@@ -597,6 +597,25 @@ class GoogleSheetsService:
     # Helper Methods
     # =========================================================================
 
+    def _get_first_sheet_id(self, spreadsheet_id: str) -> int:
+        """
+        Get the sheetId of the first tab in a spreadsheet.
+
+        Google Sheets batchUpdate requires numeric sheetId, which is NOT
+        always 0. This fetches the actual ID from the spreadsheet metadata.
+
+        Args:
+            spreadsheet_id: The Google Sheets spreadsheet ID.
+
+        Returns:
+            The numeric sheetId of the first sheet tab.
+        """
+        metadata = self.service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets.properties.sheetId",
+        ).execute()
+        return metadata["sheets"][0]["properties"]["sheetId"]
+
     async def _read_sheet_range(
         self,
         sheet_id: str,
@@ -844,13 +863,14 @@ class GoogleSheetsService:
             return False
 
         try:
+            sheet_id = self._get_first_sheet_id(settings.TASK_TRACKER_SHEET_ID)
             requests = []
 
             # --- Frozen header row (1 row) ---
             requests.append({
                 "updateSheetProperties": {
                     "properties": {
-                        "sheetId": 0,
+                        "sheetId": sheet_id,
                         "gridProperties": {"frozenRowCount": 1},
                     },
                     "fields": "gridProperties.frozenRowCount",
@@ -861,7 +881,7 @@ class GoogleSheetsService:
             requests.append({
                 "repeatCell": {
                     "range": {
-                        "sheetId": 0,
+                        "sheetId": sheet_id,
                         "startRowIndex": 0,
                         "endRowIndex": 1,
                         "startColumnIndex": 0,
@@ -892,7 +912,7 @@ class GoogleSheetsService:
             requests.append({
                 "autoResizeDimensions": {
                     "dimensions": {
-                        "sheetId": 0,
+                        "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": 0,
                         "endIndex": 9,
@@ -906,7 +926,7 @@ class GoogleSheetsService:
                 "addConditionalFormatRule": {
                     "rule": {
                         "ranges": [{
-                            "sheetId": 0,
+                            "sheetId": sheet_id,
                             "startColumnIndex": 5,
                             "endColumnIndex": 6,
                             "startRowIndex": 1,
@@ -934,7 +954,7 @@ class GoogleSheetsService:
                 "addConditionalFormatRule": {
                     "rule": {
                         "ranges": [{
-                            "sheetId": 0,
+                            "sheetId": sheet_id,
                             "startColumnIndex": 5,
                             "endColumnIndex": 6,
                             "startRowIndex": 1,
@@ -962,7 +982,7 @@ class GoogleSheetsService:
                 "addConditionalFormatRule": {
                     "rule": {
                         "ranges": [{
-                            "sheetId": 0,
+                            "sheetId": sheet_id,
                             "startColumnIndex": 5,
                             "endColumnIndex": 6,
                             "startRowIndex": 1,
@@ -997,7 +1017,7 @@ class GoogleSheetsService:
             requests.append({
                 "updateBorders": {
                     "range": {
-                        "sheetId": 0,
+                        "sheetId": sheet_id,
                         "startRowIndex": 0,
                         "startColumnIndex": 0,
                         "endColumnIndex": 9,
@@ -1041,13 +1061,14 @@ class GoogleSheetsService:
 
         try:
             num_cols = len(STAKEHOLDER_COLUMNS)  # 16 columns
+            sheet_id = self._get_first_sheet_id(settings.STAKEHOLDER_TRACKER_SHEET_ID)
             requests = []
 
             # --- Frozen header row (1 row) ---
             requests.append({
                 "updateSheetProperties": {
                     "properties": {
-                        "sheetId": 0,
+                        "sheetId": sheet_id,
                         "gridProperties": {"frozenRowCount": 1},
                     },
                     "fields": "gridProperties.frozenRowCount",
@@ -1058,7 +1079,7 @@ class GoogleSheetsService:
             requests.append({
                 "repeatCell": {
                     "range": {
-                        "sheetId": 0,
+                        "sheetId": sheet_id,
                         "startRowIndex": 0,
                         "endRowIndex": 1,
                         "startColumnIndex": 0,
@@ -1089,7 +1110,7 @@ class GoogleSheetsService:
             requests.append({
                 "autoResizeDimensions": {
                     "dimensions": {
-                        "sheetId": 0,
+                        "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": 0,
                         "endIndex": num_cols,
