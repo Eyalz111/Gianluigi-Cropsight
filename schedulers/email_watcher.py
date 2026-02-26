@@ -101,7 +101,9 @@ class EmailWatcher:
                 # Otherwise treat as a question
                 else:
                     await self._handle_question(
-                        msg_id, subject, body, sender_email, member_name
+                        msg_id, subject, body, sender_email, member_name,
+                        thread_id=msg.get("threadId"),
+                        message_id=msg.get("message_id"),
                     )
 
                 # Mark as read
@@ -227,8 +229,10 @@ class EmailWatcher:
         body: str,
         sender_email: str,
         member_name: str,
+        thread_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
-        """Handle a question email -- process with Claude and reply."""
+        """Handle a question email -- process with Claude and reply in-thread."""
         from core.agent import gianluigi_agent
 
         # Build the question from subject and body
@@ -259,7 +263,7 @@ class EmailWatcher:
             except Exception as e:
                 logger.warning(f"Outbound sanitization error (continuing): {e}")
 
-            # Reply via email
+            # Reply via email (in the same thread as the original)
             await gmail_service.send_email(
                 to=[sender_email],
                 subject=f"Re: {subject}",
@@ -268,6 +272,8 @@ class EmailWatcher:
                     f"{response_text}\n\n"
                     f"---\nGianluigi, CropSight AI Assistant"
                 ),
+                thread_id=thread_id,
+                in_reply_to=message_id,
             )
 
             # Log (supabase_client is SYNC)

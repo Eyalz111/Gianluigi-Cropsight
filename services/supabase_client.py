@@ -446,7 +446,7 @@ class SupabaseClient:
         query = self.client.table("tasks").select("*, meetings(title, date)")
 
         if assignee:
-            query = query.eq("assignee", assignee)
+            query = query.ilike("assignee", assignee)
 
         if status:
             if include_overdue and status in ("pending", "in_progress"):

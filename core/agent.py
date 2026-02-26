@@ -467,8 +467,24 @@ class GianluigiAgent:
 
     async def _tool_get_tasks(self, input: dict) -> dict:
         """Get tasks filtered by assignee/status/category."""
+        assignee = input.get("assignee")
+
+        # Resolve short names (e.g., "eyal") to full names ("Eyal Zror")
+        # The LLM may pass just a first name or member_id
+        if assignee:
+            from config.team import TEAM_MEMBERS
+            member = get_team_member(assignee)
+            if member:
+                assignee = member["name"]
+            else:
+                # Check if it matches any full name (case-insensitive)
+                for m in TEAM_MEMBERS.values():
+                    if m["name"].lower() == assignee.lower():
+                        assignee = m["name"]
+                        break
+
         tasks = supabase_client.get_tasks(
-            assignee=input.get("assignee"),
+            assignee=assignee,
             status=input.get("status"),
             category=input.get("category"),
         )
