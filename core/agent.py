@@ -461,14 +461,16 @@ class GianluigiAgent:
             priority=input.get("priority", "M"),
             status="pending",
             meeting_id=input.get("meeting_id"),
+            category=input.get("category"),
         )
         return {"success": True, "task_id": task.get("id"), "task": task}
 
     async def _tool_get_tasks(self, input: dict) -> dict:
-        """Get tasks filtered by assignee/status."""
+        """Get tasks filtered by assignee/status/category."""
         tasks = supabase_client.get_tasks(
             assignee=input.get("assignee"),
             status=input.get("status"),
+            category=input.get("category"),
         )
         return {"tasks": tasks, "count": len(tasks)}
 

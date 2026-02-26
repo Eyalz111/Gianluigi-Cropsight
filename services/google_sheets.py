@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 # Task Tracker column configuration
 TASK_TRACKER_COLUMNS = [
     "Task",
+    "Category",
     "Assignee",
     "Source Meeting",
     "Deadline",
@@ -152,7 +153,8 @@ class GoogleSheetsService:
         deadline: str | None,
         status: str,
         priority: str,
-        created_date: str
+        created_date: str,
+        category: str = "",
     ) -> bool:
         """
         Add a new task to the Task Tracker sheet.
@@ -165,6 +167,7 @@ class GoogleSheetsService:
             status: 'pending', 'in_progress', 'done', 'overdue'.
             priority: 'H', 'M', or 'L'.
             created_date: When the task was created (YYYY-MM-DD).
+            category: Task category (e.g., 'Product & Tech').
 
         Returns:
             True if task was added successfully.
@@ -175,6 +178,7 @@ class GoogleSheetsService:
 
         values = [
             task,
+            category,
             assignee,
             source_meeting,
             deadline or "",
@@ -211,8 +215,8 @@ class GoogleSheetsService:
             return False
 
         try:
-            # Update Status (column E) and Updated Date (column H)
-            range_name = f"Sheet1!E{row_number}:H{row_number}"
+            # Update Status (column F) and Updated Date (column I)
+            range_name = f"Sheet1!F{row_number}:I{row_number}"
             values = [[status, None, None, updated_date]]
 
             # Use COLUMNS input option to update only specific columns
@@ -243,7 +247,7 @@ class GoogleSheetsService:
 
         rows = await self._read_sheet_range(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            range_name="Sheet1!A:H"
+            range_name="Sheet1!A:I"
         )
 
         if not rows or len(rows) < 2:
@@ -259,13 +263,14 @@ class GoogleSheetsService:
             tasks.append({
                 "row_number": i,
                 "task": row[0],
-                "assignee": row[1],
-                "source_meeting": row[2],
-                "deadline": row[3],
-                "status": row[4],
-                "priority": row[5],
-                "created_date": row[6],
-                "updated_date": row[7] if len(row) > 7 else "",
+                "category": row[1],
+                "assignee": row[2],
+                "source_meeting": row[3],
+                "deadline": row[4],
+                "status": row[5],
+                "priority": row[6],
+                "created_date": row[7],
+                "updated_date": row[8] if len(row) > 8 else "",
             })
 
         return tasks
@@ -441,6 +446,7 @@ class GoogleSheetsService:
         for task in tasks:
             values.append([
                 task.get("task", ""),
+                task.get("category", ""),
                 task.get("assignee", ""),
                 task.get("source_meeting", ""),
                 task.get("deadline", ""),
@@ -496,6 +502,7 @@ class GoogleSheetsService:
 
             values.append([
                 task_desc,
+                "Operations & HR",  # follow-up scheduling is operational
                 led_by,
                 source_meeting,
                 "",  # deadline — follow-ups often don't have a parseable date
@@ -684,7 +691,7 @@ class GoogleSheetsService:
         try:
             self.service.spreadsheets().values().append(
                 spreadsheetId=sheet_id,
-                range="Sheet1!A:H",
+                range="Sheet1!A:I",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": values}
@@ -813,6 +820,295 @@ class GoogleSheetsService:
             logger.error(f"Error applying stakeholder update: {e}")
             return False
 
+    # =========================================================================
+    # Sheet Formatting
+    # =========================================================================
+
+    async def format_task_tracker(self) -> bool:
+        """
+        Apply professional formatting to the Task Tracker sheet.
+
+        Includes:
+        - Dark blue header row with white bold text
+        - Frozen header row
+        - Auto-resized columns A-I (9 columns)
+        - Conditional formatting on Status column (F):
+            Red for "overdue", Green for "done", Yellow for "in_progress"
+        - Light gray borders on all cells
+
+        Returns:
+            True if formatting was applied successfully.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            logger.warning("TASK_TRACKER_SHEET_ID not configured")
+            return False
+
+        try:
+            requests = []
+
+            # --- Frozen header row (1 row) ---
+            requests.append({
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": 0,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            })
+
+            # --- Dark blue header (#1a237e) with white bold text ---
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": 0,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 9,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {
+                                "red": 0x1A / 255,
+                                "green": 0x23 / 255,
+                                "blue": 0x7E / 255,
+                            },
+                            "textFormat": {
+                                "bold": True,
+                                "foregroundColor": {
+                                    "red": 1.0,
+                                    "green": 1.0,
+                                    "blue": 1.0,
+                                },
+                            },
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+
+            # --- Auto-resize columns A-I ---
+            requests.append({
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": 0,
+                        "dimension": "COLUMNS",
+                        "startIndex": 0,
+                        "endIndex": 9,
+                    }
+                }
+            })
+
+            # --- Conditional formatting: Status column (F = index 5) ---
+            # Red background for "overdue"
+            requests.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [{
+                            "sheetId": 0,
+                            "startColumnIndex": 5,
+                            "endColumnIndex": 6,
+                            "startRowIndex": 1,
+                        }],
+                        "booleanRule": {
+                            "condition": {
+                                "type": "TEXT_CONTAINS",
+                                "values": [{"userEnteredValue": "overdue"}],
+                            },
+                            "format": {
+                                "backgroundColor": {
+                                    "red": 0xFF / 255,
+                                    "green": 0xCD / 255,
+                                    "blue": 0xD2 / 255,
+                                },
+                            },
+                        },
+                    },
+                    "index": 0,
+                }
+            })
+
+            # Green background for "done"
+            requests.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [{
+                            "sheetId": 0,
+                            "startColumnIndex": 5,
+                            "endColumnIndex": 6,
+                            "startRowIndex": 1,
+                        }],
+                        "booleanRule": {
+                            "condition": {
+                                "type": "TEXT_CONTAINS",
+                                "values": [{"userEnteredValue": "done"}],
+                            },
+                            "format": {
+                                "backgroundColor": {
+                                    "red": 0xC8 / 255,
+                                    "green": 0xE6 / 255,
+                                    "blue": 0xC9 / 255,
+                                },
+                            },
+                        },
+                    },
+                    "index": 1,
+                }
+            })
+
+            # Yellow background for "in_progress"
+            requests.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [{
+                            "sheetId": 0,
+                            "startColumnIndex": 5,
+                            "endColumnIndex": 6,
+                            "startRowIndex": 1,
+                        }],
+                        "booleanRule": {
+                            "condition": {
+                                "type": "TEXT_CONTAINS",
+                                "values": [{"userEnteredValue": "in_progress"}],
+                            },
+                            "format": {
+                                "backgroundColor": {
+                                    "red": 0xFF / 255,
+                                    "green": 0xF9 / 255,
+                                    "blue": 0xC4 / 255,
+                                },
+                            },
+                        },
+                    },
+                    "index": 2,
+                }
+            })
+
+            # --- Light gray borders (#e0e0e0) on all cells ---
+            border_style = {
+                "style": "SOLID",
+                "color": {
+                    "red": 0xE0 / 255,
+                    "green": 0xE0 / 255,
+                    "blue": 0xE0 / 255,
+                },
+            }
+            requests.append({
+                "updateBorders": {
+                    "range": {
+                        "sheetId": 0,
+                        "startRowIndex": 0,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 9,
+                    },
+                    "top": border_style,
+                    "bottom": border_style,
+                    "left": border_style,
+                    "right": border_style,
+                    "innerHorizontal": border_style,
+                    "innerVertical": border_style,
+                }
+            })
+
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={"requests": requests},
+            ).execute()
+
+            logger.info("Applied professional formatting to Task Tracker")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error formatting Task Tracker: {e}")
+            return False
+
+    async def format_stakeholder_tracker(self) -> bool:
+        """
+        Apply professional formatting to the Stakeholder Tracker sheet.
+
+        Includes:
+        - Dark blue header row with white bold text
+        - Frozen header row
+        - Auto-resized columns
+
+        Returns:
+            True if formatting was applied successfully.
+        """
+        if not settings.STAKEHOLDER_TRACKER_SHEET_ID:
+            logger.warning("STAKEHOLDER_TRACKER_SHEET_ID not configured")
+            return False
+
+        try:
+            num_cols = len(STAKEHOLDER_COLUMNS)  # 16 columns
+            requests = []
+
+            # --- Frozen header row (1 row) ---
+            requests.append({
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": 0,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            })
+
+            # --- Dark blue header (#1a237e) with white bold text ---
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": 0,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": num_cols,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {
+                                "red": 0x1A / 255,
+                                "green": 0x23 / 255,
+                                "blue": 0x7E / 255,
+                            },
+                            "textFormat": {
+                                "bold": True,
+                                "foregroundColor": {
+                                    "red": 1.0,
+                                    "green": 1.0,
+                                    "blue": 1.0,
+                                },
+                            },
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+
+            # --- Auto-resize all columns ---
+            requests.append({
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": 0,
+                        "dimension": "COLUMNS",
+                        "startIndex": 0,
+                        "endIndex": num_cols,
+                    }
+                }
+            })
+
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
+                body={"requests": requests},
+            ).execute()
+
+            logger.info("Applied professional formatting to Stakeholder Tracker")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error formatting Stakeholder Tracker: {e}")
+            return False
+
     async def ensure_task_tracker_headers(self) -> bool:
         """
         Ensure the Task Tracker sheet has proper headers.
@@ -825,14 +1121,14 @@ class GoogleSheetsService:
         try:
             rows = await self._read_sheet_range(
                 sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                range_name="Sheet1!A1:H1"
+                range_name="Sheet1!A1:I1"
             )
 
             if not rows:
                 # Add headers
                 await self._write_sheet_range(
                     sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                    range_name="Sheet1!A1:H1",
+                    range_name="Sheet1!A1:I1",
                     values=[TASK_TRACKER_COLUMNS]
                 )
                 logger.info("Created Task Tracker headers")

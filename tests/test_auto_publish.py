@@ -361,7 +361,7 @@ class TestApprovalMessageCountdown:
             mock_bot_settings.TELEGRAM_EYAL_CHAT_ID = "999"
 
             mock_cfg.APPROVAL_MODE = "auto_review"
-            mock_cfg.AUTO_REVIEW_WINDOW_MINUTES = 30
+            mock_cfg.AUTO_REVIEW_WINDOW_MINUTES = 60
 
             from services.telegram_bot import TelegramBot
 
@@ -380,7 +380,7 @@ class TestApprovalMessageCountdown:
             # Check the message sent to Eyal
             bot.send_to_eyal.assert_awaited_once()
             sent_msg = bot.send_to_eyal.call_args[0][0]
-            assert "Auto-publish in 30 minutes" in sent_msg
+            assert "Auto-publish in 60 minutes" in sent_msg
 
     @pytest.mark.asyncio
     async def test_no_countdown_in_manual_mode(self):

@@ -768,7 +768,7 @@ When you receive approval requests, use the buttons to approve, request changes,
         """
         Handle general text messages (queries).
 
-        Routes to Claude for processing.
+        Runs inbound guardrails, then routes to Claude for processing.
         """
         user = update.effective_user
         message_text = update.message.text
@@ -781,6 +781,32 @@ When you receive approval requests, use the buttons to approve, request changes,
             # This is likely edit instructions from Eyal
             await self._handle_edit_instructions(update, context)
             return
+
+        # --- Inbound guardrails ---
+        try:
+            from guardrails.inbound_filter import check_inbound_message, sanitize_outbound_message
+
+            chat_id = update.effective_chat.id
+            channel = "telegram_dm" if chat_id > 0 else "telegram_group"
+
+            check_result = await check_inbound_message(
+                message=message_text,
+                sender_id=str(user.id),
+                channel=channel,
+                telegram_user_id=user.id,
+            )
+
+            if not check_result.get("allowed", True):
+                deflection = check_result.get(
+                    "deflection_message",
+                    "I can only help with CropSight-related work topics."
+                )
+                await self.send_message(chat_id, deflection)
+                return
+        except ImportError:
+            pass  # inbound_filter not yet available — skip
+        except Exception as e:
+            logger.warning(f"Inbound filter error (continuing): {e}")
 
         # Regular query - process with Gianluigi agent
         await self.send_message(
@@ -800,6 +826,21 @@ When you receive approval requests, use the buttons to approve, request changes,
             )
 
             response = result.get("response", "I couldn't process your request.")
+
+            # --- Outbound sanitization ---
+            try:
+                from guardrails.inbound_filter import sanitize_outbound_message
+                chat_id = update.effective_chat.id
+                channel = "telegram_dm" if chat_id > 0 else "telegram_group"
+                response = sanitize_outbound_message(
+                    response,
+                    {"channel": channel, "recipient": user_id},
+                )
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"Outbound sanitization error (continuing): {e}")
+
             await self.send_message(update.effective_chat.id, response)
 
         except Exception as e:

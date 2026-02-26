@@ -88,6 +88,18 @@ TOOL_CREATE_TASK = {
                 "enum": ["H", "M", "L"],
                 "description": "Priority: H (high), M (medium), L (low)"
             },
+            "category": {
+                "type": "string",
+                "enum": [
+                    "Product & Tech",
+                    "BD & Sales",
+                    "Legal & Compliance",
+                    "Finance & Fundraising",
+                    "Operations & HR",
+                    "Strategy & Research"
+                ],
+                "description": "Task category for organizational alignment"
+            },
             "meeting_id": {
                 "type": "string",
                 "description": "Optional: UUID of source meeting if task came from a meeting"
@@ -114,6 +126,18 @@ TOOL_GET_TASKS = {
                 "type": "string",
                 "enum": ["pending", "in_progress", "done", "overdue"],
                 "description": "Filter by task status (optional)"
+            },
+            "category": {
+                "type": "string",
+                "enum": [
+                    "Product & Tech",
+                    "BD & Sales",
+                    "Legal & Compliance",
+                    "Finance & Fundraising",
+                    "Operations & HR",
+                    "Strategy & Research"
+                ],
+                "description": "Filter by task category (optional)"
             }
         },
         "required": []

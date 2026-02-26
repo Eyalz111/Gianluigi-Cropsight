@@ -343,6 +343,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "assignee": "Name",
             "deadline": "YYYY-MM-DD or null",
             "priority": "H/M/L",
+            "category": "Product & Tech / BD & Sales / Legal & Compliance / Finance & Fundraising / Operations & HR / Strategy & Research",
             "transcript_timestamp": "MM:SS"
         }
     ],

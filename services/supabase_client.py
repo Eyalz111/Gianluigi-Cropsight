@@ -345,6 +345,7 @@ class SupabaseClient:
         meeting_id: str | None = None,
         transcript_timestamp: str | None = None,
         status: str = "pending",
+        category: str | None = None,
     ) -> dict:
         """
         Create a new task.
@@ -357,6 +358,7 @@ class SupabaseClient:
             meeting_id: Source meeting UUID (optional).
             transcript_timestamp: Source citation (optional).
             status: Initial status (default: 'pending').
+            category: Task category (e.g., 'Product & Tech', 'BD & Sales').
 
         Returns:
             Created task record.
@@ -369,6 +371,7 @@ class SupabaseClient:
             "meeting_id": meeting_id,
             "transcript_timestamp": transcript_timestamp,
             "status": status,
+            "category": category,
         }
 
         result = self.client.table("tasks").insert(data).execute()
@@ -410,6 +413,7 @@ class SupabaseClient:
                 "deadline": self._serialize_datetime(t.get("deadline")),
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
+                "category": t.get("category"),
             }
             for t in tasks
         ]
@@ -422,6 +426,7 @@ class SupabaseClient:
         self,
         assignee: str | None = None,
         status: str | None = None,
+        category: str | None = None,
         include_overdue: bool = True,
         limit: int = 100,
     ) -> list[dict]:
@@ -431,6 +436,7 @@ class SupabaseClient:
         Args:
             assignee: Filter by assignee name.
             status: Filter by status ('pending', 'in_progress', 'done', 'overdue').
+            category: Filter by task category (e.g., 'Product & Tech').
             include_overdue: Include overdue tasks when filtering by status.
             limit: Maximum number of results.
 
@@ -447,6 +453,9 @@ class SupabaseClient:
                 query = query.in_("status", [status, "overdue"])
             else:
                 query = query.eq("status", status)
+
+        if category:
+            query = query.eq("category", category)
 
         result = query.order("deadline", desc=False).limit(limit).execute()
         return result.data

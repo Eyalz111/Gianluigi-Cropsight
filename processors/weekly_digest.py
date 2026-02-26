@@ -351,12 +351,13 @@ def format_digest_document(
     lines.append("### Completed")
     lines.append("")
     if tasks_completed:
-        lines.append("| Task | Assignee |")
-        lines.append("|------|----------|")
+        lines.append("| Task | Category | Assignee |")
+        lines.append("|------|----------|----------|")
         for t in tasks_completed:
             title = t.get("title", "Untitled")
+            category = t.get("category", "")
             assignee = t.get("assignee", "Unassigned")
-            lines.append(f"| {title} | {assignee} |")
+            lines.append(f"| {title} | {category} | {assignee} |")
     else:
         lines.append("_No tasks completed this week._")
     lines.append("")
@@ -365,15 +366,16 @@ def format_digest_document(
     lines.append("### Overdue")
     lines.append("")
     if tasks_overdue:
-        lines.append("| Task | Assignee | Deadline |")
-        lines.append("|------|----------|----------|")
+        lines.append("| Task | Category | Assignee | Deadline |")
+        lines.append("|------|----------|----------|----------|")
         for t in tasks_overdue:
             title = t.get("title", "Untitled")
+            category = t.get("category", "")
             assignee = t.get("assignee", "Unassigned")
             deadline = t.get("deadline", "N/A")
             if deadline and len(str(deadline)) > 10:
                 deadline = str(deadline)[:10]
-            lines.append(f"| {title} | {assignee} | {deadline} |")
+            lines.append(f"| {title} | {category} | {assignee} | {deadline} |")
     else:
         lines.append("_No overdue tasks._")
     lines.append("")
@@ -382,16 +384,17 @@ def format_digest_document(
     lines.append("### Due Next Week")
     lines.append("")
     if tasks_upcoming:
-        lines.append("| Task | Assignee | Deadline | Priority |")
-        lines.append("|------|----------|----------|----------|")
+        lines.append("| Task | Category | Assignee | Deadline | Priority |")
+        lines.append("|------|----------|----------|----------|----------|")
         for t in tasks_upcoming:
             title = t.get("title", "Untitled")
+            category = t.get("category", "")
             assignee = t.get("assignee", "Unassigned")
             deadline = t.get("deadline", "N/A")
             if deadline and len(str(deadline)) > 10:
                 deadline = str(deadline)[:10]
             priority = t.get("priority", "M")
-            lines.append(f"| {title} | {assignee} | {deadline} | {priority} |")
+            lines.append(f"| {title} | {category} | {assignee} | {deadline} | {priority} |")
     else:
         lines.append("_No tasks due next week._")
     lines.append("")

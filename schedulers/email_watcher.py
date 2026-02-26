@@ -247,6 +247,18 @@ class EmailWatcher:
 
             response_text = result.get("response", "I couldn't process your request.")
 
+            # Outbound sanitization
+            try:
+                from guardrails.inbound_filter import sanitize_outbound_message
+                response_text = sanitize_outbound_message(
+                    response_text,
+                    {"channel": "email", "recipient": sender_email},
+                )
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"Outbound sanitization error (continuing): {e}")
+
             # Reply via email
             await gmail_service.send_email(
                 to=[sender_email],

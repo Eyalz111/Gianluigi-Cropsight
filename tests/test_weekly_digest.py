@@ -619,9 +619,10 @@ class TestWeeklyDigestSchedulerTrigger:
         """Should fire _generate_and_distribute on Sunday at 18:00."""
         with patch("schedulers.weekly_digest_scheduler.generate_weekly_digest") as mock_gen, \
              patch("schedulers.weekly_digest_scheduler.drive_service") as mock_drive, \
-             patch("schedulers.weekly_digest_scheduler.gmail_service") as mock_gmail, \
-             patch("schedulers.weekly_digest_scheduler.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("schedulers.weekly_digest_scheduler.supabase_client") as mock_db, \
+             patch("guardrails.approval_flow.supabase_client") as mock_af_db, \
              patch("schedulers.weekly_digest_scheduler.settings") as mock_settings:
 
             mock_gen.return_value = {
@@ -635,9 +636,10 @@ class TestWeeklyDigestSchedulerTrigger:
             mock_drive.save_weekly_digest = AsyncMock(
                 return_value={"webViewLink": "https://drive.google.com/test"}
             )
-            mock_gmail.send_weekly_digest = AsyncMock(return_value=True)
-            mock_tg.send_to_group = AsyncMock(return_value=True)
+            mock_tg.send_approval_request = AsyncMock(return_value=True)
+            mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = ["eyal@test.com"]
 
             from schedulers.weekly_digest_scheduler import WeeklyDigestScheduler
@@ -734,9 +736,10 @@ class TestDuplicatePrevention:
         """Should generate when a new week starts."""
         with patch("schedulers.weekly_digest_scheduler.generate_weekly_digest") as mock_gen, \
              patch("schedulers.weekly_digest_scheduler.drive_service") as mock_drive, \
-             patch("schedulers.weekly_digest_scheduler.gmail_service") as mock_gmail, \
-             patch("schedulers.weekly_digest_scheduler.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("schedulers.weekly_digest_scheduler.supabase_client") as mock_db, \
+             patch("guardrails.approval_flow.supabase_client") as mock_af_db, \
              patch("schedulers.weekly_digest_scheduler.settings") as mock_settings:
 
             mock_gen.return_value = {
@@ -748,9 +751,10 @@ class TestDuplicatePrevention:
                 "tasks_overdue": 0,
             }
             mock_drive.save_weekly_digest = AsyncMock(return_value={"webViewLink": ""})
-            mock_gmail.send_weekly_digest = AsyncMock(return_value=True)
-            mock_tg.send_to_group = AsyncMock(return_value=True)
+            mock_tg.send_approval_request = AsyncMock(return_value=True)
+            mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = []
 
             from schedulers.weekly_digest_scheduler import WeeklyDigestScheduler
@@ -777,9 +781,10 @@ class TestDuplicatePrevention:
         """Should update _last_digest_week after successful generation."""
         with patch("schedulers.weekly_digest_scheduler.generate_weekly_digest") as mock_gen, \
              patch("schedulers.weekly_digest_scheduler.drive_service") as mock_drive, \
-             patch("schedulers.weekly_digest_scheduler.gmail_service") as mock_gmail, \
-             patch("schedulers.weekly_digest_scheduler.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("schedulers.weekly_digest_scheduler.supabase_client") as mock_db, \
+             patch("guardrails.approval_flow.supabase_client") as mock_af_db, \
              patch("schedulers.weekly_digest_scheduler.settings") as mock_settings:
 
             mock_gen.return_value = {
@@ -791,9 +796,10 @@ class TestDuplicatePrevention:
                 "tasks_overdue": 0,
             }
             mock_drive.save_weekly_digest = AsyncMock(return_value={"webViewLink": ""})
-            mock_gmail.send_weekly_digest = AsyncMock(return_value=True)
-            mock_tg.send_to_group = AsyncMock(return_value=True)
+            mock_tg.send_approval_request = AsyncMock(return_value=True)
+            mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = []
 
             from schedulers.weekly_digest_scheduler import WeeklyDigestScheduler

@@ -12,8 +12,6 @@ from datetime import datetime, timedelta
 from config.settings import settings
 from processors.weekly_digest import generate_weekly_digest
 from services.google_drive import drive_service
-from services.gmail import gmail_service
-from services.telegram_bot import telegram_bot
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -113,7 +111,7 @@ class WeeklyDigestScheduler:
         week_of = result.get("week_of", "unknown")
         digest_doc = result.get("digest_document", "")
 
-        # Save to Drive
+        # Save to Drive (as draft — distribution waits for approval)
         filename = f"Weekly Digest - Week of {week_of}.md"
         drive_result = await drive_service.save_weekly_digest(
             content=digest_doc,
@@ -121,27 +119,24 @@ class WeeklyDigestScheduler:
         )
         drive_link = drive_result.get("webViewLink", "") if drive_result else ""
 
-        # Send email to team
-        team_emails = settings.team_emails
-        if team_emails:
-            await gmail_service.send_weekly_digest(
-                recipients=team_emails,
-                week_of=week_of,
-                digest_content=digest_doc,
-                drive_link=drive_link,
-            )
+        # Submit for Eyal's approval (instead of direct distribution)
+        from guardrails.approval_flow import submit_for_approval
 
-        # Send Telegram notification
-        summary_msg = (
-            f"*CropSight Weekly Digest — Week of {week_of}*\n\n"
-            f"Meetings: {result.get('meetings_count', 0)}\n"
-            f"Decisions: {result.get('decisions_count', 0)}\n"
-            f"Tasks completed: {result.get('tasks_completed', 0)}\n"
-            f"Tasks overdue: {result.get('tasks_overdue', 0)}\n"
+        digest_approval_id = f"digest-{week_of}"
+        await submit_for_approval(
+            content_type="weekly_digest",
+            content={
+                "title": f"Weekly Digest — {week_of}",
+                "week_of": week_of,
+                "digest_document": digest_doc,
+                "drive_link": drive_link,
+                "meetings_count": result.get("meetings_count", 0),
+                "decisions_count": result.get("decisions_count", 0),
+                "tasks_completed": result.get("tasks_completed", 0),
+                "tasks_overdue": result.get("tasks_overdue", 0),
+            },
+            meeting_id=digest_approval_id,
         )
-        if drive_link:
-            summary_msg += f"\n[View Full Digest]({drive_link})"
-        await telegram_bot.send_to_group(summary_msg)
 
         # Log to audit trail (sync call — never await)
         supabase_client.log_action(

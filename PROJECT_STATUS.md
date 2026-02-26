@@ -1,8 +1,22 @@
 # Gianluigi Project Status
 
-**Last Updated:** 2026-02-25
-**Current Version:** v0.2 — "Gianluigi Is Proactive"
-**Session:** v0.2 Implementation Complete — 204 Tests Passing
+**Last Updated:** 2026-02-26
+**Current Version:** v0.2.1 — Post-v0.2 Refinements
+**Session:** v0.2.1 Implementation Complete — 280+ Tests Passing
+
+---
+
+## v0.2.1 Status: 100% Complete (Code)
+
+### New in v0.2.1
+- [x] **Task Categories** — 6 categories (Product & Tech, BD & Sales, Legal & Compliance, Finance & Fundraising, Operations & HR, Strategy & Research) across entire system: extraction, storage, tools, Sheets, digest
+- [x] **Meeting Prep → Approval Flow** — prep docs now route through Eyal's approval before distribution
+- [x] **Weekly Digest → Approval Flow** — digests now route through Eyal's approval before distribution
+- [x] **Professional Sheets Formatting** — dark blue headers, frozen rows, conditional formatting on Status column (red/green/yellow), auto-resize columns, light gray borders
+- [x] **Multi-Layer Inbound Guardrails** — 5-layer security: sender verification, topic relevance, leak prevention, output sanitization, audit logging
+- [x] **Auto-Review Window → 60 min** — changed from 30 to 60 minutes
+- [x] **Information Security Rules** — system prompt updated with leak prevention instructions
+- [x] **Content-Type Approval Dispatch** — approval flow supports meeting_summary, meeting_prep, weekly_digest
 
 ---
 
@@ -143,7 +157,12 @@
 - [x] `tests/test_email_watcher.py` - 29 tests (inbox routing, attachments, questions, lifecycle)
 - [x] `tests/test_stakeholder_updates.py` - 12 tests (approval flow, Telegram buttons, Sheets updates)
 - [x] `tests/test_auto_publish.py` - 14 tests (schedule/cancel, auto-approve, /retract, countdown)
-- [x] **All 204 tests passing**
+- [x] **All 204 tests passing** (v0.2)
+- [x] `tests/test_task_categories.py` - 24 tests (enum, model, supabase, tools, sheets, extraction, digest)
+- [x] `tests/test_approval_routing.py` - 18 tests (content-type dispatch, prep/digest distributors)
+- [x] `tests/test_sheets_formatting.py` - 9 tests (task tracker + stakeholder formatting)
+- [x] `tests/test_inbound_filter.py` - ~25 tests (sender verification, topic relevance, leak prevention, audit)
+- [x] **All 280+ tests passing** (v0.2.1)
 
 ---
 
@@ -226,17 +245,26 @@
 ### v0.1 — "Gianluigi Can Remember" (Complete)
 All core features working. Live approval button test and Cloud Run deployment pending.
 
-### v0.2 — "Gianluigi Is Proactive" (Current — Code Complete)
+### v0.2 — "Gianluigi Is Proactive" (Complete)
 - [x] RAG foundation upgrade (hybrid search, contextual embeddings, RRF)
 - [x] Meeting prep documents with sensitivity-aware distribution
 - [x] Weekly digest (Sunday 18:00-20:00 auto-trigger)
 - [x] Gmail read + email watcher (team email routing)
 - [x] Stakeholder tracker updates with approval flow
 - [x] Pre-meeting reminders (2-3h before meetings)
-- [x] Auto-publish with 30-minute review window + /retract
+- [x] Auto-publish with review window + /retract
 - [x] Claude model upgraded to opus-4-6
-- [ ] Live testing of all v0.2 features
-- [ ] Supabase SQL migration (tsvector columns + fulltext RPC)
+
+### v0.2.1 — Post-v0.2 Refinements (Current — Code Complete)
+- [x] Task categories (6 categories across full pipeline)
+- [x] Meeting prep → Eyal approval flow
+- [x] Weekly digest → Eyal approval flow
+- [x] Professional Google Sheets formatting
+- [x] Multi-layer inbound guardrails (5 layers)
+- [x] Auto-review window 30→60 minutes
+- [x] Information security rules in system prompt
+- [ ] Live testing of all v0.2/v0.2.1 features
+- [ ] Supabase SQL migration (tsvector + category column)
 - [ ] Google Cloud Run deployment
 
 ### v0.3 — "Gianluigi Is Strategic" (Future)
@@ -245,6 +273,8 @@ All core features working. Live approval button test and Cloud Run deployment pe
 - Multi-step autonomous workflows (evaluate CrewAI)
 - Calendar write access (suggest events with Eyal approval)
 - Full auto-publish with revert capability
+- Eyal emphasis points on meeting prep before distribution
+- Persistent approval state (survives restart)
 
 ---
 
@@ -268,13 +298,13 @@ python scripts/get_google_token.py
 
 ## Notes
 
-- All 204 unit tests pass (v0.1: 68, v0.2: +136)
+- All 280+ unit tests pass (v0.1: 68, v0.2: +136, v0.2.1: +76)
 - MVP Focus transcript (Feb 22, 2026) fully processed and stored
 - Gianluigi Gmail: gianluigi.cropsight@gmail.com
 - Tests use mocks — no API calls needed to run them
 - Claude model upgraded to `claude-opus-4-6`
 - **Before first v0.2 run:** must run new SQL migration in Supabase for tsvector columns + `search_embeddings_fulltext()` RPC (see bottom of `scripts/setup_supabase.sql`)
 - **Before Gmail read works:** Eyal must re-run `scripts/get_google_token.py` to get `gmail.modify` scope
-- `APPROVAL_MODE` defaults to `manual` — set to `auto_review` to enable 30-minute auto-publish
+- `APPROVAL_MODE` defaults to `manual` — set to `auto_review` to enable 60-minute auto-publish
 - Calendar integration for follow-ups (auto-create events) is future scope
 - Paolo meeting transcript didn't auto-export from Tactiq — check Tactiq settings

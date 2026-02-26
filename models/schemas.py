@@ -59,6 +59,16 @@ class ApprovalStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class TaskCategory(str, Enum):
+    """Category of a task for organizational alignment."""
+    PRODUCT_TECH = "Product & Tech"
+    BD_SALES = "BD & Sales"
+    LEGAL_COMPLIANCE = "Legal & Compliance"
+    FINANCE_FUNDRAISING = "Finance & Fundraising"
+    OPERATIONS_HR = "Operations & HR"
+    STRATEGY_RESEARCH = "Strategy & Research"
+
+
 class QuestionStatus(str, Enum):
     """Status of an open question."""
     OPEN = "open"
@@ -102,6 +112,7 @@ class Task(BaseModel):
     meeting_id: UUID | None = None
     title: str
     assignee: str
+    category: TaskCategory | None = None
     deadline: date | None = None
     status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM

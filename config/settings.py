@@ -143,7 +143,7 @@ class Settings(BaseSettings):
         description="Approval mode: 'manual' (default) or 'auto_review' for timed auto-publish"
     )
     AUTO_REVIEW_WINDOW_MINUTES: int = Field(
-        default=30,
+        default=60,
         description="Minutes to wait before auto-publishing in auto_review mode"
     )
 

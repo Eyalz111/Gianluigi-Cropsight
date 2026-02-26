@@ -36,6 +36,7 @@ from services.embeddings import embedding_service
 from services.telegram_bot import telegram_bot
 from guardrails.calendar_filter import is_cropsight_meeting
 from guardrails.sensitivity_classifier import classify_sensitivity
+from guardrails.approval_flow import submit_for_approval
 from processors.meeting_prep import (
     find_related_meetings,
     find_relevant_decisions,
@@ -335,27 +336,22 @@ class MeetingPrepScheduler:
             filename=filename
         )
 
-        # Step 8: Sensitivity-aware distribution
-        # Check if meeting is sensitive — restrict notification to Eyal only
+        # Step 8: Submit for Eyal's approval (instead of direct distribution)
         sensitivity = classify_sensitivity({"title": title})
+        drive_link = drive_result.get("webViewLink", "") if drive_result else ""
 
-        if drive_result:
-            drive_link = drive_result.get("webViewLink", "")
-            message = (
-                f"*Meeting Prep Ready*\n\n"
-                f"Meeting: {title}\n"
-                f"Time: {start_time}\n"
-                f"Prep document: {drive_link}"
-            )
-
-            if sensitivity == "sensitive":
-                # Sensitive meeting — only notify Eyal
-                logger.info(f"Sensitive meeting '{title}' — notifying Eyal only")
-                await telegram_bot.send_to_eyal(message)
-            else:
-                # Normal meeting — notify Eyal + team group
-                await telegram_bot.send_to_eyal(message)
-                await telegram_bot.send_to_group(message)
+        prep_approval_id = f"prep-{event_id}"
+        await submit_for_approval(
+            content_type="meeting_prep",
+            content={
+                "title": title,
+                "summary": prep_content,
+                "start_time": start_time,
+                "sensitivity": sensitivity,
+                "drive_link": drive_link,
+            },
+            meeting_id=prep_approval_id,
+        )
 
         # Log the action
         supabase_client.log_action(

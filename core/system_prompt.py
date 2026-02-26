@@ -56,6 +56,8 @@ COMMUNICATION STYLE:
 
 {external_participant_rules}
 
+{information_security_rules}
+
 TOOLS AVAILABLE:
 You have access to tools for:
 - Searching meetings and documents (semantic + keyword hybrid search with cross-reference enrichment)
@@ -193,6 +195,21 @@ For external participants:
 - Note their organizational context when relevant
 """
 
+INFORMATION_SECURITY_RULES = """
+INFORMATION SECURITY — MANDATORY:
+Never include any of the following in your responses:
+- Full raw transcripts (only excerpts with citations)
+- Financial details: equity splits, salary data, valuations, term sheets, cap tables, runway figures
+- Legal documents: founders agreements, NDAs, contracts
+- API keys, passwords, or credentials
+- Bank account details or payment information
+
+For sensitive topics, direct the user to check with Eyal directly.
+When queried about the above, respond: "That information is confidential. Please check with Eyal."
+
+In group chats, be extra cautious — never share sensitive content that should only go to Eyal.
+"""
+
 # =============================================================================
 # Summary Template
 # =============================================================================
@@ -208,8 +225,8 @@ SUMMARY_TEMPLATE = """# Meeting Summary: {title}
 {decisions}
 
 ## Action Items
-| # | Task | Assignee | Deadline | Priority | Ref |
-|---|------|----------|----------|----------|-----|
+| # | Task | Category | Assignee | Deadline | Priority | Ref |
+|---|------|----------|----------|----------|----------|-----|
 {tasks}
 
 ## Follow-Up Meetings
@@ -249,6 +266,7 @@ def get_system_prompt() -> str:
         sensitivity_rules=SENSITIVITY_RULES,
         personal_content_rules=PERSONAL_CONTENT_RULES,
         external_participant_rules=EXTERNAL_PARTICIPANT_RULES,
+        information_security_rules=INFORMATION_SECURITY_RULES,
     )
 
 
@@ -293,6 +311,13 @@ EXTRACTION INSTRUCTIONS:
    - Identify the assignee (who is responsible)
    - Note any deadline mentioned (explicit or implied)
    - Assign priority: H (high), M (medium), L (low)
+   - Classify into one of these categories:
+     * "Product & Tech" — development, engineering, platform, infrastructure
+     * "BD & Sales" — business development, partnerships, client outreach
+     * "Legal & Compliance" — legal, regulatory, contracts, IP
+     * "Finance & Fundraising" — fundraising, budgets, investor relations
+     * "Operations & HR" — hiring, team operations, processes
+     * "Strategy & Research" — market research, competitive analysis, strategy
    - Cite the timestamp
 
 3. Identify FOLLOW-UP MEETINGS proposed or scheduled

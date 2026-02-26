@@ -70,6 +70,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_deadline ON tasks(deadline);
 
+-- v0.2.1: Add category column to tasks
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category TEXT;
+CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category);
+
 
 -- Follow-up meetings: Scheduled follow-ups identified from meetings
 CREATE TABLE IF NOT EXISTS follow_up_meetings (

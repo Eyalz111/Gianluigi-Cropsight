@@ -60,6 +60,10 @@ class ApprovalStatus(Enum):
 # Track pending auto-publish timers: {meeting_id: asyncio.Task}
 _pending_auto_publishes: dict[str, asyncio.Task] = {}
 
+# Track content type and data for pending approvals (in-memory)
+# {approval_id: {"type": "meeting_summary"|"meeting_prep"|"weekly_digest", "content": {...}}}
+_pending_approvals: dict[str, dict] = {}
+
 
 async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None:
     """
@@ -173,6 +177,12 @@ async def submit_for_approval(
     """
     logger.info(f"Submitting {content_type} for approval: {meeting_id}")
 
+    # Store content type and data for dispatch after approval
+    _pending_approvals[meeting_id] = {
+        "type": content_type,
+        "content": content,
+    }
+
     # Extract key info for formatting
     meeting_title = content.get("title", "Untitled Meeting")
     summary = content.get("summary", "")
@@ -183,22 +193,69 @@ async def submit_for_approval(
     discussion_summary = content.get("discussion_summary", "")
     meeting_date = content.get("date", datetime.now().strftime("%Y-%m-%d"))
 
-    # Send structured approval request to Telegram
-    telegram_sent = await telegram_bot.send_approval_request(
-        meeting_title=meeting_title,
-        summary_preview=discussion_summary or summary[:600],
-        meeting_id=meeting_id,
-        decisions=decisions,
-        tasks=tasks,
-        follow_ups=follow_ups,
-        open_questions=open_questions,
-    )
+    if content_type == "meeting_prep":
+        # Meeting prep — send preview to Eyal for approval
+        drive_link = content.get("drive_link", "")
+        sensitivity = content.get("sensitivity", "normal")
+        preview = (
+            f"<b>Meeting Prep — Awaiting Approval</b>\n\n"
+            f"Meeting: {meeting_title}\n"
+            f"Time: {content.get('start_time', 'TBD')}\n"
+            f"Sensitivity: {sensitivity}\n"
+        )
+        if drive_link:
+            preview += f"Prep document: {drive_link}\n"
+        preview += f"\n{summary[:500]}" if summary else ""
 
-    # Send email with full summary
-    email_sent = await gmail_service.send_approval_request(
-        meeting_title=meeting_title,
-        summary_preview=summary,
-    )
+        telegram_sent = await telegram_bot.send_approval_request(
+            meeting_title=f"Prep: {meeting_title}",
+            summary_preview=preview,
+            meeting_id=meeting_id,
+        )
+        email_sent = await gmail_service.send_approval_request(
+            meeting_title=f"Meeting Prep: {meeting_title}",
+            summary_preview=summary[:1000] if summary else "See attached prep document.",
+        )
+
+    elif content_type == "weekly_digest":
+        # Weekly digest — send preview to Eyal for approval
+        week_of = content.get("week_of", "")
+        digest_doc = content.get("digest_document", "")
+        preview = (
+            f"<b>Weekly Digest — Awaiting Approval</b>\n\n"
+            f"Week of: {week_of}\n"
+            f"Meetings: {content.get('meetings_count', 0)}\n"
+            f"Decisions: {content.get('decisions_count', 0)}\n"
+            f"Tasks completed: {content.get('tasks_completed', 0)}\n"
+            f"Tasks overdue: {content.get('tasks_overdue', 0)}\n"
+        )
+
+        telegram_sent = await telegram_bot.send_approval_request(
+            meeting_title=f"Weekly Digest — {week_of}",
+            summary_preview=preview,
+            meeting_id=meeting_id,
+        )
+        email_sent = await gmail_service.send_approval_request(
+            meeting_title=f"Weekly Digest — Week of {week_of}",
+            summary_preview=digest_doc[:1000],
+        )
+
+    else:
+        # Default: meeting_summary (original behavior)
+        telegram_sent = await telegram_bot.send_approval_request(
+            meeting_title=meeting_title,
+            summary_preview=discussion_summary or summary[:600],
+            meeting_id=meeting_id,
+            decisions=decisions,
+            tasks=tasks,
+            follow_ups=follow_ups,
+            open_questions=open_questions,
+        )
+
+        email_sent = await gmail_service.send_approval_request(
+            meeting_title=meeting_title,
+            summary_preview=summary,
+        )
 
     # Log the action
     supabase_client.log_action(
@@ -272,7 +329,37 @@ async def process_response(
         # Update status
         await update_approval_status(meeting_id, ApprovalStatus.APPROVED)
 
-        # Distribute content — gather all related data
+        # Check if this is a non-meeting-summary content type
+        pending_info = _pending_approvals.pop(meeting_id, None)
+        content_type = pending_info["type"] if pending_info else "meeting_summary"
+
+        if content_type == "meeting_prep":
+            # Distribute approved meeting prep
+            distribution_result = await distribute_approved_prep(
+                meeting_id=meeting_id,
+                content=pending_info["content"],
+            )
+            return {
+                "action": "approved",
+                "edits": None,
+                "next_step": "Meeting prep distributed to team",
+                "distribution": distribution_result,
+            }
+
+        elif content_type == "weekly_digest":
+            # Distribute approved weekly digest
+            distribution_result = await distribute_approved_digest(
+                meeting_id=meeting_id,
+                content=pending_info["content"],
+            )
+            return {
+                "action": "approved",
+                "edits": None,
+                "next_step": "Weekly digest distributed to team",
+                "distribution": distribution_result,
+            }
+
+        # Default: meeting_summary — gather all related data
         content = {
             "title": meeting.get("title"),
             "summary": meeting.get("summary"),
@@ -611,6 +698,7 @@ async def distribute_approved_content(
                     status=task.get("status", "pending"),
                     priority=task.get("priority", "M"),
                     created_date=meeting_date,
+                    category=task.get("category", ""),
                 )
             results["sheets_updated"] = True
             results["tasks_added"] = len(tasks)
@@ -700,6 +788,137 @@ async def distribute_approved_content(
     )
 
     logger.info(f"Distribution complete for {meeting_id}: {results}")
+    return results
+
+
+async def distribute_approved_prep(
+    meeting_id: str,
+    content: dict,
+) -> dict:
+    """
+    Distribute an approved meeting prep document to the team.
+
+    Sensitivity-aware: sensitive meetings only notify Eyal.
+
+    Args:
+        meeting_id: Identifier for this prep approval.
+        content: The prep content dict from the scheduler.
+
+    Returns:
+        Dict with distribution results.
+    """
+    logger.info(f"Distributing approved meeting prep: {meeting_id}")
+
+    results = {
+        "telegram_sent": False,
+        "type": "meeting_prep",
+    }
+
+    title = content.get("title", "Untitled Meeting")
+    sensitivity = content.get("sensitivity", "normal")
+    drive_link = content.get("drive_link", "")
+    start_time = content.get("start_time", "TBD")
+
+    message = (
+        f"<b>Meeting Prep Ready</b>\n\n"
+        f"Meeting: {title}\n"
+        f"Time: {start_time}\n"
+    )
+    if drive_link:
+        message += f"Prep document: {drive_link}"
+
+    try:
+        if sensitivity == "sensitive":
+            logger.info(f"Sensitive meeting '{title}' — notifying Eyal only")
+            await telegram_bot.send_to_eyal(message)
+        else:
+            await telegram_bot.send_to_eyal(message)
+            await telegram_bot.send_to_group(message)
+        results["telegram_sent"] = True
+    except Exception as e:
+        logger.error(f"Error sending prep notification: {e}")
+
+    supabase_client.log_action(
+        action="meeting_prep_distributed",
+        details={
+            "meeting_id": meeting_id,
+            "title": title,
+            "sensitivity": sensitivity,
+        },
+        triggered_by="eyal",
+    )
+
+    return results
+
+
+async def distribute_approved_digest(
+    meeting_id: str,
+    content: dict,
+) -> dict:
+    """
+    Distribute an approved weekly digest to the team.
+
+    Sends via email to all founders and posts summary to Telegram group.
+
+    Args:
+        meeting_id: Identifier for this digest approval.
+        content: The digest content dict from the scheduler.
+
+    Returns:
+        Dict with distribution results.
+    """
+    logger.info(f"Distributing approved weekly digest: {meeting_id}")
+
+    results = {
+        "email_sent": False,
+        "telegram_sent": False,
+        "type": "weekly_digest",
+    }
+
+    week_of = content.get("week_of", "")
+    digest_doc = content.get("digest_document", "")
+    drive_link = content.get("drive_link", "")
+
+    # Send email to team
+    try:
+        team_emails = settings.team_emails
+        if team_emails:
+            await gmail_service.send_weekly_digest(
+                recipients=team_emails,
+                week_of=week_of,
+                digest_content=digest_doc,
+                drive_link=drive_link,
+            )
+            results["email_sent"] = True
+            results["emails_to"] = team_emails
+    except Exception as e:
+        logger.error(f"Error sending digest email: {e}")
+
+    # Send Telegram notification
+    try:
+        summary_msg = (
+            f"<b>CropSight Weekly Digest — Week of {week_of}</b>\n\n"
+            f"Meetings: {content.get('meetings_count', 0)}\n"
+            f"Decisions: {content.get('decisions_count', 0)}\n"
+            f"Tasks completed: {content.get('tasks_completed', 0)}\n"
+            f"Tasks overdue: {content.get('tasks_overdue', 0)}\n"
+        )
+        if drive_link:
+            summary_msg += f"\nFull digest: {drive_link}"
+        await telegram_bot.send_to_group(summary_msg)
+        results["telegram_sent"] = True
+    except Exception as e:
+        logger.error(f"Error sending digest Telegram: {e}")
+
+    supabase_client.log_action(
+        action="weekly_digest_distributed",
+        details={
+            "week_of": week_of,
+            "meetings_count": content.get("meetings_count", 0),
+        },
+        triggered_by="eyal",
+    )
+
     return results
 
 

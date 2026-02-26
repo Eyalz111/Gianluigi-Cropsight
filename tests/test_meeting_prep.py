@@ -627,11 +627,11 @@ class TestFindOpenQuestions:
 # =============================================================================
 
 class TestSchedulerSensitivityDistribution:
-    """Tests for sensitivity-aware distribution in the scheduler."""
+    """Tests for sensitivity-aware distribution via approval flow."""
 
     @pytest.mark.asyncio
-    async def test_sensitive_meeting_notifies_eyal_only(self):
-        """Sensitive meetings should only notify Eyal, not the group."""
+    async def test_sensitive_meeting_submits_for_approval(self):
+        """Sensitive meetings should submit for approval with sensitivity=sensitive."""
         event = {
             "id": "event-sensitive",
             "title": "Investor Meeting Prep",  # contains "investor"
@@ -648,14 +648,13 @@ class TestSchedulerSensitivityDistribution:
              patch("schedulers.meeting_prep_scheduler.find_participant_tasks", new_callable=AsyncMock, return_value={}), \
              patch("schedulers.meeting_prep_scheduler.format_prep_document", return_value="# Prep"), \
              patch("schedulers.meeting_prep_scheduler.drive_service") as mock_drive, \
-             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg, \
+             patch("schedulers.meeting_prep_scheduler.submit_for_approval", new_callable=AsyncMock) as mock_submit, \
              patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
 
             mock_drive.save_meeting_prep = AsyncMock(
                 return_value={"webViewLink": "https://drive.google.com/test"}
             )
-            mock_tg.send_to_eyal = AsyncMock()
-            mock_tg.send_to_group = AsyncMock()
+            mock_submit.return_value = {"status": "pending"}
             mock_db.log_action = MagicMock()
 
             from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
@@ -666,15 +665,15 @@ class TestSchedulerSensitivityDistribution:
         assert result["status"] == "success"
         assert result["sensitivity"] == "sensitive"
 
-        # Should notify Eyal
-        mock_tg.send_to_eyal.assert_awaited_once()
-
-        # Should NOT notify the group for sensitive meetings
-        mock_tg.send_to_group.assert_not_awaited()
+        # Should have submitted for approval with correct content type
+        mock_submit.assert_awaited_once()
+        call_kwargs = mock_submit.call_args[1]
+        assert call_kwargs["content_type"] == "meeting_prep"
+        assert call_kwargs["content"]["sensitivity"] == "sensitive"
 
     @pytest.mark.asyncio
-    async def test_normal_meeting_notifies_eyal_and_group(self):
-        """Normal meetings should notify both Eyal and the team group."""
+    async def test_normal_meeting_submits_for_approval(self):
+        """Normal meetings should submit for approval with sensitivity=normal."""
         event = {
             "id": "event-normal",
             "title": "CropSight Sprint Planning",
@@ -691,14 +690,13 @@ class TestSchedulerSensitivityDistribution:
              patch("schedulers.meeting_prep_scheduler.find_participant_tasks", new_callable=AsyncMock, return_value={}), \
              patch("schedulers.meeting_prep_scheduler.format_prep_document", return_value="# Prep"), \
              patch("schedulers.meeting_prep_scheduler.drive_service") as mock_drive, \
-             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg, \
+             patch("schedulers.meeting_prep_scheduler.submit_for_approval", new_callable=AsyncMock) as mock_submit, \
              patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
 
             mock_drive.save_meeting_prep = AsyncMock(
                 return_value={"webViewLink": "https://drive.google.com/test"}
             )
-            mock_tg.send_to_eyal = AsyncMock()
-            mock_tg.send_to_group = AsyncMock()
+            mock_submit.return_value = {"status": "pending"}
             mock_db.log_action = MagicMock()
 
             from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
@@ -709,9 +707,11 @@ class TestSchedulerSensitivityDistribution:
         assert result["status"] == "success"
         assert result["sensitivity"] == "normal"
 
-        # Should notify both Eyal and group
-        mock_tg.send_to_eyal.assert_awaited_once()
-        mock_tg.send_to_group.assert_awaited_once()
+        # Should have submitted for approval with correct content type
+        mock_submit.assert_awaited_once()
+        call_kwargs = mock_submit.call_args[1]
+        assert call_kwargs["content_type"] == "meeting_prep"
+        assert call_kwargs["content"]["sensitivity"] == "normal"
 
 
 # =============================================================================

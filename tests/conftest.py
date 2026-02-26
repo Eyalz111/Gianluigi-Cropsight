@@ -225,6 +225,7 @@ def sample_task():
     """Sample task for testing."""
     return {
         "task": "Prepare client demo",
+        "category": "Product & Tech",
         "assignee": "Paolo",
         "source_meeting": "MVP Review",
         "deadline": "2026-02-28",
