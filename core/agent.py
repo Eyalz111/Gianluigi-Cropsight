@@ -257,9 +257,9 @@ class GianluigiAgent:
         query_embedding = await embedding_service.embed_text(event_title)
         related_chunks = supabase_client.search_embeddings(
             query_embedding=query_embedding,
-            match_threshold=0.6,
-            match_count=10,
-            filter_source_type="meeting",
+            similarity_threshold=0.6,
+            limit=10,
+            source_type="meeting",
         )
 
         # Get related decisions
@@ -419,9 +419,9 @@ class GianluigiAgent:
         # Search embeddings
         results = supabase_client.search_embeddings(
             query_embedding=query_embedding,
-            match_threshold=0.65,
-            match_count=10,
-            filter_source_type="meeting",
+            similarity_threshold=0.65,
+            limit=10,
+            source_type="meeting",
         )
 
         # Format results

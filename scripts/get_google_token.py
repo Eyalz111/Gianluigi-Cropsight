@@ -42,9 +42,10 @@ from google.auth.transport.requests import Request
 
 # All scopes needed by Gianluigi
 SCOPES = [
-    # Gmail - send meeting summaries and read responses
+    # Gmail - send meeting summaries, read responses, mark as read
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
 
     # Google Drive - read transcripts, write summaries
     "https://www.googleapis.com/auth/drive.file",

@@ -300,8 +300,8 @@ class TestApplyStakeholderUpdateExisting:
             calls = svc._update_cell.call_args_list
             call_ranges = [c.kwargs["range_name"] for c in calls]
             # next_action -> I, priority -> F
-            assert "Sheet1!I3" in call_ranges
-            assert "Sheet1!F3" in call_ranges
+            assert "I3" in call_ranges
+            assert "F3" in call_ranges
 
     @pytest.mark.asyncio
     async def test_update_case_insensitive_match(self):
@@ -375,7 +375,7 @@ class TestApplyStakeholderUpdateNew:
             # Check the row data
             call_kwargs = svc._append_row_to_range.call_args.kwargs
             assert call_kwargs["sheet_id"] == "sheet-456"
-            assert call_kwargs["range_name"] == "Sheet1!A:P"
+            assert call_kwargs["range_name"] == "A:P"
             row_values = call_kwargs["values"]
             assert row_values[0] == "New Partner Inc"  # organization_name
             assert row_values[1] == "Investor"          # type

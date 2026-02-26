@@ -123,9 +123,14 @@ SENSITIVE_KEYWORDS = [
 TEAM_TELEGRAM_IDS: dict[str, int] = {}
 
 # Populate from settings if available
-if settings.EYAL_TELEGRAM_ID:
-    TEAM_TELEGRAM_IDS["eyal"] = settings.EYAL_TELEGRAM_ID
-    TEAM_TELEGRAM_IDS["eyal zror"] = settings.EYAL_TELEGRAM_ID
+# Fall back to TELEGRAM_*_CHAT_ID if *_TELEGRAM_ID is not set
+# (in Telegram DMs, user ID == chat ID)
+_eyal_tid = settings.EYAL_TELEGRAM_ID or (
+    int(settings.TELEGRAM_EYAL_CHAT_ID) if settings.TELEGRAM_EYAL_CHAT_ID else None
+)
+if _eyal_tid:
+    TEAM_TELEGRAM_IDS["eyal"] = _eyal_tid
+    TEAM_TELEGRAM_IDS["eyal zror"] = _eyal_tid
 
 if settings.ROYE_TELEGRAM_ID:
     TEAM_TELEGRAM_IDS["roye"] = settings.ROYE_TELEGRAM_ID

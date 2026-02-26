@@ -216,7 +216,7 @@ class GoogleSheetsService:
 
         try:
             # Update Status (column F) and Updated Date (column I)
-            range_name = f"Sheet1!F{row_number}:I{row_number}"
+            range_name = f"F{row_number}:I{row_number}"
             values = [[status, None, None, updated_date]]
 
             # Use COLUMNS input option to update only specific columns
@@ -247,7 +247,7 @@ class GoogleSheetsService:
 
         rows = await self._read_sheet_range(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            range_name="Sheet1!A:I"
+            range_name="A:I"
         )
 
         if not rows or len(rows) < 2:
@@ -351,7 +351,7 @@ class GoogleSheetsService:
 
         rows = await self._read_sheet_range(
             sheet_id=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-            range_name="Sheet1!A:P"  # 16 columns
+            range_name="A:P"  # 16 columns
         )
 
         if not rows or len(rows) < 2:
@@ -580,7 +580,7 @@ class GoogleSheetsService:
         try:
             self.service.spreadsheets().values().append(
                 spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-                range="Sheet1!A:P",
+                range="A:P",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": values}
@@ -607,7 +607,7 @@ class GoogleSheetsService:
 
         Args:
             sheet_id: Google Sheets ID.
-            range_name: A1 notation range (e.g., "Sheet1!A1:Z100").
+            range_name: A1 notation range (e.g., "A1:Z100").
 
         Returns:
             2D list of cell values.
@@ -691,7 +691,7 @@ class GoogleSheetsService:
         try:
             self.service.spreadsheets().values().append(
                 spreadsheetId=sheet_id,
-                range="Sheet1!A:I",
+                range="A:I",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": values}
@@ -780,7 +780,7 @@ class GoogleSheetsService:
                     if col:
                         await self._update_cell(
                             sheet_id=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-                            range_name=f"Sheet1!{col}{target_row}",
+                            range_name=f"{col}{target_row}",
                             value=str(value),
                         )
 
@@ -808,7 +808,7 @@ class GoogleSheetsService:
 
                 await self._append_row_to_range(
                     sheet_id=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-                    range_name="Sheet1!A:P",
+                    range_name="A:P",
                     values=new_row,
                 )
 
@@ -1121,14 +1121,14 @@ class GoogleSheetsService:
         try:
             rows = await self._read_sheet_range(
                 sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                range_name="Sheet1!A1:I1"
+                range_name="A1:I1"
             )
 
             if not rows:
                 # Add headers
                 await self._write_sheet_range(
                     sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                    range_name="Sheet1!A1:I1",
+                    range_name="A1:I1",
                     values=[TASK_TRACKER_COLUMNS]
                 )
                 logger.info("Created Task Tracker headers")

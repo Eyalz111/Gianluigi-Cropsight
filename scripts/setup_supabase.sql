@@ -316,7 +316,7 @@ BEGIN
         e.speaker,
         e.timestamp_range,
         e.metadata,
-        ts_rank(e.chunk_text_tsv, plainto_tsquery('english', search_query)) AS rank
+        ts_rank(e.chunk_text_tsv, plainto_tsquery('english', search_query))::FLOAT AS rank
     FROM embeddings e
     WHERE
         e.chunk_text_tsv @@ plainto_tsquery('english', search_query)
