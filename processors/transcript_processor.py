@@ -382,7 +382,7 @@ Apply all tone guardrails: no emotional characterizations, professional language
     for attempt in range(max_retries):
         try:
             response = client.messages.create(
-                model=settings.CLAUDE_MODEL,
+                model=settings.model_extraction,
                 max_tokens=4096,
                 system=extraction_system,
                 messages=[

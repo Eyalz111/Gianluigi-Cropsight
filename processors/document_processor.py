@@ -151,7 +151,7 @@ Document content:
     try:
         client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model=settings.CLAUDE_MODEL,
+            model=settings.model_simple,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -194,7 +194,7 @@ Document:
     try:
         client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model=settings.CLAUDE_MODEL,
+            model=settings.model_simple,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )

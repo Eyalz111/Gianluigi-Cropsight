@@ -264,6 +264,9 @@ class TelegramBot:
         if sensitive:
             message = f"*[SENSITIVE]*\n\n{message}"
             return await self.send_to_eyal(message)
+        elif settings.ENVIRONMENT != "production":
+            # Development mode: send to Eyal only, not group
+            return await self.send_to_eyal(message)
         else:
             return await self.send_to_group(message)
 

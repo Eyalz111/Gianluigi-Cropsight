@@ -312,29 +312,58 @@ async def process_response(
     parsed = parse_approval_response(response)
     action = parsed["action"]
 
-    # Get the meeting from database
-    meeting = supabase_client.get_meeting(meeting_id)
-    if not meeting:
-        logger.error(f"Meeting not found: {meeting_id}")
-        return {
-            "action": "error",
-            "error": "Meeting not found",
-            "next_step": "Please try again",
-        }
+    # Detect content type from meeting_id prefix or in-memory pending approvals.
+    # Non-meeting content (digests, preps) uses IDs like "digest-2026-02-23"
+    # which aren't UUIDs, so we can't query the meetings table.
+    pending_info = _pending_approvals.get(meeting_id)
+    is_non_meeting = (
+        meeting_id.startswith("digest-")
+        or meeting_id.startswith("prep-")
+        or (pending_info and pending_info["type"] in ("weekly_digest", "meeting_prep"))
+    )
+
+    if is_non_meeting:
+        # Non-meeting content — build a stub meeting dict, skip DB lookup
+        title = pending_info["content"].get("title", "") if pending_info else meeting_id
+        meeting = {"id": meeting_id, "title": title}
+    else:
+        # Regular meeting — get from database
+        meeting = supabase_client.get_meeting(meeting_id)
+        if not meeting:
+            logger.error(f"Meeting not found: {meeting_id}")
+            return {
+                "action": "error",
+                "error": "Meeting not found",
+                "next_step": "Please try again",
+            }
 
     # Cancel any pending auto-publish timer (Eyal is acting manually)
     cancel_auto_publish(meeting_id)
 
     if action == "approve":
-        # Update status
-        await update_approval_status(meeting_id, ApprovalStatus.APPROVED)
-
-        # Check if this is a non-meeting-summary content type
+        # Pop pending info (already fetched above via .get(), now remove it)
         pending_info = _pending_approvals.pop(meeting_id, None)
-        content_type = pending_info["type"] if pending_info else "meeting_summary"
+
+        # Determine content type from pending_info or ID prefix
+        if pending_info:
+            content_type = pending_info["type"]
+        elif meeting_id.startswith("digest-"):
+            content_type = "weekly_digest"
+        elif meeting_id.startswith("prep-"):
+            content_type = "meeting_prep"
+        else:
+            content_type = "meeting_summary"
+
+        # Update approval status in DB (skip for non-meeting content like digests)
+        if content_type == "meeting_summary":
+            await update_approval_status(meeting_id, ApprovalStatus.APPROVED)
 
         if content_type == "meeting_prep":
-            # Distribute approved meeting prep
+            if not pending_info:
+                # Content was submitted from another process (lost on restart)
+                logger.warning(f"Meeting prep {meeting_id} approved but content not in memory (already saved to Drive)")
+                supabase_client.log_action(action="approval_status_approved", details={"meeting_id": meeting_id}, triggered_by="eyal")
+                return {"action": "approved", "edits": None, "next_step": "Approved (content already saved to Drive)"}
             distribution_result = await distribute_approved_prep(
                 meeting_id=meeting_id,
                 content=pending_info["content"],
@@ -347,7 +376,11 @@ async def process_response(
             }
 
         elif content_type == "weekly_digest":
-            # Distribute approved weekly digest
+            if not pending_info:
+                # Content was submitted from another process (lost on restart)
+                logger.warning(f"Weekly digest {meeting_id} approved but content not in memory (already saved to Drive)")
+                supabase_client.log_action(action="approval_status_approved", details={"meeting_id": meeting_id}, triggered_by="eyal")
+                return {"action": "approved", "edits": None, "next_step": "Approved (content already saved to Drive)"}
             distribution_result = await distribute_approved_digest(
                 meeting_id=meeting_id,
                 content=pending_info["content"],
@@ -398,8 +431,12 @@ async def process_response(
         }
 
     elif action == "reject":
-        # Update status
-        await update_approval_status(meeting_id, ApprovalStatus.REJECTED)
+        # Update status (skip for non-meeting content)
+        if not is_non_meeting:
+            await update_approval_status(meeting_id, ApprovalStatus.REJECTED)
+
+        # Remove from pending approvals if still there
+        _pending_approvals.pop(meeting_id, None)
 
         # Log rejection
         supabase_client.log_action(
@@ -415,8 +452,9 @@ async def process_response(
         }
 
     else:  # action == "edit"
-        # Update status to editing
-        await update_approval_status(meeting_id, ApprovalStatus.EDITING)
+        # Update status to editing (skip for non-meeting content)
+        if not is_non_meeting:
+            await update_approval_status(meeting_id, ApprovalStatus.EDITING)
 
         # Parse edit instructions
         edits = await parse_edit_instructions_with_claude(response, meeting)
@@ -533,7 +571,7 @@ Return ONLY the JSON array, no other text."""
 
     try:
         response_msg = client.messages.create(
-            model=settings.CLAUDE_MODEL,
+            model=settings.model_simple,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -597,7 +635,7 @@ Only make the changes specified - don't add or remove anything else."""
 
     try:
         response = client.messages.create(
-            model=settings.CLAUDE_MODEL,
+            model=settings.model_background,
             max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -828,8 +866,8 @@ async def distribute_approved_prep(
         message += f"Prep document: {drive_link}"
 
     try:
-        if sensitivity == "sensitive":
-            logger.info(f"Sensitive meeting '{title}' — notifying Eyal only")
+        if sensitivity == "sensitive" or settings.ENVIRONMENT != "production":
+            logger.info(f"Eyal-only distribution (sensitive={sensitivity}, env={settings.ENVIRONMENT})")
             await telegram_bot.send_to_eyal(message)
         else:
             await telegram_bot.send_to_eyal(message)
@@ -879,22 +917,25 @@ async def distribute_approved_digest(
     digest_doc = content.get("digest_document", "")
     drive_link = content.get("drive_link", "")
 
-    # Send email to team
+    # Send email — Eyal-only in development mode
     try:
-        team_emails = settings.team_emails
-        if team_emails:
+        if settings.ENVIRONMENT != "production":
+            digest_emails = [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
+        else:
+            digest_emails = settings.team_emails
+        if digest_emails:
             await gmail_service.send_weekly_digest(
-                recipients=team_emails,
+                recipients=digest_emails,
                 week_of=week_of,
                 digest_content=digest_doc,
                 drive_link=drive_link,
             )
             results["email_sent"] = True
-            results["emails_to"] = team_emails
+            results["emails_to"] = digest_emails
     except Exception as e:
         logger.error(f"Error sending digest email: {e}")
 
-    # Send Telegram notification
+    # Send Telegram notification — Eyal-only in development mode
     try:
         summary_msg = (
             f"<b>CropSight Weekly Digest — Week of {week_of}</b>\n\n"
@@ -905,7 +946,10 @@ async def distribute_approved_digest(
         )
         if drive_link:
             summary_msg += f"\nFull digest: {drive_link}"
-        await telegram_bot.send_to_group(summary_msg)
+        if settings.ENVIRONMENT != "production":
+            await telegram_bot.send_to_eyal(summary_msg)
+        else:
+            await telegram_bot.send_to_group(summary_msg)
         results["telegram_sent"] = True
     except Exception as e:
         logger.error(f"Error sending digest Telegram: {e}")

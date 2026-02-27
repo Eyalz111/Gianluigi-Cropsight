@@ -114,7 +114,10 @@ def get_sensitivity_reason(event: dict) -> str | None:
 
 def get_distribution_list(sensitivity: str, team_emails: list[str]) -> list[str]:
     """
-    Get the email distribution list based on sensitivity.
+    Get the email distribution list based on sensitivity and environment.
+
+    In development mode (ENVIRONMENT != 'production'), all emails go to
+    Eyal only — no team members are contacted.
 
     Args:
         sensitivity: 'normal' or 'sensitive'
@@ -124,6 +127,10 @@ def get_distribution_list(sensitivity: str, team_emails: list[str]) -> list[str]
         List of emails to distribute to.
     """
     from config.settings import settings
+
+    # Development mode: always Eyal-only
+    if settings.ENVIRONMENT != "production":
+        return [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
 
     if sensitivity == "sensitive":
         # Eyal only

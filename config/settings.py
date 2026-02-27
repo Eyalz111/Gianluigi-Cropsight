@@ -44,6 +44,19 @@ class Settings(BaseSettings):
         default="claude-opus-4-6",
         description="Claude model to use"
     )
+    # Tiered model settings — each tier falls back to CLAUDE_MODEL if not set
+    CLAUDE_MODEL_EXTRACTION: str = Field(
+        default="", description="Model for transcript extraction. Falls back to CLAUDE_MODEL."
+    )
+    CLAUDE_MODEL_AGENT: str = Field(
+        default="", description="Model for agent queries/tool use. Falls back to CLAUDE_MODEL."
+    )
+    CLAUDE_MODEL_BACKGROUND: str = Field(
+        default="", description="Model for meeting prep, edit application. Falls back to CLAUDE_MODEL."
+    )
+    CLAUDE_MODEL_SIMPLE: str = Field(
+        default="", description="Model for doc summaries, edit parsing. Falls back to CLAUDE_MODEL."
+    )
 
     # ==========================================================================
     # Supabase (PostgreSQL + pgvector)
@@ -146,6 +159,26 @@ class Settings(BaseSettings):
         default=60,
         description="Minutes to wait before auto-publishing in auto_review mode"
     )
+
+    @property
+    def model_extraction(self) -> str:
+        """Model for transcript extraction (accuracy-critical, rare)."""
+        return self.CLAUDE_MODEL_EXTRACTION or self.CLAUDE_MODEL
+
+    @property
+    def model_agent(self) -> str:
+        """Model for agent queries and tool use (frequent, real-time)."""
+        return self.CLAUDE_MODEL_AGENT or self.CLAUDE_MODEL
+
+    @property
+    def model_background(self) -> str:
+        """Model for meeting prep, edit application (background, rare)."""
+        return self.CLAUDE_MODEL_BACKGROUND or self.CLAUDE_MODEL
+
+    @property
+    def model_simple(self) -> str:
+        """Model for doc summaries, edit parsing (simple tasks, rare)."""
+        return self.CLAUDE_MODEL_SIMPLE or self.CLAUDE_MODEL
 
     def validate_required(self) -> list[str]:
         """

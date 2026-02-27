@@ -56,8 +56,15 @@ class GianluigiAgent:
         Initialize the agent with Claude client and configuration.
         """
         self.client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        self.model = settings.CLAUDE_MODEL
+        self.model = settings.model_agent
         self.system_prompt = get_system_prompt()
+        # Prompt caching: cache the ~4,300-token system prompt across calls
+        # within 5-minute windows. Cached reads cost 10% of normal input price.
+        self.system_prompt_cached = [{
+            "type": "text",
+            "text": self.system_prompt,
+            "cache_control": {"type": "ephemeral"}
+        }]
         self.tools = TOOL_DEFINITIONS
         self.max_tool_iterations = 10  # Prevent infinite tool loops
 
@@ -117,7 +124,7 @@ class GianluigiAgent:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
-                system=self.system_prompt,
+                system=self.system_prompt_cached,
                 tools=self.tools,
                 messages=messages,
             )
@@ -313,9 +320,9 @@ class GianluigiAgent:
             open_questions=open_questions,
         )
 
-        # Generate prep document with Claude
+        # Generate prep document with Claude (background task, uses background tier)
         response = self.client.messages.create(
-            model=self.model,
+            model=settings.model_background,
             max_tokens=2048,
             system=self.system_prompt,
             messages=[{"role": "user", "content": prep_prompt}],

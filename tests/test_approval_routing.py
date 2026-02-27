@@ -559,7 +559,9 @@ class TestDistributeApprovedPrep:
         with (
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
+            patch("guardrails.approval_flow.settings") as mock_settings,
         ):
+            mock_settings.ENVIRONMENT = "production"
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
@@ -581,7 +583,7 @@ class TestDistributeApprovedPrep:
             assert result["telegram_sent"] is True
             assert result["type"] == "meeting_prep"
 
-            # Should send to both Eyal and group
+            # Should send to both Eyal and group in production
             mock_tg.send_to_eyal.assert_awaited_once()
             mock_tg.send_to_group.assert_awaited_once()
 
@@ -709,6 +711,7 @@ class TestDistributeApprovedDigest:
             mock_gmail.send_weekly_digest = AsyncMock(return_value=True)
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_settings.ENVIRONMENT = "production"
             mock_settings.team_emails = [
                 "eyal@cropsight.ai",
                 "noga@cropsight.ai",
@@ -767,8 +770,11 @@ class TestDistributeApprovedDigest:
             patch("guardrails.approval_flow.settings") as mock_settings,
         ):
             mock_gmail.send_weekly_digest = AsyncMock(return_value=True)
+            mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_settings.ENVIRONMENT = "development"
+            mock_settings.EYAL_EMAIL = ""  # No email configured
             mock_settings.team_emails = []  # No team emails
 
             from guardrails.approval_flow import distribute_approved_digest
@@ -847,6 +853,7 @@ class TestDistributeApprovedDigest:
             )
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_settings.ENVIRONMENT = "production"
             mock_settings.team_emails = ["eyal@cropsight.ai"]
 
             from guardrails.approval_flow import distribute_approved_digest
