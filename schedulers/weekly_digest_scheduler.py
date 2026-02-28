@@ -16,7 +16,6 @@ from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHECK_INTERVAL = 3600  # 1 hour
 
 
 class WeeklyDigestScheduler:
@@ -30,14 +29,14 @@ class WeeklyDigestScheduler:
     Tracks the last generated week to avoid duplicates.
     """
 
-    def __init__(self, check_interval: int = DEFAULT_CHECK_INTERVAL):
+    def __init__(self, check_interval: int | None = None):
         """
         Initialize the weekly digest scheduler.
 
         Args:
             check_interval: Seconds between checks (default 1 hour).
         """
-        self.check_interval = check_interval
+        self.check_interval = check_interval or settings.WEEKLY_DIGEST_CHECK_INTERVAL
         self._running = False
         self._last_digest_week: str | None = None  # Track to avoid duplicates
 

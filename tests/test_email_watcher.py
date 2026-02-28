@@ -40,6 +40,7 @@ def mock_settings_for_email_watcher():
     mock_settings.EMBEDDING_DIMENSION = 1536
     mock_settings.EMBEDDING_API_KEY = "test-embedding-key"
     mock_settings.OPENAI_API_KEY = "test-openai-key"
+    mock_settings.EMAIL_CHECK_INTERVAL = 300
 
     with patch("config.settings.settings", mock_settings):
         yield mock_settings

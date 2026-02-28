@@ -149,6 +149,75 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = Field(default="development", description="Environment name")
 
     # ==========================================================================
+    # Search & RAG Tuning
+    # ==========================================================================
+    SIMILARITY_THRESHOLD: float = Field(
+        default=0.6, description="Default similarity threshold for semantic search"
+    )
+    SIMILARITY_THRESHOLD_CONTEXTUAL: float = Field(
+        default=0.4, description="Lower threshold for contextual/parent chunk retrieval"
+    )
+    RECENCY_HALFLIFE_DAYS: int = Field(
+        default=30, description="Half-life in days for time-weighted RAG recency boost"
+    )
+    CHUNK_SIZE: int = Field(default=1000, description="Embedding chunk size in characters")
+    CHUNK_OVERLAP: int = Field(default=200, description="Embedding chunk overlap in characters")
+
+    # ==========================================================================
+    # Alert Thresholds
+    # ==========================================================================
+    ALERT_OVERDUE_CLUSTER_MIN: int = Field(
+        default=3, description="Minimum overdue tasks per assignee to trigger alert"
+    )
+    ALERT_STALE_COMMITMENT_DAYS: int = Field(
+        default=14, description="Days before an open commitment is considered stale"
+    )
+    ALERT_RECURRING_DISCUSSION_MEETINGS: int = Field(
+        default=3, description="Entity in N+ meetings triggers recurring discussion alert"
+    )
+    ALERT_QUESTION_PILEUP_MIN: int = Field(
+        default=5, description="Minimum open questions to trigger pileup alert"
+    )
+
+    # ==========================================================================
+    # Conversation Memory
+    # ==========================================================================
+    CONVERSATION_MAX_MESSAGES: int = Field(
+        default=10, description="Max messages per chat in conversation memory"
+    )
+    CONVERSATION_TTL_MINUTES: int = Field(
+        default=30, description="Minutes before conversation history expires"
+    )
+
+    # ==========================================================================
+    # Scheduler Intervals (seconds)
+    # ==========================================================================
+    EMAIL_CHECK_INTERVAL: int = Field(
+        default=300, description="Email watcher check interval (seconds)"
+    )
+    TRANSCRIPT_POLL_INTERVAL: int = Field(
+        default=300, description="Transcript watcher poll interval (seconds)"
+    )
+    DOCUMENT_POLL_INTERVAL: int = Field(
+        default=300, description="Document watcher poll interval (seconds)"
+    )
+    MEETING_PREP_CHECK_INTERVAL: int = Field(
+        default=14400, description="Meeting prep scheduler check interval (seconds)"
+    )
+    MEETING_PREP_HOURS_BEFORE: int = Field(
+        default=24, description="Hours before meeting to generate prep document"
+    )
+    WEEKLY_DIGEST_CHECK_INTERVAL: int = Field(
+        default=3600, description="Weekly digest scheduler check interval (seconds)"
+    )
+    TASK_REMINDER_CHECK_INTERVAL: int = Field(
+        default=28800, description="Task reminder scheduler check interval (seconds)"
+    )
+    ALERT_CHECK_INTERVAL: int = Field(
+        default=43200, description="Alert scheduler check interval (seconds)"
+    )
+
+    # ==========================================================================
     # Approval Mode (v0.2)
     # ==========================================================================
     APPROVAL_MODE: str = Field(

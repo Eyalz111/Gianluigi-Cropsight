@@ -27,11 +27,10 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
-# Tunables
-MAX_HISTORY_MESSAGES = 10
-TTL_MINUTES = 30
 
 
 @dataclass
@@ -52,11 +51,11 @@ class ConversationMemory:
 
     def __init__(
         self,
-        max_messages: int = MAX_HISTORY_MESSAGES,
-        ttl_minutes: int = TTL_MINUTES,
+        max_messages: int | None = None,
+        ttl_minutes: int | None = None,
     ):
-        self.max_messages = max_messages
-        self.ttl_minutes = ttl_minutes
+        self.max_messages = max_messages or settings.CONVERSATION_MAX_MESSAGES
+        self.ttl_minutes = ttl_minutes or settings.CONVERSATION_TTL_MINUTES
         self._histories: dict[str, list[ConversationEntry]] = {}
 
     def add_message(self, chat_id: str, role: str, content: str) -> None:

@@ -868,7 +868,7 @@ class SupabaseClient:
         query_embedding: list[float],
         limit: int = 10,
         source_type: str | None = None,
-        similarity_threshold: float = 0.7,
+        similarity_threshold: float | None = None,
     ) -> list[dict]:
         """
         Search for similar embeddings using cosine similarity.
@@ -884,6 +884,10 @@ class SupabaseClient:
         Returns:
             List of matching chunks with similarity scores.
         """
+        if similarity_threshold is None:
+            from config.settings import settings
+            similarity_threshold = settings.SIMILARITY_THRESHOLD
+
         # Call the similarity search RPC function
         # Note: This requires a custom function in Supabase
         result = self.client.rpc(
@@ -1533,7 +1537,7 @@ class SupabaseClient:
     @staticmethod
     def _apply_time_weighting(
         results: list[dict],
-        half_life_days: int = 30,
+        half_life_days: int | None = None,
     ) -> list[dict]:
         """
         Boost recent results using time-weighted scoring.
@@ -1551,6 +1555,9 @@ class SupabaseClient:
         Returns:
             Re-sorted list with updated rrf_score values.
         """
+        if half_life_days is None:
+            half_life_days = settings.RECENCY_HALFLIFE_DAYS
+
         now = datetime.now()
 
         for item in results:
@@ -1610,7 +1617,7 @@ class SupabaseClient:
             vector_results = self.search_embeddings(
                 query_embedding=query_embedding,
                 limit=20,
-                similarity_threshold=0.4,
+                similarity_threshold=settings.SIMILARITY_THRESHOLD_CONTEXTUAL,
             )
         except Exception as e:
             logger.warning(f"Embedding search failed: {e}")

@@ -181,6 +181,7 @@ async def process_transcript(
             meeting_id=meeting_id,
             transcript=file_content,
             participants=participants,
+            pre_extracted=extracted.get("stakeholders", []),
         )
     except Exception as e:
         logger.error(f"Entity extraction failed (non-fatal): {e}")
@@ -415,12 +416,20 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     ],
     "stakeholders": [
         {
-            "name": "Person or org name",
-            "context": "How they were mentioned"
+            "name": "Full proper name of person or organization",
+            "type": "person / organization / project / location",
+            "context": "One sentence: CropSight's relationship or interaction with them",
+            "speaker": "Who mentioned them",
+            "relationship": "advisor / investor / partner / client / grant_body / pilot_site / vendor / other"
         }
     ],
     "discussion_summary": "2-4 paragraphs summarizing the key discussion topics. Professional tone only. No emotional characterizations."
 }
+
+STAKEHOLDER EXTRACTION RULES:
+A "stakeholder" is someone CropSight has a DIRECT business relationship with — someone you'd put in a CRM.
+INCLUDE: specific advisors/contacts, partner companies, grant bodies, named pilot sites/projects.
+EXCLUDE: big tech/infra (AWS, Google, Microsoft, IBM), countries/cities mentioned casually, tools/platforms (Zoom, Slack, Tactiq), generic terms, meeting participants, CropSight team members.
 
 Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps."""
 

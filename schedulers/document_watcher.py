@@ -32,8 +32,6 @@ from processors.document_processor import (
 
 logger = logging.getLogger(__name__)
 
-# Default polling interval in seconds (5 minutes)
-DEFAULT_POLL_INTERVAL = 300
 
 
 class DocumentWatcher:
@@ -43,7 +41,7 @@ class DocumentWatcher:
 
     def __init__(
         self,
-        poll_interval: int = DEFAULT_POLL_INTERVAL,
+        poll_interval: int | None = None,
     ):
         """
         Initialize the document watcher.
@@ -51,7 +49,7 @@ class DocumentWatcher:
         Args:
             poll_interval: Seconds between polls (default 5 minutes).
         """
-        self.poll_interval = poll_interval
+        self.poll_interval = poll_interval or settings.DOCUMENT_POLL_INTERVAL
         self._running = False
 
     async def start(self) -> None:

@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from config.settings import settings
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ def generate_post_meeting_alerts(
             all_mentions = supabase_client.get_entity_mentions(entity_id=eid)
             # Count unique meetings
             meeting_ids = set(m.get("meeting_id") for m in all_mentions if m.get("meeting_id"))
-            if len(meeting_ids) >= 3:
+            if len(meeting_ids) >= settings.ALERT_RECURRING_DISCUSSION_MEETINGS:
                 entity_info = all_mentions[0].get("entities", {}) or {}
                 entity_name = entity_info.get("canonical_name", "Unknown")
                 alerts.append({
@@ -195,7 +196,7 @@ def _check_overdue_clusters() -> list[dict]:
 
     # Alert if 3+ overdue for one assignee
     for assignee, tasks in by_assignee.items():
-        if len(tasks) >= 3:
+        if len(tasks) >= settings.ALERT_OVERDUE_CLUSTER_MIN:
             task_titles = [t.get("title", "?")[:50] for t in tasks[:5]]
             alerts.append({
                 "type": "overdue_cluster",
@@ -226,7 +227,7 @@ def _check_stale_commitments() -> list[dict]:
     if not open_commitments:
         return alerts
 
-    two_weeks_ago = datetime.now() - timedelta(days=14)
+    two_weeks_ago = datetime.now() - timedelta(days=settings.ALERT_STALE_COMMITMENT_DAYS)
     stale = []
 
     for c in open_commitments:
@@ -285,7 +286,7 @@ def _check_recurring_discussions() -> list[dict]:
             mentions = supabase_client.get_entity_mentions(entity_id=eid)
             meeting_ids = set(m.get("meeting_id") for m in mentions if m.get("meeting_id"))
 
-            if len(meeting_ids) >= 3:
+            if len(meeting_ids) >= settings.ALERT_RECURRING_DISCUSSION_MEETINGS:
                 name = entity.get("canonical_name", "Unknown")
                 alerts.append({
                     "type": "recurring_discussion",
@@ -314,7 +315,7 @@ def _check_question_pileup() -> list[dict]:
     alerts = []
     open_questions = supabase_client.get_open_questions(status="open")
 
-    if len(open_questions) >= 5:
+    if len(open_questions) >= settings.ALERT_QUESTION_PILEUP_MIN:
         q_summaries = []
         for q in open_questions[:5]:
             q_summaries.append({

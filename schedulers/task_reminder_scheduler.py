@@ -33,8 +33,6 @@ from services.telegram_bot import telegram_bot
 
 logger = logging.getLogger(__name__)
 
-# Default check interval (8 hours - runs ~3 times per day)
-DEFAULT_CHECK_INTERVAL = 28800
 
 # How many days before deadline to start warning
 DAYS_BEFORE_WARNING = 2
@@ -47,7 +45,7 @@ class TaskReminderScheduler:
 
     def __init__(
         self,
-        check_interval: int = DEFAULT_CHECK_INTERVAL,
+        check_interval: int | None = None,
         days_before_warning: int = DAYS_BEFORE_WARNING
     ):
         """
@@ -57,7 +55,7 @@ class TaskReminderScheduler:
             check_interval: Seconds between checks.
             days_before_warning: Days before deadline to start warning.
         """
-        self.check_interval = check_interval
+        self.check_interval = check_interval or settings.TASK_REMINDER_CHECK_INTERVAL
         self.days_before_warning = days_before_warning
         self._running = False
         # Track reminders sent today to avoid duplicates

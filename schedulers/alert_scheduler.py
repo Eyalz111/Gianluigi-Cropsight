@@ -14,14 +14,13 @@ import asyncio
 import logging
 from datetime import datetime
 
+from config.settings import settings
 from processors.proactive_alerts import generate_alerts, format_alerts_message
 from services.supabase_client import supabase_client
 from services.telegram_bot import telegram_bot
 
 logger = logging.getLogger(__name__)
 
-# Default check interval: 12 hours
-DEFAULT_CHECK_INTERVAL = 43200
 
 
 class AlertScheduler:
@@ -32,14 +31,14 @@ class AlertScheduler:
     to avoid noise.
     """
 
-    def __init__(self, check_interval: int = DEFAULT_CHECK_INTERVAL):
+    def __init__(self, check_interval: int | None = None):
         """
         Initialize the alert scheduler.
 
         Args:
             check_interval: Seconds between checks (default 12 hours).
         """
-        self.check_interval = check_interval
+        self.check_interval = check_interval or settings.ALERT_CHECK_INTERVAL
         self._running = False
         self._last_alert_date: str = ""
 

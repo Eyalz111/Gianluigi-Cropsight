@@ -48,11 +48,6 @@ from processors.meeting_prep import (
 
 logger = logging.getLogger(__name__)
 
-# Default check interval (4 hours)
-DEFAULT_CHECK_INTERVAL = 14400
-
-# How many hours before meeting to generate prep (24 hours)
-DEFAULT_PREP_HOURS_BEFORE = 24
 
 
 class MeetingPrepScheduler:
@@ -62,8 +57,8 @@ class MeetingPrepScheduler:
 
     def __init__(
         self,
-        check_interval: int = DEFAULT_CHECK_INTERVAL,
-        prep_hours_before: int = DEFAULT_PREP_HOURS_BEFORE
+        check_interval: int | None = None,
+        prep_hours_before: int | None = None
     ):
         """
         Initialize the meeting prep scheduler.
@@ -72,8 +67,8 @@ class MeetingPrepScheduler:
             check_interval: Seconds between checks (default 4 hours).
             prep_hours_before: Hours before meeting to generate prep.
         """
-        self.check_interval = check_interval
-        self.prep_hours_before = prep_hours_before
+        self.check_interval = check_interval or settings.MEETING_PREP_CHECK_INTERVAL
+        self.prep_hours_before = prep_hours_before or settings.MEETING_PREP_HOURS_BEFORE
         self._running = False
         # Track meetings we've already generated prep for
         self._prep_generated: set[str] = set()

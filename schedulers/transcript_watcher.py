@@ -44,8 +44,6 @@ from guardrails.approval_flow import submit_for_approval
 
 logger = logging.getLogger(__name__)
 
-# Default polling interval in seconds (5 minutes)
-DEFAULT_POLL_INTERVAL = 300
 
 
 class TranscriptWatcher:
@@ -55,7 +53,7 @@ class TranscriptWatcher:
 
     def __init__(
         self,
-        poll_interval: int = DEFAULT_POLL_INTERVAL,
+        poll_interval: int | None = None,
         auto_start: bool = False
     ):
         """
@@ -65,7 +63,7 @@ class TranscriptWatcher:
             poll_interval: Seconds between polls (default 5 minutes).
             auto_start: Whether to start polling immediately.
         """
-        self.poll_interval = poll_interval
+        self.poll_interval = poll_interval or settings.TRANSCRIPT_POLL_INTERVAL
         self._running = False
         self._task: asyncio.Task | None = None
         # Track files pending Eyal's classification response

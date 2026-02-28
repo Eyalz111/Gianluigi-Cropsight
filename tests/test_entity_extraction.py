@@ -18,6 +18,7 @@ from processors.entity_extraction import (
     extract_and_link_entities,
     _extract_raw_entities,
     _validate_entities,
+    _filter_known_names,
     _resolve_entity,
     review_entity_health,
 )
@@ -211,6 +212,156 @@ class TestValidateEntities:
             result = await _validate_entities(candidates)
             assert len(result) == 1
             assert result[0]["name"] == "Valid Person"
+
+
+# =========================================================================
+# Test _resolve_entity
+# =========================================================================
+
+# =========================================================================
+# Test _filter_known_names
+# =========================================================================
+
+class TestFilterKnownNames:
+    """Tests for filtering participants/team from pre-extracted stakeholders."""
+
+    def test_filters_participants(self):
+        """Should remove meeting participants."""
+        candidates = [
+            {"name": "Eyal Zror", "type": "person", "context": "host"},
+            {"name": "Jason Adelman", "type": "person", "context": "advisor"},
+        ]
+        result = _filter_known_names(candidates, ["Eyal Zror"])
+        assert len(result) == 1
+        assert result[0]["name"] == "Jason Adelman"
+
+    def test_filters_first_names(self):
+        """Should remove first-name-only matches of participants."""
+        candidates = [
+            {"name": "Eyal", "type": "person", "context": "host"},
+            {"name": "Lavazza", "type": "organization", "context": "partner"},
+        ]
+        result = _filter_known_names(candidates, ["Eyal Zror"])
+        assert len(result) == 1
+        assert result[0]["name"] == "Lavazza"
+
+    def test_filters_team_members(self):
+        """Should remove known CropSight team members."""
+        candidates = [
+            {"name": "Roye Tadmor", "type": "person", "context": "CTO"},
+            {"name": "IIA", "type": "organization", "context": "grant"},
+        ]
+        result = _filter_known_names(candidates, [])
+        names = [c["name"] for c in result]
+        assert "Roye Tadmor" not in names
+        assert "IIA" in names
+
+    def test_filters_short_names(self):
+        """Should remove names shorter than 2 chars."""
+        candidates = [
+            {"name": "X", "type": "person", "context": "unknown"},
+            {"name": "Lavazza", "type": "organization", "context": "partner"},
+        ]
+        result = _filter_known_names(candidates, [])
+        assert len(result) == 1
+
+    def test_empty_candidates(self):
+        """Empty list should return empty."""
+        assert _filter_known_names([], ["Eyal"]) == []
+
+
+# =========================================================================
+# Test pre-extracted flow (Opus piggyback)
+# =========================================================================
+
+class TestPreExtractedFlow:
+    """Tests for using pre-extracted stakeholders from Opus."""
+
+    @pytest.mark.asyncio
+    async def test_uses_pre_extracted_skips_haiku_extraction(self):
+        """Should use pre-extracted data and skip the Haiku extraction call."""
+        pre_extracted = [
+            {"name": "Jason Adelman", "type": "person", "context": "advisor", "speaker": "Eyal", "relationship": "advisor"},
+        ]
+
+        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+             patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            # Only ONE LLM call should happen (validation), not two
+            mock_client.messages.create.return_value = MagicMock(
+                content=[MagicMock(text='{"keep": [1]}')]
+            )
+
+            mock_db.list_entities.return_value = [
+                {"id": "e1", "canonical_name": "Jason Adelman", "entity_type": "person", "aliases": ["Jason"]},
+            ]
+            mock_db.create_entity_mentions_batch.return_value = [{"id": "m1"}]
+
+            result = await extract_and_link_entities(
+                "meeting-123", "transcript", [], pre_extracted=pre_extracted
+            )
+
+            # Should have called LLM exactly once (validation only)
+            assert mock_client.messages.create.call_count == 1
+            assert len(result["existing_mentions"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_haiku_when_no_pre_extracted(self):
+        """Without pre_extracted, should use standalone Haiku extraction."""
+        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+             patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            # Two LLM calls: extraction + validation
+            mock_client.messages.create.side_effect = [
+                MagicMock(content=[MagicMock(text='{"entities": [{"name": "Someone", "type": "person", "context": "test", "relationship": "other"}]}')]),
+                MagicMock(content=[MagicMock(text='{"keep": [1]}')]),
+            ]
+
+            mock_db.list_entities.return_value = []
+            mock_db.create_entity.return_value = {
+                "id": "new-uuid", "canonical_name": "Someone", "entity_type": "person", "aliases": ["Someone"],
+            }
+            mock_db.create_entity_mentions_batch.return_value = [{"id": "m1"}]
+
+            result = await extract_and_link_entities(
+                "meeting-123", "transcript", []
+            )
+
+            # Should have called LLM twice (extraction + validation)
+            assert mock_client.messages.create.call_count == 2
+            assert len(result["new_entities"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_extracted_filters_team_members(self):
+        """Pre-extracted data should still filter out team members."""
+        pre_extracted = [
+            {"name": "Roye Tadmor", "type": "person", "context": "CTO", "relationship": "other"},
+            {"name": "Lavazza", "type": "organization", "context": "partner", "relationship": "partner"},
+        ]
+
+        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+             patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.messages.create.return_value = MagicMock(
+                content=[MagicMock(text='{"keep": [1]}')]
+            )
+
+            mock_db.list_entities.return_value = []
+            mock_db.create_entity.return_value = {
+                "id": "e1", "canonical_name": "Lavazza", "entity_type": "organization", "aliases": ["Lavazza"],
+            }
+            mock_db.create_entity_mentions_batch.return_value = [{"id": "m1"}]
+
+            result = await extract_and_link_entities(
+                "meeting-123", "transcript", [], pre_extracted=pre_extracted
+            )
+
+            # Only Lavazza should come through — Roye filtered by _filter_known_names
+            assert len(result["new_entities"]) == 1
+            assert result["new_entities"][0]["canonical_name"] == "Lavazza"
 
 
 # =========================================================================

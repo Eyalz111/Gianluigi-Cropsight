@@ -152,8 +152,8 @@ class EmbeddingService:
     def chunk_transcript(
         self,
         transcript: str,
-        chunk_size: int = 1000,
-        overlap: int = 200
+        chunk_size: int | None = None,
+        overlap: int | None = None,
     ) -> list[dict]:
         """
         Split a transcript into overlapping chunks for embedding.
@@ -175,6 +175,11 @@ class EmbeddingService:
             - speaker: Primary speaker in this chunk (if detectable)
             - timestamp_range: Approximate timestamp range
         """
+        if chunk_size is None:
+            chunk_size = settings.CHUNK_SIZE
+        if overlap is None:
+            overlap = settings.CHUNK_OVERLAP
+
         if not transcript or not transcript.strip():
             return []
 
@@ -230,8 +235,8 @@ class EmbeddingService:
     def chunk_document(
         self,
         document: str,
-        chunk_size: int = 1000,
-        overlap: int = 200
+        chunk_size: int | None = None,
+        overlap: int | None = None,
     ) -> list[dict]:
         """
         Split a document into overlapping chunks for embedding.
@@ -248,6 +253,10 @@ class EmbeddingService:
             - text: The chunk content
             - chunk_index: Position in the document
         """
+        if chunk_size is None:
+            chunk_size = settings.CHUNK_SIZE
+        if overlap is None:
+            overlap = settings.CHUNK_OVERLAP
         return self._chunk_plain_text(document, chunk_size, overlap)
 
     def _chunk_plain_text(

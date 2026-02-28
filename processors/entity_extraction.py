@@ -41,21 +41,31 @@ async def extract_and_link_entities(
     meeting_id: str,
     transcript: str,
     participants: list[str],
+    pre_extracted: list[dict] | None = None,
 ) -> dict:
     """
-    Extract stakeholder entities from a transcript and link to the registry.
+    Validate and link stakeholder entities to the registry.
+
+    Two modes:
+    - With pre_extracted (normal flow): Opus already extracted stakeholders
+      from the full transcript. We just validate + link. No extra extraction
+      call needed — saves one LLM call and covers the full transcript.
+    - Without pre_extracted (fallback): Runs standalone Haiku extraction
+      from a transcript sample. Used if called outside the main pipeline.
 
     Flow:
-    1. Use Claude Haiku to extract candidate stakeholders.
-    2. Use Claude Haiku to validate candidates (filter junk).
-    3. Resolve each entity against the existing registry (local matching).
-    4. Create new entity records for unmatched entities.
-    5. Batch-create entity_mention records.
+    1. Get candidates (from Opus output or fallback Haiku extraction).
+    2. Filter out participants/team members.
+    3. Use Claude Haiku to validate candidates (filter junk).
+    4. Resolve each entity against the existing registry (local matching).
+    5. Create new entity records for unmatched entities.
+    6. Batch-create entity_mention records.
 
     Args:
         meeting_id: UUID of the meeting.
         transcript: Full transcript text.
         participants: List of meeting participant names.
+        pre_extracted: Optional stakeholders already extracted by Opus.
 
     Returns:
         Dict with:
@@ -69,8 +79,16 @@ async def extract_and_link_entities(
         "total_mentions": 0,
     }
 
-    # Step 1: Extract candidate stakeholders via LLM
-    raw_entities = await _extract_raw_entities(transcript, participants)
+    # Step 1: Get candidates — use Opus output or fall back to Haiku
+    if pre_extracted:
+        raw_entities = _filter_known_names(pre_extracted, participants)
+        logger.info(
+            f"Using {len(raw_entities)} pre-extracted stakeholders "
+            f"(from {len(pre_extracted)} Opus candidates)"
+        )
+    else:
+        raw_entities = await _extract_raw_entities(transcript, participants)
+
     if not raw_entities:
         logger.info(f"No stakeholders found in meeting {meeting_id}")
         return result
@@ -149,6 +167,40 @@ async def extract_and_link_entities(
         f"{result['total_mentions']} mentions"
     )
     return result
+
+
+def _filter_known_names(
+    candidates: list[dict],
+    participants: list[str],
+) -> list[dict]:
+    """
+    Filter out team members and participants from pre-extracted stakeholders.
+
+    The Opus extraction prompt tells it to exclude these, but we double-check
+    here in case any slip through.
+
+    Args:
+        candidates: Stakeholders extracted by Opus.
+        participants: Meeting participant names.
+
+    Returns:
+        Filtered list with known names removed.
+    """
+    team_names = get_team_member_names()
+    exclude = set(n.lower() for n in (participants + team_names))
+    # Also exclude first names
+    for name in team_names:
+        exclude.add(name.split()[0].lower())
+    for p in participants:
+        exclude.add(p.split()[0].lower())
+
+    filtered = []
+    for c in candidates:
+        name_lower = c.get("name", "").lower().strip()
+        if not name_lower or name_lower in exclude or len(name_lower) < 2:
+            continue
+        filtered.append(c)
+    return filtered
 
 
 async def _extract_raw_entities(

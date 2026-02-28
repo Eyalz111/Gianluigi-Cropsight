@@ -25,14 +25,11 @@ from services.conversation_memory import conversation_memory
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHECK_INTERVAL = 300  # 5 minutes
-
-
 class EmailWatcher:
     """Watches Gianluigi's inbox for team emails."""
 
-    def __init__(self, check_interval: int = DEFAULT_CHECK_INTERVAL):
-        self.check_interval = check_interval
+    def __init__(self, check_interval: int | None = None):
+        self.check_interval = check_interval or settings.EMAIL_CHECK_INTERVAL
         self._running = False
         self._processed_ids: set[str] = set()  # Track processed message IDs
 
