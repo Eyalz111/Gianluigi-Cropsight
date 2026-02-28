@@ -495,6 +495,57 @@ class TestFormatDigestDocument:
         assert "Gianluigi" in result
         assert "CropSight" in result
 
+    def test_includes_entity_health_section(self):
+        """Should include entity health section when data present."""
+        from processors.weekly_digest import format_digest_document
+
+        result = format_digest_document(
+            week_of="2026-02-23",
+            meetings=[],
+            decisions=[],
+            tasks_completed=[],
+            tasks_overdue=[],
+            tasks_upcoming=[],
+            open_questions=[],
+            upcoming_meetings=[],
+            entity_health={
+                "total_entities": 10,
+                "auto_cleaned": ["Internet", "Tactiq"],
+                "orphans": [{"name": "Lonely Corp", "type": "organization", "id": "x"}],
+                "new_this_week": [{"name": "Fresh Partner", "type": "organization"}],
+            },
+        )
+
+        assert "## Entity Registry Health" in result
+        assert "10" in result
+        assert "Internet" in result
+        assert "Tactiq" in result
+        assert "Fresh Partner" in result
+        assert "Lonely Corp" in result
+
+    def test_entity_health_hidden_when_nothing_to_report(self):
+        """Should not show entity health section if nothing interesting."""
+        from processors.weekly_digest import format_digest_document
+
+        result = format_digest_document(
+            week_of="2026-02-23",
+            meetings=[],
+            decisions=[],
+            tasks_completed=[],
+            tasks_overdue=[],
+            tasks_upcoming=[],
+            open_questions=[],
+            upcoming_meetings=[],
+            entity_health={
+                "total_entities": 5,
+                "auto_cleaned": [],
+                "orphans": [],
+                "new_this_week": [],
+            },
+        )
+
+        assert "Entity Registry Health" not in result
+
     def test_shows_empty_state_messages(self):
         """Should show 'no data' messages when sections are empty."""
         from processors.weekly_digest import format_digest_document

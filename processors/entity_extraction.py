@@ -42,6 +42,7 @@ _ENTITY_BLOCKLIST = {
     "whatsapp", "telegram", "email",
     # Generic geography (only block when not business-relevant)
     "israel", "italy", "usa", "united states", "europe", "asia",
+    "canada", "uk", "united kingdom", "china", "india", "germany", "france",
     "tel aviv", "jerusalem", "rome", "new york",
     # Common nouns that LLMs sometimes extract
     "computer", "phone", "hospital", "university", "government",
@@ -323,3 +324,95 @@ def _parse_json_response(response_text: str) -> dict:
 
     logger.warning(f"Could not parse JSON from entity extraction: {response_text[:200]}")
     return {}
+
+
+def review_entity_health() -> dict:
+    """
+    Weekly entity registry health check.
+
+    Scans the entity registry for quality issues:
+    1. Blocklisted entities that slipped through (auto-cleaned).
+    2. Orphan entities with zero mentions across all meetings.
+    3. New entities added this week (for Eyal to review).
+
+    Call from the weekly digest to keep the registry clean.
+
+    Returns:
+        Dict with:
+        - auto_cleaned: List of entity names removed (matched blocklist).
+        - orphans: List of entities with no mentions.
+        - new_this_week: List of entities created in the last 7 days.
+        - total_entities: Total remaining entity count.
+    """
+    from datetime import datetime, timedelta
+
+    result = {
+        "auto_cleaned": [],
+        "orphans": [],
+        "new_this_week": [],
+        "total_entities": 0,
+    }
+
+    try:
+        entities = supabase_client.list_entities(limit=500)
+        one_week_ago = datetime.now() - timedelta(days=7)
+
+        # Build a set of team member names (lowercase) to catch any that slipped in
+        team_names = set(n.lower() for n in get_team_member_names())
+        team_first_names = set(n.split()[0].lower() for n in get_team_member_names())
+
+        for entity in entities:
+            eid = entity["id"]
+            name = entity.get("canonical_name", "")
+            name_lower = name.lower().strip()
+
+            # 1. Auto-clean blocklisted or team-member entities
+            if name_lower in _ENTITY_BLOCKLIST or name_lower in team_names or name_lower in team_first_names:
+                try:
+                    supabase_client.client.table("entity_mentions").delete().eq("entity_id", eid).execute()
+                    supabase_client.client.table("entities").delete().eq("id", eid).execute()
+                    result["auto_cleaned"].append(name)
+                    logger.info(f"Auto-cleaned blocklisted entity: {name}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-clean entity '{name}': {e}")
+                continue
+
+            # 2. Check for orphans (no mentions in any meeting)
+            mentions = supabase_client.get_entity_mentions(entity_id=eid, limit=1)
+            if not mentions:
+                result["orphans"].append({
+                    "name": name,
+                    "type": entity.get("entity_type", ""),
+                    "id": eid,
+                })
+
+            # 3. Check if created this week
+            created_at = entity.get("created_at", "")
+            if created_at:
+                try:
+                    created_dt = datetime.fromisoformat(
+                        str(created_at).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                    if created_dt >= one_week_ago:
+                        result["new_this_week"].append({
+                            "name": name,
+                            "type": entity.get("entity_type", ""),
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+        # Recount after cleanup
+        remaining = supabase_client.list_entities(limit=500)
+        result["total_entities"] = len(remaining)
+
+        logger.info(
+            f"Entity health check: {len(result['auto_cleaned'])} cleaned, "
+            f"{len(result['orphans'])} orphans, "
+            f"{len(result['new_this_week'])} new this week, "
+            f"{result['total_entities']} total"
+        )
+
+    except Exception as e:
+        logger.error(f"Error in entity health check: {e}")
+
+    return result

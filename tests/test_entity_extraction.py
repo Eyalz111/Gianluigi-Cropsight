@@ -16,6 +16,7 @@ from processors.entity_extraction import (
     extract_and_link_entities,
     _extract_raw_entities,
     _resolve_entity,
+    review_entity_health,
 )
 
 
@@ -344,3 +345,91 @@ class TestEntityCRUD:
         )
         result = db.get_entity_timeline("e1")
         assert len(result) == 2
+
+
+# =========================================================================
+# Test review_entity_health
+# =========================================================================
+
+class TestEntityHealthCheck:
+    """Tests for the weekly entity registry health check."""
+
+    def test_auto_cleans_blocklisted(self):
+        """Should auto-delete entities that match the blocklist."""
+        with patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_db.list_entities.return_value = [
+                {"id": "e1", "canonical_name": "Internet", "entity_type": "technology", "created_at": "2026-02-25T10:00:00"},
+                {"id": "e2", "canonical_name": "Lavazza", "entity_type": "organization", "created_at": "2026-02-25T10:00:00"},
+            ]
+            # After cleanup, only Lavazza remains
+            mock_db.get_entity_mentions.return_value = [{"id": "m1"}]
+
+            mock_table = MagicMock()
+            mock_db.client.table.return_value = mock_table
+            mock_table.delete.return_value.eq.return_value.execute.return_value = MagicMock()
+
+            result = review_entity_health()
+            assert "Internet" in result["auto_cleaned"]
+            assert len(result["auto_cleaned"]) == 1
+
+    def test_detects_orphans(self):
+        """Should flag entities with no mentions."""
+        with patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_db.list_entities.side_effect = [
+                [
+                    {"id": "e1", "canonical_name": "Lonely Corp", "entity_type": "organization", "created_at": "2026-02-20T10:00:00"},
+                ],
+                # Second call after cleanup
+                [{"id": "e1", "canonical_name": "Lonely Corp", "entity_type": "organization"}],
+            ]
+            mock_db.get_entity_mentions.return_value = []  # No mentions
+
+            result = review_entity_health()
+            assert len(result["orphans"]) == 1
+            assert result["orphans"][0]["name"] == "Lonely Corp"
+
+    def test_flags_new_this_week(self):
+        """Should list entities created in the last 7 days."""
+        from datetime import datetime
+        recent = datetime.now().isoformat()
+
+        with patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_db.list_entities.side_effect = [
+                [
+                    {"id": "e1", "canonical_name": "Fresh Corp", "entity_type": "organization", "created_at": recent},
+                ],
+                [{"id": "e1", "canonical_name": "Fresh Corp", "entity_type": "organization"}],
+            ]
+            mock_db.get_entity_mentions.return_value = [{"id": "m1"}]
+
+            result = review_entity_health()
+            assert len(result["new_this_week"]) == 1
+            assert result["new_this_week"][0]["name"] == "Fresh Corp"
+
+    def test_old_entity_not_flagged_as_new(self):
+        """Entity from 2 weeks ago should not be in new_this_week."""
+        from datetime import datetime, timedelta
+        old = (datetime.now() - timedelta(days=14)).isoformat()
+
+        with patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_db.list_entities.side_effect = [
+                [
+                    {"id": "e1", "canonical_name": "Old Corp", "entity_type": "organization", "created_at": old},
+                ],
+                [{"id": "e1", "canonical_name": "Old Corp", "entity_type": "organization"}],
+            ]
+            mock_db.get_entity_mentions.return_value = [{"id": "m1"}]
+
+            result = review_entity_health()
+            assert result["new_this_week"] == []
+
+    def test_empty_registry(self):
+        """Empty entity registry should return clean result."""
+        with patch("processors.entity_extraction.supabase_client") as mock_db:
+            mock_db.list_entities.return_value = []
+
+            result = review_entity_health()
+            assert result["auto_cleaned"] == []
+            assert result["orphans"] == []
+            assert result["new_this_week"] == []
+            assert result["total_entities"] == 0

@@ -77,6 +77,14 @@ async def generate_weekly_digest(
     except Exception as e:
         logger.error(f"Error generating alerts for digest: {e}")
 
+    # v0.3 Tier 2: Entity registry health check (auto-cleans junk)
+    from processors.entity_extraction import review_entity_health
+    entity_health = {}
+    try:
+        entity_health = review_entity_health()
+    except Exception as e:
+        logger.error(f"Error in entity health check: {e}")
+
     # 3. Format the digest document
     digest_document = format_digest_document(
         week_of=week_of,
@@ -90,6 +98,7 @@ async def generate_weekly_digest(
         cross_ref_summary=cross_ref_summary,
         commitment_scorecard=commitment_scorecard,
         operational_alerts=operational_alerts,
+        entity_health=entity_health,
     )
 
     # 4. Build result dict with counts
@@ -417,6 +426,7 @@ def format_digest_document(
     cross_ref_summary: dict | None = None,
     commitment_scorecard: dict | None = None,
     operational_alerts: list[dict] | None = None,
+    entity_health: dict | None = None,
 ) -> str:
     """
     Format all digest information into a Markdown document.
@@ -436,6 +446,7 @@ def format_digest_document(
         cross_ref_summary: v0.3 cross-reference activity summary (optional).
         commitment_scorecard: v0.3 Tier 2 commitment scorecard (optional).
         operational_alerts: v0.3 Tier 2 proactive alerts snapshot (optional).
+        entity_health: v0.3 Tier 2 entity registry health check results (optional).
 
     Returns:
         Formatted Markdown digest document.
@@ -642,6 +653,46 @@ def format_digest_document(
             label = severity_label.get(sev, "!")
             lines.append(f"- {label} {alert.get('title', '')}")
         lines.append("")
+
+    # ---- Entity Registry Health (v0.3 Tier 2) ----
+    if entity_health:
+        total = entity_health.get("total_entities", 0)
+        cleaned = entity_health.get("auto_cleaned", [])
+        orphans = entity_health.get("orphans", [])
+        new_this_week = entity_health.get("new_this_week", [])
+
+        # Only show if there's something to report
+        if cleaned or orphans or new_this_week:
+            lines.append("## Entity Registry Health")
+            lines.append("")
+            lines.append(f"**{total}** entities in registry")
+            lines.append("")
+
+            if cleaned:
+                lines.append(
+                    f"Auto-cleaned **{len(cleaned)}** junk entit"
+                    f"{'y' if len(cleaned) == 1 else 'ies'}: "
+                    + ", ".join(cleaned)
+                )
+                lines.append("")
+
+            if new_this_week:
+                lines.append("**New this week** (please review):")
+                for e in new_this_week:
+                    lines.append(f"  - {e['name']} ({e['type']})")
+                lines.append("")
+
+            if orphans:
+                lines.append(
+                    f"**{len(orphans)}** entit"
+                    f"{'y' if len(orphans) == 1 else 'ies'}"
+                    f" with no meeting mentions:"
+                )
+                for o in orphans[:10]:
+                    lines.append(f"  - {o['name']} ({o['type']})")
+                if len(orphans) > 10:
+                    lines.append(f"  - ... and {len(orphans) - 10} more")
+                lines.append("")
 
     # ---- Footer ----
     lines.append("---")
