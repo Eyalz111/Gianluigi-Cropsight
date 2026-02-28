@@ -151,6 +151,40 @@ class GianluigiAgent:
             except Exception as e:
                 logger.debug(f"Error pre-fetching task context: {e}")
 
+        elif query_type == "entity_lookup":
+            try:
+                # Extract the entity name from the query
+                msg_lower = user_message.lower()
+                # Try to find an entity matching key terms
+                keywords = [w for w in msg_lower.split() if len(w) > 3]
+                for keyword in keywords[:3]:
+                    entity = supabase_client.find_entity_by_name(keyword)
+                    if entity:
+                        context_parts.append("[ENTITY CONTEXT]")
+                        context_parts.append(
+                            f"Entity: {entity.get('canonical_name')} "
+                            f"(type: {entity.get('entity_type')})"
+                        )
+                        aliases = entity.get("aliases", [])
+                        if aliases:
+                            context_parts.append(
+                                f"  Aliases: {', '.join(aliases)}"
+                            )
+                        # Fetch recent mentions
+                        mentions = supabase_client.get_entity_mentions(
+                            entity_id=entity.get("id"), limit=5
+                        )
+                        for m in mentions:
+                            meeting_info = m.get("meetings", {}) or {}
+                            meeting_title = meeting_info.get("title", "Unknown")
+                            context_parts.append(
+                                f"  Mentioned in \"{meeting_title}\": "
+                                f"{m.get('context', m.get('mention_text', ''))[:100]}"
+                            )
+                        break  # Found an entity, stop searching
+            except Exception as e:
+                logger.debug(f"Error pre-fetching entity context: {e}")
+
         elif query_type == "decision_history":
             try:
                 # Extract key terms for decision search
@@ -529,6 +563,16 @@ class GianluigiAgent:
         elif tool_name == "search_gmail":
             return await self._tool_search_gmail(tool_input)
 
+        # v0.3 Tier 2 tools
+        elif tool_name == "get_entity_info":
+            return await self._tool_get_entity_info(tool_input)
+
+        elif tool_name == "get_entity_timeline":
+            return await self._tool_get_entity_timeline(tool_input)
+
+        elif tool_name == "get_commitments":
+            return await self._tool_get_commitments(tool_input)
+
         else:
             raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -796,6 +840,65 @@ class GianluigiAgent:
         except Exception as e:
             logger.error(f"Error searching Gmail: {e}")
             return {"results": [], "count": 0, "error": str(e)}
+
+    # =========================================================================
+    # v0.3 Tier 2 Tool Implementations
+    # =========================================================================
+
+    async def _tool_get_entity_info(self, input: dict) -> dict:
+        """Look up an entity by name."""
+        name = input.get("name", "")
+        entity = supabase_client.find_entity_by_name(name)
+
+        if not entity:
+            return {"error": f"No entity found matching '{name}'"}
+
+        # Get recent mentions
+        mentions = supabase_client.get_entity_mentions(
+            entity_id=entity["id"], limit=10
+        )
+
+        return {
+            "entity": entity,
+            "recent_mentions": mentions,
+            "mention_count": len(mentions),
+        }
+
+    async def _tool_get_entity_timeline(self, input: dict) -> dict:
+        """Get chronological entity timeline."""
+        entity_id = input.get("entity_id", "")
+        limit = input.get("limit", 20)
+
+        entity = supabase_client.get_entity(entity_id)
+        if not entity:
+            return {"error": f"Entity not found: {entity_id}"}
+
+        timeline = supabase_client.get_entity_timeline(
+            entity_id=entity_id, limit=limit
+        )
+
+        return {
+            "entity": entity,
+            "timeline": timeline,
+            "mention_count": len(timeline),
+        }
+
+    async def _tool_get_commitments(self, input: dict) -> dict:
+        """Get commitments with optional filters."""
+        speaker = input.get("speaker")
+
+        # Resolve short names like get_tasks does
+        if speaker:
+            from config.team import TEAM_MEMBERS
+            member = get_team_member(speaker)
+            if member:
+                speaker = member["name"]
+
+        commitments = supabase_client.get_commitments(
+            speaker=speaker,
+            status=input.get("status"),
+        )
+        return {"commitments": commitments, "count": len(commitments)}
 
     # =========================================================================
     # Helper Methods

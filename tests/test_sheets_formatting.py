@@ -194,10 +194,10 @@ class TestFormatTaskTracker:
 
             keywords = _get_cond_keywords(category_rules)
             assert "Product & Tech" in keywords
-            assert "Business Development" in keywords
-            assert "Marketing & Community" in keywords
+            assert "BD & Sales" in keywords
+            assert "Strategy & Research" in keywords
             assert "Finance & Fundraising" in keywords
-            assert "Legal & IP" in keywords
+            assert "Legal & Compliance" in keywords
             assert "Operations & HR" in keywords
 
     @pytest.mark.asyncio

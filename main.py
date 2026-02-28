@@ -250,6 +250,15 @@ async def start_services() -> None:
     else:
         logger.warning("  Task reminder scheduler disabled (Google Sheets not available)")
 
+    # Start alert scheduler (always — only needs Supabase + Telegram)
+    from schedulers.alert_scheduler import alert_scheduler
+    logger.info("  Starting alert scheduler...")
+    alert_task = asyncio.create_task(
+        alert_scheduler.start(),
+        name="alert_scheduler"
+    )
+    tasks.append(alert_task)
+
     # Start email watcher (only if Gmail is available)
     if init_status.get("gmail"):
         from schedulers.email_watcher import email_watcher
@@ -324,6 +333,7 @@ async def stop_services() -> None:
     from schedulers.task_reminder_scheduler import task_reminder_scheduler
     from schedulers.weekly_digest_scheduler import weekly_digest_scheduler
     from schedulers.email_watcher import email_watcher
+    from schedulers.alert_scheduler import alert_scheduler
 
     transcript_watcher.stop()
     document_watcher.stop()
@@ -331,6 +341,7 @@ async def stop_services() -> None:
     task_reminder_scheduler.stop()
     weekly_digest_scheduler.stop()
     email_watcher.stop()
+    alert_scheduler.stop()
 
     # Stop Telegram bot
     from services.telegram_bot import telegram_bot

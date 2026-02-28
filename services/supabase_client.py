@@ -1062,6 +1062,374 @@ class SupabaseClient:
         return result.data
 
     # =========================================================================
+    # Entity Registry (v0.3 Tier 2)
+    # =========================================================================
+
+    def create_entity(
+        self,
+        canonical_name: str,
+        entity_type: str,
+        aliases: list[str] | None = None,
+        metadata: dict | None = None,
+        first_seen_meeting_id: str | None = None,
+    ) -> dict:
+        """
+        Create a new entity record.
+
+        Args:
+            canonical_name: Primary name for the entity.
+            entity_type: One of: person, organization, project, technology, location.
+            aliases: Alternative names / spellings.
+            metadata: Extra info (role, website, etc.) as JSON.
+            first_seen_meeting_id: UUID of the meeting where first mentioned.
+
+        Returns:
+            Created entity record.
+        """
+        data = {
+            "canonical_name": canonical_name,
+            "entity_type": entity_type,
+            "aliases": aliases or [],
+            "metadata": metadata or {},
+        }
+        if first_seen_meeting_id:
+            data["first_seen_meeting_id"] = first_seen_meeting_id
+
+        result = self.client.table("entities").insert(data).execute()
+        logger.info(f"Created entity: {canonical_name} ({entity_type})")
+        return result.data[0]
+
+    def get_entity(self, entity_id: str) -> dict | None:
+        """Get an entity by UUID."""
+        result = (
+            self.client.table("entities")
+            .select("*")
+            .eq("id", entity_id)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def find_entity_by_name(self, name: str) -> dict | None:
+        """
+        Find an entity by name (case-insensitive).
+
+        Searches canonical_name first, then aliases array.
+
+        Args:
+            name: Name to search for.
+
+        Returns:
+            Matching entity record or None.
+        """
+        # 1. Try exact match on canonical_name (case-insensitive)
+        result = (
+            self.client.table("entities")
+            .select("*")
+            .ilike("canonical_name", name)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+
+        # 2. Search aliases array using Postgres 'cs' (contains) operator
+        # Supabase supports .contains() for array columns
+        result = (
+            self.client.table("entities")
+            .select("*")
+            .contains("aliases", [name])
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+
+        return None
+
+    def list_entities(
+        self,
+        entity_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """
+        List entities with optional type filter.
+
+        Args:
+            entity_type: Filter by type (person, organization, etc.).
+            limit: Maximum results.
+
+        Returns:
+            List of entity records.
+        """
+        query = self.client.table("entities").select("*")
+        if entity_type:
+            query = query.eq("entity_type", entity_type)
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return result.data
+
+    def create_entity_mention(
+        self,
+        entity_id: str,
+        meeting_id: str,
+        mention_text: str,
+        context: str | None = None,
+        speaker: str | None = None,
+        sentiment: str | None = None,
+        transcript_timestamp: str | None = None,
+    ) -> dict:
+        """Create a single entity mention record."""
+        data = {
+            "entity_id": entity_id,
+            "meeting_id": meeting_id,
+            "mention_text": mention_text,
+        }
+        if context:
+            data["context"] = context
+        if speaker:
+            data["speaker"] = speaker
+        if sentiment:
+            data["sentiment"] = sentiment
+        if transcript_timestamp:
+            data["transcript_timestamp"] = transcript_timestamp
+
+        result = self.client.table("entity_mentions").insert(data).execute()
+        return result.data[0]
+
+    def create_entity_mentions_batch(self, mentions: list[dict]) -> list[dict]:
+        """
+        Batch-insert entity mentions, skipping FK errors.
+
+        Same pattern as create_task_mentions_batch: inserts one-at-a-time
+        so a single bad FK doesn't fail the whole batch.
+
+        Args:
+            mentions: List of mention dicts.
+
+        Returns:
+            List of successfully created records.
+        """
+        if not mentions:
+            return []
+
+        created = []
+        for mention in mentions:
+            try:
+                result = (
+                    self.client.table("entity_mentions")
+                    .insert(mention)
+                    .execute()
+                )
+                if result.data:
+                    created.append(result.data[0])
+            except Exception as e:
+                logger.warning(
+                    f"Skipping entity mention (entity_id={mention.get('entity_id')}): {e}"
+                )
+        if created:
+            logger.info(f"Created {len(created)} entity mentions")
+        return created
+
+    def get_entity_mentions(
+        self,
+        entity_id: str | None = None,
+        meeting_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Query entity mentions with optional filters.
+
+        Joins to entities and meetings tables for context.
+
+        Args:
+            entity_id: Filter by entity UUID.
+            meeting_id: Filter by meeting UUID.
+            limit: Maximum results.
+
+        Returns:
+            List of entity mention records.
+        """
+        query = self.client.table("entity_mentions").select(
+            "*, entities(canonical_name, entity_type), meetings(title, date)"
+        )
+        if entity_id:
+            query = query.eq("entity_id", entity_id)
+        if meeting_id:
+            query = query.eq("meeting_id", meeting_id)
+
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return result.data
+
+    def get_entity_timeline(
+        self,
+        entity_id: str,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Get chronological timeline of entity mentions across meetings.
+
+        Args:
+            entity_id: UUID of the entity.
+            limit: Maximum results.
+
+        Returns:
+            List of mentions ordered by meeting date (oldest first).
+        """
+        result = (
+            self.client.table("entity_mentions")
+            .select("*, meetings(title, date, participants)")
+            .eq("entity_id", entity_id)
+            .order("created_at")
+            .limit(limit)
+            .execute()
+        )
+        return result.data
+
+    # =========================================================================
+    # Commitment Tracking (v0.3 Tier 2)
+    # =========================================================================
+
+    def create_commitment(
+        self,
+        meeting_id: str,
+        speaker: str,
+        commitment_text: str,
+        context: str | None = None,
+        implied_deadline: str | None = None,
+        linked_task_id: str | None = None,
+    ) -> dict:
+        """
+        Create a new commitment record.
+
+        Args:
+            meeting_id: UUID of the meeting where commitment was made.
+            speaker: Who made the commitment.
+            commitment_text: What they committed to.
+            context: Surrounding discussion context.
+            implied_deadline: Deadline mentioned (e.g. "next week", "by Friday").
+            linked_task_id: UUID of linked task if one exists.
+
+        Returns:
+            Created commitment record.
+        """
+        data = {
+            "meeting_id": meeting_id,
+            "speaker": speaker,
+            "commitment_text": commitment_text,
+            "status": "open",
+        }
+        if context:
+            data["context"] = context
+        if implied_deadline:
+            data["implied_deadline"] = implied_deadline
+        if linked_task_id:
+            data["linked_task_id"] = linked_task_id
+
+        result = self.client.table("commitments").insert(data).execute()
+        logger.info(f"Created commitment: {speaker} — {commitment_text[:50]}")
+        return result.data[0]
+
+    def create_commitments_batch(
+        self,
+        meeting_id: str,
+        commitments: list[dict],
+    ) -> list[dict]:
+        """
+        Batch-insert commitments for a meeting.
+
+        Args:
+            meeting_id: UUID of the source meeting.
+            commitments: List of commitment dicts.
+
+        Returns:
+            List of successfully created records.
+        """
+        if not commitments:
+            return []
+
+        created = []
+        for c in commitments:
+            try:
+                data = {
+                    "meeting_id": meeting_id,
+                    "speaker": c.get("speaker", "Unknown"),
+                    "commitment_text": c.get("commitment_text", ""),
+                    "context": c.get("context"),
+                    "implied_deadline": c.get("implied_deadline"),
+                    "linked_task_id": c.get("linked_task_id"),
+                    "status": "open",
+                }
+                result = self.client.table("commitments").insert(data).execute()
+                if result.data:
+                    created.append(result.data[0])
+            except Exception as e:
+                logger.warning(f"Skipping commitment: {e}")
+        if created:
+            logger.info(f"Created {len(created)} commitments for meeting {meeting_id}")
+        return created
+
+    def get_commitments(
+        self,
+        speaker: str | None = None,
+        status: str | None = None,
+        meeting_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Query commitments with optional filters.
+
+        Args:
+            speaker: Filter by speaker name.
+            status: Filter by status (open, fulfilled, overdue, withdrawn).
+            meeting_id: Filter by source meeting.
+            limit: Maximum results.
+
+        Returns:
+            List of commitment records with meeting title joined.
+        """
+        query = self.client.table("commitments").select(
+            "*, meetings(title, date)"
+        )
+        if speaker:
+            query = query.ilike("speaker", f"%{speaker}%")
+        if status:
+            query = query.eq("status", status)
+        if meeting_id:
+            query = query.eq("meeting_id", meeting_id)
+
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return result.data
+
+    def fulfill_commitment(
+        self,
+        commitment_id: str,
+        fulfilled_in_meeting_id: str | None = None,
+        evidence: str | None = None,
+    ) -> dict:
+        """
+        Mark a commitment as fulfilled.
+
+        Args:
+            commitment_id: UUID of the commitment.
+            fulfilled_in_meeting_id: Meeting where fulfillment was detected.
+            evidence: Quote or evidence of fulfillment.
+
+        Returns:
+            Updated commitment record.
+        """
+        data = {"status": "fulfilled"}
+        if fulfilled_in_meeting_id:
+            data["fulfilled_in_meeting_id"] = fulfilled_in_meeting_id
+        if evidence:
+            data["evidence"] = evidence
+
+        result = (
+            self.client.table("commitments")
+            .update(data)
+            .eq("id", commitment_id)
+            .execute()
+        )
+        logger.info(f"Fulfilled commitment: {commitment_id}")
+        return result.data[0] if result.data else {}
+
+    # =========================================================================
     # Audit Log
     # =========================================================================
 

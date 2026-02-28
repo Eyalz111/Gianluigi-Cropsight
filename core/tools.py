@@ -412,7 +412,84 @@ TOOL_SEARCH_GMAIL = {
 
 
 # =============================================================================
-# All Tools (v0.1 + v0.2)
+# v0.3 Tier 2 Tool Definitions
+# =============================================================================
+
+TOOL_GET_ENTITY_INFO = {
+    "name": "get_entity_info",
+    "description": """
+        Look up an entity (person, organization, project, etc.) in the entity registry.
+        Returns canonical name, type, aliases, metadata, and recent mentions.
+        Use for questions like "Who is Jason Adelman?" or "What do we know about Lavazza?"
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Name of the entity to look up"
+            },
+            "entity_type": {
+                "type": "string",
+                "enum": ["person", "organization", "project", "technology", "location"],
+                "description": "Optional: filter by entity type"
+            }
+        },
+        "required": ["name"]
+    }
+}
+
+TOOL_GET_ENTITY_TIMELINE = {
+    "name": "get_entity_timeline",
+    "description": """
+        Get a chronological timeline of all mentions of an entity across meetings.
+        Shows when the entity was discussed, by whom, and in what context.
+        Use for questions like "What's our history with Ferrero?" or
+        "Show me all discussions about the Moldova project."
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entity_id": {
+                "type": "string",
+                "description": "UUID of the entity (get this from get_entity_info first)"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of mentions to return (default 20)"
+            }
+        },
+        "required": ["entity_id"]
+    }
+}
+
+TOOL_GET_COMMITMENTS = {
+    "name": "get_commitments",
+    "description": """
+        Retrieve verbal commitments made in meetings.
+        These are promises like "I'll send that by Friday" that may not be formal tasks.
+        Can filter by speaker or status (open, fulfilled, overdue).
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "speaker": {
+                "type": "string",
+                "description": "Filter by who made the commitment (optional)"
+            },
+            "status": {
+                "type": "string",
+                "enum": ["open", "fulfilled", "overdue", "withdrawn"],
+                "description": "Filter by commitment status (optional)"
+            }
+        },
+        "required": []
+    }
+}
+
+
+# =============================================================================
+# All Tools (v0.1 + v0.2 + v0.3)
 # =============================================================================
 
 TOOL_DEFINITIONS = [
@@ -433,4 +510,8 @@ TOOL_DEFINITIONS = [
     TOOL_GENERATE_WEEKLY_DIGEST,
     TOOL_UPDATE_STAKEHOLDER_TRACKER,
     TOOL_SEARCH_GMAIL,
+    # v0.3 Tier 2 tools
+    TOOL_GET_ENTITY_INFO,
+    TOOL_GET_ENTITY_TIMELINE,
+    TOOL_GET_COMMITMENTS,
 ]

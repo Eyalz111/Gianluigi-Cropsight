@@ -66,6 +66,17 @@ async def generate_weekly_digest(
     # v0.3: Gather cross-reference activity for the week
     cross_ref_summary = await get_cross_reference_summary(week_start, week_end)
 
+    # v0.3 Tier 2: Commitment scorecard
+    commitment_scorecard = await get_commitment_scorecard()
+
+    # v0.3 Tier 2: Proactive alerts snapshot
+    from processors.proactive_alerts import generate_alerts
+    operational_alerts = []
+    try:
+        operational_alerts = generate_alerts()
+    except Exception as e:
+        logger.error(f"Error generating alerts for digest: {e}")
+
     # 3. Format the digest document
     digest_document = format_digest_document(
         week_of=week_of,
@@ -77,6 +88,8 @@ async def generate_weekly_digest(
         open_questions=open_questions,
         upcoming_meetings=upcoming,
         cross_ref_summary=cross_ref_summary,
+        commitment_scorecard=commitment_scorecard,
+        operational_alerts=operational_alerts,
     )
 
     # 4. Build result dict with counts
@@ -354,6 +367,44 @@ async def get_cross_reference_summary(
     return result
 
 
+async def get_commitment_scorecard() -> dict:
+    """
+    Build a commitment scorecard for the weekly digest.
+
+    Summarises open commitments per speaker and recently fulfilled ones.
+
+    Returns:
+        Dict with:
+        - open_by_speaker: {speaker: [commitment_text, ...]}
+        - open_count: Total open commitments.
+        - fulfilled_count: Total fulfilled commitments.
+    """
+    result = {
+        "open_by_speaker": {},
+        "open_count": 0,
+        "fulfilled_count": 0,
+    }
+
+    try:
+        open_commitments = supabase_client.get_commitments(status="open")
+        result["open_count"] = len(open_commitments)
+
+        for c in open_commitments:
+            speaker = c.get("speaker", "Unknown")
+            text = c.get("commitment_text", "")
+            if speaker not in result["open_by_speaker"]:
+                result["open_by_speaker"][speaker] = []
+            result["open_by_speaker"][speaker].append(text)
+
+        fulfilled = supabase_client.get_commitments(status="fulfilled")
+        result["fulfilled_count"] = len(fulfilled)
+
+    except Exception as e:
+        logger.error(f"Error building commitment scorecard: {e}")
+
+    return result
+
+
 def format_digest_document(
     week_of: str,
     meetings: list[dict],
@@ -364,6 +415,8 @@ def format_digest_document(
     open_questions: list[dict],
     upcoming_meetings: list[dict],
     cross_ref_summary: dict | None = None,
+    commitment_scorecard: dict | None = None,
+    operational_alerts: list[dict] | None = None,
 ) -> str:
     """
     Format all digest information into a Markdown document.
@@ -381,6 +434,8 @@ def format_digest_document(
         open_questions: Unresolved questions.
         upcoming_meetings: Meetings scheduled for next week.
         cross_ref_summary: v0.3 cross-reference activity summary (optional).
+        commitment_scorecard: v0.3 Tier 2 commitment scorecard (optional).
+        operational_alerts: v0.3 Tier 2 proactive alerts snapshot (optional).
 
     Returns:
         Formatted Markdown digest document.
@@ -512,6 +567,32 @@ def format_digest_document(
         lines.append("_No upcoming CropSight meetings._")
     lines.append("")
 
+    # ---- Commitment Scorecard (v0.3 Tier 2) ----
+    if commitment_scorecard:
+        open_count = commitment_scorecard.get("open_count", 0)
+        fulfilled_count = commitment_scorecard.get("fulfilled_count", 0)
+        open_by_speaker = commitment_scorecard.get("open_by_speaker", {})
+
+        if open_count > 0 or fulfilled_count > 0:
+            lines.append("## Commitment Scorecard")
+            lines.append("")
+            lines.append(
+                f"**{open_count}** open commitment(s) | "
+                f"**{fulfilled_count}** fulfilled"
+            )
+            lines.append("")
+
+            if open_by_speaker:
+                lines.append("### Outstanding Commitments by Speaker")
+                lines.append("")
+                for speaker, texts in sorted(open_by_speaker.items()):
+                    lines.append(f"**{speaker}** ({len(texts)}):")
+                    for text in texts[:5]:
+                        lines.append(f"  - {text}")
+                    if len(texts) > 5:
+                        lines.append(f"  - ... and {len(texts) - 5} more")
+                lines.append("")
+
     # ---- Cross-Meeting Intelligence (v0.3) ----
     if cross_ref_summary:
         total = cross_ref_summary.get("total_mentions", 0)
@@ -549,6 +630,18 @@ def format_digest_document(
                 )
 
             lines.append("")
+
+    # ---- Operational Alerts (v0.3 Tier 2) ----
+    if operational_alerts:
+        lines.append("## Operational Alerts")
+        lines.append("")
+
+        severity_label = {"high": "!!!", "medium": "!!", "low": "!"}
+        for alert in operational_alerts:
+            sev = alert.get("severity", "low")
+            label = severity_label.get(sev, "!")
+            lines.append(f"- {label} {alert.get('title', '')}")
+        lines.append("")
 
     # ---- Footer ----
     lines.append("---")

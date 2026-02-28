@@ -89,10 +89,10 @@ COLORS = {
 # Category labels for data validation
 TASK_CATEGORIES = [
     "Product & Tech",
-    "Business Development",
-    "Marketing & Community",
+    "BD & Sales",
+    "Strategy & Research",
     "Finance & Fundraising",
-    "Legal & IP",
+    "Legal & Compliance",
     "Operations & HR",
 ]
 
@@ -1176,10 +1176,10 @@ class GoogleSheetsService:
             # --- Conditional formatting: Category column (B = index 1) ---
             category_rules = [
                 ("Product & Tech", COLORS["product_tech"]),
-                ("Business Development", COLORS["business_dev"]),
-                ("Marketing & Community", COLORS["marketing"]),
+                ("BD & Sales", COLORS["business_dev"]),
+                ("Strategy & Research", COLORS["marketing"]),
                 ("Finance & Fundraising", COLORS["finance"]),
-                ("Legal & IP", COLORS["legal_ip"]),
+                ("Legal & Compliance", COLORS["legal_ip"]),
                 ("Operations & HR", COLORS["operations_hr"]),
             ]
             for text, color in category_rules:

@@ -172,6 +172,33 @@ async def process_transcript(
         open_questions=extracted.get("open_questions", []),
     )
 
+    # Step 7c: Entity extraction and linking (v0.3 Tier 2)
+    from processors.entity_extraction import extract_and_link_entities
+
+    entity_results = {}
+    try:
+        entity_results = await extract_and_link_entities(
+            meeting_id=meeting_id,
+            transcript=file_content,
+            participants=participants,
+        )
+    except Exception as e:
+        logger.error(f"Entity extraction failed (non-fatal): {e}")
+
+    # Step 7d: Post-meeting proactive alerts (v0.3 Tier 2)
+    from processors.proactive_alerts import generate_post_meeting_alerts
+
+    post_meeting_alerts = []
+    try:
+        post_meeting_alerts = generate_post_meeting_alerts(
+            meeting_id=meeting_id,
+            transcript=file_content,
+        )
+        if post_meeting_alerts:
+            logger.info(f"Generated {len(post_meeting_alerts)} post-meeting alerts")
+    except Exception as e:
+        logger.error(f"Post-meeting alerts failed (non-fatal): {e}")
+
     # Step 8: Generate and store embeddings
     await generate_and_store_embeddings(meeting_id, file_content)
 
@@ -187,6 +214,8 @@ async def process_transcript(
             "duplicates_found": len(dedup.get("duplicates", [])),
             "status_changes_found": len(cross_ref_results.get("status_changes", [])),
             "questions_resolved": len(cross_ref_results.get("resolved_questions", [])),
+            "entities_new": len(entity_results.get("new_entities", [])),
+            "entity_mentions": entity_results.get("total_mentions", 0),
         },
         triggered_by="auto",
     )
@@ -210,6 +239,7 @@ async def process_transcript(
         "sensitivity": sensitivity,
         "approval_status": "pending",
         "cross_reference": cross_ref_results,
+        "entity_results": entity_results,
     }
 
 

@@ -307,6 +307,74 @@ CREATE INDEX IF NOT EXISTS idx_task_mentions_task ON task_mentions(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_mentions_meeting ON task_mentions(meeting_id);
 
 
+-- =============================================================================
+-- Entity Registry (v0.3 Tier 2 — Stakeholder Context)
+-- =============================================================================
+
+-- Canonical entity records: people, organizations, projects, etc.
+CREATE TABLE IF NOT EXISTS entities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    canonical_name TEXT NOT NULL,
+    entity_type TEXT NOT NULL,  -- person, organization, project, technology, location
+    aliases TEXT[] DEFAULT '{}',
+    metadata JSONB DEFAULT '{}',
+    first_seen_meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_entities_canonical_name ON entities(canonical_name);
+CREATE INDEX IF NOT EXISTS idx_entities_entity_type ON entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_entities_aliases ON entities USING GIN(aliases);
+
+-- Track when/where entities are mentioned across meetings.
+CREATE TABLE IF NOT EXISTS entity_mentions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,
+    meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
+    mention_text TEXT NOT NULL,
+    context TEXT,
+    speaker TEXT,
+    sentiment TEXT,  -- positive, neutral, negative, mixed
+    transcript_timestamp TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity ON entity_mentions(entity_id);
+CREATE INDEX IF NOT EXISTS idx_entity_mentions_meeting ON entity_mentions(meeting_id);
+
+
+-- =============================================================================
+-- Commitment Tracking (v0.3 Tier 2 — Verbal Promises)
+-- =============================================================================
+
+-- Track verbal commitments ("I'll send that by Friday") across meetings.
+CREATE TABLE IF NOT EXISTS commitments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
+    speaker TEXT NOT NULL,
+    commitment_text TEXT NOT NULL,
+    context TEXT,
+    implied_deadline TEXT,
+    status TEXT DEFAULT 'open',  -- open, fulfilled, overdue, withdrawn
+    fulfilled_in_meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,
+    evidence TEXT,
+    linked_task_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_commitments_meeting ON commitments(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_commitments_speaker ON commitments(speaker);
+CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments(status);
+
+-- Auto-update commitments.updated_at on changes
+DROP TRIGGER IF EXISTS update_commitments_updated_at ON commitments;
+CREATE TRIGGER update_commitments_updated_at
+    BEFORE UPDATE ON commitments
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+
 -- RPC function for full-text search on embeddings
 -- Called via: supabase.rpc('search_embeddings_fulltext', {...})
 CREATE OR REPLACE FUNCTION search_embeddings_fulltext(
