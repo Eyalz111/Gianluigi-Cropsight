@@ -243,6 +243,9 @@ async def submit_for_approval(
 
     else:
         # Default: meeting_summary (original behavior)
+        # v0.3: Include cross-reference results if available
+        cross_ref = content.get("cross_reference")
+
         telegram_sent = await telegram_bot.send_approval_request(
             meeting_title=meeting_title,
             summary_preview=discussion_summary or summary[:600],
@@ -251,6 +254,7 @@ async def submit_for_approval(
             tasks=tasks,
             follow_ups=follow_ups,
             open_questions=open_questions,
+            cross_reference=cross_ref,
         )
 
         email_sent = await gmail_service.send_approval_request(
@@ -433,6 +437,10 @@ async def process_response(
         content["tasks"] = tasks
         content["follow_ups"] = follow_ups
         content["open_questions"] = open_questions
+
+        # v0.3: Carry cross-reference data through to distribution
+        if pending_info and pending_info.get("content", {}).get("cross_reference"):
+            content["cross_reference"] = pending_info["content"]["cross_reference"]
 
         sensitivity = meeting.get("sensitivity", "normal")
 
@@ -826,14 +834,25 @@ async def distribute_approved_content(
     except Exception as e:
         logger.error(f"Error sending email: {e}")
 
-    # 8. Update meeting approval status
+    # 8. Apply cross-reference changes (v0.3)
+    # If the approved content included cross-reference results, apply them now
+    cross_ref = content.get("cross_reference")
+    if cross_ref:
+        results["cross_reference_applied"] = await _apply_cross_reference_changes(
+            meeting_id=meeting_id,
+            cross_ref=cross_ref,
+            meeting_title=meeting_title,
+            meeting_date=meeting_date,
+        )
+
+    # 9. Update meeting approval status
     supabase_client.update_meeting(
         meeting_id,
         approval_status="approved",
         approved_at=datetime.now().isoformat(),
     )
 
-    # 9. Log in audit_log
+    # 10. Log in audit_log
     supabase_client.log_action(
         action="content_distributed",
         details={
@@ -846,6 +865,81 @@ async def distribute_approved_content(
 
     logger.info(f"Distribution complete for {meeting_id}: {results}")
     return results
+
+
+async def _apply_cross_reference_changes(
+    meeting_id: str,
+    cross_ref: dict,
+    meeting_title: str,
+    meeting_date: str,
+) -> dict:
+    """
+    Apply approved cross-reference changes to Supabase and Sheets.
+
+    Called when Eyal approves a meeting summary that includes cross-reference
+    results. Updates task statuses, resolves open questions.
+
+    Args:
+        meeting_id: UUID of the meeting.
+        cross_ref: Cross-reference results dict.
+        meeting_title: Title of the meeting (for Sheets updates).
+        meeting_date: Date of the meeting.
+
+    Returns:
+        Dict summarizing what was applied.
+    """
+    applied = {
+        "status_changes_applied": 0,
+        "questions_resolved": 0,
+    }
+
+    # Apply task status changes
+    status_changes = cross_ref.get("status_changes", [])
+    for change in status_changes:
+        task_id = change.get("task_id")
+        new_status = change.get("new_status")
+        if task_id and new_status:
+            try:
+                supabase_client.update_task(task_id, status=new_status)
+                applied["status_changes_applied"] += 1
+                logger.info(
+                    f"Applied status change: task {task_id} -> {new_status}"
+                )
+            except Exception as e:
+                logger.error(f"Error applying status change for task {task_id}: {e}")
+
+    # Apply task status changes from dedup updates
+    dedup = cross_ref.get("dedup", {})
+    for update in dedup.get("updates", []):
+        task_id = update.get("existing_task_id")
+        new_status = update.get("new_status")
+        if task_id and new_status:
+            try:
+                supabase_client.update_task(task_id, status=new_status)
+                applied["status_changes_applied"] += 1
+            except Exception as e:
+                logger.error(f"Error applying dedup update for task {task_id}: {e}")
+
+    # Resolve open questions
+    resolved_qs = cross_ref.get("resolved_questions", [])
+    for rq in resolved_qs:
+        question_id = rq.get("question_id")
+        if question_id:
+            try:
+                supabase_client.resolve_question(
+                    question_id=question_id,
+                    resolved_in_meeting_id=meeting_id,
+                )
+                applied["questions_resolved"] += 1
+                logger.info(f"Resolved question {question_id}")
+            except Exception as e:
+                logger.error(f"Error resolving question {question_id}: {e}")
+
+    logger.info(
+        f"Cross-reference applied: {applied['status_changes_applied']} status changes, "
+        f"{applied['questions_resolved']} questions resolved"
+    )
+    return applied
 
 
 async def distribute_approved_prep(

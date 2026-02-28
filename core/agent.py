@@ -68,6 +68,112 @@ class GianluigiAgent:
         self.tools = TOOL_DEFINITIONS
         self.max_tool_iterations = 10  # Prevent infinite tool loops
 
+    def _classify_query(self, user_message: str) -> str:
+        """
+        Classify query type for optimized retrieval.
+
+        Uses simple keyword matching (no LLM call needed) to determine
+        the type of query, enabling pre-fetching of relevant context.
+
+        Args:
+            user_message: The user's query text.
+
+        Returns:
+            Query type: 'task_status', 'entity_lookup', 'decision_history', or 'general'.
+        """
+        msg_lower = user_message.lower()
+
+        if any(w in msg_lower for w in [
+            "status of", "progress on", "where are we",
+            "update on", "how is", "what happened with",
+        ]):
+            return "task_status"
+
+        if any(w in msg_lower for w in [
+            "what do we know about", "history with", "tell me about",
+            "who is", "what company", "background on",
+        ]):
+            return "entity_lookup"
+
+        if any(w in msg_lower for w in [
+            "when did we decide", "why did we decide", "what was decided",
+            "decision about", "did we agree",
+        ]):
+            return "decision_history"
+
+        return "general"
+
+    async def _get_query_context(self, query_type: str, user_message: str) -> str:
+        """
+        Pre-fetch extra context based on query type.
+
+        For task_status queries, fetches relevant tasks + task mentions.
+        For entity_lookup, fetches mentions across meetings.
+        For decision_history, fetches related decisions.
+
+        Args:
+            query_type: The classified query type.
+            user_message: The user's query text.
+
+        Returns:
+            Extra context string to inject into the conversation.
+        """
+        context_parts = []
+
+        if query_type == "task_status":
+            # Pre-fetch relevant tasks and their cross-meeting mentions
+            try:
+                all_tasks = supabase_client.get_tasks(status=None, limit=50)
+                # Find tasks mentioned in the query
+                msg_lower = user_message.lower()
+                relevant_tasks = [
+                    t for t in all_tasks
+                    if any(word in t.get("title", "").lower()
+                           for word in msg_lower.split() if len(word) > 3)
+                ]
+                if relevant_tasks:
+                    context_parts.append("[TASK STATUS CONTEXT]")
+                    for t in relevant_tasks[:5]:
+                        context_parts.append(
+                            f"- \"{t.get('title')}\" ({t.get('assignee')}, "
+                            f"status: {t.get('status')}, "
+                            f"category: {t.get('category', 'N/A')})"
+                        )
+                        # Fetch task mentions
+                        mentions = supabase_client.get_task_mentions(
+                            task_id=t.get("id"), limit=5
+                        )
+                        for m in mentions:
+                            context_parts.append(
+                                f"  Mentioned in meeting: \"{m.get('mention_text', '')[:80]}\" "
+                                f"(confidence: {m.get('confidence', 'N/A')})"
+                            )
+            except Exception as e:
+                logger.debug(f"Error pre-fetching task context: {e}")
+
+        elif query_type == "decision_history":
+            try:
+                # Extract key terms for decision search
+                msg_lower = user_message.lower()
+                keywords = [w for w in msg_lower.split() if len(w) > 3]
+                if keywords:
+                    context_parts.append("[DECISION HISTORY CONTEXT]")
+                    for keyword in keywords[:3]:
+                        decisions = supabase_client.list_decisions(
+                            topic=keyword, limit=5
+                        )
+                        for d in decisions:
+                            meeting_info = d.get("meetings", {}) or {}
+                            meeting_title = meeting_info.get("title", "Unknown")
+                            context_parts.append(
+                                f"- Decision: \"{d.get('description', '')[:100]}\" "
+                                f"(from: {meeting_title})"
+                            )
+            except Exception as e:
+                logger.debug(f"Error pre-fetching decision context: {e}")
+
+        return "\n".join(context_parts) if context_parts else ""
+
     async def process_message(
         self,
         user_message: str,
@@ -92,6 +198,13 @@ class GianluigiAgent:
         """
         logger.info(f"Processing message from {user_id}: {user_message[:50]}...")
 
+        # v0.3: Query routing — classify and pre-fetch relevant context
+        query_type = self._classify_query(user_message)
+        extra_context = ""
+        if query_type != "general":
+            extra_context = await self._get_query_context(query_type, user_message)
+            logger.info(f"Query classified as '{query_type}', pre-fetched context")
+
         # Build messages array
         messages = []
 
@@ -105,10 +218,17 @@ class GianluigiAgent:
         if team_member:
             user_context = f"[Message from {team_member['name']} ({team_member['role']})]"
 
+        # Build the full user message with any pre-fetched context
+        full_message = user_message
+        if user_context:
+            full_message = f"{user_context}\n\n{user_message}"
+        if extra_context:
+            full_message = f"{full_message}\n\n{extra_context}"
+
         # Add current user message
         messages.append({
             "role": "user",
-            "content": f"{user_context}\n\n{user_message}" if user_context else user_message
+            "content": full_message,
         })
 
         # Track actions taken

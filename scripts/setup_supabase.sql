@@ -285,6 +285,28 @@ ALTER TABLE decisions ADD COLUMN IF NOT EXISTS description_tsv tsvector
 CREATE INDEX IF NOT EXISTS idx_decisions_description_tsv ON decisions USING GIN(description_tsv);
 
 
+-- =============================================================================
+-- Task Mentions (v0.3 — Cross-Reference Intelligence)
+-- =============================================================================
+
+-- Track when tasks are mentioned across different meetings.
+-- Used for task deduplication, status inference, and cross-meeting tracking.
+CREATE TABLE IF NOT EXISTS task_mentions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id UUID REFERENCES tasks(id) ON DELETE CASCADE,
+    meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
+    mention_text TEXT NOT NULL,
+    implied_status TEXT,              -- 'done', 'in_progress', or NULL
+    confidence TEXT DEFAULT 'medium', -- 'high', 'medium', 'low'
+    evidence TEXT,                    -- exact quote from transcript
+    transcript_timestamp TEXT,        -- e.g., "23:45"
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_mentions_task ON task_mentions(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_mentions_meeting ON task_mentions(meeting_id);
+
+
 -- RPC function for full-text search on embeddings
 -- Called via: supabase.rpc('search_embeddings_fulltext', {...})
 CREATE OR REPLACE FUNCTION search_embeddings_fulltext(

@@ -21,7 +21,8 @@ Usage:
 
 import json
 import logging
-from datetime import datetime, date
+import math
+from datetime import datetime, date, timedelta
 from typing import Any, Optional
 from uuid import UUID
 
@@ -954,6 +955,98 @@ class SupabaseClient:
         return count
 
     # =========================================================================
+    # Task Mentions (v0.3 — Cross-Reference Intelligence)
+    # =========================================================================
+
+    def create_task_mention(
+        self,
+        task_id: str,
+        meeting_id: str,
+        mention_text: str,
+        implied_status: str | None = None,
+        confidence: str = "medium",
+        evidence: str | None = None,
+        transcript_timestamp: str | None = None,
+    ) -> dict:
+        """
+        Record a task being mentioned in a meeting.
+
+        Used for cross-meeting tracking: when a task from Meeting A
+        is discussed in Meeting B, this creates the link.
+
+        Args:
+            task_id: UUID of the task being mentioned.
+            meeting_id: UUID of the meeting where it was mentioned.
+            mention_text: How the task was referenced in the meeting.
+            implied_status: Status implied by the mention ('done', 'in_progress', or None).
+            confidence: Confidence level ('high', 'medium', 'low').
+            evidence: Exact quote from transcript supporting the inference.
+            transcript_timestamp: When in the meeting it was mentioned.
+
+        Returns:
+            Created task_mention record.
+        """
+        data = {
+            "task_id": task_id,
+            "meeting_id": meeting_id,
+            "mention_text": mention_text,
+            "implied_status": implied_status,
+            "confidence": confidence,
+            "evidence": evidence,
+            "transcript_timestamp": transcript_timestamp,
+        }
+
+        result = self.client.table("task_mentions").insert(data).execute()
+        logger.info(f"Created task mention: task={task_id} in meeting={meeting_id}")
+        return result.data[0]
+
+    def create_task_mentions_batch(self, mentions: list[dict]) -> list[dict]:
+        """
+        Batch insert multiple task mentions.
+
+        Args:
+            mentions: List of mention dicts (task_id, meeting_id, mention_text, etc.).
+
+        Returns:
+            List of created task_mention records.
+        """
+        if not mentions:
+            return []
+
+        result = self.client.table("task_mentions").insert(mentions).execute()
+        logger.info(f"Created {len(result.data)} task mentions")
+        return result.data
+
+    def get_task_mentions(
+        self,
+        task_id: str | None = None,
+        meeting_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Query task mentions with optional filters.
+
+        Args:
+            task_id: Filter by task UUID.
+            meeting_id: Filter by meeting UUID.
+            limit: Maximum number of results.
+
+        Returns:
+            List of task mention records with task title/assignee joined.
+        """
+        query = self.client.table("task_mentions").select(
+            "*, tasks(title, assignee, status, category)"
+        )
+
+        if task_id:
+            query = query.eq("task_id", task_id)
+        if meeting_id:
+            query = query.eq("meeting_id", meeting_id)
+
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return result.data
+
+    # =========================================================================
     # Audit Log
     # =========================================================================
 
@@ -1045,9 +1138,53 @@ class SupabaseClient:
                 if item_id not in items:
                     items[item_id] = item
 
-        # Sort by RRF score descending
+        # Sort by RRF score descending and attach scores
         sorted_ids = sorted(scores, key=lambda x: scores[x], reverse=True)
-        return [items[item_id] for item_id in sorted_ids]
+        result_list = []
+        for item_id in sorted_ids:
+            item = dict(items[item_id])
+            item["rrf_score"] = scores[item_id]
+            result_list.append(item)
+        return result_list
+
+    @staticmethod
+    def _apply_time_weighting(
+        results: list[dict],
+        half_life_days: int = 30,
+    ) -> list[dict]:
+        """
+        Boost recent results using time-weighted scoring.
+
+        Applies a recency boost that blends with the existing RRF score.
+        Recent meetings get a higher score; older meetings decay smoothly.
+
+        The formula: final_score = 0.7 * rrf_score + 0.3 * recency_boost
+        where recency_boost = 1.0 / (1.0 + days_ago / half_life_days)
+
+        Args:
+            results: List of search result dicts (must have rrf_score and metadata).
+            half_life_days: Number of days for the recency boost to halve.
+
+        Returns:
+            Re-sorted list with updated rrf_score values.
+        """
+        now = datetime.now()
+
+        for item in results:
+            meeting_date_str = item.get("metadata", {}).get("meeting_date") if item.get("metadata") else None
+            if meeting_date_str:
+                try:
+                    meeting_date = datetime.fromisoformat(
+                        str(meeting_date_str).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                    days_ago = max(0, (now - meeting_date).days)
+                    recency_boost = 1.0 / (1.0 + days_ago / half_life_days)
+                    rrf = item.get("rrf_score", 0)
+                    item["rrf_score"] = rrf * 0.7 + recency_boost * 0.3
+                except (ValueError, TypeError):
+                    pass
+
+        return sorted(results, key=lambda x: x.get("rrf_score", 0), reverse=True)
 
     def search_memory(
         self,
@@ -1107,6 +1244,8 @@ class SupabaseClient:
             merged = self._reciprocal_rank_fusion(
                 vector_results, fulltext_results, id_key="id"
             )
+            # v0.3: Apply time-weighted boost so recent meetings rank higher
+            merged = self._apply_time_weighting(merged)
             results["embeddings"] = merged[:limit]
 
         # 4. Keyword search in decisions (ILIKE — small table, cheap)
@@ -1190,6 +1329,28 @@ class SupabaseClient:
                     )
                     enriched_chunk["related_decisions"] = cached["decisions"]
                     enriched_chunk["related_tasks"] = cached["tasks"]
+
+            # v0.3: Fetch neighboring chunks for expanded context
+            chunk_index = chunk.get("chunk_index")
+            if source_id and chunk_index is not None:
+                try:
+                    neighbor_indices = [chunk_index - 1, chunk_index + 1]
+                    neighbors = (
+                        self.client.table("embeddings")
+                        .select("chunk_text, chunk_index")
+                        .eq("source_id", source_id)
+                        .in_("chunk_index", neighbor_indices)
+                        .execute()
+                    )
+                    if neighbors.data:
+                        sorted_neighbors = sorted(
+                            neighbors.data, key=lambda x: x["chunk_index"]
+                        )
+                        enriched_chunk["expanded_context"] = " ".join(
+                            n["chunk_text"] for n in sorted_neighbors
+                        )
+                except Exception as e:
+                    logger.debug(f"Could not fetch neighbor chunks: {e}")
 
             enriched.append(enriched_chunk)
 

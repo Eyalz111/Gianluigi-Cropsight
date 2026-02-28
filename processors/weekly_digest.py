@@ -63,6 +63,9 @@ async def generate_weekly_digest(
     open_questions = await get_open_questions_summary()
     upcoming = await get_upcoming_meetings(days=7)
 
+    # v0.3: Gather cross-reference activity for the week
+    cross_ref_summary = await get_cross_reference_summary(week_start, week_end)
+
     # 3. Format the digest document
     digest_document = format_digest_document(
         week_of=week_of,
@@ -73,6 +76,7 @@ async def generate_weekly_digest(
         tasks_upcoming=task_summary.get("due_next_week", []),
         open_questions=open_questions,
         upcoming_meetings=upcoming,
+        cross_ref_summary=cross_ref_summary,
     )
 
     # 4. Build result dict with counts
@@ -270,6 +274,86 @@ async def get_upcoming_meetings(days: int = 7) -> list[dict]:
         return []
 
 
+async def get_cross_reference_summary(
+    week_start: datetime,
+    week_end: datetime,
+) -> dict:
+    """
+    Get cross-reference activity summary for the week.
+
+    Fetches task mentions created during the week to summarize
+    deduplication, status changes, and question resolutions.
+
+    Args:
+        week_start: Start of the week (Monday).
+        week_end: End of the week (Sunday).
+
+    Returns:
+        Dict with:
+        - total_mentions: Total task mentions created this week.
+        - status_changes: List of status changes with task titles.
+        - duplicates_prevented: Count of duplicates caught.
+        - questions_resolved: Count of questions resolved.
+    """
+    result = {
+        "total_mentions": 0,
+        "status_changes": [],
+        "duplicates_prevented": 0,
+        "questions_resolved": 0,
+    }
+
+    try:
+        # Get all task mentions (we fetch recent and filter by date)
+        mentions = supabase_client.get_task_mentions(limit=200)
+
+        # Filter to this week's mentions
+        week_mentions = []
+        for m in mentions:
+            created = m.get("created_at", "")
+            if created:
+                try:
+                    created_dt = datetime.fromisoformat(
+                        str(created).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                    if week_start <= created_dt <= week_end:
+                        week_mentions.append(m)
+                except (ValueError, TypeError):
+                    pass
+
+        result["total_mentions"] = len(week_mentions)
+
+        # Count status changes vs duplicates
+        for m in week_mentions:
+            if m.get("implied_status"):
+                task_info = m.get("tasks", {}) or {}
+                result["status_changes"].append({
+                    "task_title": task_info.get("title", "Unknown"),
+                    "assignee": task_info.get("assignee", ""),
+                    "new_status": m.get("implied_status"),
+                })
+            else:
+                result["duplicates_prevented"] += 1
+
+        # Count resolved questions this week
+        resolved_qs = supabase_client.get_open_questions(status="resolved")
+        for q in resolved_qs:
+            created = q.get("created_at", "")
+            if created:
+                try:
+                    created_dt = datetime.fromisoformat(
+                        str(created).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                    if week_start <= created_dt <= week_end:
+                        result["questions_resolved"] += 1
+                except (ValueError, TypeError):
+                    pass
+
+    except Exception as e:
+        logger.error(f"Error fetching cross-reference summary: {e}")
+
+    return result
+
+
 def format_digest_document(
     week_of: str,
     meetings: list[dict],
@@ -278,7 +362,8 @@ def format_digest_document(
     tasks_overdue: list[dict],
     tasks_upcoming: list[dict],
     open_questions: list[dict],
-    upcoming_meetings: list[dict]
+    upcoming_meetings: list[dict],
+    cross_ref_summary: dict | None = None,
 ) -> str:
     """
     Format all digest information into a Markdown document.
@@ -295,6 +380,7 @@ def format_digest_document(
         tasks_upcoming: Tasks due next week.
         open_questions: Unresolved questions.
         upcoming_meetings: Meetings scheduled for next week.
+        cross_ref_summary: v0.3 cross-reference activity summary (optional).
 
     Returns:
         Formatted Markdown digest document.
@@ -425,6 +511,44 @@ def format_digest_document(
     else:
         lines.append("_No upcoming CropSight meetings._")
     lines.append("")
+
+    # ---- Cross-Meeting Intelligence (v0.3) ----
+    if cross_ref_summary:
+        total = cross_ref_summary.get("total_mentions", 0)
+        dedup_count = cross_ref_summary.get("duplicates_prevented", 0)
+        status_changes = cross_ref_summary.get("status_changes", [])
+        questions_resolved = cross_ref_summary.get("questions_resolved", 0)
+
+        if total > 0 or questions_resolved > 0:
+            lines.append("## Cross-Meeting Intelligence This Week")
+            lines.append("")
+
+            if dedup_count > 0:
+                lines.append(
+                    f"- **{dedup_count} task(s)** automatically deduplicated "
+                    f"(prevented duplicates)"
+                )
+
+            if status_changes:
+                lines.append(
+                    f"- **{len(status_changes)} task status change(s)** "
+                    f"inferred and approved"
+                )
+                for sc in status_changes:
+                    title = sc.get("task_title", "Unknown")
+                    assignee = sc.get("assignee", "")
+                    new_status = sc.get("new_status", "")
+                    assignee_str = f" ({assignee})" if assignee else ""
+                    lines.append(
+                        f"  - \"{title}\"{assignee_str}: -> {new_status}"
+                    )
+
+            if questions_resolved > 0:
+                lines.append(
+                    f"- **{questions_resolved} open question(s)** resolved"
+                )
+
+            lines.append("")
 
     # ---- Footer ----
     lines.append("---")

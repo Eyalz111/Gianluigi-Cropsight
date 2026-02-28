@@ -149,11 +149,25 @@ async def process_transcript(
 
     logger.info(f"Created meeting record: {meeting_id}")
 
-    # Store extracted data
+    # Step 7b: Cross-reference analysis (v0.3)
+    # Run before storing tasks so we can deduplicate them
+    from processors.cross_reference import run_cross_reference
+
+    cross_ref_results = await run_cross_reference(
+        meeting_id=meeting_id,
+        transcript=file_content,
+        new_tasks=extracted.get("tasks", []),
+    )
+
+    # Use deduplicated tasks — only insert genuinely new ones
+    dedup = cross_ref_results.get("dedup", {})
+    tasks_to_store = dedup.get("new_tasks", extracted.get("tasks", []))
+
+    # Store extracted data (with deduplicated tasks)
     await store_meeting_data(
         meeting_id=meeting_id,
         decisions=extracted.get("decisions", []),
-        tasks=extracted.get("tasks", []),
+        tasks=tasks_to_store,
         follow_ups=extracted.get("follow_ups", []),
         open_questions=extracted.get("open_questions", []),
     )
@@ -169,7 +183,10 @@ async def process_transcript(
             "title": meeting_title,
             "sensitivity": sensitivity,
             "decisions_count": len(extracted.get("decisions", [])),
-            "tasks_count": len(extracted.get("tasks", [])),
+            "tasks_count": len(tasks_to_store),
+            "duplicates_found": len(dedup.get("duplicates", [])),
+            "status_changes_found": len(cross_ref_results.get("status_changes", [])),
+            "questions_resolved": len(cross_ref_results.get("resolved_questions", [])),
         },
         triggered_by="auto",
     )
@@ -177,20 +194,22 @@ async def process_transcript(
     logger.info(
         f"Transcript processing complete: {meeting_id} "
         f"({len(extracted.get('decisions', []))} decisions, "
-        f"{len(extracted.get('tasks', []))} tasks)"
+        f"{len(tasks_to_store)} new tasks, "
+        f"{len(dedup.get('duplicates', []))} duplicates)"
     )
 
     return {
         "meeting_id": meeting_id,
         "summary": summary,
         "decisions": extracted.get("decisions", []),
-        "tasks": extracted.get("tasks", []),
+        "tasks": tasks_to_store,
         "follow_ups": extracted.get("follow_ups", []),
         "open_questions": extracted.get("open_questions", []),
         "stakeholders": extracted.get("stakeholders", []),
         "discussion_summary": extracted.get("discussion_summary", ""),
         "sensitivity": sensitivity,
         "approval_status": "pending",
+        "cross_reference": cross_ref_results,
     }
 
 

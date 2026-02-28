@@ -4,6 +4,38 @@ All notable changes to this project, organized by version.
 
 ---
 
+## v0.3 Phase 1 — Operational Intelligence (2026-02-28)
+
+**Tests:** 349 passing (35 new)
+
+### Added
+- **Task Deduplication** — newly extracted tasks are compared against existing open tasks using Claude Haiku; classified as NEW, DUPLICATE, or UPDATE. Duplicates create `task_mention` records instead of duplicate task rows.
+- **Task Status Inference** — Claude Sonnet analyzes full transcripts against open tasks to detect completions or progress changes with confidence levels (high/medium/low)
+- **Open Question Resolution** — detects when previously raised questions get answered in later meetings
+- **Cross-Reference Orchestrator** — `run_cross_reference()` coordinates all three analyses and creates `task_mention` audit trail records
+- **Cross-Meeting Intelligence in Approval Messages** — Telegram approval requests now show task status changes, deduplicated tasks, and resolved questions
+- **Cross-Reference Application on Approve** — when Eyal approves, inferred task statuses are updated in Supabase and open questions are resolved
+- **Weekly Digest Cross-Reference Section** — summarizes dedup/status/resolution activity for the week
+- **Time-Weighted RAG** — search results are boosted by recency (30-day half-life, 70/30 RRF/recency blend)
+- **Parent Chunk Retrieval** — `enrich_chunks_with_context()` now fetches neighboring chunks (index ± 1) for expanded context
+- **Query Router** — lightweight keyword-based pre-classification (`task_status`, `entity_lookup`, `decision_history`, `general`) with context pre-fetching
+- **`task_mentions` table** — tracks cross-meeting task references with implied_status, confidence, and evidence
+
+### Changed
+- Transcript pipeline: new Step 7b runs cross-reference before storing tasks
+- `create_tasks_batch()` only receives genuinely new tasks (duplicates filtered out)
+- `search_memory()` applies time-weighted scoring after RRF fusion
+- `process_message()` pre-fetches relevant context based on query type
+
+### New Files
+| File | Purpose |
+|------|---------|
+| `processors/cross_reference.py` | Core cross-reference processor |
+| `tests/test_cross_reference.py` | 35 tests |
+| `docs/versions/v0.3_implementation.md` | Implementation notes |
+
+---
+
 ## v0.2.1 — Post-v0.2 Refinements (2026-02-26)
 
 **Tests:** 286 passing (82 new)

@@ -55,6 +55,86 @@ def _escape_html(text: str) -> str:
     )
 
 
+def _format_cross_reference_section(cross_ref: dict) -> list[str]:
+    """
+    Format cross-reference results as HTML lines for the Telegram approval message.
+
+    Shows task status changes, deduplicated tasks, and resolved questions
+    in a clean, readable format for Eyal to review.
+
+    Args:
+        cross_ref: Cross-reference results dict from run_cross_reference().
+
+    Returns:
+        List of HTML-formatted lines, or empty list if nothing to show.
+    """
+    lines = []
+    has_content = False
+
+    # Status changes
+    status_changes = cross_ref.get("status_changes", [])
+    if status_changes:
+        has_content = True
+        lines.append(f"<b>Cross-Meeting Intelligence</b>")
+        lines.append("")
+        lines.append(f"<b>Task Status Changes ({len(status_changes)})</b>")
+        for sc in status_changes:
+            conf = sc.get("confidence", "medium").upper()
+            title = _escape_html(sc.get("task_title", "Unknown"))
+            assignee = sc.get("assignee", "")
+            new_status = sc.get("new_status", "").upper()
+            evidence = _escape_html(sc.get("evidence", "")[:80])
+            lines.append(f"  [{conf}] \"{title}\" ({assignee}) -> {new_status}")
+            if evidence:
+                lines.append(f"    \"{evidence}\"")
+        lines.append("")
+
+    # Dedup results
+    dedup = cross_ref.get("dedup", {})
+    duplicates = dedup.get("duplicates", [])
+    updates = dedup.get("updates", [])
+
+    if duplicates:
+        has_content = True
+        if not status_changes:
+            lines.append(f"<b>Cross-Meeting Intelligence</b>")
+            lines.append("")
+        lines.append(f"<b>Deduplicated Tasks ({len(duplicates)})</b>")
+        for dup in duplicates:
+            task_title = _escape_html(dup.get("task", {}).get("title", ""))
+            reason = _escape_html(dup.get("reason", "")[:60])
+            lines.append(f"  \"{task_title}\" -> matched existing task")
+            if reason:
+                lines.append(f"    ({reason})")
+        lines.append("")
+
+    if updates:
+        has_content = True
+        lines.append(f"<b>Task Updates ({len(updates)})</b>")
+        for upd in updates:
+            task_title = _escape_html(upd.get("task", {}).get("title", ""))
+            new_status = upd.get("new_status", "").upper()
+            lines.append(f"  \"{task_title}\" -> {new_status}")
+        lines.append("")
+
+    # Resolved questions
+    resolved_qs = cross_ref.get("resolved_questions", [])
+    if resolved_qs:
+        has_content = True
+        if not status_changes and not duplicates:
+            lines.append(f"<b>Cross-Meeting Intelligence</b>")
+            lines.append("")
+        lines.append(f"<b>Questions Resolved ({len(resolved_qs)})</b>")
+        for rq in resolved_qs:
+            question = _escape_html(rq.get("question", "")[:60])
+            answer = _escape_html(rq.get("answer", "")[:60])
+            lines.append(f"  Q: \"{question}\"")
+            lines.append(f"  A: {answer}")
+        lines.append("")
+
+    return lines if has_content else []
+
+
 class TelegramBot:
     """
     Telegram bot for Gianluigi's user interface.
@@ -281,6 +361,7 @@ class TelegramBot:
         follow_ups: list[dict] | None = None,
         open_questions: list[dict] | None = None,
         drive_link: str | None = None,
+        cross_reference: dict | None = None,
     ) -> bool:
         """
         Send an approval request to Eyal with a clean, structured preview.
@@ -294,6 +375,7 @@ class TelegramBot:
             follow_ups: List of follow-up meeting dicts.
             open_questions: List of open question dicts.
             drive_link: Optional link to draft in Drive.
+            cross_reference: v0.3 cross-reference results (dedup, status changes, etc.).
 
         Returns:
             True if request was sent successfully.
@@ -353,6 +435,13 @@ class TelegramBot:
             lines.append(f"<b>Discussion Summary</b>")
             lines.append(_escape_html(excerpt))
             lines.append("")
+
+        # v0.3: Cross-meeting intelligence section
+        if cross_reference:
+            cr_lines = _format_cross_reference_section(cross_reference)
+            if cr_lines:
+                lines.extend(cr_lines)
+                lines.append("")
 
         if drive_link:
             lines.append(f'<a href="{drive_link}">View Full Draft</a>')
