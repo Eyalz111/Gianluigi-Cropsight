@@ -1,12 +1,17 @@
 """
 Entity extraction and linking for v0.3 Tier 2.
 
-Extracts people, organizations, projects, technologies, and locations
-from meeting transcripts and links them to the entity registry.
+Extracts stakeholders from meeting transcripts and links them to the
+entity registry. "Stakeholder" means a specific person or organization
+that CropSight has (or could have) a direct business relationship with.
+
+Two-pass approach:
+  1. Claude Haiku extracts candidate stakeholders from the transcript.
+  2. Claude Haiku validates each candidate (is it a real stakeholder
+     or a generic/irrelevant name?). This replaces a hardcoded blocklist.
 
 Entity resolution is local (name matching), not LLM-based, to keep
-it fast and free. Upgrade to LLM-based resolution later if quality
-is poor.
+it fast and free.
 
 Usage:
     from processors.entity_extraction import extract_and_link_entities
@@ -31,28 +36,6 @@ from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
 
-# Generic names that should never be registered as entities.
-# These slip through when the LLM over-extracts from casual conversation.
-_ENTITY_BLOCKLIST = {
-    # Meeting tools / platforms
-    "tactiq", "tactiq.io", "google meet", "zoom", "teams", "slack",
-    "google", "google docs", "google drive", "google sheets",
-    # Generic tech
-    "internet", "ai", "machine learning", "cloud", "api", "gps",
-    "whatsapp", "telegram", "email",
-    # Generic geography (only block when not business-relevant)
-    "israel", "italy", "usa", "united states", "europe", "asia",
-    "canada", "uk", "united kingdom", "china", "india", "germany", "france",
-    "tel aviv", "jerusalem", "rome", "new york",
-    # Common nouns that LLMs sometimes extract
-    "computer", "phone", "hospital", "university", "government",
-    "amazon", "facebook", "meta", "microsoft", "apple",
-    # Transcript artifacts and mis-transcriptions of CropSight
-    "crop site", "cropsite", "crop sight",
-    "jerusalem hospital",
-    "weather model",
-}
-
 
 async def extract_and_link_entities(
     meeting_id: str,
@@ -60,13 +43,14 @@ async def extract_and_link_entities(
     participants: list[str],
 ) -> dict:
     """
-    Extract entities from a transcript and link to the entity registry.
+    Extract stakeholder entities from a transcript and link to the registry.
 
     Flow:
-    1. Use Claude Haiku to extract raw entities from transcript.
-    2. Resolve each entity against the existing registry (local matching).
-    3. Create new entity records for unmatched entities.
-    4. Batch-create entity_mention records for all entities.
+    1. Use Claude Haiku to extract candidate stakeholders.
+    2. Use Claude Haiku to validate candidates (filter junk).
+    3. Resolve each entity against the existing registry (local matching).
+    4. Create new entity records for unmatched entities.
+    5. Batch-create entity_mention records.
 
     Args:
         meeting_id: UUID of the meeting.
@@ -85,19 +69,30 @@ async def extract_and_link_entities(
         "total_mentions": 0,
     }
 
-    # Step 1: Extract raw entities via LLM
+    # Step 1: Extract candidate stakeholders via LLM
     raw_entities = await _extract_raw_entities(transcript, participants)
     if not raw_entities:
-        logger.info(f"No external entities found in meeting {meeting_id}")
+        logger.info(f"No stakeholders found in meeting {meeting_id}")
         return result
 
-    # Step 2: Fetch existing entities for resolution
+    # Step 2: Validate candidates via LLM (filter out junk)
+    validated = await _validate_entities(raw_entities)
+    if not validated:
+        logger.info(f"All candidates filtered by validation in {meeting_id}")
+        return result
+
+    logger.info(
+        f"Entity extraction: {len(raw_entities)} candidates -> "
+        f"{len(validated)} validated"
+    )
+
+    # Step 3: Fetch existing entities for resolution
     existing_entities = supabase_client.list_entities(limit=500)
 
-    # Step 3: Resolve and create mentions
+    # Step 4: Resolve and create mentions
     mentions_to_create = []
 
-    for raw in raw_entities:
+    for raw in validated:
         name = raw.get("name", "").strip()
         entity_type = raw.get("type", "person").strip().lower()
         if not name:
@@ -142,7 +137,7 @@ async def extract_and_link_entities(
             "transcript_timestamp": raw.get("timestamp"),
         })
 
-    # Step 4: Batch create mentions
+    # Step 5: Batch create mentions
     if mentions_to_create:
         created = supabase_client.create_entity_mentions_batch(mentions_to_create)
         result["total_mentions"] = len(created)
@@ -161,7 +156,7 @@ async def _extract_raw_entities(
     participants: list[str],
 ) -> list[dict]:
     """
-    Use Claude Haiku to extract entities from a transcript.
+    Use Claude Haiku to extract candidate stakeholders from a transcript.
 
     Excludes meeting participants and known CropSight team members.
 
@@ -185,39 +180,55 @@ async def _extract_raw_entities(
         first = p.split()[0].lower()
         exclude_names.add(first)
 
-    # Truncate transcript for Haiku
-    truncated = transcript[:8000] if len(transcript) > 8000 else transcript
+    # Sample transcript: take beginning + middle + end to cover the whole meeting.
+    # Meetings often start with small talk — the real business is deeper in.
+    max_chars = 16000
+    if len(transcript) > max_chars:
+        third = max_chars // 3
+        truncated = (
+            transcript[:third]
+            + "\n\n[...transcript continues...]\n\n"
+            + transcript[len(transcript)//2 - third//2 : len(transcript)//2 + third//2]
+            + "\n\n[...transcript continues...]\n\n"
+            + transcript[-third:]
+        )
+    else:
+        truncated = transcript
 
-    prompt = f"""Extract BUSINESS-RELEVANT external entities from this startup meeting transcript.
+    prompt = f"""Extract stakeholders from this CropSight (agtech startup) meeting transcript.
 
-We want: specific people (partners, investors, advisors), specific companies/organizations, named projects, and specific locations relevant to business operations.
+A "stakeholder" is a specific person or organization that CropSight has a DIRECT
+business relationship with — someone you'd add to a CRM. Examples:
+- A named advisor or contact: "Jason Adelman"
+- A partner company in active discussions: "Lavazza", "Ferrero"
+- A grant body CropSight applied to: "IIA" (Israel Innovation Authority)
+- A specific pilot location tied to operations: "Gagauzia", "Moldova"
 
-EXCLUDE these meeting participants and team members: {', '.join(sorted(exclude_names))}
+Do NOT extract:
+- Big tech/infra companies (AWS, Google, Microsoft, IBM, etc.)
+- Countries or cities mentioned in passing (not business sites)
+- Tools/platforms (Zoom, Slack, WhatsApp, Tactiq, Google Sheets)
+- Generic terms (AI, cloud, GPS, machine learning)
+- Vague descriptions that aren't proper names
+- Transcript artifacts or garbled text
 
-Also EXCLUDE:
-- Generic/common nouns (internet, computer, phone, email, etc.)
-- Countries or cities mentioned only in passing or small talk (not business context)
-- Tools/platforms used for the meeting itself (Zoom, Google Meet, Tactiq, etc.)
-- Generic technology terms (AI, machine learning, cloud, etc.)
-- Geopolitical discussion not directly tied to business operations
+EXCLUDE these participants/team: {', '.join(sorted(exclude_names))}
 
-ONLY include entities that are directly relevant to the startup's business: partners, clients, investors, grant bodies, pilot locations, named projects, specific advisors/contacts.
-
-For each entity, provide:
-- name: The canonical name
-- type: person / organization / project / technology / location
-- context: Brief context of how they were mentioned (1 sentence)
+For each stakeholder, provide:
+- name: Proper name (full name for people, official name for orgs)
+- type: person / organization / project / location
+- context: One sentence — CropSight's relationship with them
 - speaker: Who mentioned them
 - sentiment: positive / neutral / negative / mixed
-- timestamp: Approximate transcript timestamp if visible
+- relationship: advisor / investor / partner / client / grant_body / pilot_site / vendor / other
 
 TRANSCRIPT:
 {truncated}
 
 Return JSON:
-{{"entities": [{{"name": "...", "type": "...", "context": "...", "speaker": "...", "sentiment": "...", "timestamp": "..."}}]}}
+{{"entities": [{{"name": "...", "type": "...", "context": "...", "speaker": "...", "sentiment": "...", "relationship": "..."}}]}}
 
-Be selective — only include entities that matter for business tracking. Quality over quantity."""
+Return only genuine CropSight stakeholders. An empty list is perfectly fine."""
 
     try:
         client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -230,24 +241,109 @@ Be selective — only include entities that matter for business tracking. Qualit
         parsed = _parse_json_response(response_text)
         entities = parsed.get("entities", [])
 
-        # Filter out any entities that match excluded names or blocklist
+        # Basic post-filter: remove excluded names and very short names
         filtered = []
         for e in entities:
             name_lower = e.get("name", "").lower().strip()
             if not name_lower or name_lower in exclude_names:
                 continue
-            if name_lower in _ENTITY_BLOCKLIST:
-                continue
             if len(name_lower) < 2:
                 continue
             filtered.append(e)
 
-        logger.info(f"Extracted {len(filtered)} raw entities")
+        logger.info(f"Extracted {len(filtered)} candidate stakeholders")
         return filtered
 
     except Exception as e:
         logger.error(f"Error extracting entities: {e}")
         return []
+
+
+async def _validate_entities(candidates: list[dict]) -> list[dict]:
+    """
+    Use Claude Haiku to validate extracted candidates.
+
+    Takes the list of candidates from pass 1 and asks the LLM to filter
+    out anything that isn't a genuine CropSight stakeholder. This replaces
+    the hardcoded blocklist — the LLM understands context better than
+    a static word list.
+
+    Args:
+        candidates: List of candidate entity dicts from _extract_raw_entities.
+
+    Returns:
+        Filtered list of validated entities.
+    """
+    if not candidates:
+        return []
+
+    # Build a simple list for the LLM to review
+    candidate_lines = []
+    for i, c in enumerate(candidates):
+        name = c.get("name", "")
+        etype = c.get("type", "")
+        context = c.get("context", "")
+        relationship = c.get("relationship", "")
+        candidate_lines.append(
+            f"{i+1}. \"{name}\" ({etype}) — {context} [relationship: {relationship}]"
+        )
+
+    prompt = f"""Review these candidate stakeholders extracted from a CropSight (agtech startup) meeting transcript.
+
+For each candidate, decide: is this a REAL stakeholder that belongs in a CRM/stakeholder tracker?
+
+KEEP if it's:
+- A specific person CropSight works with (advisor, investor, partner contact, client)
+- A specific company/organization CropSight has business dealings with
+- A specific grant body, government agency CropSight applied to by name
+- A named pilot location or project tied to CropSight operations
+
+REJECT if it's:
+- A big tech company used as infrastructure (AWS, Google, IBM, Microsoft, etc.)
+- A country, city, or region mentioned casually (not a specific pilot/office site)
+- A generic/vague term, not a proper entity name
+- A tool, platform, or technology (not a business partner)
+- A university/hospital mentioned in passing (not a specific CropSight partner)
+- A transcript artifact, mis-transcription, or garbled name
+
+CANDIDATES:
+{chr(10).join(candidate_lines)}
+
+Return JSON with ONLY the numbers of candidates to KEEP:
+{{"keep": [1, 3, 5]}}
+
+If none should be kept, return: {{"keep": []}}"""
+
+    try:
+        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model=settings.model_simple,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        response_text = response.content[0].text
+        parsed = _parse_json_response(response_text)
+        keep_indices = parsed.get("keep", [])
+
+        # Convert 1-based indices to 0-based and filter
+        validated = []
+        for idx in keep_indices:
+            zero_idx = idx - 1
+            if 0 <= zero_idx < len(candidates):
+                validated.append(candidates[zero_idx])
+
+        logger.info(
+            f"Validation: {len(candidates)} candidates -> "
+            f"{len(validated)} kept"
+        )
+        return validated
+
+    except Exception as e:
+        # On validation failure, pass through all candidates rather
+        # than losing everything. Better to have some junk than miss
+        # real stakeholders.
+        logger.warning(f"Entity validation failed, passing all through: {e}")
+        return candidates
 
 
 def _resolve_entity(
@@ -331,7 +427,7 @@ def review_entity_health() -> dict:
     Weekly entity registry health check.
 
     Scans the entity registry for quality issues:
-    1. Blocklisted entities that slipped through (auto-cleaned).
+    1. Team-member entities that slipped through (auto-cleaned).
     2. Orphan entities with zero mentions across all meetings.
     3. New entities added this week (for Eyal to review).
 
@@ -339,7 +435,7 @@ def review_entity_health() -> dict:
 
     Returns:
         Dict with:
-        - auto_cleaned: List of entity names removed (matched blocklist).
+        - auto_cleaned: List of entity names removed.
         - orphans: List of entities with no mentions.
         - new_this_week: List of entities created in the last 7 days.
         - total_entities: Total remaining entity count.
@@ -366,13 +462,13 @@ def review_entity_health() -> dict:
             name = entity.get("canonical_name", "")
             name_lower = name.lower().strip()
 
-            # 1. Auto-clean blocklisted or team-member entities
-            if name_lower in _ENTITY_BLOCKLIST or name_lower in team_names or name_lower in team_first_names:
+            # 1. Auto-clean team-member entities
+            if name_lower in team_names or name_lower in team_first_names:
                 try:
                     supabase_client.client.table("entity_mentions").delete().eq("entity_id", eid).execute()
                     supabase_client.client.table("entities").delete().eq("id", eid).execute()
                     result["auto_cleaned"].append(name)
-                    logger.info(f"Auto-cleaned blocklisted entity: {name}")
+                    logger.info(f"Auto-cleaned team member entity: {name}")
                 except Exception as e:
                     logger.warning(f"Failed to auto-clean entity '{name}': {e}")
                 continue
