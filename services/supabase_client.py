@@ -92,8 +92,10 @@ class SupabaseClient:
                 pass
             # Try common date formats
             import re
-            if re.match(r'^\d{4}-\d{2}-\d{2}', dt):
-                return dt  # Already looks like ISO
+            # Extract just the ISO date/datetime portion, discard trailing text
+            iso_match = re.match(r'^(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:?\d{2}|Z)?)?)', dt)
+            if iso_match:
+                return iso_match.group(1)  # Return only the parseable portion
             # Unparseable (e.g., "Friday February 27th at 4 PM") — return None
             # to avoid Supabase TIMESTAMPTZ parse errors
             logger.warning(f"Could not parse date string: {dt!r}, storing as NULL")
@@ -1004,18 +1006,31 @@ class SupabaseClient:
         """
         Batch insert multiple task mentions.
 
+        Inserts one at a time to skip any with invalid FK references
+        (e.g., deleted tasks) without failing the whole batch.
+
         Args:
             mentions: List of mention dicts (task_id, meeting_id, mention_text, etc.).
 
         Returns:
-            List of created task_mention records.
+            List of successfully created task_mention records.
         """
         if not mentions:
             return []
 
-        result = self.client.table("task_mentions").insert(mentions).execute()
-        logger.info(f"Created {len(result.data)} task mentions")
-        return result.data
+        created = []
+        for mention in mentions:
+            try:
+                result = self.client.table("task_mentions").insert(mention).execute()
+                if result.data:
+                    created.append(result.data[0])
+            except Exception as e:
+                logger.warning(
+                    f"Skipping task mention (task_id={mention.get('task_id')}): {e}"
+                )
+        if created:
+            logger.info(f"Created {len(created)} task mentions")
+        return created
 
     def get_task_mentions(
         self,
@@ -1220,11 +1235,14 @@ class SupabaseClient:
         }
 
         # 1. Semantic search (vector) — top 20 candidates
+        # Lower threshold for contextual embeddings (metadata-prefixed chunks
+        # have different similarity characteristics than raw-text embeddings)
         vector_results = []
         try:
             vector_results = self.search_embeddings(
                 query_embedding=query_embedding,
                 limit=20,
+                similarity_threshold=0.4,
             )
         except Exception as e:
             logger.warning(f"Embedding search failed: {e}")

@@ -278,9 +278,7 @@ class TranscriptWatcher:
 
         # Submit for Eyal's approval
         if result.get("meeting_id"):
-            await submit_for_approval(
-                content_type="meeting_summary",
-                content={
+            approval_content = {
                     "meeting_id": result["meeting_id"],
                     "title": metadata["title"],
                     "summary": result.get("summary", ""),
@@ -289,7 +287,14 @@ class TranscriptWatcher:
                     "follow_ups": result.get("follow_ups", []),
                     "open_questions": result.get("open_questions", []),
                     "discussion_summary": result.get("discussion_summary", ""),
-                },
+                }
+            # v0.3: Include cross-reference results if available
+            if result.get("cross_reference"):
+                approval_content["cross_reference"] = result["cross_reference"]
+
+            await submit_for_approval(
+                content_type="meeting_summary",
+                content=approval_content,
                 meeting_id=result["meeting_id"],
             )
 
