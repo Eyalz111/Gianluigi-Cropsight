@@ -4,6 +4,51 @@ All notable changes to this project, organized by version.
 
 ---
 
+## v0.3 Tier 2 — Entity Registry, Commitment Tracking, Proactive Alerts (2026-03-01)
+
+**Tests:** 420 passing (71 new since Phase 1)
+
+### Added
+- **Entity Registry** — canonical entity records (people, orgs, projects, locations) with alias resolution. Entities are extracted by piggybacking on the existing Opus transcript call (zero extra LLM cost). Two-pass validation (extraction + Haiku review) replaces hardcoded blocklist.
+- **Entity Mentions** — tracks when/where entities appear across meetings with speaker, context, and sentiment
+- **Commitment Tracking** — extracts verbal promises ("I'll send that by Friday") from transcripts using Haiku, stores in `commitments` table with speaker, context, implied deadline
+- **Commitment Fulfillment Detection** — compares open commitments against new transcripts to detect when promises are kept
+- **Proactive Alerts** — 4 SQL-driven pattern detectors (no LLM): overdue task clusters (3+ per assignee), stale commitments (2+ weeks), recurring discussions (entity in 3+ meetings), open question pileup (5+ unresolved)
+- **Alert Scheduler** — 12-hour cycle, once-per-day Telegram alerts to Eyal
+- **Weekly Entity Health Check** — `review_entity_health()` auto-cleans team member entities, flags orphans, lists new entities
+- **Commitment Scorecard** — weekly digest section showing open commitments by speaker
+- **Operational Alerts Section** — weekly digest section with severity-grouped alerts
+- **Agent Tools** — `get_entity_info`, `get_entity_timeline`, `get_commitments` for natural language queries
+- **Settings Centralization** — ~25 hardcoded values (thresholds, intervals, chunk sizes) moved to `config/settings.py` with Pydantic Fields
+- **Opus Piggyback** — entity extraction uses pre-extracted stakeholders from the main Opus transcript call instead of a separate Haiku call (100% transcript coverage, zero extra cost)
+- **Seed Script** — `scripts/seed_entities.py` pre-populates registry with 7 known CropSight entities
+
+### Changed
+- All 7 schedulers + conversation_memory: module-level constant capture replaced with runtime resolution in `__init__` (fixes test mockability)
+- Sheets category names: updated to match Claude extraction (BD & Sales, Legal & Compliance, Strategy & Research)
+- Entity extraction prompt: CropSight-specific stakeholder definition with relationship types
+- Transcript processor: Steps 7c (entity extraction) and 7d (post-meeting alerts) added after cross-reference
+
+### New Files
+| File | Purpose |
+|------|---------|
+| `processors/entity_extraction.py` | Entity extraction + linking + health check |
+| `processors/proactive_alerts.py` | 4 SQL-driven alert detectors |
+| `schedulers/alert_scheduler.py` | Proactive alert scheduler |
+| `scripts/seed_entities.py` | Entity registry seed data |
+| `tests/test_entity_extraction.py` | 38 tests |
+| `tests/test_commitment_tracking.py` | 16 tests |
+| `tests/test_proactive_alerts.py` | 15 tests |
+
+### Database Tables Added
+| Table | Purpose |
+|-------|---------|
+| `entities` | Canonical entity records with aliases and metadata |
+| `entity_mentions` | Cross-meeting entity mention tracking |
+| `commitments` | Verbal commitment tracking with status lifecycle |
+
+---
+
 ## v0.3 Phase 1 — Operational Intelligence (2026-02-28)
 
 **Tests:** 349 passing (35 new)
