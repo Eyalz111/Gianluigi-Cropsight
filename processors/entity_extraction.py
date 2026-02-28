@@ -46,6 +46,10 @@ _ENTITY_BLOCKLIST = {
     # Common nouns that LLMs sometimes extract
     "computer", "phone", "hospital", "university", "government",
     "amazon", "facebook", "meta", "microsoft", "apple",
+    # Transcript artifacts and mis-transcriptions of CropSight
+    "crop site", "cropsite", "crop sight",
+    "jerusalem hospital",
+    "weather model",
 }
 
 
