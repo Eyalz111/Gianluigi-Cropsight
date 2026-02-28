@@ -1385,7 +1385,7 @@ class SupabaseClient:
             List of commitment records with meeting title joined.
         """
         query = self.client.table("commitments").select(
-            "*, meetings(title, date)"
+            "*, meetings!commitments_meeting_id_fkey(title, date)"
         )
         if speaker:
             query = query.ilike("speaker", f"%{speaker}%")
