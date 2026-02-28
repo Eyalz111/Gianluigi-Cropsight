@@ -37,6 +37,207 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 
+# =========================================================================
+# Color Constants — RGB dicts for Google Sheets API (0.0–1.0 scale)
+# =========================================================================
+
+def _hex_color(hex_str: str) -> dict:
+    """Convert '#RRGGBB' to Sheets API color dict."""
+    return {
+        "red": int(hex_str[1:3], 16) / 255,
+        "green": int(hex_str[3:5], 16) / 255,
+        "blue": int(hex_str[5:7], 16) / 255,
+    }
+
+
+COLORS = {
+    # Category colors (Task Tracker column B)
+    "product_tech": _hex_color("#BBDEFB"),       # Light Blue
+    "business_dev": _hex_color("#C8E6C9"),        # Light Green
+    "marketing": _hex_color("#FFE0B2"),           # Light Orange
+    "finance": _hex_color("#E1BEE7"),             # Light Purple
+    "legal_ip": _hex_color("#FFCDD2"),            # Light Red
+    "operations_hr": _hex_color("#B2DFDB"),       # Light Teal
+
+    # Priority colors
+    "priority_high": _hex_color("#FFCDD2"),       # Light Red
+    "priority_medium": _hex_color("#FFF9C4"),     # Light Yellow
+    "priority_low": _hex_color("#C8E6C9"),        # Light Green
+
+    # Status colors (shared)
+    "status_overdue": _hex_color("#FFCDD2"),      # Light Red
+    "status_done": _hex_color("#C8E6C9"),         # Light Green
+    "status_in_progress": _hex_color("#FFF9C4"),  # Light Yellow
+    "status_pending": _hex_color("#BBDEFB"),      # Light Blue
+
+    # Stakeholder status colors
+    "status_new": _hex_color("#BBDEFB"),          # Light Blue
+    "status_active": _hex_color("#C8E6C9"),       # Light Green
+    "status_inactive": _hex_color("#E0E0E0"),     # Light Gray
+    "status_completed": _hex_color("#A5D6A7"),    # Medium Green
+
+    # Banding / borders
+    "banding_even": _hex_color("#F5F5F5"),        # Very Light Gray
+    "banding_odd": _hex_color("#FFFFFF"),          # White
+    "border_gray": _hex_color("#E0E0E0"),         # Light Gray
+
+    # Header
+    "header_bg": _hex_color("#1A237E"),           # Dark Blue
+    "header_text": _hex_color("#FFFFFF"),         # White
+}
+
+# Category labels for data validation
+TASK_CATEGORIES = [
+    "Product & Tech",
+    "Business Development",
+    "Marketing & Community",
+    "Finance & Fundraising",
+    "Legal & IP",
+    "Operations & HR",
+]
+
+# Status labels for data validation
+TASK_STATUSES = ["pending", "in_progress", "done", "overdue"]
+STAKEHOLDER_STATUSES = ["New", "Active", "Inactive", "Completed"]
+
+# Priority labels for data validation
+PRIORITIES = ["H", "M", "L"]
+
+
+# =========================================================================
+# Formatting Helper Functions
+# =========================================================================
+
+def _conditional_format_rule(
+    sheet_id: int, col_index: int, text: str, color: dict, rule_index: int = 0
+) -> dict:
+    """Build one addConditionalFormatRule request for TEXT_CONTAINS."""
+    return {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{
+                    "sheetId": sheet_id,
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
+                    "startRowIndex": 1,
+                }],
+                "booleanRule": {
+                    "condition": {
+                        "type": "TEXT_CONTAINS",
+                        "values": [{"userEnteredValue": text}],
+                    },
+                    "format": {"backgroundColor": color},
+                },
+            },
+            "index": rule_index,
+        }
+    }
+
+
+def _column_width_request(sheet_id: int, col_index: int, width_px: int) -> dict:
+    """Build one updateDimensionProperties request for a fixed column width."""
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": col_index,
+                "endIndex": col_index + 1,
+            },
+            "properties": {"pixelSize": width_px},
+            "fields": "pixelSize",
+        }
+    }
+
+
+def _banding_request(sheet_id: int, num_cols: int) -> dict:
+    """Build an addBanding request for alternating row colors (skip header)."""
+    return {
+        "addBanding": {
+            "bandedRange": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": num_cols,
+                },
+                "rowProperties": {
+                    "firstBandColor": COLORS["banding_odd"],
+                    "secondBandColor": COLORS["banding_even"],
+                },
+            }
+        }
+    }
+
+
+def _border_request(sheet_id: int, num_cols: int) -> dict:
+    """Build an updateBorders request with light gray borders on all cells."""
+    border_style = {
+        "style": "SOLID",
+        "color": COLORS["border_gray"],
+    }
+    return {
+        "updateBorders": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0,
+                "startColumnIndex": 0,
+                "endColumnIndex": num_cols,
+            },
+            "top": border_style,
+            "bottom": border_style,
+            "left": border_style,
+            "right": border_style,
+            "innerHorizontal": border_style,
+            "innerVertical": border_style,
+        }
+    }
+
+
+def _data_validation_request(
+    sheet_id: int, col_index: int, values: list[str]
+) -> dict:
+    """Build a setDataValidation request with a dropdown (ONE_OF_LIST)."""
+    return {
+        "setDataValidation": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "startColumnIndex": col_index,
+                "endColumnIndex": col_index + 1,
+            },
+            "rule": {
+                "condition": {
+                    "type": "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": v} for v in values],
+                },
+                "showCustomUi": True,
+                "strict": False,
+            },
+        }
+    }
+
+
+def _text_wrap_request(sheet_id: int, col_index: int) -> dict:
+    """Build a repeatCell request that sets wrapStrategy: WRAP on a column."""
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "startColumnIndex": col_index,
+                "endColumnIndex": col_index + 1,
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "wrapStrategy": "WRAP",
+                }
+            },
+            "fields": "userEnteredFormat.wrapStrategy",
+        }
+    }
+
+
 # Task Tracker column configuration
 TASK_TRACKER_COLUMNS = [
     "Task",
@@ -616,6 +817,47 @@ class GoogleSheetsService:
         ).execute()
         return metadata["sheets"][0]["properties"]["sheetId"]
 
+    def _clear_conditional_format_rules(self, spreadsheet_id: str) -> list[dict]:
+        """
+        Build deleteConditionalFormatRule requests for ALL existing rules.
+
+        Fetches sheet metadata to find how many conditional format rules exist,
+        then returns delete requests in reverse index order (so indices stay
+        valid as rules are removed). This makes formatting idempotent.
+
+        Args:
+            spreadsheet_id: The Google Sheets spreadsheet ID.
+
+        Returns:
+            List of deleteConditionalFormatRule request dicts.
+        """
+        metadata = self.service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets.conditionalFormats",
+        ).execute()
+
+        # Count existing rules on the first sheet
+        sheets = metadata.get("sheets", [])
+        if not sheets:
+            return []
+
+        rules = sheets[0].get("conditionalFormats", [])
+        if not rules:
+            return []
+
+        sheet_id = self._get_first_sheet_id(spreadsheet_id)
+
+        # Delete in reverse order so indices don't shift
+        return [
+            {
+                "deleteConditionalFormatRule": {
+                    "sheetId": sheet_id,
+                    "index": i,
+                }
+            }
+            for i in range(len(rules) - 1, -1, -1)
+        ]
+
     async def _read_sheet_range(
         self,
         sheet_id: str,
@@ -850,10 +1092,13 @@ class GoogleSheetsService:
         Includes:
         - Dark blue header row with white bold text
         - Frozen header row
-        - Auto-resized columns A-I (9 columns)
-        - Conditional formatting on Status column (F):
-            Red for "overdue", Green for "done", Yellow for "in_progress"
+        - Fixed column widths (A=300, B=140, C=100, D=160, E=90, F=90, G=70, H=90, I=90)
+        - Text wrapping on Task column (A)
+        - Conditional formatting on Status (F), Category (B), Priority (G)
+        - Data validation dropdowns on Status, Priority, Category
+        - Alternating row colors (zebra striping)
         - Light gray borders on all cells
+        - Clears existing conditional format rules first (idempotent)
 
         Returns:
             True if formatting was applied successfully.
@@ -863,44 +1108,42 @@ class GoogleSheetsService:
             return False
 
         try:
-            sheet_id = self._get_first_sheet_id(settings.TASK_TRACKER_SHEET_ID)
+            sid = self._get_first_sheet_id(settings.TASK_TRACKER_SHEET_ID)
+            num_cols = 9  # A through I
             requests = []
 
-            # --- Frozen header row (1 row) ---
+            # --- Clear existing conditional format rules (idempotent) ---
+            requests.extend(
+                self._clear_conditional_format_rules(settings.TASK_TRACKER_SHEET_ID)
+            )
+
+            # --- Frozen header row ---
             requests.append({
                 "updateSheetProperties": {
                     "properties": {
-                        "sheetId": sheet_id,
+                        "sheetId": sid,
                         "gridProperties": {"frozenRowCount": 1},
                     },
                     "fields": "gridProperties.frozenRowCount",
                 }
             })
 
-            # --- Dark blue header (#1a237e) with white bold text ---
+            # --- Dark blue header with white bold text ---
             requests.append({
                 "repeatCell": {
                     "range": {
-                        "sheetId": sheet_id,
+                        "sheetId": sid,
                         "startRowIndex": 0,
                         "endRowIndex": 1,
                         "startColumnIndex": 0,
-                        "endColumnIndex": 9,
+                        "endColumnIndex": num_cols,
                     },
                     "cell": {
                         "userEnteredFormat": {
-                            "backgroundColor": {
-                                "red": 0x1A / 255,
-                                "green": 0x23 / 255,
-                                "blue": 0x7E / 255,
-                            },
+                            "backgroundColor": COLORS["header_bg"],
                             "textFormat": {
                                 "bold": True,
-                                "foregroundColor": {
-                                    "red": 1.0,
-                                    "green": 1.0,
-                                    "blue": 1.0,
-                                },
+                                "foregroundColor": COLORS["header_text"],
                             },
                         }
                     },
@@ -908,128 +1151,65 @@ class GoogleSheetsService:
                 }
             })
 
-            # --- Auto-resize columns A-I ---
-            requests.append({
-                "autoResizeDimensions": {
-                    "dimensions": {
-                        "sheetId": sheet_id,
-                        "dimension": "COLUMNS",
-                        "startIndex": 0,
-                        "endIndex": 9,
-                    }
-                }
-            })
+            # --- Fixed column widths (replace autoResize) ---
+            col_widths = [300, 140, 100, 160, 90, 90, 70, 90, 90]
+            for i, w in enumerate(col_widths):
+                requests.append(_column_width_request(sid, i, w))
+
+            # --- Text wrapping on Task column (A = index 0) ---
+            requests.append(_text_wrap_request(sid, 0))
 
             # --- Conditional formatting: Status column (F = index 5) ---
-            # Red background for "overdue"
-            requests.append({
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [{
-                            "sheetId": sheet_id,
-                            "startColumnIndex": 5,
-                            "endColumnIndex": 6,
-                            "startRowIndex": 1,
-                        }],
-                        "booleanRule": {
-                            "condition": {
-                                "type": "TEXT_CONTAINS",
-                                "values": [{"userEnteredValue": "overdue"}],
-                            },
-                            "format": {
-                                "backgroundColor": {
-                                    "red": 0xFF / 255,
-                                    "green": 0xCD / 255,
-                                    "blue": 0xD2 / 255,
-                                },
-                            },
-                        },
-                    },
-                    "index": 0,
-                }
-            })
+            rule_idx = 0
+            status_rules = [
+                ("overdue", COLORS["status_overdue"]),
+                ("done", COLORS["status_done"]),
+                ("in_progress", COLORS["status_in_progress"]),
+                ("pending", COLORS["status_pending"]),
+            ]
+            for text, color in status_rules:
+                requests.append(
+                    _conditional_format_rule(sid, 5, text, color, rule_idx)
+                )
+                rule_idx += 1
 
-            # Green background for "done"
-            requests.append({
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [{
-                            "sheetId": sheet_id,
-                            "startColumnIndex": 5,
-                            "endColumnIndex": 6,
-                            "startRowIndex": 1,
-                        }],
-                        "booleanRule": {
-                            "condition": {
-                                "type": "TEXT_CONTAINS",
-                                "values": [{"userEnteredValue": "done"}],
-                            },
-                            "format": {
-                                "backgroundColor": {
-                                    "red": 0xC8 / 255,
-                                    "green": 0xE6 / 255,
-                                    "blue": 0xC9 / 255,
-                                },
-                            },
-                        },
-                    },
-                    "index": 1,
-                }
-            })
+            # --- Conditional formatting: Category column (B = index 1) ---
+            category_rules = [
+                ("Product & Tech", COLORS["product_tech"]),
+                ("Business Development", COLORS["business_dev"]),
+                ("Marketing & Community", COLORS["marketing"]),
+                ("Finance & Fundraising", COLORS["finance"]),
+                ("Legal & IP", COLORS["legal_ip"]),
+                ("Operations & HR", COLORS["operations_hr"]),
+            ]
+            for text, color in category_rules:
+                requests.append(
+                    _conditional_format_rule(sid, 1, text, color, rule_idx)
+                )
+                rule_idx += 1
 
-            # Yellow background for "in_progress"
-            requests.append({
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [{
-                            "sheetId": sheet_id,
-                            "startColumnIndex": 5,
-                            "endColumnIndex": 6,
-                            "startRowIndex": 1,
-                        }],
-                        "booleanRule": {
-                            "condition": {
-                                "type": "TEXT_CONTAINS",
-                                "values": [{"userEnteredValue": "in_progress"}],
-                            },
-                            "format": {
-                                "backgroundColor": {
-                                    "red": 0xFF / 255,
-                                    "green": 0xF9 / 255,
-                                    "blue": 0xC4 / 255,
-                                },
-                            },
-                        },
-                    },
-                    "index": 2,
-                }
-            })
+            # --- Conditional formatting: Priority column (G = index 6) ---
+            priority_rules = [
+                ("H", COLORS["priority_high"]),
+                ("M", COLORS["priority_medium"]),
+                ("L", COLORS["priority_low"]),
+            ]
+            for text, color in priority_rules:
+                requests.append(
+                    _conditional_format_rule(sid, 6, text, color, rule_idx)
+                )
+                rule_idx += 1
 
-            # --- Light gray borders (#e0e0e0) on all cells ---
-            border_style = {
-                "style": "SOLID",
-                "color": {
-                    "red": 0xE0 / 255,
-                    "green": 0xE0 / 255,
-                    "blue": 0xE0 / 255,
-                },
-            }
-            requests.append({
-                "updateBorders": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "startRowIndex": 0,
-                        "startColumnIndex": 0,
-                        "endColumnIndex": 9,
-                    },
-                    "top": border_style,
-                    "bottom": border_style,
-                    "left": border_style,
-                    "right": border_style,
-                    "innerHorizontal": border_style,
-                    "innerVertical": border_style,
-                }
-            })
+            # --- Data validation dropdowns ---
+            requests.append(_data_validation_request(sid, 5, TASK_STATUSES))    # Status (F)
+            requests.append(_data_validation_request(sid, 6, PRIORITIES))       # Priority (G)
+            requests.append(_data_validation_request(sid, 1, TASK_CATEGORIES))  # Category (B)
+
+            # --- Alternating row colors (zebra striping) ---
+            requests.append(_banding_request(sid, num_cols))
+
+            # --- Light gray borders on all cells ---
+            requests.append(_border_request(sid, num_cols))
 
             self.service.spreadsheets().batchUpdate(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
@@ -1050,7 +1230,13 @@ class GoogleSheetsService:
         Includes:
         - Dark blue header row with white bold text
         - Frozen header row
-        - Auto-resized columns
+        - Fixed column widths
+        - Text wrapping on Description (C) and Notes (P)
+        - Conditional formatting on Status (O), Priority (F)
+        - Data validation dropdowns on Status, Priority
+        - Alternating row colors (zebra striping)
+        - Light gray borders on all cells
+        - Clears existing conditional format rules first (idempotent)
 
         Returns:
             True if formatting was applied successfully.
@@ -1061,25 +1247,32 @@ class GoogleSheetsService:
 
         try:
             num_cols = len(STAKEHOLDER_COLUMNS)  # 16 columns
-            sheet_id = self._get_first_sheet_id(settings.STAKEHOLDER_TRACKER_SHEET_ID)
+            sid = self._get_first_sheet_id(settings.STAKEHOLDER_TRACKER_SHEET_ID)
             requests = []
 
-            # --- Frozen header row (1 row) ---
+            # --- Clear existing conditional format rules (idempotent) ---
+            requests.extend(
+                self._clear_conditional_format_rules(
+                    settings.STAKEHOLDER_TRACKER_SHEET_ID
+                )
+            )
+
+            # --- Frozen header row ---
             requests.append({
                 "updateSheetProperties": {
                     "properties": {
-                        "sheetId": sheet_id,
+                        "sheetId": sid,
                         "gridProperties": {"frozenRowCount": 1},
                     },
                     "fields": "gridProperties.frozenRowCount",
                 }
             })
 
-            # --- Dark blue header (#1a237e) with white bold text ---
+            # --- Dark blue header with white bold text ---
             requests.append({
                 "repeatCell": {
                     "range": {
-                        "sheetId": sheet_id,
+                        "sheetId": sid,
                         "startRowIndex": 0,
                         "endRowIndex": 1,
                         "startColumnIndex": 0,
@@ -1087,18 +1280,10 @@ class GoogleSheetsService:
                     },
                     "cell": {
                         "userEnteredFormat": {
-                            "backgroundColor": {
-                                "red": 0x1A / 255,
-                                "green": 0x23 / 255,
-                                "blue": 0x7E / 255,
-                            },
+                            "backgroundColor": COLORS["header_bg"],
                             "textFormat": {
                                 "bold": True,
-                                "foregroundColor": {
-                                    "red": 1.0,
-                                    "green": 1.0,
-                                    "blue": 1.0,
-                                },
+                                "foregroundColor": COLORS["header_text"],
                             },
                         }
                     },
@@ -1106,17 +1291,62 @@ class GoogleSheetsService:
                 }
             })
 
-            # --- Auto-resize all columns ---
-            requests.append({
-                "autoResizeDimensions": {
-                    "dimensions": {
-                        "sheetId": sheet_id,
-                        "dimension": "COLUMNS",
-                        "startIndex": 0,
-                        "endIndex": num_cols,
-                    }
-                }
-            })
+            # --- Fixed column widths ---
+            # A=180, B=90, C=200, D=160, E=160, F=70,
+            # G-J=120 each (primary action), K-N=120 each (secondary action),
+            # O=90, P=200
+            col_widths = [
+                180, 90, 200, 160, 160, 70,    # A-F
+                120, 120, 120, 120,             # G-J (Primary Action)
+                120, 120, 120, 120,             # K-N (Secondary Action)
+                90, 200,                        # O-P
+            ]
+            for i, w in enumerate(col_widths):
+                requests.append(_column_width_request(sid, i, w))
+
+            # --- Text wrapping on Description (C=2) and Notes (P=15) ---
+            requests.append(_text_wrap_request(sid, 2))
+            requests.append(_text_wrap_request(sid, 15))
+
+            # --- Conditional formatting: Status column (O = index 14) ---
+            rule_idx = 0
+            status_rules = [
+                ("New", COLORS["status_new"]),
+                ("Active", COLORS["status_active"]),
+                ("Inactive", COLORS["status_inactive"]),
+                ("Completed", COLORS["status_completed"]),
+            ]
+            for text, color in status_rules:
+                requests.append(
+                    _conditional_format_rule(sid, 14, text, color, rule_idx)
+                )
+                rule_idx += 1
+
+            # --- Conditional formatting: Priority column (F = index 5) ---
+            priority_rules = [
+                ("H", COLORS["priority_high"]),
+                ("M", COLORS["priority_medium"]),
+                ("L", COLORS["priority_low"]),
+            ]
+            for text, color in priority_rules:
+                requests.append(
+                    _conditional_format_rule(sid, 5, text, color, rule_idx)
+                )
+                rule_idx += 1
+
+            # --- Data validation dropdowns ---
+            requests.append(
+                _data_validation_request(sid, 14, STAKEHOLDER_STATUSES)  # Status (O)
+            )
+            requests.append(
+                _data_validation_request(sid, 5, PRIORITIES)  # Priority (F)
+            )
+
+            # --- Alternating row colors (zebra striping) ---
+            requests.append(_banding_request(sid, num_cols))
+
+            # --- Light gray borders on all cells ---
+            requests.append(_border_request(sid, num_cols))
 
             self.service.spreadsheets().batchUpdate(
                 spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
