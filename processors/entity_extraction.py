@@ -31,6 +31,23 @@ from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
 
+# Generic names that should never be registered as entities.
+# These slip through when the LLM over-extracts from casual conversation.
+_ENTITY_BLOCKLIST = {
+    # Meeting tools / platforms
+    "tactiq", "tactiq.io", "google meet", "zoom", "teams", "slack",
+    "google", "google docs", "google drive", "google sheets",
+    # Generic tech
+    "internet", "ai", "machine learning", "cloud", "api", "gps",
+    "whatsapp", "telegram", "email",
+    # Generic geography (only block when not business-relevant)
+    "israel", "italy", "usa", "united states", "europe", "asia",
+    "tel aviv", "jerusalem", "rome", "new york",
+    # Common nouns that LLMs sometimes extract
+    "computer", "phone", "hospital", "university", "government",
+    "amazon", "facebook", "meta", "microsoft", "apple",
+}
+
 
 async def extract_and_link_entities(
     meeting_id: str,
@@ -166,9 +183,20 @@ async def _extract_raw_entities(
     # Truncate transcript for Haiku
     truncated = transcript[:8000] if len(transcript) > 8000 else transcript
 
-    prompt = f"""Extract all external entities (people, organizations, projects, technologies, locations) mentioned in this meeting transcript.
+    prompt = f"""Extract BUSINESS-RELEVANT external entities from this startup meeting transcript.
+
+We want: specific people (partners, investors, advisors), specific companies/organizations, named projects, and specific locations relevant to business operations.
 
 EXCLUDE these meeting participants and team members: {', '.join(sorted(exclude_names))}
+
+Also EXCLUDE:
+- Generic/common nouns (internet, computer, phone, email, etc.)
+- Countries or cities mentioned only in passing or small talk (not business context)
+- Tools/platforms used for the meeting itself (Zoom, Google Meet, Tactiq, etc.)
+- Generic technology terms (AI, machine learning, cloud, etc.)
+- Geopolitical discussion not directly tied to business operations
+
+ONLY include entities that are directly relevant to the startup's business: partners, clients, investors, grant bodies, pilot locations, named projects, specific advisors/contacts.
 
 For each entity, provide:
 - name: The canonical name
@@ -184,7 +212,7 @@ TRANSCRIPT:
 Return JSON:
 {{"entities": [{{"name": "...", "type": "...", "context": "...", "speaker": "...", "sentiment": "...", "timestamp": "..."}}]}}
 
-Only include entities that are clearly mentioned. Do not infer entities that are not explicitly named."""
+Be selective — only include entities that matter for business tracking. Quality over quantity."""
 
     try:
         client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -197,12 +225,17 @@ Only include entities that are clearly mentioned. Do not infer entities that are
         parsed = _parse_json_response(response_text)
         entities = parsed.get("entities", [])
 
-        # Filter out any entities that match excluded names
+        # Filter out any entities that match excluded names or blocklist
         filtered = []
         for e in entities:
             name_lower = e.get("name", "").lower().strip()
-            if name_lower and name_lower not in exclude_names:
-                filtered.append(e)
+            if not name_lower or name_lower in exclude_names:
+                continue
+            if name_lower in _ENTITY_BLOCKLIST:
+                continue
+            if len(name_lower) < 2:
+                continue
+            filtered.append(e)
 
         logger.info(f"Extracted {len(filtered)} raw entities")
         return filtered
