@@ -41,6 +41,7 @@ from telegram.ext import (
 
 from config.settings import settings
 from config.team import TEAM_MEMBERS, get_team_member
+from services.conversation_memory import conversation_memory
 
 logger = logging.getLogger(__name__)
 
@@ -776,13 +777,11 @@ When you receive approval requests, use the buttons to approve, request changes,
         user = update.effective_user
         message_text = update.message.text
 
-        # Check if this is a reply to an approval request (edit instructions)
-        if (
-            update.message.reply_to_message
-            and str(user.id) == str(self.eyal_chat_id)
-        ):
-            # This is likely edit instructions from Eyal
-            await self._handle_edit_instructions(update, context)
+        # Check if Eyal is in review mode (pending edit or replying to approval)
+        is_eyal = str(user.id) == str(self.eyal_chat_id)
+        has_pending_edit = bool(context.user_data.get("pending_edit_meeting_id"))
+        if is_eyal and (update.message.reply_to_message or has_pending_edit):
+            await self._handle_review_mode_message(update, context)
             return
 
         # --- Inbound guardrails ---
@@ -821,11 +820,16 @@ When you receive approval requests, use the buttons to approve, request changes,
         from core.agent import gianluigi_agent
 
         user_id = self._get_user_id(user.id) or "unknown"
+        chat_id_str = str(update.effective_chat.id)
+
+        # Get conversation history for context
+        history = conversation_memory.get_history(chat_id_str)
 
         try:
             result = await gianluigi_agent.process_message(
                 user_message=message_text,
                 user_id=user_id,
+                conversation_history=history,
             )
 
             response = result.get("response", "I couldn't process your request.")
@@ -843,6 +847,10 @@ When you receive approval requests, use the buttons to approve, request changes,
                 pass
             except Exception as e:
                 logger.warning(f"Outbound sanitization error (continuing): {e}")
+
+            # Store conversation turn in memory
+            conversation_memory.add_message(chat_id_str, "user", message_text)
+            conversation_memory.add_message(chat_id_str, "assistant", response)
 
             await self.send_message(update.effective_chat.id, response)
 
@@ -879,6 +887,7 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         if action == "approve":
             await query.edit_message_text("Approved! Distributing to team...")
+            conversation_memory.clear(str(self.eyal_chat_id))
 
             try:
                 result = await process_response(
@@ -923,6 +932,7 @@ When you receive approval requests, use the buttons to approve, request changes,
                 details={"meeting_id": meeting_id},
                 triggered_by="eyal",
             )
+            conversation_memory.clear(str(self.eyal_chat_id))
 
             await query.edit_message_text(
                 "Rejected. The summary will not be distributed."
@@ -967,32 +977,127 @@ When you receive approval requests, use the buttons to approve, request changes,
             )
             logger.info(f"Stakeholder update rejected: {org_key}")
 
-    async def _handle_edit_instructions(
+    async def _handle_review_mode_message(
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """
-        Handle edit instructions from Eyal.
+        Handle a message from Eyal while in review mode.
 
-        Passes instructions through Claude to apply edits,
-        then resubmits for approval.
+        Classifies intent (question vs edit instruction), then routes:
+        - Questions → agent with conversation history (stays in review mode)
+        - Edit instructions → edit flow (clears review mode after processing)
         """
         meeting_id = context.user_data.get("pending_edit_meeting_id")
-        edit_instructions = update.message.text
+        message_text = update.message.text
+        chat_id = update.effective_chat.id
+        chat_id_str = str(chat_id)
 
         if not meeting_id:
             await self.send_message(
-                update.effective_chat.id,
-                "I'm not sure which meeting you're editing. "
+                chat_id,
+                "I'm not sure which meeting you're referring to. "
                 "Please use the buttons on the approval request."
             )
             return
 
-        await self.send_message(
-            update.effective_chat.id,
-            "Processing your edits..."
-        )
+        # Classify: is this a question about the summary, or an edit instruction?
+        intent = await self._classify_review_intent(message_text)
+
+        if intent == "question":
+            # Answer the question using the agent + conversation history
+            await self.send_message(chat_id, "Thinking...")
+
+            from core.agent import gianluigi_agent
+
+            history = conversation_memory.get_history(chat_id_str)
+
+            try:
+                result = await gianluigi_agent.process_message(
+                    user_message=message_text,
+                    user_id="eyal",
+                    conversation_history=history,
+                )
+
+                response = result.get("response", "I couldn't process your request.")
+
+                # Store conversation turn (stay in review mode)
+                conversation_memory.add_message(chat_id_str, "user", message_text)
+                conversation_memory.add_message(chat_id_str, "assistant", response)
+
+                await self.send_message(chat_id, response)
+
+            except Exception as e:
+                logger.error(f"Error answering review question: {e}")
+                await self.send_message(
+                    chat_id,
+                    "Sorry, I encountered an error processing your question."
+                )
+        else:
+            # Edit instruction — route to edit flow
+            await self._route_edit_instruction(update, context, meeting_id, message_text)
+
+    async def _classify_review_intent(self, message: str) -> str:
+        """
+        Classify whether a review-mode message is a question or edit instruction.
+
+        Uses a cheap Haiku call (~50 tokens) for fast classification.
+
+        Args:
+            message: The user's message text.
+
+        Returns:
+            "question" or "edit"
+        """
+        from anthropic import Anthropic
+
+        try:
+            client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            response = client.messages.create(
+                model=settings.model_simple,
+                max_tokens=10,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Classify this message as either 'question' or 'edit'. "
+                        "A question asks about the content (e.g., 'what decisions were made?'). "
+                        "An edit requests changes (e.g., 'make it shorter', 'change the deadline'). "
+                        "Reply with ONLY the word 'question' or 'edit'.\n\n"
+                        f"Message: {message}"
+                    ),
+                }],
+            )
+            result = response.content[0].text.strip().lower()
+            if "question" in result:
+                return "question"
+            return "edit"
+        except Exception as e:
+            logger.warning(f"Intent classification failed, defaulting to edit: {e}")
+            return "edit"
+
+    async def _route_edit_instruction(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        meeting_id: str,
+        edit_instructions: str,
+    ) -> None:
+        """
+        Process edit instructions and resubmit the summary for approval.
+
+        Extracted from the old _handle_edit_instructions. Clears
+        pending_edit_meeting_id after processing.
+
+        Args:
+            update: Telegram update.
+            context: Telegram context.
+            meeting_id: UUID of the meeting being edited.
+            edit_instructions: The edit instruction text from Eyal.
+        """
+        chat_id = update.effective_chat.id
+
+        await self.send_message(chat_id, "Processing your edits...")
 
         try:
             from guardrails.approval_flow import process_response
@@ -1006,22 +1111,19 @@ When you receive approval requests, use the buttons to approve, request changes,
             if result.get("action") == "edit_requested":
                 edits = result.get("edits", [])
                 await self.send_message(
-                    update.effective_chat.id,
+                    chat_id,
                     f"Applied {len(edits)} edit(s). "
                     f"A new approval request has been sent."
                 )
             else:
                 await self.send_message(
-                    update.effective_chat.id,
+                    chat_id,
                     f"Edit processing result: {result.get('next_step', 'Unknown')}"
                 )
 
         except Exception as e:
             logger.error(f"Error processing edits for {meeting_id}: {e}")
-            await self.send_message(
-                update.effective_chat.id,
-                f"Error processing edits: {e}"
-            )
+            await self.send_message(chat_id, f"Error processing edits: {e}")
 
         # Clear the pending edit
         context.user_data.pop("pending_edit_meeting_id", None)

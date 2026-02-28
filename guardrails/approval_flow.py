@@ -41,6 +41,7 @@ from services.google_drive import drive_service
 from services.google_sheets import sheets_service
 from services.supabase_client import supabase_client
 from guardrails.sensitivity_classifier import get_distribution_list
+from services.conversation_memory import conversation_memory
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +256,24 @@ async def submit_for_approval(
         email_sent = await gmail_service.send_approval_request(
             meeting_title=meeting_title,
             summary_preview=summary,
+        )
+
+    # Inject approval context into conversation memory so the agent knows
+    # what summary it just sent (enables follow-up questions and edits)
+    preview = discussion_summary or summary[:600]
+    if telegram_sent and settings.TELEGRAM_EYAL_CHAT_ID:
+        conversation_memory.inject_approval_context(
+            chat_id=settings.TELEGRAM_EYAL_CHAT_ID,
+            meeting_id=meeting_id,
+            title=meeting_title,
+            preview=preview,
+        )
+    if email_sent and settings.EYAL_EMAIL:
+        conversation_memory.inject_approval_context(
+            chat_id=settings.EYAL_EMAIL,
+            meeting_id=meeting_id,
+            title=meeting_title,
+            preview=preview,
         )
 
     # Log the action

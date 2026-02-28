@@ -21,6 +21,7 @@ from config.settings import settings
 from config.team import is_team_email, get_team_member_by_email
 from services.gmail import gmail_service
 from services.supabase_client import supabase_client
+from services.conversation_memory import conversation_memory
 
 logger = logging.getLogger(__name__)
 
@@ -243,10 +244,14 @@ class EmailWatcher:
         # Get team member ID
         member_id = member_name.lower().split()[0]  # "Eyal Zror" -> "eyal"
 
+        # Get conversation history keyed by sender email
+        history = conversation_memory.get_history(sender_email)
+
         try:
             result = await gianluigi_agent.process_message(
                 user_message=question,
                 user_id=member_id,
+                conversation_history=history,
             )
 
             response_text = result.get("response", "I couldn't process your request.")
@@ -262,6 +267,10 @@ class EmailWatcher:
                 pass
             except Exception as e:
                 logger.warning(f"Outbound sanitization error (continuing): {e}")
+
+            # Store conversation turn in memory
+            conversation_memory.add_message(sender_email, "user", question)
+            conversation_memory.add_message(sender_email, "assistant", response_text)
 
             # Reply via email (in the same thread as the original)
             await gmail_service.send_email(

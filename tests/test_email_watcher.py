@@ -453,8 +453,11 @@ class TestCheckInbox:
             return_value={"response": "Here is your answer."}
         )
 
+        from services.conversation_memory import ConversationMemory
+
         with patch("schedulers.email_watcher.gmail_service") as mock_gmail, \
-             patch("schedulers.email_watcher.supabase_client") as mock_supa:
+             patch("schedulers.email_watcher.supabase_client") as mock_supa, \
+             patch("schedulers.email_watcher.conversation_memory", ConversationMemory()):
             mock_gmail.send_email = AsyncMock(return_value=True)
 
             with patch("core.agent.gianluigi_agent", mock_agent):
@@ -466,10 +469,11 @@ class TestCheckInbox:
                     member_name="Eyal Zror",
                 )
 
-            # Should have called the agent
+            # Should have called the agent with conversation history
             mock_agent.process_message.assert_called_once_with(
                 user_message="What is our Q1 budget?",
                 user_id="eyal",
+                conversation_history=[],
             )
 
             # Should have sent reply email
@@ -498,8 +502,11 @@ class TestCheckInbox:
             return_value={"response": "OK"}
         )
 
+        from services.conversation_memory import ConversationMemory
+
         with patch("schedulers.email_watcher.gmail_service") as mock_gmail, \
-             patch("schedulers.email_watcher.supabase_client"):
+             patch("schedulers.email_watcher.supabase_client"), \
+             patch("schedulers.email_watcher.conversation_memory", ConversationMemory()):
             mock_gmail.send_email = AsyncMock(return_value=True)
 
             with patch("core.agent.gianluigi_agent", mock_agent):
@@ -515,6 +522,7 @@ class TestCheckInbox:
             mock_agent.process_message.assert_called_once_with(
                 user_message="What is our runway?",
                 user_id="eyal",
+                conversation_history=[],
             )
 
     @pytest.mark.asyncio
