@@ -81,6 +81,10 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
     # 7. Find open tasks for each participant
     participant_tasks = await find_participant_tasks(participant_names)
 
+    # 7b. Find related documents
+    from processors.document_processor import find_related_documents
+    related_documents = find_related_documents(topic)
+
     # 8. Synthesize strategic insights from all gathered context
     synthesis = await synthesize_prep_insights(
         topic=topic,
@@ -100,6 +104,7 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
         participant_tasks=participant_tasks,
         stakeholder_info=stakeholder_info,
         synthesis=synthesis,
+        related_documents=related_documents,
     )
 
     return {
@@ -111,6 +116,7 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
         "participant_tasks": participant_tasks,
         "stakeholder_info": stakeholder_info,
         "synthesis": synthesis,
+        "related_documents": related_documents,
     }
 
 
@@ -416,13 +422,14 @@ def format_prep_document(
     participant_tasks: dict[str, list[dict]],
     stakeholder_info: list[dict],
     synthesis: dict | None = None,
+    related_documents: list[dict] | None = None,
 ) -> str:
     """
     Format all prep information into a Markdown document.
 
     Builds a structured document with sections for meeting details,
     stakeholder context, strategic briefing, related meetings, decisions,
-    open questions, and participant tasks.
+    open questions, related documents, and participant tasks.
 
     Args:
         event: Calendar event details.
@@ -432,6 +439,7 @@ def format_prep_document(
         participant_tasks: Tasks by participant.
         stakeholder_info: Stakeholder context.
         synthesis: LLM-generated strategic insights.
+        related_documents: Documents related to the meeting topic.
 
     Returns:
         Formatted Markdown prep document.
@@ -546,6 +554,22 @@ def format_prep_document(
         for q in open_questions:
             raised_by = q.get("raised_by", "Unknown")
             lines.append(f"- {q.get('question')} (raised by {raised_by})")
+        lines.append("")
+
+    # Related documents
+    if related_documents:
+        lines.extend([
+            "## Related Documents",
+            "",
+        ])
+        for doc in related_documents:
+            doc_type = doc.get("document_type", "other")
+            ingested = doc.get("ingested_at", "")[:10] if doc.get("ingested_at") else ""
+            summary = doc.get("summary", "")
+            summary_preview = summary[:150] + "..." if len(summary) > 150 else summary
+            lines.append(f"- **{doc.get('title', 'Untitled')}** ({doc_type}, {ingested})")
+            if summary_preview:
+                lines.append(f"  {summary_preview}")
         lines.append("")
 
     # Participant tasks

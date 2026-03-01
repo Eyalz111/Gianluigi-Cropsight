@@ -97,12 +97,14 @@ CREATE TABLE IF NOT EXISTS documents (
     title TEXT NOT NULL,
     source TEXT,                         -- 'upload', 'email', 'drive'
     file_type TEXT,
+    document_type TEXT,                  -- 'strategy', 'legal', 'technical', 'pitch', 'client', 'other'
     summary TEXT,
     drive_path TEXT,
     ingested_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source);
+CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(document_type);
 
 
 -- Open questions: Unresolved issues from meetings

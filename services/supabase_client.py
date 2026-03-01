@@ -874,6 +874,7 @@ class SupabaseClient:
         file_type: str | None = None,
         summary: str | None = None,
         drive_path: str | None = None,
+        document_type: str | None = None,
     ) -> dict:
         """
         Create a document record.
@@ -884,6 +885,7 @@ class SupabaseClient:
             file_type: File extension (pdf, docx, etc.).
             summary: Document summary.
             drive_path: Google Drive path.
+            document_type: Classification (strategy, legal, technical, pitch, client, other).
 
         Returns:
             Created document record.
@@ -894,6 +896,7 @@ class SupabaseClient:
             "file_type": file_type,
             "summary": summary,
             "drive_path": drive_path,
+            "document_type": document_type,
         }
 
         result = self.client.table("documents").insert(data).execute()
@@ -928,6 +931,7 @@ class SupabaseClient:
     def list_documents(
         self,
         source: str | None = None,
+        document_type: str | None = None,
         limit: int = 50,
     ) -> list[dict]:
         """
@@ -935,6 +939,7 @@ class SupabaseClient:
 
         Args:
             source: Filter by source ('upload', 'email', 'drive').
+            document_type: Filter by type ('strategy', 'legal', 'technical', etc.).
             limit: Maximum number of results.
 
         Returns:
@@ -944,8 +949,31 @@ class SupabaseClient:
 
         if source:
             query = query.eq("source", source)
+        if document_type:
+            query = query.eq("document_type", document_type)
 
         result = query.order("ingested_at", desc=True).limit(limit).execute()
+        return result.data
+
+    def search_documents_by_title(self, search_term: str, limit: int = 5) -> list[dict]:
+        """
+        Search documents by title (case-insensitive partial match).
+
+        Args:
+            search_term: Text to search for in document titles.
+            limit: Maximum number of results.
+
+        Returns:
+            List of matching document records.
+        """
+        result = (
+            self.client.table("documents")
+            .select("*")
+            .ilike("title", f"%{search_term}%")
+            .order("ingested_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
         return result.data
 
     # =========================================================================

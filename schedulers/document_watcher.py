@@ -191,19 +191,52 @@ class DocumentWatcher:
                 "file_id": file_id,
                 "file_name": file_name,
                 "document_id": result.get("document_id"),
+                "document_type": result.get("document_type", "other"),
                 "chunk_count": result.get("chunk_count", 0),
             },
             triggered_by="auto",
         )
+
+        # Notify Eyal via Telegram
+        await self._notify_document_ingested(title, result)
 
         return {
             "file_id": file_id,
             "file_name": file_name,
             "status": "processed",
             "document_id": result.get("document_id"),
+            "document_type": result.get("document_type", "other"),
             "summary_length": len(result.get("summary", "")),
             "chunk_count": result.get("chunk_count", 0),
         }
+
+    async def _notify_document_ingested(self, title: str, result: dict) -> None:
+        """
+        Send Telegram notification to Eyal about a newly ingested document.
+
+        Args:
+            title: Document title.
+            result: Processing result dict.
+        """
+        try:
+            from services.telegram_bot import telegram_bot
+
+            doc_type = result.get("document_type", "other")
+            chunks = result.get("chunk_count", 0)
+            summary = result.get("summary", "")
+            # Truncate summary for notification
+            summary_preview = summary[:200] + "..." if len(summary) > 200 else summary
+
+            message = (
+                f"New document ingested: <b>{title}</b>\n"
+                f"Type: {doc_type} | Chunks: {chunks}\n"
+            )
+            if summary_preview:
+                message += f"\n{summary_preview}"
+
+            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed to notify about document ingestion: {e}")
 
     async def process_file_manually(self, file_id: str) -> dict:
         """
