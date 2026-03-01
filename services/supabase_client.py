@@ -214,11 +214,21 @@ class SupabaseClient:
         """
         Delete a meeting and all related data.
 
-        Deletion order matters due to foreign key constraints:
-        1. embeddings (source_id = meeting_id, no FK cascade)
-        2. tasks (meeting_id, ON DELETE SET NULL would orphan them)
-        3. meeting (cascades: decisions, follow_ups, open_questions,
-           task_mentions, entity_mentions, commitments, pending_approvals)
+        Explicitly deletes all child tables before the meeting itself,
+        because ON DELETE CASCADE only fires if the parent delete succeeds —
+        and it won't succeed if any un-cascaded FK still references it.
+
+        Deletion order (children first, then parent):
+        1. embeddings (source_id, no FK cascade)
+        2. task_mentions (meeting_id FK)
+        3. entity_mentions (meeting_id FK)
+        4. commitments (meeting_id FK)
+        5. decisions (meeting_id FK)
+        6. follow_up_meetings (source_meeting_id FK)
+        7. open_questions (meeting_id FK)
+        8. pending_approvals (by approval_id = meeting_id)
+        9. tasks (meeting_id, ON DELETE SET NULL would orphan)
+        10. meeting record itself
 
         Args:
             meeting_id: UUID of the meeting to delete.
@@ -238,7 +248,29 @@ class SupabaseClient:
             )
             counts["embeddings"] = len(emb_result.data) if emb_result.data else 0
 
-            # 2. Delete tasks (ON DELETE SET NULL would orphan them)
+            # 2-7. Delete all child tables that reference meetings
+            for table, fk_col in [
+                ("task_mentions", "meeting_id"),
+                ("entity_mentions", "meeting_id"),
+                ("commitments", "meeting_id"),
+                ("decisions", "meeting_id"),
+                ("follow_up_meetings", "source_meeting_id"),
+                ("open_questions", "meeting_id"),
+            ]:
+                try:
+                    self.client.table(table).delete().eq(fk_col, meeting_id).execute()
+                except Exception as e:
+                    logger.debug(f"Skipping {table} cleanup: {e}")
+
+            # 8. Delete pending approvals (approval_id = meeting_id string)
+            try:
+                self.client.table("pending_approvals").delete().eq(
+                    "approval_id", meeting_id
+                ).execute()
+            except Exception as e:
+                logger.debug(f"Skipping pending_approvals cleanup: {e}")
+
+            # 9. Delete tasks (ON DELETE SET NULL would orphan them)
             task_result = (
                 self.client.table("tasks")
                 .delete()
@@ -247,9 +279,7 @@ class SupabaseClient:
             )
             counts["tasks"] = len(task_result.data) if task_result.data else 0
 
-            # 3. Delete meeting (cascades: decisions, follow_ups,
-            #    open_questions, task_mentions, entity_mentions,
-            #    commitments, pending_approvals)
+            # 10. Delete the meeting itself (should now be clean)
             mtg_result = (
                 self.client.table("meetings")
                 .delete()

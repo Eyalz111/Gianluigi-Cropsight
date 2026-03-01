@@ -923,9 +923,12 @@ When you receive approval requests, use the buttons to approve, request changes,
         title = meeting.get("title", "Unknown")
         source_path = meeting.get("source_file_path", "")
 
+        # Escape underscores in title for Telegram markdown
+        safe_title = title.replace("_", "\\_")
+
         await self.send_message(
             update.effective_chat.id,
-            f"Reprocessing: *{title}*\nLooking for source file...",
+            f"Reprocessing: *{safe_title}*\nLooking for source file...",
         )
 
         # Find the Drive file by source_file_path
@@ -946,14 +949,16 @@ When you receive approval requests, use the buttons to approve, request changes,
                 result = await transcript_watcher.reprocess_file(drive_file["id"])
                 status = result.get("status", "unknown")
                 deleted = result.get("deleted_old", {})
-                await self.send_message(
-                    update.effective_chat.id,
-                    f"Reprocess complete: *{title}*\n"
-                    f"Status: {status}\n"
-                    f"Deleted: {deleted.get('embeddings', 0)} embeddings, "
-                    f"{deleted.get('tasks', 0)} tasks"
-                    if deleted else f"Reprocess complete: *{title}*\nStatus: {status}",
-                )
+                if deleted:
+                    msg = (
+                        f"Reprocess complete: *{safe_title}*\n"
+                        f"Status: {status}\n"
+                        f"Deleted: {deleted.get('embeddings', 0)} embeddings, "
+                        f"{deleted.get('tasks', 0)} tasks"
+                    )
+                else:
+                    msg = f"Reprocess complete: *{safe_title}*\nStatus: {status}"
+                await self.send_message(update.effective_chat.id, msg)
                 return
 
         # File not found in Drive — cascade delete and ask to re-upload
@@ -961,7 +966,7 @@ When you receive approval requests, use the buttons to approve, request changes,
         await self.send_message(
             update.effective_chat.id,
             f"Source file not found in Drive.\n"
-            f"Deleted old data for *{title}*: "
+            f"Deleted old data for *{safe_title}*: "
             f"{deleted.get('embeddings', 0)} embeddings, "
             f"{deleted.get('tasks', 0)} tasks.\n\n"
             f"Please re-upload the transcript file to the raw transcripts folder.",
