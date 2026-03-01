@@ -138,6 +138,12 @@ class TranscriptWatcher:
                     "status": "error",
                     "error": str(e),
                 })
+                # Alert on pipeline failure
+                from core.error_alerting import alert_critical_error
+                await alert_critical_error(
+                    component="transcript_pipeline",
+                    error_message=f"Failed to process '{file.get('name')}': {e}",
+                )
 
         return results
 

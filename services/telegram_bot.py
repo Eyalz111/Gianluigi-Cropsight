@@ -55,6 +55,13 @@ def _escape_html(text: str) -> str:
     )
 
 
+def _escape_markdown(text: str) -> str:
+    """Escape Markdown special characters for Telegram Markdown parse mode."""
+    for ch in ("*", "_", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def _format_cross_reference_section(cross_ref: dict) -> list[str]:
     """
     Format cross-reference results as HTML lines for the Telegram approval message.
@@ -185,6 +192,8 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("retract", self._handle_retract))
         self.app.add_handler(CommandHandler("reprocess", self._handle_reprocess))
         self.app.add_handler(CommandHandler("cost", self._handle_cost))
+        self.app.add_handler(CommandHandler("meetings", self._handle_meetings))
+        self.app.add_handler(CommandHandler("status", self._handle_status))
         self.app.add_handler(CommandHandler("myid", self._handle_myid))
 
         # Add callback handler for inline buttons (approval flow)
@@ -705,6 +714,154 @@ Or just send me a question and I'll search our meeting history to answer it!
                 f"Error fetching cost data: {e}",
             )
 
+    async def _handle_meetings(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """
+        Handle /meetings command — browse past meetings.
+
+        /meetings          — List last 10 meetings
+        /meetings <title>  — Search by title
+        """
+        from services.supabase_client import supabase_client
+
+        try:
+            if context.args:
+                # Search by title
+                search_term = " ".join(context.args)
+                meetings = supabase_client.list_meetings(limit=50)
+                # Filter by title (case-insensitive)
+                term_lower = search_term.lower()
+                meetings = [
+                    m for m in meetings
+                    if term_lower in m.get("title", "").lower()
+                ][:10]
+                header = f"*Meetings matching:* _{_escape_markdown(search_term)}_\n"
+            else:
+                meetings = supabase_client.list_meetings(limit=10)
+                header = "*Recent Meetings (last 10):*\n"
+
+            if not meetings:
+                await self.send_message(
+                    update.effective_chat.id,
+                    "No meetings found.",
+                )
+                return
+
+            lines = [header]
+            for i, m in enumerate(meetings, 1):
+                title = _escape_markdown(m.get("title", "Untitled"))
+                date = m.get("date", "")[:10]
+                participants = m.get("participants", [])
+                p_count = len(participants) if participants else 0
+                status = m.get("approval_status", "unknown")
+
+                lines.append(
+                    f"*{i}.* {title}\n"
+                    f"   {date} | {p_count} participants | {status}"
+                )
+
+            await self.send_message(update.effective_chat.id, "\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"Error in /meetings command: {e}")
+            await self.send_message(
+                update.effective_chat.id,
+                f"Error fetching meetings: {e}",
+            )
+
+    async def _handle_status(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """
+        Handle /status command — system dashboard.
+
+        Admin-only. Shows key metrics: meetings, tasks, commitments,
+        API cost, and environment.
+        """
+        user = update.effective_user
+        if not self._is_admin(user.id):
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can view system status.",
+            )
+            return
+
+        from services.supabase_client import supabase_client
+        from datetime import datetime, timedelta
+
+        try:
+            # Gather metrics
+            meetings = supabase_client.list_meetings(limit=1000)
+            meetings_count = len(meetings)
+            last_meeting = meetings[0] if meetings else None
+            last_date = last_meeting.get("date", "")[:10] if last_meeting else "never"
+
+            all_tasks = supabase_client.get_tasks(status=None)
+            total_tasks = len(all_tasks)
+            open_tasks = len([t for t in all_tasks if t.get("status") == "pending"])
+            overdue_tasks = len([
+                t for t in all_tasks
+                if t.get("status") == "pending"
+                and t.get("deadline")
+                and t["deadline"] < datetime.now().strftime("%Y-%m-%d")
+            ])
+
+            open_commitments = supabase_client.get_commitments(status="open")
+            open_c = len(open_commitments)
+            two_weeks_ago = (datetime.now() - timedelta(weeks=2)).isoformat()
+            stale_c = len([
+                c for c in open_commitments
+                if c.get("created_at", "") < two_weeks_ago
+            ])
+
+            documents = supabase_client.list_documents(limit=1000)
+            docs_count = len(documents)
+
+            # API cost (last 30 days)
+            thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
+            try:
+                usage_rows = (
+                    supabase_client.client.table("token_usage")
+                    .select("input_tokens,output_tokens")
+                    .gte("created_at", thirty_days_ago)
+                    .execute()
+                ).data
+                total_tokens = sum(
+                    (r.get("input_tokens", 0) + r.get("output_tokens", 0))
+                    for r in usage_rows
+                ) if usage_rows else 0
+            except Exception:
+                total_tokens = 0
+
+            from config.settings import settings as _settings
+            env = _settings.ENVIRONMENT
+
+            lines = [
+                "*Gianluigi Status*\n",
+                f"Meetings processed: {meetings_count}",
+                f"Last processing: {last_date}",
+                f"Documents ingested: {docs_count}",
+                f"Tasks tracked: {total_tasks}",
+                f"Open tasks: {open_tasks} | Overdue: {overdue_tasks}",
+                f"Open commitments: {open_c} | Stale (2+ weeks): {stale_c}",
+                f"Monthly tokens: {total_tokens:,}",
+                f"Environment: {env}",
+            ]
+
+            await self.send_message(update.effective_chat.id, "\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"Error in /status command: {e}")
+            await self.send_message(
+                update.effective_chat.id,
+                f"Error fetching status: {e}",
+            )
+
     async def _handle_myid(
         self,
         update: Update,
@@ -745,11 +902,16 @@ Or just send me a question and I'll search our meeting history to answer it!
 /help - This help message
 /tasks - Show your open tasks
 /mytasks - Same as /tasks
-/search [topic] - Search meeting history for a topic
+/search [query] - Search meetings and documents
+/search -m [query] - Search meetings only
+/search -d [query] - Search documents only
+/meetings - List recent meetings
+/meetings [title] - Search meetings by title
 /decisions - List recent key decisions
 /questions - List open questions
 /reprocess [title] - Reprocess a transcript (Eyal only)
 /cost - API token usage summary (Eyal only)
+/status - System dashboard (Eyal only)
 
 *Ask Questions:*
 Just type your question and I'll search our meeting history to answer it.
@@ -817,37 +979,110 @@ When you receive approval requests, use the buttons to approve, request changes,
         """
         Handle /search command.
 
-        Searches meeting history for a topic.
+        Searches meetings and/or documents for a topic.
+        Supports flags: -m (meetings only), -d (documents only).
         """
-        # Get search query from command arguments
-        if context.args:
-            query = " ".join(context.args)
-        else:
+        if not context.args:
             await self.send_message(
                 update.effective_chat.id,
-                "Usage: /search [topic]\n\nExample: /search cloud providers"
+                "Usage: /search [query]\n"
+                "  /search -m [query]  — meetings only\n"
+                "  /search -d [query]  — documents only\n\n"
+                "Example: /search cloud providers"
             )
             return
 
-        # Perform search
+        # Parse flags
+        args = list(context.args)
+        source_filter = None  # None = both
+        if args[0] == "-m":
+            source_filter = "meeting"
+            args = args[1:]
+        elif args[0] == "-d":
+            source_filter = "document"
+            args = args[1:]
+
+        if not args:
+            await self.send_message(
+                update.effective_chat.id,
+                "Please provide a search query after the flag."
+            )
+            return
+
+        query = " ".join(args)
+
         await self.send_message(
             update.effective_chat.id,
             f"Searching for: _{query}_..."
         )
 
-        # Import here to avoid circular imports
-        from core.agent import gianluigi_agent
+        from services.supabase_client import supabase_client
+        from services.embeddings import embedding_service
 
-        user_id = self._get_user_id(update.effective_user.id) or "unknown"
-        result = await gianluigi_agent.process_message(
-            user_message=f"Search our meeting history for: {query}",
-            user_id=user_id,
-        )
+        try:
+            # Embed the query for semantic search
+            query_embedding = await embedding_service.embed_text(query)
+            results = supabase_client.search_embeddings(
+                query_embedding=query_embedding,
+                limit=10,
+                source_type=source_filter,
+            )
 
-        await self.send_message(
-            update.effective_chat.id,
-            result.get("response", "No results found.")
-        )
+            if not results:
+                await self.send_message(
+                    update.effective_chat.id,
+                    f"No results found for: {query}"
+                )
+                return
+
+            # Deduplicate by source_id and take top 3
+            seen = set()
+            top_results = []
+            for r in results:
+                sid = r.get("source_id")
+                if sid not in seen:
+                    seen.add(sid)
+                    top_results.append(r)
+                if len(top_results) >= 3:
+                    break
+
+            # Format results
+            lines = [f"*Search Results for:* _{_escape_markdown(query)}_\n"]
+            for i, r in enumerate(top_results, 1):
+                source_type = r.get("source_type", "unknown")
+                chunk = r.get("chunk_text", "")[:200]
+                similarity = r.get("similarity", 0)
+
+                # Try to get source title
+                source_id = r.get("source_id", "")
+                if source_type == "meeting":
+                    meeting = supabase_client.get_meeting(source_id)
+                    title = meeting.get("title", "Unknown") if meeting else "Unknown"
+                    date = (meeting.get("date", "")[:10] if meeting else "")
+                    lines.append(f"*{i}. {_escape_markdown(title)}* ({date})")
+                else:
+                    doc = supabase_client.get_document(source_id)
+                    title = doc.get("title", "Unknown") if doc else "Unknown"
+                    lines.append(f"*{i}. {_escape_markdown(title)}* (document)")
+
+                lines.append(f"  _{_escape_markdown(chunk)}_...")
+                lines.append("")
+
+            await self.send_message(update.effective_chat.id, "\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"Error in /search: {e}")
+            # Fall back to agent-based search
+            from core.agent import gianluigi_agent
+            user_id = self._get_user_id(update.effective_user.id) or "unknown"
+            result = await gianluigi_agent.process_message(
+                user_message=f"Search our meeting history for: {query}",
+                user_id=user_id,
+            )
+            await self.send_message(
+                update.effective_chat.id,
+                result.get("response", "No results found.")
+            )
 
     async def _handle_decisions(
         self,

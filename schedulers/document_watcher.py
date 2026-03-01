@@ -115,6 +115,11 @@ class DocumentWatcher:
                     "status": "error",
                     "error": str(e),
                 })
+                from core.error_alerting import alert_critical_error
+                await alert_critical_error(
+                    component="document_pipeline",
+                    error_message=f"Failed to process '{file.get('name')}': {e}",
+                )
 
         return results
 
