@@ -290,6 +290,10 @@ class TranscriptWatcher:
             if result.get("cross_reference"):
                 approval_content["cross_reference"] = result["cross_reference"]
 
+            # v0.4.1: Include commitments for Sheets dashboard
+            if result.get("commitments"):
+                approval_content["commitments"] = result["commitments"]
+
             await submit_for_approval(
                 content_type="meeting_summary",
                 content=approval_content,
@@ -521,6 +525,49 @@ class TranscriptWatcher:
             content=content,
             metadata=metadata,
         )
+
+    async def reprocess_file(self, file_id: str) -> dict:
+        """
+        Reprocess a transcript file by deleting the old meeting data first.
+
+        1. Gets filename from Drive
+        2. Finds existing meeting by source_file_path
+        3. If found: cascade deletes all related data
+        4. Processes the file fresh via process_file_manually
+
+        Args:
+            file_id: Google Drive file ID.
+
+        Returns:
+            Processing result dict with reprocess metadata.
+        """
+        from services.supabase_client import supabase_client
+
+        # Get file metadata to find the name
+        file = await drive_service.get_file_metadata(file_id)
+        if not file:
+            return {"status": "error", "error": "File not found in Drive"}
+
+        filename = file.get("name", "")
+        deleted = None
+
+        # Find existing meeting by source file path
+        existing = supabase_client.find_meeting_by_source(filename)
+        if existing:
+            meeting_id = existing["id"]
+            logger.info(
+                f"Reprocessing: deleting existing meeting '{existing.get('title')}' "
+                f"({meeting_id})"
+            )
+            deleted = supabase_client.delete_meeting_cascade(meeting_id)
+
+        # Process fresh
+        result = await self.process_file_manually(file_id)
+        result["reprocessed"] = True
+        if deleted:
+            result["deleted_old"] = deleted
+
+        return result
 
 
 # Singleton instance

@@ -447,6 +447,76 @@ class GoogleDriveService:
             logger.error(f"Error uploading file {filename}: {e}")
             return {}
 
+    async def _upload_bytes_file(
+        self,
+        data: bytes,
+        filename: str,
+        folder_id: str,
+        mime_type: str,
+    ) -> dict:
+        """
+        Upload a binary file to a specified folder.
+
+        Args:
+            data: Raw bytes of the file.
+            filename: Name for the file.
+            folder_id: Target folder ID.
+            mime_type: MIME type of the content.
+
+        Returns:
+            File metadata including the new file ID and webViewLink.
+        """
+        try:
+            file_metadata = {
+                "name": filename,
+                "parents": [folder_id],
+            }
+
+            media = MediaIoBaseUpload(
+                io.BytesIO(data),
+                mimetype=mime_type,
+                resumable=True,
+            )
+
+            file = self.service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id, name, webViewLink, createdTime",
+            ).execute()
+
+            logger.info(f"Uploaded file: {filename} ({file.get('id')})")
+            return file
+
+        except Exception as e:
+            logger.error(f"Error uploading file {filename}: {e}")
+            return {}
+
+    async def save_meeting_summary_docx(
+        self,
+        data: bytes,
+        filename: str,
+    ) -> dict:
+        """
+        Save a Word document meeting summary to the Meeting Summaries folder.
+
+        Args:
+            data: Raw bytes of the .docx file.
+            filename: Name for the file (e.g., "2026-03-01 - Strategy.docx").
+
+        Returns:
+            File metadata including the new file ID and webViewLink.
+        """
+        if not settings.MEETING_SUMMARIES_FOLDER_ID:
+            logger.warning("MEETING_SUMMARIES_FOLDER_ID not configured")
+            return {}
+
+        return await self._upload_bytes_file(
+            data=data,
+            filename=filename,
+            folder_id=settings.MEETING_SUMMARIES_FOLDER_ID,
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
     async def update_file(self, file_id: str, content: str) -> dict:
         """
         Update an existing file's content.

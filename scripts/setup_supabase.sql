@@ -401,6 +401,24 @@ CREATE TRIGGER update_pending_approvals_updated_at
     EXECUTE FUNCTION update_updated_at_column();
 
 
+-- =============================================================================
+-- Calendar Classifications (v0.4.1 — Meeting Classification Memory)
+-- =============================================================================
+
+-- Remember Eyal's meeting classification answers so similar meetings
+-- can be auto-classified without asking again.
+CREATE TABLE IF NOT EXISTS calendar_classifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    title_lower TEXT GENERATED ALWAYS AS (lower(title)) STORED,
+    is_cropsight BOOLEAN NOT NULL,
+    classified_by TEXT DEFAULT 'eyal',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cal_class_title_lower ON calendar_classifications(title_lower);
+
+
 -- RPC function for full-text search on embeddings
 -- Called via: supabase.rpc('search_embeddings_fulltext', {...})
 CREATE OR REPLACE FUNCTION search_embeddings_fulltext(

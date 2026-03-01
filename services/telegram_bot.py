@@ -183,6 +183,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("decisions", self._handle_decisions))
         self.app.add_handler(CommandHandler("questions", self._handle_questions))
         self.app.add_handler(CommandHandler("retract", self._handle_retract))
+        self.app.add_handler(CommandHandler("reprocess", self._handle_reprocess))
         self.app.add_handler(CommandHandler("myid", self._handle_myid))
 
         # Add callback handler for inline buttons (approval flow)
@@ -644,6 +645,7 @@ Or just send me a question and I'll search our meeting history to answer it!
 /search [topic] - Search meeting history for a topic
 /decisions - List recent key decisions
 /questions - List open questions
+/reprocess [title] - Reprocess a transcript (Eyal only)
 
 *Ask Questions:*
 Just type your question and I'll search our meeting history to answer it.
@@ -847,6 +849,122 @@ When you receive approval requests, use the buttons to approve, request changes,
             f"Retracted summary for: *{title}*\n\n"
             f"The summary has been unpublished. Team notifications cannot be unsent "
             f"but the Drive document status has been updated."
+        )
+
+    async def _handle_reprocess(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """
+        Handle /reprocess command — re-run transcript processing.
+
+        Admin-only (Eyal). Deletes old meeting data and reprocesses the file.
+        Usage:
+            /reprocess            — list 10 recent meetings
+            /reprocess <title>    — search by partial title
+        """
+        user = update.effective_user
+        if not self._is_admin(user.id):
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can reprocess transcripts.",
+            )
+            return
+
+        from services.supabase_client import supabase_client
+        from schedulers.transcript_watcher import transcript_watcher
+
+        # Parse args — everything after /reprocess
+        args = " ".join(context.args) if context.args else ""
+
+        if not args:
+            # No args — list 10 recent meetings
+            meetings = supabase_client.list_meetings(limit=10)
+            if not meetings:
+                await self.send_message(
+                    update.effective_chat.id,
+                    "No meetings found in the database.",
+                )
+                return
+
+            lines = ["*Recent Meetings:*\n"]
+            for m in meetings:
+                date = m.get("date", "")[:10]
+                title = m.get("title", "Unknown")
+                lines.append(f"• {date} — {title}")
+            lines.append("\nUse `/reprocess <title>` to reprocess a specific meeting.")
+            await self.send_message(update.effective_chat.id, "\n".join(lines))
+            return
+
+        # Search by title
+        matches = supabase_client.search_meetings_by_title(args)
+
+        if not matches:
+            await self.send_message(
+                update.effective_chat.id,
+                f"No meetings found matching '{args}'.",
+            )
+            return
+
+        if len(matches) > 1:
+            lines = [f"Multiple matches for '{args}':\n"]
+            for m in matches:
+                date = m.get("date", "")[:10]
+                title = m.get("title", "Unknown")
+                lines.append(f"• {date} — {title}")
+            lines.append("\nPlease be more specific.")
+            await self.send_message(update.effective_chat.id, "\n".join(lines))
+            return
+
+        # Single match — reprocess
+        meeting = matches[0]
+        meeting_id = meeting["id"]
+        title = meeting.get("title", "Unknown")
+        source_path = meeting.get("source_file_path", "")
+
+        await self.send_message(
+            update.effective_chat.id,
+            f"Reprocessing: *{title}*\nLooking for source file...",
+        )
+
+        # Find the Drive file by source_file_path
+        from services.google_drive import drive_service
+
+        if source_path and settings.RAW_TRANSCRIPTS_FOLDER_ID:
+            files = await drive_service.list_files_in_folder(
+                settings.RAW_TRANSCRIPTS_FOLDER_ID,
+            )
+            # Match by filename
+            source_name = source_path.split("/")[-1] if "/" in source_path else source_path
+            drive_file = next(
+                (f for f in files if source_name.lower() in f.get("name", "").lower()),
+                None,
+            )
+
+            if drive_file:
+                result = await transcript_watcher.reprocess_file(drive_file["id"])
+                status = result.get("status", "unknown")
+                deleted = result.get("deleted_old", {})
+                await self.send_message(
+                    update.effective_chat.id,
+                    f"Reprocess complete: *{title}*\n"
+                    f"Status: {status}\n"
+                    f"Deleted: {deleted.get('embeddings', 0)} embeddings, "
+                    f"{deleted.get('tasks', 0)} tasks"
+                    if deleted else f"Reprocess complete: *{title}*\nStatus: {status}",
+                )
+                return
+
+        # File not found in Drive — cascade delete and ask to re-upload
+        deleted = supabase_client.delete_meeting_cascade(meeting_id)
+        await self.send_message(
+            update.effective_chat.id,
+            f"Source file not found in Drive.\n"
+            f"Deleted old data for *{title}*: "
+            f"{deleted.get('embeddings', 0)} embeddings, "
+            f"{deleted.get('tasks', 0)} tasks.\n\n"
+            f"Please re-upload the transcript file to the raw transcripts folder.",
         )
 
     # =========================================================================

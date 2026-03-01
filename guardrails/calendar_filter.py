@@ -194,19 +194,28 @@ def remember_meeting_classification(title: str, is_cropsight: bool) -> None:
     Remember a meeting classification for future similar titles.
 
     This helps avoid asking Eyal about similar meetings repeatedly.
+    Stores in Supabase for persistence across restarts.
 
     Args:
         title: The meeting title.
         is_cropsight: Whether it was classified as CropSight.
     """
-    # TODO: Store in database for future reference
-    # This could be a simple lookup table or ML model in v0.2+
-    pass
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from services.supabase_client import supabase_client
+        supabase_client.remember_classification(title, is_cropsight)
+    except Exception as e:
+        logger.warning(f"Failed to remember classification: {e}")
 
 
 def check_remembered_classification(title: str) -> bool | None:
     """
     Check if we've seen a similar meeting title before.
+
+    Two-pass approach:
+    1. Exact match (case-insensitive) — fast and reliable
+    2. Fuzzy match (word overlap) — catches renamed/similar meetings
 
     Args:
         title: The meeting title to check.
@@ -214,7 +223,106 @@ def check_remembered_classification(title: str) -> bool | None:
     Returns:
         True/False if we have a remembered classification, None otherwise.
     """
-    # TODO: Query database for similar titles
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from services.supabase_client import supabase_client
+
+        # Pass 1: Exact match (case-insensitive via title_lower column)
+        exact = supabase_client.get_classification_by_title(title)
+        if exact is not None:
+            logger.info(
+                f"Exact classification match for '{title}': "
+                f"{'CropSight' if exact['is_cropsight'] else 'Personal'}"
+            )
+            return exact["is_cropsight"]
+
+        # Pass 2: Fuzzy match against all past classifications
+        all_classifications = supabase_client.get_all_classifications()
+        if all_classifications:
+            fuzzy_result = _find_fuzzy_match(title, all_classifications)
+            if fuzzy_result is not None:
+                logger.info(
+                    f"Fuzzy classification match for '{title}': "
+                    f"{'CropSight' if fuzzy_result else 'Personal'}"
+                )
+                return fuzzy_result
+
+    except Exception as e:
+        logger.warning(f"Failed to check remembered classification: {e}")
+
+    return None
+
+
+# Stop words for fuzzy matching — common meeting words that don't help distinguish
+_STOP_WORDS = frozenset({
+    "meeting", "call", "sync", "weekly", "daily", "standup", "stand-up",
+    "biweekly", "monthly", "review", "update", "check-in", "checkin",
+    "chat", "discussion", "session", "catchup", "catch-up", "followup",
+    "follow-up", "with", "and", "the", "for", "about", "on", "re",
+})
+
+
+def _extract_significant_words(title: str) -> set[str]:
+    """
+    Extract significant words from a meeting title.
+
+    Strips punctuation, lowercases, removes stop words and very short words.
+
+    Args:
+        title: The meeting title.
+
+    Returns:
+        Set of significant lowercase words.
+    """
+    import re
+    # Lowercase and strip punctuation (keep alphanumeric + spaces)
+    cleaned = re.sub(r"[^\w\s]", " ", title.lower())
+    words = cleaned.split()
+    # Remove stop words and words with 1-2 characters
+    return {w for w in words if w not in _STOP_WORDS and len(w) > 2}
+
+
+def _find_fuzzy_match(
+    title: str,
+    classifications: list[dict],
+    threshold: float = 0.6,
+) -> bool | None:
+    """
+    Find a fuzzy match for a title against past classifications.
+
+    Uses word-overlap scoring: if 60%+ of the new title's significant
+    words match a past title's significant words, return that classification.
+
+    Args:
+        title: The new meeting title.
+        classifications: List of past classification records.
+        threshold: Minimum overlap ratio to consider a match (default 0.6).
+
+    Returns:
+        True/False if a match is found above threshold, None otherwise.
+    """
+    new_words = _extract_significant_words(title)
+    if not new_words:
+        return None
+
+    best_score = 0.0
+    best_match = None
+
+    for record in classifications:
+        past_words = _extract_significant_words(record.get("title", ""))
+        if not past_words:
+            continue
+
+        # Overlap = intersection / new_words count
+        overlap = len(new_words & past_words) / len(new_words)
+        if overlap > best_score:
+            best_score = overlap
+            best_match = record
+
+    if best_score >= threshold and best_match is not None:
+        return best_match["is_cropsight"]
+
     return None
 
 

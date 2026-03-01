@@ -210,6 +210,106 @@ class SupabaseClient:
             return {}
         return result.data[0]
 
+    def delete_meeting_cascade(self, meeting_id: str) -> dict:
+        """
+        Delete a meeting and all related data.
+
+        Deletion order matters due to foreign key constraints:
+        1. embeddings (source_id = meeting_id, no FK cascade)
+        2. tasks (meeting_id, ON DELETE SET NULL would orphan them)
+        3. meeting (cascades: decisions, follow_ups, open_questions,
+           task_mentions, entity_mentions, commitments, pending_approvals)
+
+        Args:
+            meeting_id: UUID of the meeting to delete.
+
+        Returns:
+            Dict with counts of deleted records by type.
+        """
+        counts = {"embeddings": 0, "tasks": 0, "meetings": 0}
+
+        try:
+            # 1. Delete embeddings (source_id references meeting, no cascade)
+            emb_result = (
+                self.client.table("embeddings")
+                .delete()
+                .eq("source_id", meeting_id)
+                .execute()
+            )
+            counts["embeddings"] = len(emb_result.data) if emb_result.data else 0
+
+            # 2. Delete tasks (ON DELETE SET NULL would orphan them)
+            task_result = (
+                self.client.table("tasks")
+                .delete()
+                .eq("meeting_id", meeting_id)
+                .execute()
+            )
+            counts["tasks"] = len(task_result.data) if task_result.data else 0
+
+            # 3. Delete meeting (cascades: decisions, follow_ups,
+            #    open_questions, task_mentions, entity_mentions,
+            #    commitments, pending_approvals)
+            mtg_result = (
+                self.client.table("meetings")
+                .delete()
+                .eq("id", meeting_id)
+                .execute()
+            )
+            counts["meetings"] = len(mtg_result.data) if mtg_result.data else 0
+
+            logger.info(
+                f"Cascade-deleted meeting {meeting_id}: "
+                f"{counts['embeddings']} embeddings, "
+                f"{counts['tasks']} tasks, "
+                f"{counts['meetings']} meetings"
+            )
+
+        except Exception as e:
+            logger.error(f"Error during cascade delete of {meeting_id}: {e}")
+
+        return counts
+
+    def find_meeting_by_source(self, source_file_path: str) -> dict | None:
+        """
+        Find a meeting by its source file path (case-insensitive partial match).
+
+        Args:
+            source_file_path: Filename or path fragment to search for.
+
+        Returns:
+            Meeting record or None.
+        """
+        result = (
+            self.client.table("meetings")
+            .select("*")
+            .ilike("source_file_path", f"%{source_file_path}%")
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def search_meetings_by_title(self, title_query: str, limit: int = 10) -> list[dict]:
+        """
+        Search meetings by title (case-insensitive partial match).
+
+        Args:
+            title_query: Partial title to search for.
+            limit: Maximum results.
+
+        Returns:
+            List of matching meeting records.
+        """
+        result = (
+            self.client.table("meetings")
+            .select("id, title, date, source_file_path")
+            .ilike("title", f"%{title_query}%")
+            .order("date", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data
+
     def list_meetings(
         self,
         date_from: datetime | None = None,
@@ -407,6 +507,23 @@ class SupabaseClient:
         Returns:
             List of created task records.
         """
+        # Filter out tasks missing required fields (assignee or title)
+        valid_tasks = []
+        for t in tasks:
+            if not t.get("assignee"):
+                logger.warning(
+                    f"Skipping task with no assignee: {t.get('title', '?')}"
+                )
+                continue
+            if not t.get("title"):
+                logger.warning(f"Skipping task with no title")
+                continue
+            valid_tasks.append(t)
+
+        if not valid_tasks:
+            logger.info("No valid tasks to insert after filtering")
+            return []
+
         data = [
             {
                 "meeting_id": meeting_id,
@@ -418,7 +535,7 @@ class SupabaseClient:
                 "status": "pending",
                 "category": t.get("category"),
             }
-            for t in tasks
+            for t in valid_tasks
         ]
 
         result = self.client.table("tasks").insert(data).execute()
@@ -1553,6 +1670,77 @@ class SupabaseClient:
             .select("*")
             .eq("status", "pending")
             .not_.is_("auto_publish_at", "null")
+            .execute()
+        )
+        return result.data
+
+    # =========================================================================
+    # Calendar Classifications (v0.4.1 — Meeting Classification Memory)
+    # =========================================================================
+
+    def remember_classification(
+        self,
+        title: str,
+        is_cropsight: bool,
+        classified_by: str = "eyal",
+    ) -> dict:
+        """
+        Store a meeting classification for future reference.
+
+        Args:
+            title: The meeting title as classified.
+            is_cropsight: Whether it was classified as CropSight.
+            classified_by: Who made the classification (default 'eyal').
+
+        Returns:
+            Created record dict.
+        """
+        data = {
+            "title": title,
+            "is_cropsight": is_cropsight,
+            "classified_by": classified_by,
+        }
+        result = self.client.table("calendar_classifications").insert(data).execute()
+        logger.info(
+            f"Remembered classification: '{title}' → "
+            f"{'CropSight' if is_cropsight else 'Personal'}"
+        )
+        return result.data[0] if result.data else {}
+
+    def get_classification_by_title(self, title: str) -> dict | None:
+        """
+        Look up a classification by exact title match (case-insensitive).
+
+        Args:
+            title: The meeting title to look up.
+
+        Returns:
+            Classification record or None if not found.
+        """
+        result = (
+            self.client.table("calendar_classifications")
+            .select("*")
+            .eq("title_lower", title.lower())
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def get_all_classifications(self, limit: int = 100) -> list[dict]:
+        """
+        Get all stored classifications (for fuzzy matching).
+
+        Args:
+            limit: Maximum records to return.
+
+        Returns:
+            List of classification records.
+        """
+        result = (
+            self.client.table("calendar_classifications")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
             .execute()
         )
         return result.data

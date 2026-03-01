@@ -1082,6 +1082,129 @@ class GoogleSheetsService:
             return False
 
     # =========================================================================
+    # Commitment Dashboard (v0.4.1)
+    # =========================================================================
+
+    async def ensure_commitments_tab(self) -> int | None:
+        """
+        Ensure a 'Commitments' tab exists in the Task Tracker spreadsheet.
+
+        Creates the tab with a header row if it doesn't exist.
+
+        Returns:
+            The sheetId of the Commitments tab, or None if no spreadsheet configured.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            logger.warning("TASK_TRACKER_SHEET_ID not configured")
+            return None
+
+        try:
+            # Check existing tabs
+            metadata = self.service.spreadsheets().get(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                fields="sheets.properties",
+            ).execute()
+
+            for sheet in metadata.get("sheets", []):
+                props = sheet.get("properties", {})
+                if props.get("title") == "Commitments":
+                    logger.info(f"Commitments tab already exists (sheetId={props['sheetId']})")
+                    return props["sheetId"]
+
+            # Create the tab
+            result = self.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={
+                    "requests": [
+                        {
+                            "addSheet": {
+                                "properties": {"title": "Commitments"}
+                            }
+                        }
+                    ]
+                },
+            ).execute()
+
+            new_sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
+            logger.info(f"Created Commitments tab (sheetId={new_sheet_id})")
+
+            # Add header row
+            headers = [
+                "Commitment", "Owner", "Deadline", "Status",
+                "Source Meeting", "Created Date",
+            ]
+            self.service.spreadsheets().values().update(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range="Commitments!A1:F1",
+                valueInputOption="RAW",
+                body={"values": [headers]},
+            ).execute()
+
+            return new_sheet_id
+
+        except Exception as e:
+            logger.error(f"Error ensuring Commitments tab: {e}")
+            return None
+
+    async def add_commitments_batch_to_sheet(
+        self,
+        commitments: list[dict],
+        source_meeting: str,
+        created_date: str,
+    ) -> bool:
+        """
+        Add a batch of commitments to the Commitments tab.
+
+        Args:
+            commitments: List of commitment dicts.
+            source_meeting: Meeting title where commitments were extracted.
+            created_date: Date string of the meeting.
+
+        Returns:
+            True if commitments were added successfully.
+        """
+        if not commitments:
+            return True  # no-op
+
+        if not settings.TASK_TRACKER_SHEET_ID:
+            logger.warning("TASK_TRACKER_SHEET_ID not configured")
+            return False
+
+        try:
+            # Ensure tab exists
+            sheet_id = await self.ensure_commitments_tab()
+            if sheet_id is None:
+                return False
+
+            # Build rows
+            rows = []
+            for c in commitments:
+                rows.append([
+                    c.get("commitment_text", ""),
+                    c.get("speaker", ""),
+                    c.get("implied_deadline", ""),
+                    c.get("status", "open"),
+                    source_meeting,
+                    created_date,
+                ])
+
+            # Append to the Commitments tab
+            self.service.spreadsheets().values().append(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range="Commitments!A:F",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": rows},
+            ).execute()
+
+            logger.info(f"Added {len(rows)} commitments to Commitments tab")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error adding commitments to sheet: {e}")
+            return False
+
+    # =========================================================================
     # Sheet Formatting
     # =========================================================================
 

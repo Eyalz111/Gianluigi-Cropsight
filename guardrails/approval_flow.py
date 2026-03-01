@@ -840,6 +840,31 @@ async def distribute_approved_content(
     except Exception as e:
         logger.error(f"Error saving to Drive: {e}")
 
+    # 1b. Generate and save Word document
+    try:
+        from services.word_generator import generate_summary_docx
+        docx_bytes = generate_summary_docx(
+            meeting_title=meeting_title,
+            meeting_date=meeting_date,
+            participants=meeting_record.get("participants", []) if meeting_record else [],
+            duration_minutes=meeting_record.get("duration_minutes", 0) if meeting_record else 0,
+            sensitivity=sensitivity,
+            decisions=content.get("decisions", []),
+            tasks=tasks,
+            follow_ups=follow_ups,
+            open_questions=open_questions,
+            discussion_summary=content.get("discussion_summary", ""),
+            stakeholders_mentioned=content.get("stakeholders", []),
+        )
+        docx_result = await drive_service.save_meeting_summary_docx(
+            data=docx_bytes,
+            filename=f"{meeting_date} - {meeting_title}.docx",
+        )
+        results["docx_link"] = docx_result.get("webViewLink", "")
+        logger.info(f"Saved .docx to Drive: {docx_result.get('id')}")
+    except Exception as e:
+        logger.error(f"Error saving Word document: {e}")
+
     # 2. Add tasks to Google Sheets Task Tracker
     try:
         if tasks:
@@ -859,6 +884,21 @@ async def distribute_approved_content(
             logger.info(f"Added {len(tasks)} tasks to tracker")
     except Exception as e:
         logger.error(f"Error adding tasks to Sheets: {e}")
+
+    # 2b. Add commitments to Commitments tab
+    try:
+        commitments = content.get("commitments", [])
+        if not commitments and meeting_id:
+            commitments = supabase_client.get_commitments(meeting_id=meeting_id)
+        if commitments:
+            await sheets_service.add_commitments_batch_to_sheet(
+                commitments=commitments,
+                source_meeting=meeting_title,
+                created_date=meeting_date,
+            )
+            results["commitments_added"] = len(commitments)
+    except Exception as e:
+        logger.error(f"Error adding commitments to Sheets: {e}")
 
     # 3. Add follow-up meetings to Task Tracker as action items
     try:
