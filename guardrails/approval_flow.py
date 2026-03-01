@@ -279,6 +279,7 @@ async def submit_for_approval(
     follow_ups = content.get("follow_ups", [])
     open_questions = content.get("open_questions", [])
     discussion_summary = content.get("discussion_summary", "")
+    executive_summary = content.get("executive_summary", "")
     meeting_date = content.get("date", datetime.now().strftime("%Y-%m-%d"))
 
     if content_type == "meeting_prep":
@@ -342,11 +343,13 @@ async def submit_for_approval(
             follow_ups=follow_ups,
             open_questions=open_questions,
             cross_reference=cross_ref,
+            executive_summary=executive_summary,
         )
 
         email_sent = await gmail_service.send_approval_request(
             meeting_title=meeting_title,
             summary_preview=summary,
+            executive_summary=executive_summary,
         )
 
     # Inject approval context into conversation memory so the agent knows
@@ -806,6 +809,7 @@ async def distribute_approved_content(
 
     meeting_title = content.get("title", "Untitled")
     summary = content.get("summary", "")
+    exec_summary = content.get("executive_summary", "")
     meeting_date = content.get("date", datetime.now().strftime("%Y-%m-%d"))
     tasks = content.get("tasks", [])
     follow_ups = content.get("follow_ups", [])
@@ -949,6 +953,8 @@ async def distribute_approved_content(
                 summary_content=summary,
                 drive_link=results.get("drive_link", ""),
                 meeting_date=meeting_date,
+                executive_summary=exec_summary,
+                tasks=tasks,
             )
             results["email_sent"] = email_result
             results["emails_to"] = distribution_emails

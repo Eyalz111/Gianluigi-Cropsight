@@ -17,10 +17,13 @@ Usage:
     prep = await generate_meeting_prep(calendar_event_id="...")
 """
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
 
+from config.settings import settings
+from core.llm import call_llm
 from services.google_calendar import calendar_service
 from services.google_sheets import sheets_service
 from services.supabase_client import supabase_client
@@ -78,7 +81,17 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
     # 7. Find open tasks for each participant
     participant_tasks = await find_participant_tasks(participant_names)
 
-    # 8. Build the Markdown prep document
+    # 8. Synthesize strategic insights from all gathered context
+    synthesis = await synthesize_prep_insights(
+        topic=topic,
+        participant_names=participant_names,
+        related_meetings=related_meetings,
+        relevant_decisions=relevant_decisions,
+        open_questions=open_questions,
+        participant_tasks=participant_tasks,
+    )
+
+    # 9. Build the Markdown prep document
     prep_document = format_prep_document(
         event=event,
         related_meetings=related_meetings,
@@ -86,6 +99,7 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
         open_questions=open_questions,
         participant_tasks=participant_tasks,
         stakeholder_info=stakeholder_info,
+        synthesis=synthesis,
     )
 
     return {
@@ -96,6 +110,7 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
         "open_questions": open_questions,
         "participant_tasks": participant_tasks,
         "stakeholder_info": stakeholder_info,
+        "synthesis": synthesis,
     }
 
 
@@ -298,20 +313,116 @@ async def get_stakeholder_context(
     return stakeholders
 
 
+async def synthesize_prep_insights(
+    topic: str,
+    participant_names: list[str],
+    related_meetings: list[dict],
+    relevant_decisions: list[dict],
+    open_questions: list[dict],
+    participant_tasks: dict[str, list[dict]],
+) -> dict:
+    """
+    Use LLM to synthesize gathered context into strategic meeting insights.
+
+    Produces conversation starters, decision relevance assessment, and
+    diplomatically flags overdue tasks.
+
+    Args:
+        topic: Meeting topic.
+        participant_names: Attendee names.
+        related_meetings: Past related meetings.
+        relevant_decisions: Relevant past decisions.
+        open_questions: Unresolved questions.
+        participant_tasks: Tasks by participant.
+
+    Returns:
+        Dict with keys: decision_notes, conversation_starters, overdue_flags.
+        Returns empty dict on error.
+    """
+    # Skip synthesis if there's no meaningful context to work with
+    if not related_meetings and not relevant_decisions and not open_questions:
+        return {}
+
+    # Build context summary for the LLM
+    context_parts = [f"Meeting topic: {topic}", f"Attendees: {', '.join(participant_names)}"]
+
+    if relevant_decisions:
+        decision_list = "\n".join(
+            f"- {d.get('description', '')} (from {d.get('source_meeting', '?')}, {d.get('date', '?')})"
+            for d in relevant_decisions[:10]
+        )
+        context_parts.append(f"Past decisions:\n{decision_list}")
+
+    if open_questions:
+        q_list = "\n".join(
+            f"- {q.get('question', '')} (raised by {q.get('raised_by', '?')})"
+            for q in open_questions[:5]
+        )
+        context_parts.append(f"Open questions:\n{q_list}")
+
+    if participant_tasks:
+        for name, tasks in participant_tasks.items():
+            overdue = [t for t in tasks if t.get("status") == "overdue" or (
+                t.get("deadline") and t["deadline"] < datetime.now().strftime("%Y-%m-%d")
+                and t.get("status") != "completed"
+            )]
+            if overdue:
+                task_list = "\n".join(f"  - {t.get('title', '')} (due: {t.get('deadline', '?')})" for t in overdue)
+                context_parts.append(f"{name}'s overdue tasks:\n{task_list}")
+
+    if related_meetings:
+        meeting_list = "\n".join(
+            f"- {m.get('title', '')} ({m.get('date', '?')}): {m.get('summary', '')[:150]}"
+            for m in related_meetings[:5]
+        )
+        context_parts.append(f"Related past meetings:\n{meeting_list}")
+
+    prompt = f"""Given this context for an upcoming meeting, provide strategic preparation insights.
+
+{chr(10).join(context_parts)}
+
+Return valid JSON with this structure:
+{{
+    "decision_notes": ["For each past decision, one sentence on whether it's still relevant or needs revisiting"],
+    "conversation_starters": ["2-3 specific questions that could move stuck items forward or clarify open issues"],
+    "overdue_flags": ["Diplomatic notes about any overdue items that should be addressed — frame constructively, not critically"]
+}}
+
+Rules:
+- Be specific and actionable, not generic
+- Conversation starters should reference actual open questions or decisions
+- Overdue flags should be framed as "opportunities to unblock" not blame
+- If nothing is overdue, return an empty list for overdue_flags
+- Keep each item to 1-2 sentences"""
+
+    try:
+        response_text, _ = call_llm(
+            prompt=prompt,
+            model=settings.model_simple,
+            max_tokens=1024,
+            call_site="meeting_prep_synthesis",
+        )
+        return json.loads(response_text)
+    except Exception as e:
+        logger.warning(f"Meeting prep synthesis failed (non-fatal): {e}")
+        return {}
+
+
 def format_prep_document(
     event: dict,
     related_meetings: list[dict],
     relevant_decisions: list[dict],
     open_questions: list[dict],
     participant_tasks: dict[str, list[dict]],
-    stakeholder_info: list[dict]
+    stakeholder_info: list[dict],
+    synthesis: dict | None = None,
 ) -> str:
     """
     Format all prep information into a Markdown document.
 
     Builds a structured document with sections for meeting details,
-    stakeholder context, related meetings, decisions, open questions,
-    and participant tasks.
+    stakeholder context, strategic briefing, related meetings, decisions,
+    open questions, and participant tasks.
 
     Args:
         event: Calendar event details.
@@ -320,6 +431,7 @@ def format_prep_document(
         open_questions: Open questions that might be addressed.
         participant_tasks: Tasks by participant.
         stakeholder_info: Stakeholder context.
+        synthesis: LLM-generated strategic insights.
 
     Returns:
         Formatted Markdown prep document.
@@ -353,6 +465,38 @@ def format_prep_document(
             description,
             "",
         ])
+
+    # Strategic briefing (LLM-synthesized insights)
+    if synthesis:
+        has_content = False
+        briefing_lines = ["## Strategic Briefing", ""]
+
+        starters = synthesis.get("conversation_starters", [])
+        if starters:
+            has_content = True
+            briefing_lines.append("**Conversation Starters:**")
+            for s in starters:
+                briefing_lines.append(f"- {s}")
+            briefing_lines.append("")
+
+        decision_notes = synthesis.get("decision_notes", [])
+        if decision_notes:
+            has_content = True
+            briefing_lines.append("**Decision Relevance:**")
+            for n in decision_notes:
+                briefing_lines.append(f"- {n}")
+            briefing_lines.append("")
+
+        overdue_flags = synthesis.get("overdue_flags", [])
+        if overdue_flags:
+            has_content = True
+            briefing_lines.append("**Items to Unblock:**")
+            for f in overdue_flags:
+                briefing_lines.append(f"- {f}")
+            briefing_lines.append("")
+
+        if has_content:
+            lines.extend(briefing_lines)
 
     # Stakeholder context for external participants
     if stakeholder_info:

@@ -233,6 +233,7 @@ async def process_transcript(
     return {
         "meeting_id": meeting_id,
         "summary": summary,
+        "executive_summary": extracted.get("executive_summary", ""),
         "decisions": extracted.get("decisions", []),
         "tasks": tasks_to_store,
         "follow_ups": extracted.get("follow_ups", []),
@@ -378,6 +379,7 @@ async def extract_structured_data(
 
 IMPORTANT: Your response must be valid JSON with this exact structure:
 {
+    "executive_summary": "One sentence capturing the meeting's most important outcome or decision. Write for someone deciding whether to read the full summary.",
     "decisions": [
         {
             "description": "The decision made",
@@ -388,7 +390,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     ],
     "tasks": [
         {
-            "title": "Task description",
+            "title": "Task description — see TASK EXTRACTION RULES below",
             "assignee": "Name",
             "deadline": "YYYY-MM-DD or null",
             "priority": "H/M/L",
@@ -430,8 +432,23 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "implied_deadline": "Deadline mentioned or 'none'"
         }
     ],
-    "discussion_summary": "2-4 paragraphs summarizing the key discussion topics. Professional tone only. No emotional characterizations."
+    "discussion_summary": "2-4 paragraphs — see DISCUSSION SUMMARY RULES below"
 }
+
+TASK EXTRACTION RULES:
+Each task title should answer: WHO does WHAT by WHEN and WHY.
+- BAD: "Write accuracy abstract"
+- GOOD: "Write 1-page accuracy abstract documenting model performance benchmarks — needed before the client meeting so the team can discuss accuracy claims"
+Include the business context from the conversation, not just the bare action.
+
+DISCUSSION SUMMARY RULES:
+- Opening paragraph: What was the meeting's purpose and key outcome?
+- Body paragraphs: Group by theme, not chronology. Connect related discussions even if they happened at different points in the meeting.
+- Closing paragraph: What's the overall trajectory? Are things on track, at risk, or pivoting?
+- Write for a reader who missed the meeting — they should understand both WHAT happened and WHY it matters.
+- Use active voice. Be specific, not vague.
+- BAD: "The team discussed the Moldova pilot and various challenges."
+- GOOD: "The Moldova pilot timeline was the central tension point: delivery is on track technically, but client expectations around accuracy documentation need to be managed before the next milestone."
 
 STAKEHOLDER EXTRACTION RULES:
 A "stakeholder" is someone CropSight has a DIRECT business relationship with — someone you'd put in a CRM.
@@ -479,6 +496,7 @@ Apply all tone guardrails: no emotional characterizations, professional language
                 continue
             logger.error(f"Claude API error after {attempt + 1} attempts: {e}")
             return {
+                "executive_summary": "",
                 "decisions": [],
                 "tasks": [],
                 "follow_ups": [],
@@ -490,6 +508,7 @@ Apply all tone guardrails: no emotional characterizations, professional language
         except Exception as e:
             logger.error(f"Error calling Claude for extraction: {e}")
             return {
+                "executive_summary": "",
                 "decisions": [],
                 "tasks": [],
                 "follow_ups": [],
@@ -500,6 +519,7 @@ Apply all tone guardrails: no emotional characterizations, professional language
 
     # Should not reach here, but just in case
     return {
+        "executive_summary": "",
         "decisions": [],
         "tasks": [],
         "follow_ups": [],
@@ -547,6 +567,7 @@ def _parse_extraction_response(response_text: str) -> dict:
 
     # Return default structure
     return {
+        "executive_summary": "",
         "decisions": [],
         "tasks": [],
         "follow_ups": [],

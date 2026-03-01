@@ -364,6 +364,7 @@ class TelegramBot:
         open_questions: list[dict] | None = None,
         drive_link: str | None = None,
         cross_reference: dict | None = None,
+        executive_summary: str | None = None,
     ) -> bool:
         """
         Send an approval request to Eyal with a clean, structured preview.
@@ -378,6 +379,7 @@ class TelegramBot:
             open_questions: List of open question dicts.
             drive_link: Optional link to draft in Drive.
             cross_reference: v0.3 cross-reference results (dedup, status changes, etc.).
+            executive_summary: One-line TLDR of the meeting's key outcome.
 
         Returns:
             True if request was sent successfully.
@@ -389,6 +391,11 @@ class TelegramBot:
 
         # Build a clean HTML message
         lines = [f"<b>Approval Request: {_escape_html(meeting_title)}</b>", ""]
+
+        # Executive summary (TLDR) at the top
+        if executive_summary:
+            lines.append(f"<i>{_escape_html(executive_summary)}</i>")
+            lines.append("")
 
         # Decisions
         if decisions:

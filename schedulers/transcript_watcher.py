@@ -280,6 +280,7 @@ class TranscriptWatcher:
                     "meeting_id": result["meeting_id"],
                     "title": metadata["title"],
                     "summary": result.get("summary", ""),
+                    "executive_summary": result.get("executive_summary", ""),
                     "decisions": result.get("decisions", []),
                     "tasks": result.get("tasks", []),
                     "follow_ups": result.get("follow_ups", []),
