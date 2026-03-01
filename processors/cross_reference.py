@@ -354,6 +354,7 @@ async def run_cross_reference(
     meeting_id: str,
     transcript: str,
     new_tasks: list[dict],
+    pre_extracted_commitments: list[dict] | None = None,
 ) -> dict:
     """
     Orchestrate all cross-reference analyses for a meeting.
@@ -365,6 +366,8 @@ async def run_cross_reference(
         meeting_id: UUID of the meeting.
         transcript: Full transcript text.
         new_tasks: Newly extracted tasks from this meeting.
+        pre_extracted_commitments: Commitments already extracted by Opus
+            (avoids 8K truncation). Falls back to Haiku extraction if None.
 
     Returns:
         Dict with:
@@ -393,12 +396,16 @@ async def run_cross_reference(
         transcript=transcript,
     )
 
-    # v0.3 Tier 2: Extract commitments
-    new_commitments = await extract_commitments(
-        meeting_id=meeting_id,
-        transcript=transcript,
-        participants=[],  # Participants not available here, but not critical
-    )
+    # v0.3 Tier 2: Extract commitments (prefer Opus pre-extraction over Haiku fallback)
+    if pre_extracted_commitments:
+        new_commitments = pre_extracted_commitments
+        logger.info(f"Using {len(new_commitments)} pre-extracted commitments from Opus")
+    else:
+        new_commitments = await extract_commitments(
+            meeting_id=meeting_id,
+            transcript=transcript,
+            participants=[],  # Participants not available here, but not critical
+        )
 
     # Store new commitments in Supabase
     if new_commitments:

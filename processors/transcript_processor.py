@@ -157,6 +157,7 @@ async def process_transcript(
         meeting_id=meeting_id,
         transcript=file_content,
         new_tasks=extracted.get("tasks", []),
+        pre_extracted_commitments=extracted.get("commitments", []),
     )
 
     # Use deduplicated tasks — only insert genuinely new ones
@@ -423,6 +424,14 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "relationship": "advisor / investor / partner / client / grant_body / pilot_site / vendor / other"
         }
     ],
+    "commitments": [
+        {
+            "speaker": "Name of person making the commitment",
+            "commitment_text": "What they committed to (concise)",
+            "context": "Brief surrounding context (1 sentence)",
+            "implied_deadline": "Deadline mentioned or 'none'"
+        }
+    ],
     "discussion_summary": "2-4 paragraphs summarizing the key discussion topics. Professional tone only. No emotional characterizations."
 }
 
@@ -430,6 +439,12 @@ STAKEHOLDER EXTRACTION RULES:
 A "stakeholder" is someone CropSight has a DIRECT business relationship with — someone you'd put in a CRM.
 INCLUDE: specific advisors/contacts, partner companies, grant bodies, named pilot sites/projects.
 EXCLUDE: big tech/infra (AWS, Google, Microsoft, IBM), countries/cities mentioned casually, tools/platforms (Zoom, Slack, Tactiq), generic terms, meeting participants, CropSight team members.
+
+COMMITMENT EXTRACTION RULES:
+A "commitment" is a verbal promise to do something specific.
+INCLUDE: "I'll send that by Friday", "Let me set up a meeting with Jason"
+EXCLUDE: past-tense ("I already sent it"), observations ("We should think about this"), questions ("Can you look into it?")
+Be conservative — only include clear, actionable commitments.
 
 Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps."""
 

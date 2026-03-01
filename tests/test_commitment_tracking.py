@@ -10,11 +10,12 @@ Tests cover:
 
 import json
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from processors.cross_reference import (
     extract_commitments,
     check_commitment_fulfillment,
+    run_cross_reference,
 )
 from processors.weekly_digest import (
     get_commitment_scorecard,
@@ -313,3 +314,117 @@ class TestCommitmentScorecard:
         assert "1** fulfilled" in digest
         assert "Eyal" in digest
         assert "Send deck" in digest
+
+
+# =========================================================================
+# Test Opus piggyback (v0.4 — pre-extracted commitments)
+# =========================================================================
+
+class TestPreExtractedCommitments:
+    """Tests for commitment extraction via Opus piggyback."""
+
+    @pytest.mark.asyncio
+    async def test_pre_extracted_commitments_skip_haiku_call(self):
+        """When pre_extracted_commitments are provided, Haiku should not be called."""
+        pre_extracted = [
+            {"speaker": "Eyal", "commitment_text": "Send deck by Friday", "context": "Fundraising", "implied_deadline": "Friday"},
+            {"speaker": "Paolo", "commitment_text": "Set up Lavazza meeting", "context": "BD", "implied_deadline": "next week"},
+        ]
+
+        with (
+            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.supabase_client") as mock_db,
+            patch("processors.cross_reference.deduplicate_tasks", new_callable=AsyncMock) as mock_dedup,
+            patch("processors.cross_reference.infer_task_status_changes", new_callable=AsyncMock) as mock_status,
+            patch("processors.cross_reference.resolve_open_questions", new_callable=AsyncMock) as mock_resolve,
+            patch("processors.cross_reference.check_commitment_fulfillment", new_callable=AsyncMock) as mock_fulfill,
+        ):
+            mock_dedup.return_value = {"new_tasks": [], "duplicates": [], "updates": []}
+            mock_status.return_value = []
+            mock_resolve.return_value = []
+            mock_fulfill.return_value = []
+            mock_db.create_commitments_batch = MagicMock(return_value=[])
+            mock_db.create_task_mentions_batch = MagicMock(return_value=[])
+
+            result = await run_cross_reference(
+                meeting_id="opus-001",
+                transcript="Full transcript text",
+                new_tasks=[],
+                pre_extracted_commitments=pre_extracted,
+            )
+
+            # Anthropic should NOT have been instantiated (no Haiku call)
+            mock_anthropic.assert_not_called()
+
+            # Commitments batch should have been called with the pre-extracted ones
+            mock_db.create_commitments_batch.assert_called_once_with("opus-001", pre_extracted)
+
+    @pytest.mark.asyncio
+    async def test_fallback_when_pre_extracted_is_none(self):
+        """When pre_extracted_commitments is None, should fall back to Haiku extraction."""
+        commitments_json = json.dumps({
+            "commitments": [
+                {"speaker": "Eyal", "commitment_text": "Review draft", "context": "Editing", "implied_deadline": "none"},
+            ]
+        })
+
+        with (
+            patch("processors.cross_reference.Anthropic") as mock_anthropic_cls,
+            patch("processors.cross_reference.supabase_client") as mock_db,
+            patch("processors.cross_reference.deduplicate_tasks", new_callable=AsyncMock) as mock_dedup,
+            patch("processors.cross_reference.infer_task_status_changes", new_callable=AsyncMock) as mock_status,
+            patch("processors.cross_reference.resolve_open_questions", new_callable=AsyncMock) as mock_resolve,
+            patch("processors.cross_reference.check_commitment_fulfillment", new_callable=AsyncMock) as mock_fulfill,
+        ):
+            mock_dedup.return_value = {"new_tasks": [], "duplicates": [], "updates": []}
+            mock_status.return_value = []
+            mock_resolve.return_value = []
+            mock_fulfill.return_value = []
+            mock_db.create_commitments_batch = MagicMock(return_value=[])
+            mock_db.create_task_mentions_batch = MagicMock(return_value=[])
+
+            # Set up mock for the Haiku call
+            mock_client = MagicMock()
+            mock_anthropic_cls.return_value = mock_client
+            mock_response = MagicMock()
+            mock_response.content = [MagicMock(text=commitments_json)]
+            mock_client.messages.create.return_value = mock_response
+
+            result = await run_cross_reference(
+                meeting_id="fallback-001",
+                transcript="Some transcript",
+                new_tasks=[],
+                pre_extracted_commitments=None,
+            )
+
+            # Anthropic SHOULD have been called (Haiku fallback for commitments)
+            mock_anthropic_cls.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_pre_extracted_list_uses_fallback(self):
+        """Empty list [] should still use fallback (only None skips extraction)."""
+        # An empty pre-extracted list means Opus found zero commitments — trust that.
+        with (
+            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.supabase_client") as mock_db,
+            patch("processors.cross_reference.deduplicate_tasks", new_callable=AsyncMock) as mock_dedup,
+            patch("processors.cross_reference.infer_task_status_changes", new_callable=AsyncMock) as mock_status,
+            patch("processors.cross_reference.resolve_open_questions", new_callable=AsyncMock) as mock_resolve,
+            patch("processors.cross_reference.check_commitment_fulfillment", new_callable=AsyncMock) as mock_fulfill,
+        ):
+            mock_dedup.return_value = {"new_tasks": [], "duplicates": [], "updates": []}
+            mock_status.return_value = []
+            mock_resolve.return_value = []
+            mock_fulfill.return_value = []
+            mock_db.create_commitments_batch = MagicMock(return_value=[])
+            mock_db.create_task_mentions_batch = MagicMock(return_value=[])
+
+            result = await run_cross_reference(
+                meeting_id="empty-001",
+                transcript="Some transcript",
+                new_tasks=[],
+                pre_extracted_commitments=[],  # Empty list — truthy check is falsy
+            )
+
+            # Empty list is falsy, so fallback to Haiku should occur
+            mock_anthropic.assert_called()

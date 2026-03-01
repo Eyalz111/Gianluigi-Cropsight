@@ -1,0 +1,46 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+
+# Testing
+tests/
+pytest.ini
+.pytest_cache
+.coverage
+htmlcov/
+
+# Documentation
+docs/
+*.md
+!requirements.txt
+
+# Environment and credentials
+.env
+.env.*
+token.json
+credentials.json
+*.key
+*.pem
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

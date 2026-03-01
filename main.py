@@ -152,6 +152,13 @@ async def start_services() -> None:
 
     logger.info("Starting Gianluigi services...")
 
+    # Start health server early (Cloud Run needs HTTP on PORT for liveness probe)
+    from services.health_server import health_server
+    try:
+        await health_server.start()
+    except Exception as e:
+        logger.warning(f"Health server failed to start (non-fatal): {e}")
+
     # Validate configuration
     errors = settings.validate_required()
     if errors:
@@ -275,6 +282,18 @@ async def start_services() -> None:
     logger.info("  Gianluigi is ready!")
     logger.info("=" * 50)
 
+    # Signal readiness to Cloud Run health check
+    health_server.set_ready(True)
+
+    # Reconstruct auto-publish timers from persistent state (v0.4)
+    from guardrails.approval_flow import reconstruct_auto_publish_timers
+    try:
+        reconstructed = await reconstruct_auto_publish_timers()
+        if reconstructed:
+            logger.info(f"  Reconstructed {reconstructed} auto-publish timer(s)")
+    except Exception as e:
+        logger.warning(f"  Timer reconstruction failed (non-fatal): {e}")
+
     # Log to Supabase
     from services.supabase_client import supabase_client
     supabase_client.log_action(
@@ -346,6 +365,10 @@ async def stop_services() -> None:
     # Stop Telegram bot
     from services.telegram_bot import telegram_bot
     await telegram_bot.stop()
+
+    # Stop health server
+    from services.health_server import health_server
+    await health_server.stop()
 
     # Log shutdown
     from services.supabase_client import supabase_client

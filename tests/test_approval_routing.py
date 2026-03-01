@@ -6,12 +6,13 @@ The approval flow now supports 3 content types:
 - "meeting_prep" (new — dispatches to distribute_approved_prep)
 - "weekly_digest" (new — dispatches to distribute_approved_digest)
 
+v0.4: Approvals are now persisted in Supabase (not in-memory dict).
+
 Tests:
-1. submit_for_approval() stores content type + data in _pending_approvals
-2. submit_for_approval() sends type-specific Telegram + email messages
-3. process_response() dispatches to correct distributor when approved
-4. distribute_approved_prep() — sensitive vs normal distribution
-5. distribute_approved_digest() — email + Telegram group posting
+1. submit_for_approval() persists to Supabase and sends type-specific messages
+2. process_response() dispatches to correct distributor when approved
+3. distribute_approved_prep() — sensitive vs normal distribution
+4. distribute_approved_digest() — email + Telegram group posting
 """
 
 import pytest
@@ -26,21 +27,23 @@ class TestSubmitForApprovalRouting:
     """Tests for submit_for_approval() — content-type branching."""
 
     @pytest.mark.asyncio
-    async def test_meeting_prep_stores_in_pending_and_sends_prep_message(self):
-        """Meeting prep should be stored in _pending_approvals and send prep-specific messages."""
-        pending = {}
-
+    async def test_meeting_prep_persists_and_sends_prep_message(self):
+        """Meeting prep should be persisted to Supabase and send prep-specific messages."""
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
+            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
-            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            patch("guardrails.approval_flow.conversation_memory") as mock_mem,
         ):
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-1"})
+            mock_db.delete_pending_approval = MagicMock(return_value=False)
+            mock_db.create_pending_approval = MagicMock(return_value={"approval_id": "prep-001"})
             mock_settings.APPROVAL_MODE = "manual"
+            mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
+            mock_settings.EYAL_EMAIL = "eyal@test.com"
 
             from guardrails.approval_flow import submit_for_approval
 
@@ -58,10 +61,12 @@ class TestSubmitForApprovalRouting:
                 meeting_id="prep-001",
             )
 
-            # Should store in _pending_approvals with correct type
-            assert "prep-001" in pending
-            assert pending["prep-001"]["type"] == "meeting_prep"
-            assert pending["prep-001"]["content"] is content
+            # Should persist to Supabase with correct type
+            mock_db.create_pending_approval.assert_called_once()
+            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            assert call_kwargs["approval_id"] == "prep-001"
+            assert call_kwargs["content_type"] == "meeting_prep"
+            assert call_kwargs["content"] is content
 
             # Return value should indicate pending
             assert result["status"] == "pending"
@@ -83,21 +88,23 @@ class TestSubmitForApprovalRouting:
             assert log_kwargs["details"]["content_type"] == "meeting_prep"
 
     @pytest.mark.asyncio
-    async def test_weekly_digest_stores_in_pending_and_sends_digest_message(self):
-        """Weekly digest should be stored in _pending_approvals and send digest-specific messages."""
-        pending = {}
-
+    async def test_weekly_digest_persists_and_sends_digest_message(self):
+        """Weekly digest should be persisted to Supabase and send digest-specific messages."""
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
+            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
-            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            patch("guardrails.approval_flow.conversation_memory") as mock_mem,
         ):
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-2"})
+            mock_db.delete_pending_approval = MagicMock(return_value=False)
+            mock_db.create_pending_approval = MagicMock(return_value={"approval_id": "digest-001"})
             mock_settings.APPROVAL_MODE = "manual"
+            mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
+            mock_settings.EYAL_EMAIL = "eyal@test.com"
 
             from guardrails.approval_flow import submit_for_approval
 
@@ -118,10 +125,10 @@ class TestSubmitForApprovalRouting:
                 meeting_id="digest-001",
             )
 
-            # Should store in _pending_approvals with correct type
-            assert "digest-001" in pending
-            assert pending["digest-001"]["type"] == "weekly_digest"
-            assert pending["digest-001"]["content"] is content
+            # Should persist to Supabase with correct type
+            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            assert call_kwargs["content_type"] == "weekly_digest"
+            assert call_kwargs["content"] is content
 
             # Return value
             assert result["status"] == "pending"
@@ -138,21 +145,23 @@ class TestSubmitForApprovalRouting:
             assert "Week of" in email_call_kwargs["meeting_title"]
 
     @pytest.mark.asyncio
-    async def test_meeting_summary_stores_in_pending_and_uses_default_branch(self):
-        """Meeting summary (default) should store in _pending_approvals and use original flow."""
-        pending = {}
-
+    async def test_meeting_summary_persists_and_uses_default_branch(self):
+        """Meeting summary (default) should persist to Supabase and use original flow."""
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
+            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
-            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            patch("guardrails.approval_flow.conversation_memory") as mock_mem,
         ):
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-3"})
+            mock_db.delete_pending_approval = MagicMock(return_value=False)
+            mock_db.create_pending_approval = MagicMock(return_value={"approval_id": "summary-001"})
             mock_settings.APPROVAL_MODE = "manual"
+            mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
+            mock_settings.EYAL_EMAIL = "eyal@test.com"
 
             from guardrails.approval_flow import submit_for_approval
 
@@ -172,9 +181,9 @@ class TestSubmitForApprovalRouting:
                 meeting_id="summary-001",
             )
 
-            # Should store in _pending_approvals
-            assert "summary-001" in pending
-            assert pending["summary-001"]["type"] == "meeting_summary"
+            # Should persist to Supabase
+            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            assert call_kwargs["content_type"] == "meeting_summary"
 
             # Default branch sends decisions, tasks, follow_ups, open_questions
             tg_call_kwargs = mock_tg.send_approval_request.call_args.kwargs
@@ -188,19 +197,21 @@ class TestSubmitForApprovalRouting:
     @pytest.mark.asyncio
     async def test_prep_telegram_preview_includes_drive_link_and_sensitivity(self):
         """Meeting prep Telegram preview should show drive link and sensitivity."""
-        pending = {}
-
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
+            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
-            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            patch("guardrails.approval_flow.conversation_memory") as mock_mem,
         ):
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_db.delete_pending_approval = MagicMock()
+            mock_db.create_pending_approval = MagicMock(return_value={})
             mock_settings.APPROVAL_MODE = "manual"
+            mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
+            mock_settings.EYAL_EMAIL = "eyal@test.com"
 
             from guardrails.approval_flow import submit_for_approval
 
@@ -228,19 +239,21 @@ class TestSubmitForApprovalRouting:
     @pytest.mark.asyncio
     async def test_digest_telegram_preview_includes_stats(self):
         """Weekly digest Telegram preview should include meeting/task stats."""
-        pending = {}
-
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
+            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
-            patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            patch("guardrails.approval_flow.conversation_memory") as mock_mem,
         ):
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_db.delete_pending_approval = MagicMock()
+            mock_db.create_pending_approval = MagicMock(return_value={})
             mock_settings.APPROVAL_MODE = "manual"
+            mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
+            mock_settings.EYAL_EMAIL = "eyal@test.com"
 
             from guardrails.approval_flow import submit_for_approval
 
@@ -274,7 +287,7 @@ class TestSubmitForApprovalRouting:
 # =============================================================================
 
 class TestProcessResponseRouting:
-    """Tests for process_response() — dispatch based on content type in _pending_approvals."""
+    """Tests for process_response() — dispatch based on content type from Supabase."""
 
     @pytest.mark.asyncio
     async def test_approve_meeting_prep_dispatches_to_distribute_approved_prep(self):
@@ -286,21 +299,14 @@ class TestProcessResponseRouting:
             "drive_link": "https://drive.google.com/file/prep-x",
             "start_time": "2026-02-28 09:00",
         }
-        pending = {
-            "prep-approve-1": {
-                "type": "meeting_prep",
-                "content": prep_content,
-            }
-        }
-
-        mock_meeting = {
-            "id": "prep-approve-1",
-            "title": "Investor Call",
-            "approval_status": "pending",
+        pending_row = {
+            "approval_id": "prep-approve-1",
+            "content_type": "meeting_prep",
+            "content": prep_content,
+            "status": "pending",
         }
 
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
@@ -310,7 +316,8 @@ class TestProcessResponseRouting:
                 new_callable=AsyncMock,
             ) as mock_distribute_prep,
         ):
-            mock_db.get_meeting = MagicMock(return_value=mock_meeting)
+            mock_db.get_pending_approval = MagicMock(return_value=pending_row)
+            mock_db.delete_pending_approval = MagicMock(return_value=True)
             mock_distribute_prep.return_value = {"telegram_sent": True, "type": "meeting_prep"}
 
             from guardrails.approval_flow import process_response
@@ -329,8 +336,8 @@ class TestProcessResponseRouting:
                 content=prep_content,
             )
 
-            # Entry should be popped from _pending_approvals
-            assert "prep-approve-1" not in pending
+            # Entry should be deleted from Supabase
+            mock_db.delete_pending_approval.assert_called_with("prep-approve-1")
 
     @pytest.mark.asyncio
     async def test_approve_weekly_digest_dispatches_to_distribute_approved_digest(self):
@@ -344,21 +351,14 @@ class TestProcessResponseRouting:
             "tasks_completed": 6,
             "tasks_overdue": 1,
         }
-        pending = {
-            "digest-approve-1": {
-                "type": "weekly_digest",
-                "content": digest_content,
-            }
-        }
-
-        mock_meeting = {
-            "id": "digest-approve-1",
-            "title": "Weekly Digest",
-            "approval_status": "pending",
+        pending_row = {
+            "approval_id": "digest-approve-1",
+            "content_type": "weekly_digest",
+            "content": digest_content,
+            "status": "pending",
         }
 
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
@@ -368,7 +368,8 @@ class TestProcessResponseRouting:
                 new_callable=AsyncMock,
             ) as mock_distribute_digest,
         ):
-            mock_db.get_meeting = MagicMock(return_value=mock_meeting)
+            mock_db.get_pending_approval = MagicMock(return_value=pending_row)
+            mock_db.delete_pending_approval = MagicMock(return_value=True)
             mock_distribute_digest.return_value = {
                 "email_sent": True,
                 "telegram_sent": True,
@@ -390,20 +391,20 @@ class TestProcessResponseRouting:
                 content=digest_content,
             )
 
-            assert "digest-approve-1" not in pending
+            mock_db.delete_pending_approval.assert_called_with("digest-approve-1")
 
     @pytest.mark.asyncio
     async def test_approve_meeting_summary_dispatches_to_distribute_approved_content(self):
-        """Approving a meeting_summary (or unknown type) should call distribute_approved_content."""
+        """Approving a meeting_summary should call distribute_approved_content."""
         summary_content = {
             "title": "Sprint Retro",
             "summary": "Retrospective notes.",
         }
-        pending = {
-            "summary-approve-1": {
-                "type": "meeting_summary",
-                "content": summary_content,
-            }
+        pending_row = {
+            "approval_id": "summary-approve-1",
+            "content_type": "meeting_summary",
+            "content": summary_content,
+            "status": "pending",
         }
 
         mock_meeting = {
@@ -416,7 +417,6 @@ class TestProcessResponseRouting:
         }
 
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
@@ -426,6 +426,8 @@ class TestProcessResponseRouting:
                 new_callable=AsyncMock,
             ) as mock_distribute_content,
         ):
+            mock_db.get_pending_approval = MagicMock(return_value=pending_row)
+            mock_db.delete_pending_approval = MagicMock(return_value=True)
             mock_db.get_meeting = MagicMock(return_value=mock_meeting)
             mock_db.list_decisions = MagicMock(return_value=[])
             mock_db.get_tasks = MagicMock(return_value=[])
@@ -451,10 +453,7 @@ class TestProcessResponseRouting:
 
     @pytest.mark.asyncio
     async def test_approve_with_no_pending_entry_defaults_to_meeting_summary(self):
-        """If _pending_approvals has no entry, should default to meeting_summary flow."""
-        # Empty pending dict — simulates edge case where entry was lost
-        pending = {}
-
+        """If Supabase has no pending row, should default to meeting_summary flow."""
         mock_meeting = {
             "id": "orphan-001",
             "title": "Orphan Meeting",
@@ -465,7 +464,6 @@ class TestProcessResponseRouting:
         }
 
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
@@ -475,6 +473,8 @@ class TestProcessResponseRouting:
                 new_callable=AsyncMock,
             ) as mock_distribute_content,
         ):
+            mock_db.get_pending_approval = MagicMock(return_value=None)
+            mock_db.delete_pending_approval = MagicMock(return_value=False)
             mock_db.get_meeting = MagicMock(return_value=mock_meeting)
             mock_db.list_decisions = MagicMock(return_value=[])
             mock_db.get_tasks = MagicMock(return_value=[])
@@ -496,11 +496,11 @@ class TestProcessResponseRouting:
     @pytest.mark.asyncio
     async def test_reject_does_not_dispatch_any_distributor(self):
         """Rejecting content should not call any distribute function."""
-        pending = {
-            "reject-001": {
-                "type": "meeting_prep",
-                "content": {"title": "Some prep"},
-            }
+        pending_row = {
+            "approval_id": "reject-001",
+            "content_type": "meeting_prep",
+            "content": {"title": "Some prep"},
+            "status": "pending",
         }
 
         mock_meeting = {
@@ -510,7 +510,6 @@ class TestProcessResponseRouting:
         }
 
         with (
-            patch("guardrails.approval_flow._pending_approvals", pending),
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
@@ -528,6 +527,8 @@ class TestProcessResponseRouting:
                 new_callable=AsyncMock,
             ) as mock_content,
         ):
+            mock_db.get_pending_approval = MagicMock(return_value=pending_row)
+            mock_db.delete_pending_approval = MagicMock(return_value=True)
             mock_db.get_meeting = MagicMock(return_value=mock_meeting)
             mock_db.log_action = MagicMock()
 

@@ -61,9 +61,17 @@ class ApprovalStatus(Enum):
 # Track pending auto-publish timers: {meeting_id: asyncio.Task}
 _pending_auto_publishes: dict[str, asyncio.Task] = {}
 
-# Track content type and data for pending approvals (in-memory)
-# {approval_id: {"type": "meeting_summary"|"meeting_prep"|"weekly_digest", "content": {...}}}
-_pending_approvals: dict[str, dict] = {}
+# NOTE: Pending approvals are now persisted in the `pending_approvals` Supabase
+# table (v0.4).  The in-memory dict was removed — all reads/writes go through
+# supabase_client.{create,get,update,delete}_pending_approval().
+
+
+def _row_to_pending_info(row: dict) -> dict:
+    """Convert a DB row from pending_approvals into the legacy in-memory format."""
+    return {
+        "type": row.get("content_type", "meeting_summary"),
+        "content": row.get("content", {}),
+    }
 
 
 async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None:
@@ -155,6 +163,73 @@ def cancel_auto_publish(meeting_id: str) -> None:
         logger.info(f"Cancelled auto-publish for {meeting_id}")
 
 
+async def reconstruct_auto_publish_timers() -> int:
+    """
+    Reconstruct auto-publish timers from persistent state on startup.
+
+    Queries the pending_approvals table for rows with auto_publish_at,
+    and schedules asyncio tasks for each one:
+    - If auto_publish_at is in the past → auto-approve immediately.
+    - If auto_publish_at is in the future → schedule with remaining delay.
+
+    Returns:
+        Number of timers reconstructed.
+    """
+    rows = supabase_client.get_pending_auto_publishes()
+    if not rows:
+        logger.info("No auto-publish timers to reconstruct")
+        return 0
+
+    count = 0
+    now = datetime.now().astimezone()
+
+    for row in rows:
+        approval_id = row["approval_id"]
+        auto_publish_at_str = row["auto_publish_at"]
+
+        try:
+            auto_publish_at = datetime.fromisoformat(auto_publish_at_str)
+            # Ensure timezone-aware comparison
+            if auto_publish_at.tzinfo is None:
+                auto_publish_at = auto_publish_at.astimezone()
+
+            remaining_seconds = (auto_publish_at - now).total_seconds()
+
+            if remaining_seconds <= 0:
+                # Expired — auto-approve immediately
+                logger.info(f"Auto-publish timer expired for {approval_id}, approving now")
+                asyncio.create_task(
+                    process_response(
+                        meeting_id=approval_id,
+                        response="approve",
+                        response_source="auto_review",
+                    ),
+                    name=f"auto_publish_expired_{approval_id}",
+                )
+            else:
+                # Future — schedule with remaining delay
+                remaining_minutes = remaining_seconds / 60
+                logger.info(
+                    f"Reconstructing auto-publish timer for {approval_id}: "
+                    f"{remaining_minutes:.1f} minutes remaining"
+                )
+                task = asyncio.create_task(
+                    _auto_publish_after_delay(
+                        approval_id,
+                        delay_minutes=remaining_minutes,
+                    ),
+                    name=f"auto_publish_{approval_id}",
+                )
+                _pending_auto_publishes[approval_id] = task
+
+            count += 1
+        except Exception as e:
+            logger.error(f"Failed to reconstruct timer for {approval_id}: {e}")
+
+    logger.info(f"Reconstructed {count} auto-publish timers")
+    return count
+
+
 async def submit_for_approval(
     content_type: str,
     content: dict,
@@ -178,11 +253,24 @@ async def submit_for_approval(
     """
     logger.info(f"Submitting {content_type} for approval: {meeting_id}")
 
-    # Store content type and data for dispatch after approval
-    _pending_approvals[meeting_id] = {
-        "type": content_type,
-        "content": content,
-    }
+    # Persist approval state to Supabase (survives restarts)
+    # Delete any stale row first (upsert pattern for edit re-submissions)
+    supabase_client.delete_pending_approval(meeting_id)
+
+    # Calculate auto_publish_at if in auto_review mode
+    auto_publish_at = None
+    if settings.APPROVAL_MODE == "auto_review":
+        from datetime import timedelta
+        auto_publish_at = (
+            datetime.now() + timedelta(minutes=settings.AUTO_REVIEW_WINDOW_MINUTES)
+        ).isoformat()
+
+    supabase_client.create_pending_approval(
+        approval_id=meeting_id,
+        content_type=content_type,
+        content=content,
+        auto_publish_at=auto_publish_at,
+    )
 
     # Extract key info for formatting
     meeting_title = content.get("title", "Untitled Meeting")
@@ -335,10 +423,11 @@ async def process_response(
     parsed = parse_approval_response(response)
     action = parsed["action"]
 
-    # Detect content type from meeting_id prefix or in-memory pending approvals.
+    # Detect content type from persisted pending approvals (Supabase).
     # Non-meeting content (digests, preps) uses IDs like "digest-2026-02-23"
     # which aren't UUIDs, so we can't query the meetings table.
-    pending_info = _pending_approvals.get(meeting_id)
+    pending_row = supabase_client.get_pending_approval(meeting_id)
+    pending_info = _row_to_pending_info(pending_row) if pending_row else None
     is_non_meeting = (
         meeting_id.startswith("digest-")
         or meeting_id.startswith("prep-")
@@ -364,8 +453,8 @@ async def process_response(
     cancel_auto_publish(meeting_id)
 
     if action == "approve":
-        # Pop pending info (already fetched above via .get(), now remove it)
-        pending_info = _pending_approvals.pop(meeting_id, None)
+        # Delete from persistent store (already fetched above, now remove it)
+        supabase_client.delete_pending_approval(meeting_id)
 
         # Determine content type from pending_info or ID prefix
         if pending_info:
@@ -462,8 +551,8 @@ async def process_response(
         if not is_non_meeting:
             await update_approval_status(meeting_id, ApprovalStatus.REJECTED)
 
-        # Remove from pending approvals if still there
-        _pending_approvals.pop(meeting_id, None)
+        # Remove from persistent store if still there
+        supabase_client.delete_pending_approval(meeting_id)
 
         # Log rejection
         supabase_client.log_action(

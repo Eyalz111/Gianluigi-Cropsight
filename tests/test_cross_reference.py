@@ -457,7 +457,6 @@ class TestApprovalFlowCrossReference:
     async def test_submit_for_approval_includes_cross_ref(self):
         """submit_for_approval should pass cross_reference to send_approval_request."""
         with (
-            patch("guardrails.approval_flow._pending_approvals", {}),
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
@@ -467,6 +466,8 @@ class TestApprovalFlowCrossReference:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-1"})
+            mock_db.delete_pending_approval = MagicMock(return_value=False)
+            mock_db.create_pending_approval = MagicMock(return_value={})
             mock_settings.APPROVAL_MODE = "manual"
             mock_settings.TELEGRAM_EYAL_CHAT_ID = None
             mock_settings.EYAL_EMAIL = None

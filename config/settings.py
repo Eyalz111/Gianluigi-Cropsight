@@ -141,6 +141,10 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Application Settings
     # ==========================================================================
+    PORT: int = Field(
+        default=8080,
+        description="HTTP port for health check server (Cloud Run)"
+    )
     DRIVE_POLL_INTERVAL_MINUTES: int = Field(
         default=15,
         description="How often to check for new transcripts (minutes)"

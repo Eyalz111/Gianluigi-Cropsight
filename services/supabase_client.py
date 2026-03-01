@@ -1434,6 +1434,130 @@ class SupabaseClient:
         return result.data[0] if result.data else {}
 
     # =========================================================================
+    # Pending Approvals (v0.4 — Persistent Approval State)
+    # =========================================================================
+
+    def create_pending_approval(
+        self,
+        approval_id: str,
+        content_type: str,
+        content: dict,
+        auto_publish_at: str | None = None,
+    ) -> dict:
+        """
+        Create a pending approval record.
+
+        Args:
+            approval_id: Meeting UUID or prefixed ID (e.g. "prep-2026-03-01").
+            content_type: 'meeting_summary', 'meeting_prep', or 'weekly_digest'.
+            content: Full content dict (stored as JSONB).
+            auto_publish_at: ISO timestamp for auto-publish, or None for manual mode.
+
+        Returns:
+            Created pending approval record.
+        """
+        data = {
+            "approval_id": approval_id,
+            "content_type": content_type,
+            "content": content,
+            "status": "pending",
+        }
+        if auto_publish_at:
+            data["auto_publish_at"] = auto_publish_at
+
+        result = self.client.table("pending_approvals").insert(data).execute()
+        logger.info(f"Created pending approval: {approval_id} ({content_type})")
+        return result.data[0]
+
+    def get_pending_approval(self, approval_id: str) -> dict | None:
+        """
+        Get a pending approval by its approval_id.
+
+        Args:
+            approval_id: The approval ID to look up.
+
+        Returns:
+            Approval record dict or None if not found.
+        """
+        result = (
+            self.client.table("pending_approvals")
+            .select("*")
+            .eq("approval_id", approval_id)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def update_pending_approval(
+        self,
+        approval_id: str,
+        status: str | None = None,
+        content: dict | None = None,
+    ) -> dict:
+        """
+        Update a pending approval record.
+
+        Args:
+            approval_id: The approval ID to update.
+            status: New status (pending/approved/rejected/editing).
+            content: Updated content dict.
+
+        Returns:
+            Updated record.
+        """
+        data = {}
+        if status is not None:
+            data["status"] = status
+        if content is not None:
+            data["content"] = content
+
+        result = (
+            self.client.table("pending_approvals")
+            .update(data)
+            .eq("approval_id", approval_id)
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
+    def delete_pending_approval(self, approval_id: str) -> bool:
+        """
+        Delete a pending approval record.
+
+        Args:
+            approval_id: The approval ID to delete.
+
+        Returns:
+            True if a record was deleted, False if not found.
+        """
+        result = (
+            self.client.table("pending_approvals")
+            .delete()
+            .eq("approval_id", approval_id)
+            .execute()
+        )
+        deleted = len(result.data) > 0 if result.data else False
+        if deleted:
+            logger.info(f"Deleted pending approval: {approval_id}")
+        return deleted
+
+    def get_pending_auto_publishes(self) -> list[dict]:
+        """
+        Get all pending approvals that have an auto_publish_at timestamp.
+
+        Used on startup to reconstruct auto-publish timers.
+
+        Returns:
+            List of pending approval records with auto_publish_at set.
+        """
+        result = (
+            self.client.table("pending_approvals")
+            .select("*")
+            .eq("status", "pending")
+            .not_.is_("auto_publish_at", "null")
+            .execute()
+        )
+        return result.data
+
+    # =========================================================================
     # Audit Log
     # =========================================================================
 

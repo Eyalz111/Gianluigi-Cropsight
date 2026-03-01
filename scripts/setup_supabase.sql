@@ -375,6 +375,32 @@ CREATE TRIGGER update_commitments_updated_at
     EXECUTE FUNCTION update_updated_at_column();
 
 
+-- =============================================================================
+-- Pending Approvals (v0.4 — Persistent Approval State)
+-- =============================================================================
+
+-- Persist approval state so approve/reject survives process restarts.
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    approval_id TEXT UNIQUE NOT NULL,       -- meeting UUID or "prep-YYYY-MM-DD"
+    content_type TEXT NOT NULL,             -- meeting_summary / meeting_prep / weekly_digest
+    content JSONB NOT NULL,                 -- full content dict
+    status TEXT DEFAULT 'pending',          -- pending / approved / rejected / editing
+    auto_publish_at TIMESTAMPTZ,            -- NULL if manual mode
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status);
+
+-- Auto-update pending_approvals.updated_at on changes
+DROP TRIGGER IF EXISTS update_pending_approvals_updated_at ON pending_approvals;
+CREATE TRIGGER update_pending_approvals_updated_at
+    BEFORE UPDATE ON pending_approvals
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+
 -- RPC function for full-text search on embeddings
 -- Called via: supabase.rpc('search_embeddings_fulltext', {...})
 CREATE OR REPLACE FUNCTION search_embeddings_fulltext(

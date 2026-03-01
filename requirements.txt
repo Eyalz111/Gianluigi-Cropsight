@@ -39,6 +39,7 @@ python-dotenv>=1.0.0           # Load .env files
 # HTTP & Async
 # =============================================================================
 httpx>=0.27.0                  # Async HTTP client
+aiohttp>=3.9.0                 # HTTP server for health checks (Cloud Run)
 aiofiles>=24.1.0               # Async file operations
 
 # =============================================================================
