@@ -72,7 +72,7 @@ steps:
         CROPSIGHT_CALENDAR_COLOR_ID=CROPSIGHT_CALENDAR_COLOR_ID:latest,
         GIANLUIGI_EMAIL=GIANLUIGI_EMAIL:latest
       - '--set-env-vars'
-      - 'ENVIRONMENT=production,LOG_LEVEL=INFO,APPROVAL_MODE=manual'
+      - 'ENVIRONMENT=staging,LOG_LEVEL=INFO,APPROVAL_MODE=manual'
 
 images:
   - 'gcr.io/$PROJECT_ID/gianluigi:$COMMIT_SHA'
