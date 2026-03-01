@@ -220,6 +220,9 @@ class Settings(BaseSettings):
     ALERT_CHECK_INTERVAL: int = Field(
         default=43200, description="Alert scheduler check interval (seconds)"
     )
+    ORPHAN_CLEANUP_INTERVAL: int = Field(
+        default=86400, description="Orphan cleanup scheduler interval (seconds)"
+    )
 
     # ==========================================================================
     # Approval Mode (v0.2)

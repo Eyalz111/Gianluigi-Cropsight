@@ -1804,6 +1804,94 @@ class SupabaseClient:
         return result.data
 
     # =========================================================================
+    # Orphan Cleanup Helpers (v0.5)
+    # =========================================================================
+
+    def get_stale_pending_approvals(self, days: int = 7) -> list[dict]:
+        """
+        Get pending approvals older than N days.
+
+        Args:
+            days: Number of days after which an approval is considered stale.
+
+        Returns:
+            List of stale pending approval records.
+        """
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        result = (
+            self.client.table("pending_approvals")
+            .select("*")
+            .eq("status", "pending")
+            .lt("created_at", cutoff)
+            .execute()
+        )
+        return result.data
+
+    def get_orphan_embedding_ids(self) -> list[str]:
+        """
+        Find embedding IDs whose source_id doesn't exist in meetings or documents.
+
+        Returns:
+            List of orphan embedding UUIDs.
+        """
+        # Get all unique source_ids from embeddings
+        emb_result = (
+            self.client.table("embeddings")
+            .select("id, source_id, source_type")
+            .execute()
+        )
+        if not emb_result.data:
+            return []
+
+        # Get all meeting IDs
+        meeting_result = self.client.table("meetings").select("id").execute()
+        meeting_ids = {str(m["id"]) for m in (meeting_result.data or [])}
+
+        # Get all document IDs
+        doc_result = self.client.table("documents").select("id").execute()
+        doc_ids = {str(d["id"]) for d in (doc_result.data or [])}
+
+        # Find orphans: embeddings whose source doesn't exist
+        orphan_ids = []
+        for emb in emb_result.data:
+            source_id = str(emb.get("source_id", ""))
+            source_type = emb.get("source_type", "meeting")
+            if source_type == "meeting" and source_id not in meeting_ids:
+                orphan_ids.append(str(emb["id"]))
+            elif source_type == "document" and source_id not in doc_ids:
+                orphan_ids.append(str(emb["id"]))
+
+        return orphan_ids
+
+    def delete_embeddings_by_ids(self, ids: list[str]) -> int:
+        """
+        Delete embeddings by their IDs.
+
+        Args:
+            ids: List of embedding UUIDs to delete.
+
+        Returns:
+            Number of embeddings deleted.
+        """
+        if not ids:
+            return 0
+
+        # Delete in batches of 100 to avoid query size limits
+        total_deleted = 0
+        for i in range(0, len(ids), 100):
+            batch = ids[i : i + 100]
+            result = (
+                self.client.table("embeddings")
+                .delete()
+                .in_("id", batch)
+                .execute()
+            )
+            total_deleted += len(result.data) if result.data else 0
+
+        logger.info(f"Deleted {total_deleted} orphan embeddings")
+        return total_deleted
+
+    # =========================================================================
     # Audit Log
     # =========================================================================
 

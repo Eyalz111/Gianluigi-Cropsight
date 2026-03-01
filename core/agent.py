@@ -616,12 +616,20 @@ class GianluigiAgent:
         if not meeting:
             return {"error": "Meeting not found"}
 
-        return {
+        result = {
             "title": meeting.get("title"),
             "date": meeting.get("date"),
             "summary": meeting.get("summary"),
             "participants": meeting.get("participants"),
         }
+
+        # Add Drive link so the user can navigate directly
+        if settings.MEETING_SUMMARIES_FOLDER_ID:
+            result["summaries_folder"] = (
+                f"https://drive.google.com/drive/folders/{settings.MEETING_SUMMARIES_FOLDER_ID}"
+            )
+
+        return result
 
     async def _tool_create_task(self, input: dict) -> dict:
         """Create a new task."""
@@ -659,7 +667,16 @@ class GianluigiAgent:
             status=input.get("status"),
             category=input.get("category"),
         )
-        return {"tasks": tasks, "count": len(tasks)}
+
+        result = {"tasks": tasks, "count": len(tasks)}
+
+        # Add Sheets link so the user can navigate directly
+        if settings.TASK_TRACKER_SHEET_ID:
+            result["task_tracker"] = (
+                f"https://docs.google.com/spreadsheets/d/{settings.TASK_TRACKER_SHEET_ID}/edit"
+            )
+
+        return result
 
     async def _tool_update_task(self, input: dict) -> dict:
         """Update a task's status or deadline."""
@@ -684,6 +701,12 @@ class GianluigiAgent:
             query_embedding=query_embedding,
             query_text=query,
         )
+
+        # Add Drive link so the user can navigate directly
+        if settings.DOCUMENTS_FOLDER_ID:
+            results["documents_folder"] = (
+                f"https://drive.google.com/drive/folders/{settings.DOCUMENTS_FOLDER_ID}"
+            )
 
         return results
 
@@ -898,7 +921,16 @@ class GianluigiAgent:
             speaker=speaker,
             status=input.get("status"),
         )
-        return {"commitments": commitments, "count": len(commitments)}
+
+        result = {"commitments": commitments, "count": len(commitments)}
+
+        # Add Sheets link so the user can navigate directly
+        if settings.TASK_TRACKER_SHEET_ID:
+            result["task_tracker"] = (
+                f"https://docs.google.com/spreadsheets/d/{settings.TASK_TRACKER_SHEET_ID}/edit"
+            )
+
+        return result
 
     # =========================================================================
     # Helper Methods

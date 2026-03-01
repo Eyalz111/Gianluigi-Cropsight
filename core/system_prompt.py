@@ -83,6 +83,9 @@ When creating task lists or summaries:
 2. Identify assignee clearly
 3. Use priority indicators (H/M/L) when applicable
 4. Note any deadlines mentioned
+
+When your tool results include links (summaries_folder, task_tracker, documents_folder),
+include them in your response so users can navigate directly. Use markdown: [text](url)
 """
 
 # =============================================================================

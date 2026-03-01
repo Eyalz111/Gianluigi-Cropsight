@@ -24,16 +24,11 @@ import sys
 from typing import NoReturn
 
 from config.settings import settings
+from core.logging_config import setup_logging
 
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ]
-)
+# Configure logging (JSON in production, plain text in dev)
+setup_logging(level=settings.LOG_LEVEL, environment=settings.ENVIRONMENT)
 logger = logging.getLogger("gianluigi")
 
 
@@ -266,6 +261,15 @@ async def start_services() -> None:
     )
     tasks.append(alert_task)
 
+    # Start orphan cleanup scheduler (always — only needs Supabase + Telegram)
+    from schedulers.orphan_cleanup_scheduler import orphan_cleanup_scheduler
+    logger.info("  Starting orphan cleanup scheduler...")
+    cleanup_task = asyncio.create_task(
+        orphan_cleanup_scheduler.start(),
+        name="orphan_cleanup_scheduler"
+    )
+    tasks.append(cleanup_task)
+
     # Start email watcher (only if Gmail is available)
     if init_status.get("gmail"):
         from schedulers.email_watcher import email_watcher
@@ -353,6 +357,7 @@ async def stop_services() -> None:
     from schedulers.weekly_digest_scheduler import weekly_digest_scheduler
     from schedulers.email_watcher import email_watcher
     from schedulers.alert_scheduler import alert_scheduler
+    from schedulers.orphan_cleanup_scheduler import orphan_cleanup_scheduler
 
     transcript_watcher.stop()
     document_watcher.stop()
@@ -361,6 +366,7 @@ async def stop_services() -> None:
     weekly_digest_scheduler.stop()
     email_watcher.stop()
     alert_scheduler.stop()
+    orphan_cleanup_scheduler.stop()
 
     # Stop Telegram bot
     from services.telegram_bot import telegram_bot
