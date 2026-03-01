@@ -567,8 +567,11 @@ async def check_commitment_fulfillment(
         List of fulfillment detections:
         [{commitment_id, evidence, confidence}]
     """
-    # Fetch all open commitments
-    open_commitments = supabase_client.get_commitments(status="open")
+    # Fetch all open commitments, excluding ones just created from this meeting
+    all_open = supabase_client.get_commitments(status="open")
+    open_commitments = [
+        c for c in all_open if c.get("meeting_id") != meeting_id
+    ]
 
     if not open_commitments:
         return []
