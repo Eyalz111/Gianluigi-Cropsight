@@ -24,9 +24,8 @@ import logging
 import re
 from typing import Any
 
-from anthropic import Anthropic
-
 from config.settings import settings
+from core.llm import call_llm
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -107,13 +106,12 @@ Return JSON:
 {{"classifications": [{{"new_task_index": "A", "type": "DUPLICATE|UPDATE|NEW", "existing_task_id": "abc or null", "new_status": "done|in_progress|null", "evidence": "quote or null", "reason": "why this classification"}}]}}"""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response_text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="task_dedup",
         )
-        response_text = response.content[0].text
         parsed = _parse_json_response(response_text)
         classifications = parsed.get("classifications", [])
     except Exception as e:
@@ -240,13 +238,13 @@ Return JSON:
 {{"status_changes": [{{"task_id": "abc", "new_status": "done|in_progress", "evidence": "exact quote", "confidence": "high|medium|low", "reasoning": "why"}}]}}"""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=settings.model_agent,
+        response_text, _ = call_llm(
+            prompt=prompt,
+            model=settings.model_simple,
             max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="status_inference",
+            meeting_id=meeting_id,
         )
-        response_text = response.content[0].text
         parsed = _parse_json_response(response_text)
         changes = parsed.get("status_changes", [])
     except Exception as e:
@@ -323,13 +321,13 @@ Return JSON:
 {{"resolved_questions": [{{"question_id": "abc", "answer": "summary", "evidence": "exact quote", "confidence": "high|medium|low"}}]}}"""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response_text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="question_resolution",
+            meeting_id=meeting_id,
         )
-        response_text = response.content[0].text
         parsed = _parse_json_response(response_text)
         resolved = parsed.get("resolved_questions", [])
     except Exception as e:
@@ -533,13 +531,13 @@ Return JSON:
 Be conservative — only include clear, actionable commitments. Exclude vague intentions."""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response_text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="commitment_extraction",
+            meeting_id=meeting_id,
         )
-        response_text = response.content[0].text
         parsed = _parse_json_response(response_text)
         commitments = parsed.get("commitments", [])
         logger.info(f"Extracted {len(commitments)} commitments from meeting {meeting_id}")
@@ -608,13 +606,13 @@ Return JSON:
 {{"fulfilled": [{{"commitment_id": "...", "evidence": "...", "confidence": "..."}}]}}"""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response_text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="commitment_fulfillment",
+            meeting_id=meeting_id,
         )
-        response_text = response.content[0].text
         parsed = _parse_json_response(response_text)
         fulfilled = parsed.get("fulfilled", [])
 

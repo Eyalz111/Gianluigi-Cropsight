@@ -184,6 +184,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("questions", self._handle_questions))
         self.app.add_handler(CommandHandler("retract", self._handle_retract))
         self.app.add_handler(CommandHandler("reprocess", self._handle_reprocess))
+        self.app.add_handler(CommandHandler("cost", self._handle_cost))
         self.app.add_handler(CommandHandler("myid", self._handle_myid))
 
         # Add callback handler for inline buttons (approval flow)
@@ -602,6 +603,101 @@ Or just send me a question and I'll search our meeting history to answer it!
         # Register user if we can identify them
         logger.info(f"User started chat: {user.id} - {user.username}")
 
+    async def _handle_cost(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """
+        Handle /cost command — show API token usage summary.
+
+        Admin-only (Eyal). Shows last 7 days of LLM usage grouped by
+        call_site and model, including cache hit rates.
+        """
+        user = update.effective_user
+        if not self._is_admin(user.id):
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can view cost data.",
+            )
+            return
+
+        from services.supabase_client import supabase_client
+
+        try:
+            # Query last 7 days of token usage
+            from datetime import datetime, timedelta
+            seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
+
+            rows = (
+                supabase_client.client.table("token_usage")
+                .select("call_site,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens")
+                .gte("created_at", seven_days_ago)
+                .execute()
+            ).data
+
+            if not rows:
+                await self.send_message(
+                    update.effective_chat.id,
+                    "No API usage recorded in the last 7 days.",
+                )
+                return
+
+            # Aggregate by call_site + model
+            agg = {}
+            for r in rows:
+                key = (r["call_site"], r["model"])
+                if key not in agg:
+                    agg[key] = {
+                        "calls": 0,
+                        "input": 0,
+                        "output": 0,
+                        "cache_read": 0,
+                        "cache_create": 0,
+                    }
+                agg[key]["calls"] += 1
+                agg[key]["input"] += r.get("input_tokens", 0)
+                agg[key]["output"] += r.get("output_tokens", 0)
+                agg[key]["cache_read"] += r.get("cache_read_tokens", 0) or 0
+                agg[key]["cache_create"] += r.get("cache_creation_tokens", 0) or 0
+
+            # Format output
+            total_input = sum(v["input"] for v in agg.values())
+            total_output = sum(v["output"] for v in agg.values())
+            total_calls = sum(v["calls"] for v in agg.values())
+            total_cache_read = sum(v["cache_read"] for v in agg.values())
+
+            lines = ["*API Usage (Last 7 Days)*\n"]
+            for (site, model), v in sorted(agg.items()):
+                # Shorten model name for display
+                short_model = model.split("/")[-1] if "/" in model else model
+                short_model = short_model.replace("claude-", "")
+                cache_pct = ""
+                if v["cache_read"] > 0:
+                    pct = round(v["cache_read"] / max(v["input"], 1) * 100)
+                    cache_pct = f" ({pct}% cached)"
+                lines.append(
+                    f"`{site}` ({short_model})\n"
+                    f"  {v['calls']} calls | "
+                    f"{v['input']:,} in / {v['output']:,} out"
+                    f"{cache_pct}"
+                )
+
+            lines.append(
+                f"\n*Totals:* {total_calls} calls | "
+                f"{total_input:,} in / {total_output:,} out | "
+                f"{total_cache_read:,} cached"
+            )
+
+            await self.send_message(update.effective_chat.id, "\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"Error in /cost command: {e}")
+            await self.send_message(
+                update.effective_chat.id,
+                f"Error fetching cost data: {e}",
+            )
+
     async def _handle_myid(
         self,
         update: Update,
@@ -646,6 +742,7 @@ Or just send me a question and I'll search our meeting history to answer it!
 /decisions - List recent key decisions
 /questions - List open questions
 /reprocess [title] - Reprocess a transcript (Eyal only)
+/cost - API token usage summary (Eyal only)
 
 *Ask Questions:*
 Just type your question and I'll search our meeting history to answer it.
@@ -1262,25 +1359,22 @@ When you receive approval requests, use the buttons to approve, request changes,
         Returns:
             "question" or "edit"
         """
-        from anthropic import Anthropic
+        from core.llm import call_llm
 
         try:
-            client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-            response = client.messages.create(
+            result, _ = call_llm(
+                prompt=(
+                    "Classify this message as either 'question' or 'edit'. "
+                    "A question asks about the content (e.g., 'what decisions were made?'). "
+                    "An edit requests changes (e.g., 'make it shorter', 'change the deadline'). "
+                    "Reply with ONLY the word 'question' or 'edit'.\n\n"
+                    f"Message: {message}"
+                ),
                 model=settings.model_simple,
                 max_tokens=10,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Classify this message as either 'question' or 'edit'. "
-                        "A question asks about the content (e.g., 'what decisions were made?'). "
-                        "An edit requests changes (e.g., 'make it shorter', 'change the deadline'). "
-                        "Reply with ONLY the word 'question' or 'edit'.\n\n"
-                        f"Message: {message}"
-                    ),
-                }],
+                call_site="review_intent",
             )
-            result = response.content[0].text.strip().lower()
+            result = result.strip().lower()
             if "question" in result:
                 return "question"
             return "edit"

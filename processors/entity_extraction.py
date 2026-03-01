@@ -28,9 +28,8 @@ import logging
 import re
 from typing import Any
 
-from anthropic import Anthropic
-
 from config.settings import settings
+from core.llm import call_llm
 from config.team import get_team_member_names, TEAM_MEMBERS
 from services.supabase_client import supabase_client
 
@@ -283,13 +282,12 @@ Return JSON:
 Return only genuine CropSight stakeholders. An empty list is perfectly fine."""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response_text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="entity_extraction",
         )
-        response_text = response.content[0].text
         parsed = _parse_json_response(response_text)
         entities = parsed.get("entities", [])
 
@@ -367,13 +365,12 @@ Return JSON with ONLY the numbers of candidates to KEEP:
 If none should be kept, return: {{"keep": []}}"""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response_text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="entity_validation",
         )
-        response_text = response.content[0].text
         parsed = _parse_json_response(response_text)
         keep_indices = parsed.get("keep", [])
 

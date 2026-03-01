@@ -459,3 +459,20 @@ BEGIN
     LIMIT match_count;
 END;
 $$;
+
+-- =============================================================================
+-- Token Usage Tracking (v0.5)
+-- =============================================================================
+
+-- Tracks token usage per LLM call for cost monitoring
+CREATE TABLE IF NOT EXISTS token_usage (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    call_site TEXT NOT NULL,           -- e.g., "transcript_extraction", "task_dedup"
+    model TEXT NOT NULL,               -- e.g., "claude-opus-4-6"
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_creation_tokens INTEGER DEFAULT 0,
+    meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);

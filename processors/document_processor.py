@@ -30,9 +30,8 @@ import io
 import logging
 from typing import Any
 
-from anthropic import Anthropic
-
 from config.settings import settings
+from core.llm import call_llm
 from services.supabase_client import supabase_client
 from services.embeddings import embedding_service
 
@@ -149,20 +148,13 @@ Document content:
 {truncated}"""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        summary, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="document_summary",
         )
-
-        # Extract text from response
-        summary_parts = []
-        for block in response.content:
-            if hasattr(block, "text"):
-                summary_parts.append(block.text)
-
-        summary = "\n".join(summary_parts).strip()
+        summary = summary.strip()
         logger.info(f"Generated summary for '{title}': {len(summary)} chars")
         return summary
 
@@ -192,17 +184,12 @@ Document:
 {truncated}"""
 
     try:
-        client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="document_key_points",
         )
-
-        text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                text += block.text
 
         # Parse numbered list into individual points
         points = []

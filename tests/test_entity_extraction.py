@@ -34,19 +34,16 @@ class TestExtractRawEntities:
     @pytest.mark.asyncio
     async def test_empty_transcript(self):
         """Empty transcript should return empty list."""
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            mock_response.content = [MagicMock(text='{"entities": []}')]
-            mock_client.messages.create.return_value = mock_response
-
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.return_value = ('{"entities": []}', _usage)
             result = await _extract_raw_entities("", [])
             assert result == []
 
     @pytest.mark.asyncio
     async def test_extraction_returns_entities(self):
         """Should extract entities from transcript."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         entities_json = json.dumps({
             "entities": [
                 {"name": "Jason Adelman", "type": "person", "context": "advisor", "speaker": "Eyal", "sentiment": "positive", "relationship": "advisor"},
@@ -54,13 +51,8 @@ class TestExtractRawEntities:
             ]
         })
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            mock_response.content = [MagicMock(text=entities_json)]
-            mock_client.messages.create.return_value = mock_response
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.return_value = (entities_json, _usage)
             result = await _extract_raw_entities("Some transcript", ["Someone"])
             assert len(result) == 2
             assert result[0]["name"] == "Jason Adelman"
@@ -69,6 +61,7 @@ class TestExtractRawEntities:
     @pytest.mark.asyncio
     async def test_participant_exclusion(self):
         """Participants should be filtered out."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         entities_json = json.dumps({
             "entities": [
                 {"name": "Eyal", "type": "person", "context": "host", "speaker": "Paolo", "sentiment": "neutral", "relationship": "other"},
@@ -76,15 +69,9 @@ class TestExtractRawEntities:
             ]
         })
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            mock_response.content = [MagicMock(text=entities_json)]
-            mock_client.messages.create.return_value = mock_response
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.return_value = (entities_json, _usage)
             result = await _extract_raw_entities("transcript", ["Eyal Zror"])
-            # "Eyal" should be excluded (first name of participant)
             names = [e["name"] for e in result]
             assert "Eyal" not in names
             assert "Jason Adelman" in names
@@ -92,6 +79,7 @@ class TestExtractRawEntities:
     @pytest.mark.asyncio
     async def test_team_member_exclusion(self):
         """Known team members should be filtered out."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         entities_json = json.dumps({
             "entities": [
                 {"name": "Roye Tadmor", "type": "person", "context": "CTO", "speaker": "Eyal", "sentiment": "neutral", "relationship": "other"},
@@ -99,13 +87,8 @@ class TestExtractRawEntities:
             ]
         })
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            mock_response.content = [MagicMock(text=entities_json)]
-            mock_client.messages.create.return_value = mock_response
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.return_value = (entities_json, _usage)
             result = await _extract_raw_entities("transcript", [])
             names = [e["name"] for e in result]
             assert "Roye Tadmor" not in names
@@ -114,11 +97,8 @@ class TestExtractRawEntities:
     @pytest.mark.asyncio
     async def test_llm_error_returns_empty(self):
         """LLM error should return empty list, not raise."""
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_client.messages.create.side_effect = Exception("API error")
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.side_effect = Exception("API error")
             result = await _extract_raw_entities("transcript", [])
             assert result == []
 
@@ -133,20 +113,15 @@ class TestValidateEntities:
     @pytest.mark.asyncio
     async def test_keeps_valid_entities(self):
         """Should keep entities the LLM marks as valid."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         candidates = [
             {"name": "Jason Adelman", "type": "person", "context": "advisor", "relationship": "advisor"},
             {"name": "AWS", "type": "organization", "context": "cloud provider", "relationship": "vendor"},
             {"name": "Lavazza", "type": "organization", "context": "partner", "relationship": "partner"},
         ]
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            # LLM says keep 1 and 3 (Jason and Lavazza), reject 2 (AWS)
-            mock_response.content = [MagicMock(text='{"keep": [1, 3]}')]
-            mock_client.messages.create.return_value = mock_response
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.return_value = ('{"keep": [1, 3]}', _usage)
             result = await _validate_entities(candidates)
             assert len(result) == 2
             names = [e["name"] for e in result]
@@ -157,17 +132,13 @@ class TestValidateEntities:
     @pytest.mark.asyncio
     async def test_rejects_all(self):
         """Should return empty list when LLM rejects everything."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         candidates = [
             {"name": "Internet", "type": "technology", "context": "mentioned", "relationship": "other"},
         ]
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            mock_response.content = [MagicMock(text='{"keep": []}')]
-            mock_client.messages.create.return_value = mock_response
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.return_value = ('{"keep": []}', _usage)
             result = await _validate_entities(candidates)
             assert result == []
 
@@ -184,31 +155,22 @@ class TestValidateEntities:
             {"name": "Someone", "type": "person", "context": "contact", "relationship": "other"},
         ]
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_client.messages.create.side_effect = Exception("API error")
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.side_effect = Exception("API error")
             result = await _validate_entities(candidates)
-            # Should pass through all candidates on error
             assert len(result) == 1
             assert result[0]["name"] == "Someone"
 
     @pytest.mark.asyncio
     async def test_handles_out_of_range_indices(self):
         """Should ignore indices that are out of range."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         candidates = [
             {"name": "Valid Person", "type": "person", "context": "test", "relationship": "advisor"},
         ]
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            # LLM returns an out-of-range index (99) plus a valid one (1)
-            mock_response.content = [MagicMock(text='{"keep": [1, 99]}')]
-            mock_client.messages.create.return_value = mock_response
-
+        with patch("processors.entity_extraction.call_llm") as mock_llm:
+            mock_llm.return_value = ('{"keep": [1, 99]}', _usage)
             result = await _validate_entities(candidates)
             assert len(result) == 1
             assert result[0]["name"] == "Valid Person"
@@ -280,18 +242,15 @@ class TestPreExtractedFlow:
     @pytest.mark.asyncio
     async def test_uses_pre_extracted_skips_haiku_extraction(self):
         """Should use pre-extracted data and skip the Haiku extraction call."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         pre_extracted = [
             {"name": "Jason Adelman", "type": "person", "context": "advisor", "speaker": "Eyal", "relationship": "advisor"},
         ]
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
             # Only ONE LLM call should happen (validation), not two
-            mock_client.messages.create.return_value = MagicMock(
-                content=[MagicMock(text='{"keep": [1]}')]
-            )
+            mock_llm.return_value = ('{"keep": [1]}', _usage)
 
             mock_db.list_entities.return_value = [
                 {"id": "e1", "canonical_name": "Jason Adelman", "entity_type": "person", "aliases": ["Jason"]},
@@ -303,20 +262,19 @@ class TestPreExtractedFlow:
             )
 
             # Should have called LLM exactly once (validation only)
-            assert mock_client.messages.create.call_count == 1
+            assert mock_llm.call_count == 1
             assert len(result["existing_mentions"]) == 1
 
     @pytest.mark.asyncio
     async def test_falls_back_to_haiku_when_no_pre_extracted(self):
         """Without pre_extracted, should use standalone Haiku extraction."""
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
             # Two LLM calls: extraction + validation
-            mock_client.messages.create.side_effect = [
-                MagicMock(content=[MagicMock(text='{"entities": [{"name": "Someone", "type": "person", "context": "test", "relationship": "other"}]}')]),
-                MagicMock(content=[MagicMock(text='{"keep": [1]}')]),
+            mock_llm.side_effect = [
+                ('{"entities": [{"name": "Someone", "type": "person", "context": "test", "relationship": "other"}]}', _usage),
+                ('{"keep": [1]}', _usage),
             ]
 
             mock_db.list_entities.return_value = []
@@ -330,24 +288,21 @@ class TestPreExtractedFlow:
             )
 
             # Should have called LLM twice (extraction + validation)
-            assert mock_client.messages.create.call_count == 2
+            assert mock_llm.call_count == 2
             assert len(result["new_entities"]) == 1
 
     @pytest.mark.asyncio
     async def test_pre_extracted_filters_team_members(self):
         """Pre-extracted data should still filter out team members."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         pre_extracted = [
             {"name": "Roye Tadmor", "type": "person", "context": "CTO", "relationship": "other"},
             {"name": "Lavazza", "type": "organization", "context": "partner", "relationship": "partner"},
         ]
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_client.messages.create.return_value = MagicMock(
-                content=[MagicMock(text='{"keep": [1]}')]
-            )
+            mock_llm.return_value = ('{"keep": [1]}', _usage)
 
             mock_db.list_entities.return_value = []
             mock_db.create_entity.return_value = {
@@ -428,20 +383,18 @@ class TestExtractAndLinkEntities:
     @pytest.mark.asyncio
     async def test_new_entity_creation(self):
         """Should create new entity when no match exists."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         entities_json = json.dumps({
             "entities": [
                 {"name": "New Person", "type": "person", "context": "new contact", "speaker": "Eyal", "sentiment": "positive", "relationship": "advisor"},
             ]
         })
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            # First call: extraction. Second call: validation.
-            mock_client.messages.create.side_effect = [
-                MagicMock(content=[MagicMock(text=entities_json)]),
-                MagicMock(content=[MagicMock(text='{"keep": [1]}')]),
+            mock_llm.side_effect = [
+                (entities_json, _usage),
+                ('{"keep": [1]}', _usage),
             ]
 
             mock_db.list_entities.return_value = []
@@ -459,19 +412,18 @@ class TestExtractAndLinkEntities:
     @pytest.mark.asyncio
     async def test_existing_entity_linking(self):
         """Should link to existing entity when match found."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         entities_json = json.dumps({
             "entities": [
                 {"name": "Jason Adelman", "type": "person", "context": "advisor", "speaker": "Eyal", "sentiment": "positive", "relationship": "advisor"},
             ]
         })
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_client.messages.create.side_effect = [
-                MagicMock(content=[MagicMock(text=entities_json)]),
-                MagicMock(content=[MagicMock(text='{"keep": [1]}')]),
+            mock_llm.side_effect = [
+                (entities_json, _usage),
+                ('{"keep": [1]}', _usage),
             ]
 
             mock_db.list_entities.return_value = [
@@ -488,6 +440,7 @@ class TestExtractAndLinkEntities:
     @pytest.mark.asyncio
     async def test_batch_mentions_created(self):
         """Should batch-create mentions for all entities."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         entities_json = json.dumps({
             "entities": [
                 {"name": "Ferrero", "type": "organization", "context": "partner", "speaker": "Paolo", "sentiment": "positive", "relationship": "partner"},
@@ -495,13 +448,11 @@ class TestExtractAndLinkEntities:
             ]
         })
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_client.messages.create.side_effect = [
-                MagicMock(content=[MagicMock(text=entities_json)]),
-                MagicMock(content=[MagicMock(text='{"keep": [1, 2]}')]),
+            mock_llm.side_effect = [
+                (entities_json, _usage),
+                ('{"keep": [1, 2]}', _usage),
             ]
 
             mock_db.list_entities.return_value = []
@@ -522,13 +473,10 @@ class TestExtractAndLinkEntities:
     @pytest.mark.asyncio
     async def test_empty_extraction(self):
         """No entities found should return empty result."""
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_response = MagicMock()
-            mock_response.content = [MagicMock(text='{"entities": []}')]
-            mock_client.messages.create.return_value = mock_response
+            mock_llm.return_value = ('{"entities": []}', _usage)
 
             result = await extract_and_link_entities("meeting-123", "short meeting", [])
             assert result["new_entities"] == []
@@ -538,6 +486,7 @@ class TestExtractAndLinkEntities:
     @pytest.mark.asyncio
     async def test_validation_filters_junk(self):
         """Validation pass should remove junk that extraction let through."""
+        _usage = {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         entities_json = json.dumps({
             "entities": [
                 {"name": "Jason Adelman", "type": "person", "context": "advisor", "speaker": "Eyal", "sentiment": "positive", "relationship": "advisor"},
@@ -545,14 +494,11 @@ class TestExtractAndLinkEntities:
             ]
         })
 
-        with patch("processors.entity_extraction.Anthropic") as mock_cls, \
+        with patch("processors.entity_extraction.call_llm") as mock_llm, \
              patch("processors.entity_extraction.supabase_client") as mock_db:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            # Extraction returns both, validation keeps only Jason
-            mock_client.messages.create.side_effect = [
-                MagicMock(content=[MagicMock(text=entities_json)]),
-                MagicMock(content=[MagicMock(text='{"keep": [1]}')]),
+            mock_llm.side_effect = [
+                (entities_json, _usage),
+                ('{"keep": [1]}', _usage),
             ]
 
             mock_db.list_entities.return_value = [

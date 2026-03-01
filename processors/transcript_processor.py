@@ -31,9 +31,10 @@ import re
 from datetime import datetime
 from typing import Any
 
-from anthropic import Anthropic, APIStatusError
+from anthropic import APIStatusError
 
 from config.settings import settings
+from core.llm import call_llm
 from core.system_prompt import (
     get_summary_extraction_prompt,
     format_summary as format_summary_template,
@@ -372,9 +373,6 @@ async def extract_structured_data(
         duration_minutes=duration_minutes,
     )
 
-    # Call Claude for extraction
-    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-
     # Use a structured extraction approach with JSON output
     extraction_system = """You are an expert meeting analyst. Extract structured information from meeting transcripts.
 
@@ -454,17 +452,13 @@ Apply all tone guardrails: no emotional characterizations, professional language
 
     for attempt in range(max_retries):
         try:
-            response = client.messages.create(
+            response_text, _ = call_llm(
+                prompt=prompt,
                 model=settings.model_extraction,
                 max_tokens=4096,
                 system=extraction_system,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                call_site="transcript_extraction",
             )
-
-            # Parse the response
-            response_text = response.content[0].text
 
             # Try to extract JSON from the response
             extracted = _parse_extraction_response(response_text)

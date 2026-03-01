@@ -58,22 +58,18 @@ class TestDeduplicateTasks:
     @pytest.mark.asyncio
     async def test_duplicate_classification(self):
         """Tasks classified as DUPLICATE by Claude should go to duplicates list."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text='{"classifications": [{"new_task_index": "A", "type": "DUPLICATE", "existing_task_id": "task-1", "new_status": null, "evidence": null, "reason": "Same task"}]}'
-        )]
-
         with (
             patch("processors.cross_reference.supabase_client") as mock_db,
-            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.call_llm") as mock_llm,
         ):
             mock_db.get_tasks = MagicMock(return_value=[
                 {"id": "task-1", "title": "Set up dev environment", "assignee": "Roye",
                  "category": "Product & Tech", "status": "pending"},
             ])
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic.return_value = mock_client
+            mock_llm.return_value = (
+                '{"classifications": [{"new_task_index": "A", "type": "DUPLICATE", "existing_task_id": "task-1", "new_status": null, "evidence": null, "reason": "Same task"}]}',
+                {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            )
 
             from processors.cross_reference import deduplicate_tasks
 
@@ -90,22 +86,18 @@ class TestDeduplicateTasks:
     @pytest.mark.asyncio
     async def test_update_classification(self):
         """Tasks classified as UPDATE should go to updates list with new_status."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text='{"classifications": [{"new_task_index": "A", "type": "UPDATE", "existing_task_id": "task-1", "new_status": "done", "evidence": "We finished the setup", "reason": "Task completed"}]}'
-        )]
-
         with (
             patch("processors.cross_reference.supabase_client") as mock_db,
-            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.call_llm") as mock_llm,
         ):
             mock_db.get_tasks = MagicMock(return_value=[
                 {"id": "task-1", "title": "Set up dev environment", "assignee": "Roye",
                  "category": "Product & Tech", "status": "in_progress"},
             ])
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic.return_value = mock_client
+            mock_llm.return_value = (
+                '{"classifications": [{"new_task_index": "A", "type": "UPDATE", "existing_task_id": "task-1", "new_status": "done", "evidence": "We finished the setup", "reason": "Task completed"}]}',
+                {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            )
 
             from processors.cross_reference import deduplicate_tasks
 
@@ -125,15 +117,13 @@ class TestDeduplicateTasks:
         """On LLM error, all tasks should be treated as new (safe default)."""
         with (
             patch("processors.cross_reference.supabase_client") as mock_db,
-            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.call_llm") as mock_llm,
         ):
             mock_db.get_tasks = MagicMock(return_value=[
                 {"id": "task-1", "title": "Existing task", "assignee": "Eyal",
                  "category": "Strategy & Research", "status": "pending"},
             ])
-            mock_client = MagicMock()
-            mock_client.messages.create.side_effect = Exception("API Error")
-            mock_anthropic.return_value = mock_client
+            mock_llm.side_effect = Exception("API Error")
 
             from processors.cross_reference import deduplicate_tasks
 
@@ -167,22 +157,18 @@ class TestInferTaskStatusChanges:
     @pytest.mark.asyncio
     async def test_explicit_completion_high_confidence(self):
         """Explicit completion statement should be flagged with high confidence."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text='{"status_changes": [{"task_id": "task-1", "new_status": "done", "evidence": "I finished the dev setup", "confidence": "high", "reasoning": "Explicit completion"}]}'
-        )]
-
         with (
             patch("processors.cross_reference.supabase_client") as mock_db,
-            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.call_llm") as mock_llm,
         ):
             mock_db.get_tasks = MagicMock(return_value=[
                 {"id": "task-1", "title": "Set up dev environment", "assignee": "Roye",
                  "status": "pending", "category": "Product & Tech", "created_at": "2026-02-10"},
             ])
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic.return_value = mock_client
+            mock_llm.return_value = (
+                '{"status_changes": [{"task_id": "task-1", "new_status": "done", "evidence": "I finished the dev setup", "confidence": "high", "reasoning": "Explicit completion"}]}',
+                {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            )
 
             from processors.cross_reference import infer_task_status_changes
 
@@ -197,22 +183,18 @@ class TestInferTaskStatusChanges:
     @pytest.mark.asyncio
     async def test_progress_mention_medium_confidence(self):
         """Progress mention should be flagged as in_progress with medium confidence."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text='{"status_changes": [{"task_id": "task-2", "new_status": "in_progress", "evidence": "I am working on the timeline", "confidence": "medium", "reasoning": "Active work mentioned"}]}'
-        )]
-
         with (
             patch("processors.cross_reference.supabase_client") as mock_db,
-            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.call_llm") as mock_llm,
         ):
             mock_db.get_tasks = MagicMock(return_value=[
                 {"id": "task-2", "title": "Draft Moldova timeline", "assignee": "Paolo",
                  "status": "pending", "category": "BD & Sales", "created_at": "2026-02-15"},
             ])
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic.return_value = mock_client
+            mock_llm.return_value = (
+                '{"status_changes": [{"task_id": "task-2", "new_status": "in_progress", "evidence": "I am working on the timeline", "confidence": "medium", "reasoning": "Active work mentioned"}]}',
+                {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            )
 
             from processors.cross_reference import infer_task_status_changes
 
@@ -225,20 +207,18 @@ class TestInferTaskStatusChanges:
     @pytest.mark.asyncio
     async def test_unrelated_transcript_no_changes(self):
         """When transcript doesn't mention any tasks, should return empty."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text='{"status_changes": []}')]
-
         with (
             patch("processors.cross_reference.supabase_client") as mock_db,
-            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.call_llm") as mock_llm,
         ):
             mock_db.get_tasks = MagicMock(return_value=[
                 {"id": "task-1", "title": "Some task", "assignee": "Eyal",
                  "status": "pending", "category": "Strategy & Research", "created_at": "2026-02-10"},
             ])
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic.return_value = mock_client
+            mock_llm.return_value = (
+                '{"status_changes": []}',
+                {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            )
 
             from processors.cross_reference import infer_task_status_changes
 
@@ -269,22 +249,18 @@ class TestResolveOpenQuestions:
     @pytest.mark.asyncio
     async def test_question_answered_in_transcript(self):
         """When a question is clearly answered, should be in resolved list."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text='{"resolved_questions": [{"question_id": "q-1", "answer": "Freemium with enterprise tier", "evidence": "We decided on freemium model", "confidence": "high"}]}'
-        )]
-
         with (
             patch("processors.cross_reference.supabase_client") as mock_db,
-            patch("processors.cross_reference.Anthropic") as mock_anthropic,
+            patch("processors.cross_reference.call_llm") as mock_llm,
         ):
             mock_db.get_open_questions = MagicMock(return_value=[
                 {"id": "q-1", "question": "What is our pricing model?",
                  "raised_by": "Eyal", "status": "open"},
             ])
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic.return_value = mock_client
+            mock_llm.return_value = (
+                '{"resolved_questions": [{"question_id": "q-1", "answer": "Freemium with enterprise tier", "evidence": "We decided on freemium model", "confidence": "high"}]}',
+                {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            )
 
             from processors.cross_reference import resolve_open_questions
 

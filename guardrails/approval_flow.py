@@ -31,9 +31,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from anthropic import Anthropic
-
 from config.settings import settings
+from core.llm import call_llm
 from config.team import TEAM_MEMBERS, get_team_member
 from services.telegram_bot import telegram_bot
 from services.gmail import gmail_service
@@ -660,8 +659,6 @@ async def parse_edit_instructions_with_claude(
     Returns:
         List of structured edit instructions.
     """
-    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-
     prompt = f"""Parse the following edit instructions for a meeting summary.
 
 CURRENT SUMMARY:
@@ -686,13 +683,12 @@ Example output:
 Return ONLY the JSON array, no other text."""
 
     try:
-        response_msg = client.messages.create(
+        response_text, _ = call_llm(
+            prompt=prompt,
             model=settings.model_simple,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="edit_parsing",
         )
-
-        response_text = response_msg.content[0].text
 
         # Parse JSON from response
         edits = json.loads(response_text)
@@ -732,9 +728,6 @@ async def apply_edits(
 
     current_summary = meeting.get("summary", "")
 
-    # Use Claude to apply the edits to the summary
-    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-
     edits_description = json.dumps(edits, indent=2)
 
     prompt = f"""Apply the following edits to this meeting summary.
@@ -750,13 +743,13 @@ Maintain the same markdown format and structure.
 Only make the changes specified - don't add or remove anything else."""
 
     try:
-        response = client.messages.create(
+        updated_summary, _ = call_llm(
+            prompt=prompt,
             model=settings.model_background,
             max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
+            call_site="edit_application",
+            meeting_id=meeting_id,
         )
-
-        updated_summary = response.content[0].text
 
         # Update the meeting in database
         supabase_client.update_meeting(
