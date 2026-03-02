@@ -92,7 +92,7 @@ class EmailWatcher:
 
                 # Check if this is an approval reply
                 if self._is_approval_reply(subject):
-                    await self._handle_approval_reply(msg_id, body, member_name)
+                    await self._handle_approval_reply(msg_id, body, member_name, subject)
                 # Check if it has attachments
                 elif attachments:
                     await self._handle_attachments(msg_id, msg, member_name)
@@ -120,31 +120,79 @@ class EmailWatcher:
         )
 
     async def _handle_approval_reply(
-        self, msg_id: str, body: str, member_name: str
+        self, msg_id: str, body: str, member_name: str, subject: str
     ) -> None:
-        """Handle an approval reply email."""
-        from guardrails.approval_flow import parse_approval_response
+        """
+        Handle an approval reply email.
+
+        Extracts the meeting_id reference from the subject line,
+        looks up the pending approval, and calls process_response().
+        """
+        from guardrails.approval_flow import process_response
 
         logger.info(f"Processing approval reply from {member_name}")
 
         # Extract just the reply content (before quoted text)
         reply_text = self._extract_reply_text(body)
-        parsed = parse_approval_response(reply_text)
 
-        # Log it -- actual approval handling happens through meeting_id
-        # which we'd need to extract from the subject or thread
-        # supabase_client methods are SYNC -- never await
-        supabase_client.log_action(
-            action="approval_reply_received",
-            details={
-                "from": member_name,
-                "action": parsed["action"],
-                "source": "email",
-            },
-            triggered_by=member_name.lower().split()[0],  # first name
-        )
+        # Extract meeting_id short prefix from subject: [ref:abcd1234]
+        ref_match = re.search(r'\[ref:([a-f0-9]{8})\]', subject)
+        if not ref_match:
+            logger.warning(
+                f"Approval reply missing [ref:...] tag in subject: {subject}"
+            )
+            # Log and bail — can't route without meeting_id
+            supabase_client.log_action(
+                action="approval_reply_unroutable",
+                details={"from": member_name, "subject": subject, "source": "email"},
+                triggered_by=member_name.lower().split()[0],
+            )
+            return
 
-        logger.info(f"Approval reply from {member_name}: {parsed['action']}")
+        ref_prefix = ref_match.group(1)
+
+        # Look up the full meeting_id from pending_approvals table
+        pending = supabase_client.get_pending_approvals(status="pending")
+        full_meeting_id = None
+        for row in pending:
+            aid = row.get("approval_id", "")
+            if aid.startswith(ref_prefix):
+                full_meeting_id = aid
+                break
+
+        if not full_meeting_id:
+            logger.warning(f"No pending approval found for ref:{ref_prefix}")
+            supabase_client.log_action(
+                action="approval_reply_no_match",
+                details={"from": member_name, "ref": ref_prefix, "source": "email"},
+                triggered_by=member_name.lower().split()[0],
+            )
+            return
+
+        # Process the approval response
+        try:
+            result = await process_response(
+                meeting_id=full_meeting_id,
+                response=reply_text,
+                response_source="email",
+            )
+
+            action = result.get("action", "unknown")
+            logger.info(f"Email approval processed: {action} for {full_meeting_id[:8]}")
+
+            # Send confirmation to Eyal's Telegram DM
+            try:
+                from services.telegram_bot import telegram_bot
+                if settings.TELEGRAM_EYAL_CHAT_ID:
+                    await telegram_bot.send_message(
+                        chat_id=settings.TELEGRAM_EYAL_CHAT_ID,
+                        text=f"Email approval received: {action} (ref:{ref_prefix})",
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to send Telegram confirmation: {e}")
+
+        except Exception as e:
+            logger.error(f"Error processing email approval for {ref_prefix}: {e}")
 
     async def _handle_attachments(
         self, msg_id: str, msg: dict, member_name: str

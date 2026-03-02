@@ -1335,6 +1335,61 @@ When you receive approval requests, use the buttons to approve, request changes,
             await self._handle_review_mode_message(update, context)
             return
 
+        # Check if Eyal typed an approval/reject as free text (not via buttons)
+        if is_eyal:
+            lower_msg = message_text.strip().lower()
+            is_approval_text = any(
+                lower_msg.startswith(w)
+                for w in ["approve", "approved", "reject", "rejected"]
+            )
+            if is_approval_text:
+                from services.supabase_client import supabase_client
+                from guardrails.approval_flow import process_response
+
+                # Find the most recent pending approval
+                pending = supabase_client.get_pending_approvals_by_status("pending")
+                if pending:
+                    latest = pending[0]
+                    mid = latest.get("approval_id") or latest.get("id")
+                    action = "approve" if "approve" in lower_msg else "reject"
+                    await self.send_message(
+                        update.effective_chat.id,
+                        "Processing your approval..." if action == "approve"
+                        else "Rejecting...",
+                    )
+                    try:
+                        result = await process_response(
+                            meeting_id=mid,
+                            response=action,
+                            response_source="telegram",
+                        )
+                        dist = result.get("distribution", {})
+                        if action == "approve" and dist:
+                            status_lines = ["Distribution complete:"]
+                            if dist.get("drive_saved"):
+                                status_lines.append("  - Saved to Google Drive")
+                            if dist.get("sheets_updated"):
+                                status_lines.append(
+                                    f"  - {dist.get('tasks_added', 0)} tasks added to tracker"
+                                )
+                            if dist.get("telegram_sent"):
+                                status_lines.append("  - Notification sent")
+                            if dist.get("email_sent"):
+                                status_lines.append("  - Email sent")
+                            await self.send_to_eyal(
+                                "\n".join(status_lines), parse_mode=None
+                            )
+                        else:
+                            await self.send_to_eyal(
+                                result.get("next_step", "Done."), parse_mode=None
+                            )
+                    except Exception as e:
+                        logger.error(f"Error processing text-based approval: {e}")
+                        await self.send_to_eyal(
+                            f"Error processing approval: {e}", parse_mode=None
+                        )
+                    return
+
         # --- Inbound guardrails ---
         try:
             from guardrails.inbound_filter import check_inbound_message, sanitize_outbound_message
@@ -1654,14 +1709,14 @@ When you receive approval requests, use the buttons to approve, request changes,
                 meeting_id=meeting_id,
                 response=edit_instructions,
                 response_source="telegram",
+                force_action="edit",
             )
 
             if result.get("action") == "edit_requested":
-                edits = result.get("edits", [])
                 await self.send_message(
                     chat_id,
-                    f"Applied {len(edits)} edit(s). "
-                    f"A new approval request has been sent."
+                    "Edits applied successfully. "
+                    "A new approval request has been sent."
                 )
             else:
                 await self.send_message(

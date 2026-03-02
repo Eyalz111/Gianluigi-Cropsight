@@ -391,7 +391,8 @@ class GoogleSheetsService:
 
         return await self._append_row(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            values=values
+            values=values,
+            tab_name="Tasks",
         )
 
     async def update_task_status(
@@ -659,7 +660,8 @@ class GoogleSheetsService:
 
         return await self._append_rows(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            values=values
+            values=values,
+            tab_name="Tasks",
         )
 
     async def add_follow_ups_as_tasks(
@@ -715,7 +717,8 @@ class GoogleSheetsService:
 
         return await self._append_rows(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            values=values
+            values=values,
+            tab_name="Tasks",
         )
 
     async def add_stakeholders_batch(
@@ -920,7 +923,8 @@ class GoogleSheetsService:
     async def _append_row(
         self,
         sheet_id: str,
-        values: list[Any]
+        values: list[Any],
+        tab_name: str | None = None,
     ) -> bool:
         """
         Append a row to the end of a sheet.
@@ -928,16 +932,18 @@ class GoogleSheetsService:
         Args:
             sheet_id: Google Sheets ID.
             values: List of values for the new row.
+            tab_name: Optional tab name to target (e.g. "Tasks").
 
         Returns:
             True if append was successful.
         """
-        return await self._append_rows(sheet_id, [values])
+        return await self._append_rows(sheet_id, [values], tab_name=tab_name)
 
     async def _append_rows(
         self,
         sheet_id: str,
-        values: list[list[Any]]
+        values: list[list[Any]],
+        tab_name: str | None = None,
     ) -> bool:
         """
         Append multiple rows to the end of a sheet.
@@ -945,14 +951,18 @@ class GoogleSheetsService:
         Args:
             sheet_id: Google Sheets ID.
             values: 2D list of values for the new rows.
+            tab_name: Optional tab name to target (e.g. "Tasks").
+                      When provided, uses "{tab_name}!A:I" to avoid
+                      appending to the wrong tab.
 
         Returns:
             True if append was successful.
         """
         try:
+            range_name = f"'{tab_name}'!A:I" if tab_name else "A:I"
             self.service.spreadsheets().values().append(
                 spreadsheetId=sheet_id,
-                range="A:I",
+                range=range_name,
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": values}
@@ -1234,6 +1244,17 @@ class GoogleSheetsService:
             sid = self._get_first_sheet_id(settings.TASK_TRACKER_SHEET_ID)
             num_cols = 9  # A through I
             requests = []
+
+            # --- Rename first sheet to "Tasks" so tab_name references work ---
+            requests.append({
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sid,
+                        "title": "Tasks",
+                    },
+                    "fields": "title",
+                }
+            })
 
             # --- Clear existing conditional format rules (idempotent) ---
             requests.extend(

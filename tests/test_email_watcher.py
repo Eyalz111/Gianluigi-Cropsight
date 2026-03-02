@@ -248,11 +248,12 @@ class TestCheckInbox:
 
         watcher = EmailWatcher()
 
+        meeting_id = "abcd1234-5678-9abc-def0-123456789abc"
         mock_messages = [
             {
                 "id": "msg-003",
                 "from": "Eyal Zror <eyal@cropsight.io>",
-                "subject": "Re: [APPROVAL NEEDED] Meeting Summary: MVP Focus",
+                "subject": f"Re: [APPROVAL NEEDED] Meeting Summary: MVP Focus [ref:{meeting_id[:8]}]",
                 "body": "Approve\n\nOn Mon, Feb 24...",
                 "attachments": [],
             }
@@ -264,19 +265,24 @@ class TestCheckInbox:
              patch("schedulers.email_watcher.get_team_member_by_email",
                    return_value={"name": "Eyal Zror", "role": "CEO"}), \
              patch(
-                 "guardrails.approval_flow.parse_approval_response",
-                 return_value={"action": "approve", "edits": None},
-             ):
+                 "guardrails.approval_flow.process_response",
+                 new_callable=AsyncMock,
+                 return_value={"action": "approved", "next_step": "distributed"},
+             ) as mock_process:
             mock_gmail.get_unread_messages = AsyncMock(return_value=mock_messages)
             mock_gmail.mark_as_read = AsyncMock(return_value=True)
+            # Return a pending approval whose id starts with our ref prefix
+            mock_supa.get_pending_approvals.return_value = [
+                {"approval_id": meeting_id, "status": "pending"}
+            ]
 
             await watcher._check_inbox()
 
-            # Should have logged the approval action
-            mock_supa.log_action.assert_called_once()
-            call_kwargs = mock_supa.log_action.call_args
-            assert call_kwargs[1]["action"] == "approval_reply_received"
-            assert call_kwargs[1]["details"]["action"] == "approve"
+            # Should have called process_response with the full meeting_id
+            mock_process.assert_called_once()
+            call_kwargs = mock_process.call_args[1]
+            assert call_kwargs["meeting_id"] == meeting_id
+            assert call_kwargs["response_source"] == "email"
 
     @pytest.mark.asyncio
     async def test_routes_attachment_email(self, mock_settings_for_email_watcher):

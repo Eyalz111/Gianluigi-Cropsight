@@ -304,6 +304,7 @@ async def submit_for_approval(
         email_sent = await gmail_service.send_approval_request(
             meeting_title=f"Meeting Prep: {meeting_title}",
             summary_preview=summary[:1000] if summary else "See attached prep document.",
+            meeting_id=meeting_id,
         )
 
     elif content_type == "weekly_digest":
@@ -327,6 +328,7 @@ async def submit_for_approval(
         email_sent = await gmail_service.send_approval_request(
             meeting_title=f"Weekly Digest — Week of {week_of}",
             summary_preview=digest_doc[:1000],
+            meeting_id=meeting_id,
         )
 
     else:
@@ -348,8 +350,13 @@ async def submit_for_approval(
 
         email_sent = await gmail_service.send_approval_request(
             meeting_title=meeting_title,
-            summary_preview=summary,
+            summary_preview=discussion_summary or summary[:600],
             executive_summary=executive_summary,
+            decisions=decisions,
+            tasks=tasks,
+            follow_ups=follow_ups,
+            open_questions=open_questions,
+            meeting_id=meeting_id,
         )
 
     # Inject approval context into conversation memory so the agent knows
@@ -403,7 +410,8 @@ async def submit_for_approval(
 async def process_response(
     meeting_id: str,
     response: str,
-    response_source: str = "telegram"
+    response_source: str = "telegram",
+    force_action: str | None = None,
 ) -> dict:
     """
     Process Eyal's response to an approval request.
@@ -412,6 +420,8 @@ async def process_response(
         meeting_id: UUID of the meeting/content.
         response: Eyal's response text.
         response_source: Where the response came from ('telegram' or 'email').
+        force_action: If set, skip parsing and use this action directly.
+            Used when the caller already knows the intent (e.g., edit mode).
 
     Returns:
         Dict with:
@@ -421,9 +431,12 @@ async def process_response(
     """
     logger.info(f"Processing approval response for {meeting_id}: {response[:50]}...")
 
-    # Parse the response
-    parsed = parse_approval_response(response)
-    action = parsed["action"]
+    # Parse the response (or use forced action from caller)
+    if force_action:
+        action = force_action
+    else:
+        parsed = parse_approval_response(response)
+        action = parsed["action"]
 
     # Detect content type from persisted pending approvals (Supabase).
     # Non-meeting content (digests, preps) uses IDs like "digest-2026-02-23"
@@ -578,10 +591,26 @@ async def process_response(
         edits = await parse_edit_instructions_with_claude(response, meeting)
 
         if edits:
-            # Apply edits
-            updated_content = await apply_edits(meeting_id, edits)
+            # Gather current structured data for the edit LLM
+            current_structured = {}
+            if pending_info and pending_info.get("content"):
+                for key in ("decisions", "tasks", "follow_ups", "open_questions"):
+                    if key in pending_info["content"]:
+                        current_structured[key] = pending_info["content"][key]
 
-            # Resubmit for approval
+            # Apply edits to summary AND structured data
+            updated_content = await apply_edits(
+                meeting_id, edits, structured_data=current_structured
+            )
+
+            # Carry over fields from pending info that aren't edited
+            if pending_info and pending_info.get("content"):
+                for key in ("executive_summary", "discussion_summary",
+                            "stakeholders", "cross_reference", "commitments"):
+                    if key in pending_info["content"] and key not in updated_content:
+                        updated_content[key] = pending_info["content"][key]
+
+            # Resubmit for approval with edited content
             await submit_for_approval(
                 content_type="meeting_summary",
                 content=updated_content,
@@ -633,9 +662,10 @@ def parse_approval_response(response: str) -> dict:
         return {"action": "approve", "edits": None}
 
     # Check for rejection signals
+    # "delete" removed — "delete X from the summary" is an edit, not a rejection.
+    # "no" and "stop" removed — too broad, match edit instructions like "no, change it".
     rejection_signals = [
-        "reject", "rejected", "no", "discard", "delete",
-        "don't send", "cancel", "stop"
+        "reject", "rejected", "discard", "don't send", "cancel",
     ]
     if any(signal in response_lower for signal in rejection_signals):
         return {"action": "reject", "edits": None}
@@ -711,17 +741,24 @@ Return ONLY the JSON array, no other text."""
 
 async def apply_edits(
     meeting_id: str,
-    edits: list[dict]
+    edits: list[dict],
+    structured_data: dict | None = None,
 ) -> dict:
     """
-    Apply parsed edits to a pending summary.
+    Apply parsed edits to the meeting summary AND structured data.
+
+    Edits are applied to the full content (summary text, decisions, tasks,
+    follow-ups, open questions) so that name corrections, deletions, etc.
+    are reflected everywhere — not just in the summary text.
 
     Args:
         meeting_id: UUID of the meeting.
         edits: List of edit instructions.
+        structured_data: Dict with decisions, tasks, follow_ups, open_questions.
+            If None, fetched from DB.
 
     Returns:
-        Updated content dict.
+        Updated content dict with all sections.
     """
     # Get current meeting data
     meeting = supabase_client.get_meeting(meeting_id)
@@ -731,35 +768,144 @@ async def apply_edits(
 
     current_summary = meeting.get("summary", "")
 
+    # Gather structured data if not provided
+    if structured_data is None:
+        structured_data = {}
+    decisions = structured_data.get("decisions") or supabase_client.list_decisions(
+        meeting_id=meeting_id
+    )
+    all_tasks = structured_data.get("tasks")
+    if all_tasks is None:
+        all_tasks_list = supabase_client.get_tasks(status=None)
+        all_tasks = [t for t in all_tasks_list if t.get("meeting_id") == meeting_id]
+    follow_ups = structured_data.get("follow_ups") or supabase_client.list_follow_up_meetings(
+        source_meeting_id=meeting_id
+    )
+    open_questions = structured_data.get("open_questions") or supabase_client.get_open_questions(
+        meeting_id=meeting_id
+    )
+
     edits_description = json.dumps(edits, indent=2)
 
-    prompt = f"""Apply the following edits to this meeting summary.
+    # Build a complete content representation for the LLM
+    # so edits are applied to ALL sections, not just the summary.
+    decisions_text = json.dumps(
+        [{"index": i + 1, "description": d.get("description", "")}
+         for i, d in enumerate(decisions)],
+        indent=2,
+    )
+    tasks_text = json.dumps(
+        [{"index": i + 1, "title": t.get("title", ""), "assignee": t.get("assignee", ""),
+          "priority": t.get("priority", "M"), "deadline": t.get("deadline"),
+          "category": t.get("category", ""), "status": t.get("status", "pending")}
+         for i, t in enumerate(all_tasks)],
+        indent=2,
+    )
+    follow_ups_text = json.dumps(
+        [{"index": i + 1, "title": f.get("title", ""), "led_by": f.get("led_by", "")}
+         for i, f in enumerate(follow_ups)],
+        indent=2,
+    )
+    questions_text = json.dumps(
+        [{"index": i + 1, "question": q.get("question", ""), "raised_by": q.get("raised_by", "")}
+         for i, q in enumerate(open_questions)],
+        indent=2,
+    )
+
+    prompt = f"""Apply the following edits to this meeting content.
+
+CRITICAL RULES:
+- Apply the edits to ALL sections: summary, decisions, tasks, follow-ups, and questions.
+- If an edit says to rename someone, rename them EVERYWHERE they appear.
+- If an edit says to delete/remove something, remove it from ALL sections where it appears.
+- Preserve the exact format and structure of each section. Only change what the edits require.
+- Return valid JSON with the structure shown below.
 
 CURRENT SUMMARY:
 {current_summary}
 
+CURRENT DECISIONS:
+{decisions_text}
+
+CURRENT TASKS:
+{tasks_text}
+
+CURRENT FOLLOW-UP MEETINGS:
+{follow_ups_text}
+
+CURRENT OPEN QUESTIONS:
+{questions_text}
+
 EDITS TO APPLY:
 {edits_description}
 
-Return the complete updated summary with all edits applied.
-Maintain the same markdown format and structure.
-Only make the changes specified - don't add or remove anything else."""
+Return a JSON object with these keys:
+- "summary": the full updated summary text
+- "decisions": updated array of decisions (same format as above, remove items if edit says to delete)
+- "tasks": updated array of tasks (same format as above, remove items if edit says to delete)
+- "follow_ups": updated array of follow-up meetings (same format)
+- "open_questions": updated array of open questions (same format)
+
+Return ONLY the JSON object, no other text."""
 
     try:
-        updated_summary, _ = call_llm(
+        response_text, _ = call_llm(
             prompt=prompt,
             model=settings.model_background,
-            max_tokens=4096,
+            max_tokens=8192,
             call_site="edit_application",
             meeting_id=meeting_id,
         )
 
-        # Update the meeting in database
+        # Parse JSON response
+        # Strip markdown code fences if present
+        clean = response_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+        if clean.endswith("```"):
+            clean = clean[:-3]
+        clean = clean.strip()
+
+        edited = json.loads(clean)
+        updated_summary = edited.get("summary", current_summary)
+
+        # Update the meeting summary in database
         supabase_client.update_meeting(
             meeting_id,
             summary=updated_summary,
-            approval_status="pending",  # Reset to pending for re-review
+            approval_status="pending",
         )
+
+        # Build edited structured data for the approval message.
+        # Map LLM output back to the format expected by submit_for_approval.
+        edited_decisions = []
+        for d in edited.get("decisions", []):
+            edited_decisions.append({"description": d.get("description", "")})
+
+        edited_tasks = []
+        for t in edited.get("tasks", []):
+            edited_tasks.append({
+                "title": t.get("title", ""),
+                "assignee": t.get("assignee", ""),
+                "priority": t.get("priority", "M"),
+                "deadline": t.get("deadline"),
+                "category": t.get("category", ""),
+                "status": t.get("status", "pending"),
+            })
+
+        edited_follow_ups = []
+        for f in edited.get("follow_ups", []):
+            edited_follow_ups.append({
+                "title": f.get("title", ""),
+                "led_by": f.get("led_by", ""),
+            })
+
+        edited_questions = []
+        for q in edited.get("open_questions", []):
+            edited_questions.append({
+                "question": q.get("question", ""),
+                "raised_by": q.get("raised_by", ""),
+            })
 
         logger.info(f"Applied {len(edits)} edits to meeting {meeting_id}")
 
@@ -767,6 +913,10 @@ Only make the changes specified - don't add or remove anything else."""
             "title": meeting.get("title"),
             "summary": updated_summary,
             "date": meeting.get("date"),
+            "decisions": edited_decisions,
+            "tasks": edited_tasks,
+            "follow_ups": edited_follow_ups,
+            "open_questions": edited_questions,
         }
 
     except Exception as e:
