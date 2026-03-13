@@ -1,0 +1,59 @@
+00:00 Eyal: Alright, let's get started. Paolo, Roye, thanks for joining. We have a lot to cover today — the Moldova pilot, the Ferrero partnership update, and some funding timeline items.
+
+00:15 Paolo: Sure. So first on Ferrero — I spoke with Marco Bianchi from their innovation team last week. He's very interested in our spectral analysis module. He wants us to send a technical brief by next Wednesday.
+
+00:32 Eyal: That's great news. Marco Bianchi — is he the one Jason Adelman introduced us to?
+
+00:38 Paolo: Exactly. Jason made the intro back in January. Marco runs their AgTech scouting division. He said if the specs look good, they'd want a pilot in their hazelnut orchards in Piedmont by Q3.
+
+00:55 Eyal: Okay so that's a clear action — Paolo, you'll prepare and send the technical brief to Marco by next Wednesday. Make it focused on the spectral analysis capabilities, not the full platform.
+
+01:10 Paolo: Got it. I'll have a draft ready by Monday for your review.
+
+01:18 Eyal: Perfect. Now on Moldova — Roye, where are we with the Gagauzia deployment?
+
+01:25 Roye: The hardware shipped last Thursday. We're expecting it to arrive at the pilot site by March 10th. I've been coordinating with the local team there. The main issue is we still need the data pipeline configured for their soil types.
+
+01:42 Eyal: Can you have the data pipeline ready before the hardware arrives?
+
+01:48 Roye: I'll have it configured by March 8th. Already started on it yesterday.
+
+01:55 Eyal: Good. Let's also make sure we document the configuration process — we'll need to replicate this for future pilot sites. Roye, add that to your task list.
+
+02:08 Roye: Will do.
+
+02:12 Eyal: Now the bigger picture — I had a call yesterday with Sarah Chen from GreenBridge Ventures. She's a new partner there, focused on climate-tech investments. She mentioned they have a fund closing in April and CropSight could be a fit.
+
+02:30 Paolo: That sounds promising. What's the ticket size?
+
+02:35 Eyal: She mentioned Series A range, probably 2 to 4 million. But we need to get our deck updated first. I'll update the investor deck with the latest metrics by Friday and send it to Sarah.
+
+02:50 Eyal: Related to funding — we need to decide on our valuation approach. I think we should go with revenue-multiple rather than comparable company analysis.
+
+03:02 Paolo: Agreed. The comparable company approach would undervalue us given our IP position.
+
+03:08 Roye: I agree too. Revenue-multiple makes more sense for deep tech.
+
+03:15 Eyal: Okay, decision made — we'll use revenue-multiple for our Series A valuation. Paolo, can you put together a one-pager on our revenue projections by end of next week?
+
+03:28 Paolo: Sure, I'll have that ready by March 14th.
+
+03:35 Eyal: One more thing — we should schedule a follow-up specifically on the fundraising strategy. Let's do that next Tuesday, just the three of us, maybe 30 minutes.
+
+03:48 Paolo: Works for me.
+
+03:50 Roye: Same here.
+
+03:55 Eyal: Great. Before we wrap up — how's everyone doing? I know it's been a crazy month. Roye, I heard you had that dentist thing, everything okay?
+
+04:05 Roye: Yeah all good, just a routine thing. Nothing to worry about.
+
+04:10 Eyal: Good to hear. Oh, one question I keep thinking about — should we be building our own drone integration or partnering with DJI? We've discussed this before but never really settled it.
+
+04:25 Paolo: I think it's worth exploring both paths. We should probably talk to DJI's enterprise team first before committing to building our own.
+
+04:35 Eyal: Yeah, open question for now. Let's revisit it in two weeks with some research. Alright, I think that covers everything. Thanks everyone.
+
+04:45 Paolo: Thanks Eyal.
+
+04:47 Roye: Bye everyone.

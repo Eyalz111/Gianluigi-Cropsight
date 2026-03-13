@@ -190,9 +190,11 @@ class TestSubmitForApprovalRouting:
             assert tg_call_kwargs["decisions"] == content["decisions"]
             assert tg_call_kwargs["tasks"] == content["tasks"]
 
-            # Email uses summary text (not digest_document)
+            # Email now uses discussion_summary (matches Telegram)
             email_call_kwargs = mock_gmail.send_approval_request.call_args.kwargs
-            assert email_call_kwargs["summary_preview"] == content["summary"]
+            assert email_call_kwargs["summary_preview"] == content["discussion_summary"]
+            assert email_call_kwargs["decisions"] == content["decisions"]
+            assert email_call_kwargs["tasks"] == content["tasks"]
 
     @pytest.mark.asyncio
     async def test_prep_telegram_preview_includes_drive_link_and_sensitivity(self):

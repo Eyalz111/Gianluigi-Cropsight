@@ -1714,6 +1714,26 @@ class SupabaseClient:
             logger.info(f"Deleted pending approval: {approval_id}")
         return deleted
 
+    def get_pending_approvals_by_status(self, status: str = "pending") -> list[dict]:
+        """
+        Get all pending approvals with a given status, newest first.
+
+        Used to find the most recent pending approval when Eyal types
+        'approve' or 'reject' as free text instead of using buttons.
+
+        Returns:
+            List of pending approval records.
+        """
+        result = (
+            self.client.table("pending_approvals")
+            .select("*")
+            .eq("status", status)
+            .order("created_at", desc=True)
+            .limit(5)
+            .execute()
+        )
+        return result.data
+
     def get_pending_auto_publishes(self) -> list[dict]:
         """
         Get all pending approvals that have an auto_publish_at timestamp.
