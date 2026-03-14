@@ -225,6 +225,45 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # v1.0 — Gantt Integration
+    # ==========================================================================
+    GANTT_SHEET_ID: str = Field(default="", description="Gantt Google Sheet ID")
+    GANTT_BACKUP_FOLDER_ID: str = Field(default="", description="Gantt backup Drive folder ID")
+
+    # ==========================================================================
+    # v1.0 — Email Intelligence
+    # ==========================================================================
+    EYAL_PERSONAL_EMAIL: str = Field(default="", description="Eyal's personal Gmail for daily scan")
+    PERSONAL_CONTACTS_BLOCKLIST: str = Field(default="", description="Comma-separated blocklist for personal email scan")
+    EYAL_GMAIL_REFRESH_TOKEN: str = Field(default="", description="OAuth refresh token for Eyal's personal Gmail")
+
+    # ==========================================================================
+    # v1.0 — MCP Server
+    # ==========================================================================
+    MCP_AUTH_TOKEN: str = Field(default="", description="Auth token for MCP server")
+    MCP_PORT: int = Field(default=8080, description="MCP server port (shared with health server)")
+
+    # ==========================================================================
+    # v1.0 — Weekly Review
+    # ==========================================================================
+    WEEKLY_REVIEW_CALENDAR_TITLE: str = Field(
+        default="CropSight: Weekly Review with Gianluigi",
+        description="Calendar event title for weekly review sessions"
+    )
+
+    # ==========================================================================
+    # v1.0 — Reports
+    # ==========================================================================
+    REPORTS_BASE_URL: str = Field(default="", description="Base URL for HTML reports on Cloud Run")
+    REPORTS_SECRET_TOKEN: str = Field(default="", description="Secret token for report access")
+
+    # ==========================================================================
+    # v1.0 — Drive Folders
+    # ==========================================================================
+    WEEKLY_REPORTS_FOLDER_ID: str = Field(default="", description="Weekly Reports Drive folder ID")
+    GANTT_SLIDES_FOLDER_ID: str = Field(default="", description="Gantt Slides Drive folder ID")
+
+    # ==========================================================================
     # Approval Mode (v0.2)
     # ==========================================================================
     APPROVAL_MODE: str = Field(
@@ -308,6 +347,13 @@ class Settings(BaseSettings):
         """Get list of all team member emails (non-empty only)."""
         emails = [self.EYAL_EMAIL, self.ROYE_EMAIL, self.PAOLO_EMAIL, self.YORAM_EMAIL]
         return [e for e in emails if e]
+
+    @property
+    def personal_contacts_blocklist_list(self) -> list[str]:
+        """Parse comma-separated blocklist into a list."""
+        if not self.PERSONAL_CONTACTS_BLOCKLIST:
+            return []
+        return [e.strip() for e in self.PERSONAL_CONTACTS_BLOCKLIST.split(",") if e.strip()]
 
     @property
     def is_production(self) -> bool:

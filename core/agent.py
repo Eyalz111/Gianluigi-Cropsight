@@ -28,6 +28,8 @@ from anthropic import Anthropic
 
 from config.settings import settings
 from config.team import get_team_member
+from core.conversation_agent import ConversationAgent
+from core.router import classify_intent
 from core.system_prompt import (
     get_system_prompt,
     get_meeting_prep_prompt,
@@ -67,6 +69,11 @@ class GianluigiAgent:
         }]
         self.tools = TOOL_DEFINITIONS
         self.max_tool_iterations = 10  # Prevent infinite tool loops
+
+        # v1.0: Conversation Agent handles the tool-use dialogue loop
+        self.conversation_agent = ConversationAgent(
+            tool_executor=self._execute_tool_call
+        )
 
     def _classify_query(self, user_message: str) -> str:
         """
@@ -218,6 +225,7 @@ class GianluigiAgent:
         Process a user message and return the agent's response.
 
         This is the main entry point for user queries via Telegram or email.
+        Routes through the multi-agent pipeline: Router → Conversation Agent.
 
         Args:
             user_message: The message from the user.
@@ -232,117 +240,32 @@ class GianluigiAgent:
         """
         logger.info(f"Processing message from {user_id}: {user_message[:50]}...")
 
-        # v0.3: Query routing — classify and pre-fetch relevant context
+        # Step 1: Classify intent via Router Agent
+        intent = await classify_intent(
+            message=user_message,
+            conversation_mode=None,  # Phase 1: no active modes
+            user_id=user_id,
+        )
+        logger.info(f"Router classified intent as: {intent}")
+
+        # Step 2: Pre-fetch context based on query type (existing v0.3 logic)
         query_type = self._classify_query(user_message)
         extra_context = ""
         if query_type != "general":
             extra_context = await self._get_query_context(query_type, user_message)
             logger.info(f"Query classified as '{query_type}', pre-fetched context")
 
-        # Build messages array
-        messages = []
-
-        # Add conversation history if provided
-        if conversation_history:
-            messages.extend(conversation_history)
-
-        # Add user context to the message
-        team_member = get_team_member(user_id)
-        user_context = ""
-        if team_member:
-            user_context = f"[Message from {team_member['name']} ({team_member['role']})]"
-
-        # Build the full user message with any pre-fetched context
-        full_message = user_message
-        if user_context:
-            full_message = f"{user_context}\n\n{user_message}"
-        if extra_context:
-            full_message = f"{full_message}\n\n{extra_context}"
-
-        # Add current user message
-        messages.append({
-            "role": "user",
-            "content": full_message,
-        })
-
-        # Track actions taken
-        actions_taken = []
-        sources_cited = []
-
-        # Tool use loop
-        iterations = 0
-        while iterations < self.max_tool_iterations:
-            iterations += 1
-
-            # Call Claude API
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=4096,
-                system=self.system_prompt_cached,
-                tools=self.tools,
-                messages=messages,
-            )
-
-            # Check stop reason
-            if response.stop_reason == "end_turn":
-                # No more tool calls, extract final response
-                final_text = self._extract_text_response(response)
-                break
-
-            elif response.stop_reason == "tool_use":
-                # Process tool calls
-                tool_results = []
-
-                for content_block in response.content:
-                    if content_block.type == "tool_use":
-                        tool_name = content_block.name
-                        tool_input = content_block.input
-                        tool_id = content_block.id
-
-                        logger.info(f"Executing tool: {tool_name}")
-
-                        # Execute the tool
-                        try:
-                            result = await self._execute_tool_call(tool_name, tool_input)
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tool_id,
-                                "content": str(result),
-                            })
-                            actions_taken.append({
-                                "tool": tool_name,
-                                "input": tool_input,
-                                "success": True,
-                            })
-                        except Exception as e:
-                            logger.error(f"Tool execution error: {e}")
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tool_id,
-                                "content": f"Error: {str(e)}",
-                                "is_error": True,
-                            })
-                            actions_taken.append({
-                                "tool": tool_name,
-                                "input": tool_input,
-                                "success": False,
-                                "error": str(e),
-                            })
-
-                # Add assistant response and tool results to messages
-                messages.append({"role": "assistant", "content": response.content})
-                messages.append({"role": "user", "content": tool_results})
-
-            else:
-                # Unexpected stop reason
-                logger.warning(f"Unexpected stop reason: {response.stop_reason}")
-                final_text = self._extract_text_response(response)
-                break
-
-        else:
-            # Max iterations reached
-            logger.warning("Max tool iterations reached")
-            final_text = "I'm sorry, I wasn't able to complete your request. Please try rephrasing."
+        # Step 3: Dispatch to Conversation Agent
+        # Phase 1: All intents route to Conversation Agent regardless of classification.
+        # Phase 3+ will branch here: debrief → DebriefFlow, weekly_review → WeeklyReviewFlow,
+        # gantt_request → Operator Agent, etc.
+        result = await self.conversation_agent.respond(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_history=conversation_history,
+            intent=intent,
+            extra_context=extra_context,
+        )
 
         # Log the interaction
         supabase_client.log_action(
@@ -350,16 +273,13 @@ class GianluigiAgent:
             details={
                 "user_id": user_id,
                 "message_preview": user_message[:100],
-                "tools_used": [a["tool"] for a in actions_taken],
+                "intent": intent,
+                "tools_used": [a["tool"] for a in result.get("actions", [])],
             },
             triggered_by=user_id,
         )
 
-        return {
-            "response": final_text,
-            "actions": actions_taken,
-            "sources": sources_cited,
-        }
+        return result
 
     async def process_transcript(
         self,

@@ -28,8 +28,9 @@ Usage:
         meeting_id="uuid-here",
     )
 
-NOT used by: core/agent.py (has its own tool-use loop with pre-cached
-system prompt and tools array — refactoring would be high-risk, low gain).
+call_llm_with_tools() handles tool-use API calls for the multi-agent
+architecture, centralizing token tracking for Router, Conversation,
+Analyst, and Operator agents.
 """
 
 import logging
@@ -127,6 +128,61 @@ def call_llm(
     )
 
     return response_text, usage
+
+
+def call_llm_with_tools(
+    messages: list[dict],
+    model: str,
+    max_tokens: int,
+    system: list[dict],
+    tools: list[dict],
+    call_site: str,
+) -> Any:
+    """
+    Make a Claude API call with tool use support.
+
+    Centralizes all tool-use API calls through llm.py for consistent
+    token tracking. Each agent passes a descriptive call_site label
+    (e.g., "router", "conversation_agent") so costs appear as separate
+    entries in the token_usage table.
+
+    Args:
+        messages: Conversation messages array.
+        model: Model ID (e.g., settings.model_agent).
+        max_tokens: Maximum tokens in the response.
+        system: Pre-formatted system prompt with cache_control.
+        tools: Tool definitions array.
+        call_site: Short label for token tracking.
+
+    Returns:
+        Raw Anthropic API response object.
+    """
+    client = get_client()
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        tools=tools,
+        messages=messages,
+    )
+
+    # Extract usage info
+    usage = {
+        "input_tokens": getattr(response.usage, "input_tokens", 0),
+        "output_tokens": getattr(response.usage, "output_tokens", 0),
+        "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
+        "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
+    }
+
+    # Log usage (best-effort, never raises)
+    _log_usage(
+        call_site=call_site,
+        model=model,
+        usage=usage,
+    )
+
+    return response
 
 
 def _log_usage(

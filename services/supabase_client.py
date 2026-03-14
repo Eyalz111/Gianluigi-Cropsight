@@ -2227,6 +2227,296 @@ class SupabaseClient:
 
         return enriched
 
+    # =========================================================================
+    # v1.0 — Gantt Schema
+    # =========================================================================
+
+    def upsert_gantt_schema_rows(self, rows: list[dict]) -> list[dict]:
+        """Bulk upsert gantt schema rows."""
+        result = self.client.table("gantt_schema").upsert(rows).execute()
+        return result.data or []
+
+    def get_gantt_schema(self, sheet_name: str | None = None) -> list[dict]:
+        """Get gantt schema rows, optionally filtered by sheet."""
+        query = self.client.table("gantt_schema").select("*")
+        if sheet_name:
+            query = query.eq("sheet_name", sheet_name)
+        query = query.order("row_number")
+        result = query.execute()
+        return result.data or []
+
+    def get_gantt_protected_rows(self, sheet_name: str) -> list[dict]:
+        """Get protected rows only for a sheet."""
+        result = (
+            self.client.table("gantt_schema")
+            .select("*")
+            .eq("sheet_name", sheet_name)
+            .eq("protected", True)
+            .order("row_number")
+            .execute()
+        )
+        return result.data or []
+
+    # =========================================================================
+    # v1.0 — Gantt Proposals
+    # =========================================================================
+
+    def create_gantt_proposal(self, source_type: str, source_id: str | None, changes: list[dict]) -> dict:
+        """Create a new Gantt change proposal."""
+        row = {
+            "source_type": source_type,
+            "changes": changes,
+        }
+        if source_id:
+            row["source_id"] = str(source_id)
+        result = self.client.table("gantt_proposals").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_gantt_proposal(self, proposal_id: str) -> dict | None:
+        """Get a single Gantt proposal by ID."""
+        result = (
+            self.client.table("gantt_proposals")
+            .select("*")
+            .eq("id", str(proposal_id))
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def get_gantt_proposals(self, status: str | None = None, limit: int = 20) -> list[dict]:
+        """List Gantt proposals, optionally filtered by status."""
+        query = self.client.table("gantt_proposals").select("*")
+        if status:
+            query = query.eq("status", status)
+        query = query.order("proposed_at", desc=True).limit(limit)
+        result = query.execute()
+        return result.data or []
+
+    def update_gantt_proposal(self, proposal_id: str, status: str, reviewed_by: str | None = None, rejection_reason: str | None = None) -> dict:
+        """Update a Gantt proposal's status."""
+        updates = {"status": status, "reviewed_at": datetime.now().isoformat()}
+        if reviewed_by:
+            updates["reviewed_by"] = reviewed_by
+        if rejection_reason:
+            updates["rejection_reason"] = rejection_reason
+        result = (
+            self.client.table("gantt_proposals")
+            .update(updates)
+            .eq("id", str(proposal_id))
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
+    # =========================================================================
+    # v1.0 — Gantt Snapshots
+    # =========================================================================
+
+    def create_gantt_snapshot(self, proposal_id: str, sheet_name: str, cell_references: list[str], old_values: dict, new_values: dict) -> dict:
+        """Create a snapshot of cell values before a Gantt write."""
+        row = {
+            "proposal_id": str(proposal_id),
+            "sheet_name": sheet_name,
+            "cell_references": cell_references,
+            "old_values": old_values,
+            "new_values": new_values,
+        }
+        result = self.client.table("gantt_snapshots").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_gantt_snapshots(self, proposal_id: str) -> list[dict]:
+        """Get all snapshots for a given proposal."""
+        result = (
+            self.client.table("gantt_snapshots")
+            .select("*")
+            .eq("proposal_id", str(proposal_id))
+            .order("created_at")
+            .execute()
+        )
+        return result.data or []
+
+    # =========================================================================
+    # v1.0 — Debrief Sessions
+    # =========================================================================
+
+    def create_debrief_session(self, date: str) -> dict:
+        """Create a new debrief session."""
+        row = {"date": date}
+        result = self.client.table("debrief_sessions").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_debrief_session(self, session_id: str) -> dict | None:
+        """Get a single debrief session by ID."""
+        result = (
+            self.client.table("debrief_sessions")
+            .select("*")
+            .eq("id", str(session_id))
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def get_active_debrief_session(self) -> dict | None:
+        """Get the currently active (in_progress) debrief session."""
+        result = (
+            self.client.table("debrief_sessions")
+            .select("*")
+            .eq("status", "in_progress")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def update_debrief_session(self, session_id: str, **kwargs) -> dict:
+        """Update a debrief session's fields."""
+        result = (
+            self.client.table("debrief_sessions")
+            .update(kwargs)
+            .eq("id", str(session_id))
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
+    # =========================================================================
+    # v1.0 — Email Scans
+    # =========================================================================
+
+    def create_email_scan(self, scan_type: str, email_id: str, date: str, sender: str | None = None, subject: str | None = None, classification: str | None = None, extracted_items: list | None = None) -> dict:
+        """Record a scanned email."""
+        row = {
+            "scan_type": scan_type,
+            "email_id": email_id,
+            "date": date,
+        }
+        if sender:
+            row["sender"] = sender
+        if subject:
+            row["subject"] = subject
+        if classification:
+            row["classification"] = classification
+        if extracted_items is not None:
+            row["extracted_items"] = extracted_items
+        result = self.client.table("email_scans").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_email_scans(self, scan_type: str | None = None, date_from: str | None = None, limit: int = 50) -> list[dict]:
+        """List email scans with optional filters."""
+        query = self.client.table("email_scans").select("*")
+        if scan_type:
+            query = query.eq("scan_type", scan_type)
+        if date_from:
+            query = query.gte("date", date_from)
+        query = query.order("date", desc=True).limit(limit)
+        result = query.execute()
+        return result.data or []
+
+    def is_email_already_scanned(self, email_id: str) -> bool:
+        """Check if an email has already been scanned (dedup)."""
+        result = (
+            self.client.table("email_scans")
+            .select("id")
+            .eq("email_id", email_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+
+    # =========================================================================
+    # v1.0 — MCP Sessions
+    # =========================================================================
+
+    def create_mcp_session(self, session_date: str, summary: str, decisions_made: list | None = None, pending_items: list | None = None) -> dict:
+        """Create a new MCP session record."""
+        row = {
+            "session_date": session_date,
+            "summary": summary,
+        }
+        if decisions_made is not None:
+            row["decisions_made"] = decisions_made
+        if pending_items is not None:
+            row["pending_items"] = pending_items
+        result = self.client.table("mcp_sessions").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_latest_mcp_session(self) -> dict | None:
+        """Get the most recent MCP session."""
+        result = (
+            self.client.table("mcp_sessions")
+            .select("*")
+            .order("session_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    # =========================================================================
+    # v1.0 — Weekly Reports
+    # =========================================================================
+
+    def create_weekly_report(self, week_number: int, year: int, data: dict | None = None) -> dict:
+        """Create a new weekly report record."""
+        row = {"week_number": week_number, "year": year}
+        if data is not None:
+            row["data"] = data
+        result = self.client.table("weekly_reports").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_weekly_report(self, week_number: int, year: int) -> dict | None:
+        """Get a weekly report by week number and year."""
+        result = (
+            self.client.table("weekly_reports")
+            .select("*")
+            .eq("week_number", week_number)
+            .eq("year", year)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def update_weekly_report(self, report_id: str, **kwargs) -> dict:
+        """Update a weekly report's fields."""
+        result = (
+            self.client.table("weekly_reports")
+            .update(kwargs)
+            .eq("id", str(report_id))
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
+    # =========================================================================
+    # v1.0 — Meeting Prep History
+    # =========================================================================
+
+    def create_meeting_prep_history(self, meeting_type: str, meeting_date: str, prep_content: dict, calendar_event_id: str | None = None) -> dict:
+        """Create a meeting prep history record."""
+        row = {
+            "meeting_type": meeting_type,
+            "meeting_date": meeting_date,
+            "prep_content": prep_content,
+        }
+        if calendar_event_id:
+            row["calendar_event_id"] = calendar_event_id
+        result = self.client.table("meeting_prep_history").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_meeting_prep_history(self, meeting_type: str | None = None, limit: int = 10) -> list[dict]:
+        """List meeting prep history with optional type filter."""
+        query = self.client.table("meeting_prep_history").select("*")
+        if meeting_type:
+            query = query.eq("meeting_type", meeting_type)
+        query = query.order("meeting_date", desc=True).limit(limit)
+        result = query.execute()
+        return result.data or []
+
+    def update_meeting_prep_history(self, prep_id: str, status: str, **kwargs) -> dict:
+        """Update a meeting prep history record's status."""
+        updates = {"status": status, **kwargs}
+        result = (
+            self.client.table("meeting_prep_history")
+            .update(updates)
+            .eq("id", str(prep_id))
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
 
 # Singleton instance for easy import
 db = SupabaseClient()

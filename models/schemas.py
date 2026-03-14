@@ -270,3 +270,182 @@ class StakeholderEntry(BaseModel):
     priority: str | None = None
     status: str | None = None
     notes: str | None = None
+
+
+# =============================================================================
+# v1.0 Enums
+# =============================================================================
+
+class GanttProposalStatus(str, Enum):
+    """Status of a Gantt change proposal."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    ROLLED_BACK = "rolled_back"
+
+
+class DebriefStatus(str, Enum):
+    """Status of an end-of-day debrief session."""
+    IN_PROGRESS = "in_progress"
+    CONFIRMING = "confirming"
+    APPROVED = "approved"
+    CANCELLED = "cancelled"
+
+
+class EmailClassification(str, Enum):
+    """Classification of a scanned email."""
+    RELEVANT = "relevant"
+    BORDERLINE = "borderline"
+    FALSE_POSITIVE = "false_positive"
+    SKIPPED = "skipped"
+
+
+class IntentType(str, Enum):
+    """Classified intent of an inbound message."""
+    QUESTION = "question"
+    TASK_UPDATE = "task_update"
+    INFORMATION_INJECTION = "information_injection"
+    GANTT_REQUEST = "gantt_request"
+    DEBRIEF = "debrief"
+    APPROVAL_RESPONSE = "approval_response"
+    WEEKLY_REVIEW = "weekly_review"
+    MEETING_PREP_REQUEST = "meeting_prep_request"
+    AMBIGUOUS = "ambiguous"
+
+
+# =============================================================================
+# v1.0 Models — Gantt Integration
+# =============================================================================
+
+class GanttSchemaRow(BaseModel):
+    """Schema definition for a row in the operational Gantt chart."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    sheet_name: str
+    section: str
+    subsection: str | None = None
+    row_number: int
+    owner_column: str = "C"
+    due_column: str = "D"
+    first_week_column: str = "E"
+    week_offset: int = 9
+    protected: bool = False
+    notes: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class GanttProposal(BaseModel):
+    """A proposed change to the Gantt chart, pending CEO approval."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    status: GanttProposalStatus = GanttProposalStatus.PENDING
+    source_type: str | None = None
+    source_id: UUID | None = None
+    changes: list[dict] = Field(default_factory=list)
+    proposed_at: datetime | None = None
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
+    rejection_reason: str | None = None
+
+
+class GanttSnapshot(BaseModel):
+    """A snapshot of Gantt cell values before a proposal is applied, for rollback."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    proposal_id: UUID
+    sheet_name: str
+    cell_references: list[str] = Field(default_factory=list)
+    old_values: dict = Field(default_factory=dict)
+    new_values: dict = Field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+# =============================================================================
+# v1.0 Models — End-of-Day Debrief
+# =============================================================================
+
+class DebriefSession(BaseModel):
+    """An interactive end-of-day debrief session with the CEO."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    date: date
+    status: DebriefStatus = DebriefStatus.IN_PROGRESS
+    items_captured: list[dict] = Field(default_factory=list)
+    pending_questions: list[dict] = Field(default_factory=list)
+    calendar_events_covered: list[str] = Field(default_factory=list)
+    calendar_events_remaining: list[str] = Field(default_factory=list)
+    raw_messages: list[dict] = Field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+# =============================================================================
+# v1.0 Models — Email Intelligence
+# =============================================================================
+
+class EmailScan(BaseModel):
+    """A scanned email from the daily email intelligence scan."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    scan_type: str
+    email_id: str
+    date: datetime
+    sender: str | None = None
+    subject: str | None = None
+    classification: EmailClassification | None = None
+    extracted_items: list[dict] | None = None
+    approved: bool = False
+    created_at: datetime | None = None
+
+
+# =============================================================================
+# v1.0 Models — MCP Server
+# =============================================================================
+
+class MCPSession(BaseModel):
+    """A Claude.ai MCP work session record."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    session_date: date
+    summary: str
+    decisions_made: list[dict] = Field(default_factory=list)
+    pending_items: list[dict] = Field(default_factory=list)
+    created_at: datetime | None = None
+
+
+# =============================================================================
+# v1.0 Models — Weekly Review & Reports
+# =============================================================================
+
+class WeeklyReport(BaseModel):
+    """A generated weekly report with associated artifacts."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    week_number: int
+    year: int
+    report_url: str | None = None
+    slide_drive_id: str | None = None
+    digest_drive_id: str | None = None
+    gantt_backup_drive_id: str | None = None
+    data: dict | None = None
+    created_at: datetime | None = None
+
+
+# =============================================================================
+# v1.0 Models — Meeting Prep History
+# =============================================================================
+
+class MeetingPrepHistory(BaseModel):
+    """Historical record of a meeting prep document and its lifecycle."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    meeting_type: str
+    calendar_event_id: str | None = None
+    meeting_date: datetime
+    prep_content: dict = Field(default_factory=dict)
+    status: str = "pending"
+    approved_at: datetime | None = None
+    distributed_at: datetime | None = None
+    recipients: list[str] | None = None
+    created_at: datetime | None = None
