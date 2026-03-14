@@ -331,6 +331,46 @@ async def submit_for_approval(
             meeting_id=meeting_id,
         )
 
+    elif content_type == "gantt_update":
+        # Gantt update proposal — render human-readable diff for approval
+        proposal_id = content.get("proposal_id", "")
+        changes = content.get("changes", [])
+        changes_count = content.get("changes_count", 0)
+
+        preview_lines = [f"<b>Gantt Update Proposal — Awaiting Approval</b>\n"]
+        preview_lines.append(f"Changes: {changes_count} cell(s)\n")
+        for i, change in enumerate(changes[:10], 1):
+            section = change.get("section", "")
+            subsection = change.get("subsection", "")
+            week = change.get("week", "")
+            old_val = change.get("old_value", "")
+            new_val = change.get("new_value", "")
+            if old_val:
+                preview_lines.append(
+                    f"({i}) {section} &gt; {subsection}, W{week}: "
+                    f"'{old_val}' → '{new_val}'"
+                )
+            else:
+                preview_lines.append(
+                    f"({i}) {section} &gt; {subsection}, W{week}: "
+                    f"added '{new_val}' (was empty)"
+                )
+        if len(changes) > 10:
+            preview_lines.append(f"... and {len(changes) - 10} more changes")
+
+        preview = "\n".join(preview_lines)
+
+        telegram_sent = await telegram_bot.send_approval_request(
+            meeting_title=f"Gantt Update ({changes_count} cells)",
+            summary_preview=preview,
+            meeting_id=meeting_id,
+        )
+        email_sent = await gmail_service.send_approval_request(
+            meeting_title=f"Gantt Update Proposal ({changes_count} cells)",
+            summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("&gt;", ">"),
+            meeting_id=meeting_id,
+        )
+
     else:
         # Default: meeting_summary (original behavior)
         # v0.3: Include cross-reference results if available
@@ -446,7 +486,8 @@ async def process_response(
     is_non_meeting = (
         meeting_id.startswith("digest-")
         or meeting_id.startswith("prep-")
-        or (pending_info and pending_info["type"] in ("weekly_digest", "meeting_prep"))
+        or meeting_id.startswith("gantt-")
+        or (pending_info and pending_info["type"] in ("weekly_digest", "meeting_prep", "gantt_update"))
     )
 
     if is_non_meeting:
@@ -478,6 +519,8 @@ async def process_response(
             content_type = "weekly_digest"
         elif meeting_id.startswith("prep-"):
             content_type = "meeting_prep"
+        elif meeting_id.startswith("gantt-"):
+            content_type = "gantt_update"
         else:
             content_type = "meeting_summary"
 
@@ -518,6 +561,38 @@ async def process_response(
                 "next_step": "Weekly digest distributed to team",
                 "distribution": distribution_result,
             }
+
+        elif content_type == "gantt_update":
+            if not pending_info:
+                logger.warning(f"Gantt update {meeting_id} approved but content not in memory")
+                supabase_client.log_action(action="approval_status_approved", details={"meeting_id": meeting_id}, triggered_by="eyal")
+                return {"action": "approved", "edits": None, "next_step": "Approved (proposal may have already been executed)"}
+
+            proposal_id = pending_info["content"].get("proposal_id")
+            if proposal_id:
+                from core.operator_agent import OperatorAgent
+                operator = OperatorAgent()
+                exec_result = await operator.execute_gantt_update(proposal_id)
+
+                # Notify Eyal of the result
+                if exec_result.get("status") == "executed":
+                    cells_written = exec_result.get("cells_written", 0)
+                    await telegram_bot.send_to_eyal(
+                        f"Gantt updated: {cells_written} cell(s) written successfully."
+                    )
+                else:
+                    error = exec_result.get("error", "Unknown error")
+                    await telegram_bot.send_to_eyal(
+                        f"Gantt update failed: {error}"
+                    )
+
+                return {
+                    "action": "approved",
+                    "edits": None,
+                    "next_step": "Gantt chart updated",
+                    "execution": exec_result,
+                }
+            return {"action": "approved", "edits": None, "next_step": "Approved but no proposal_id found"}
 
         # Default: meeting_summary — gather all related data
         content = {

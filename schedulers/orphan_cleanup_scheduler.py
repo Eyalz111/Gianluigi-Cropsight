@@ -53,6 +53,9 @@ class OrphanCleanupScheduler:
         self._running = True
         logger.info(f"Starting orphan cleanup scheduler (interval: {self.check_interval}s)")
 
+        # Wait 5 minutes before first check to avoid spamming on every restart
+        await asyncio.sleep(300)
+
         while self._running:
             try:
                 await self._run_cleanup()

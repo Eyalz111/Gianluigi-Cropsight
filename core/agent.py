@@ -493,6 +493,28 @@ class GianluigiAgent:
         elif tool_name == "get_commitments":
             return await self._tool_get_commitments(tool_input)
 
+        # v1.0 Phase 2 — Gantt Integration tools
+        elif tool_name == "get_gantt_status":
+            return await self._tool_get_gantt_status(tool_input)
+
+        elif tool_name == "get_gantt_section":
+            return await self._tool_get_gantt_section(tool_input)
+
+        elif tool_name == "get_meeting_cadence":
+            return await self._tool_get_meeting_cadence(tool_input)
+
+        elif tool_name == "get_gantt_horizon":
+            return await self._tool_get_gantt_horizon(tool_input)
+
+        elif tool_name == "propose_gantt_update":
+            return await self._tool_propose_gantt_update(tool_input)
+
+        elif tool_name == "get_gantt_history":
+            return await self._tool_get_gantt_history(tool_input)
+
+        elif tool_name == "rollback_gantt_update":
+            return await self._tool_rollback_gantt_update(tool_input)
+
         else:
             raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -851,6 +873,89 @@ class GianluigiAgent:
             )
 
         return result
+
+    # =========================================================================
+    # v1.0 Phase 2 — Gantt Integration Tool Implementations
+    # =========================================================================
+
+    async def _tool_get_gantt_status(self, input: dict) -> dict:
+        """Get Gantt status for a week."""
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.get_gantt_status(week=input.get("week"))
+
+    async def _tool_get_gantt_section(self, input: dict) -> dict:
+        """Deep dive into a Gantt section."""
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.get_gantt_section(
+            section=input.get("section", ""),
+            weeks=input.get("weeks"),
+        )
+
+    async def _tool_get_meeting_cadence(self, input: dict) -> dict:
+        """Get meeting cadence from Gantt."""
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.get_meeting_cadence(week=input.get("week"))
+
+    async def _tool_get_gantt_horizon(self, input: dict) -> dict:
+        """Get upcoming milestones from Gantt."""
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.get_gantt_horizon(
+            weeks_ahead=input.get("weeks_ahead", 8)
+        )
+
+    async def _tool_propose_gantt_update(self, input: dict) -> dict:
+        """Propose Gantt changes — creates approval request."""
+        from services.gantt_manager import gantt_manager
+        from guardrails.approval_flow import submit_for_approval
+
+        changes = input.get("changes", [])
+        source = input.get("source", "telegram")
+
+        result = await gantt_manager.propose_gantt_update(
+            changes=changes,
+            source=source,
+        )
+
+        if result.get("status") in ("rejected", "needs_confirmation"):
+            return result
+
+        # Submit for approval via the standard flow
+        proposal_id = result.get("proposal_id")
+        if proposal_id:
+            await submit_for_approval(
+                content_type="gantt_update",
+                content={
+                    "proposal_id": proposal_id,
+                    "changes": result.get("changes", []),
+                    "changes_count": result.get("changes_count", 0),
+                    "source": source,
+                },
+                meeting_id=f"gantt-{proposal_id}",
+            )
+            # Tell Claude the approval request was already sent to Telegram,
+            # so it should NOT repeat the proposal details in its response.
+            result["approval_sent"] = True
+            result["note"] = (
+                "Approval request sent to Telegram. "
+                "Just confirm briefly that the proposal was submitted — "
+                "do NOT repeat the change details."
+            )
+
+        return result
+
+    async def _tool_get_gantt_history(self, input: dict) -> dict:
+        """Get recent Gantt changes."""
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.get_gantt_history(
+            limit=input.get("limit", 10)
+        )
+
+    async def _tool_rollback_gantt_update(self, input: dict) -> dict:
+        """Rollback a Gantt change."""
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.rollback_proposal(
+            proposal_id=input.get("proposal_id")
+        )
 
     # =========================================================================
     # Helper Methods

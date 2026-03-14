@@ -229,6 +229,16 @@ class Settings(BaseSettings):
     # ==========================================================================
     GANTT_SHEET_ID: str = Field(default="", description="Gantt Google Sheet ID")
     GANTT_BACKUP_FOLDER_ID: str = Field(default="", description="Gantt backup Drive folder ID")
+    GANTT_MAX_CELLS_PER_PROPOSAL: int = Field(
+        default=20, description="Safety limit: max cell changes per Gantt proposal batch"
+    )
+    GANTT_LOG_TAB: str = Field(default="Log", description="Gantt sheet Log tab name")
+    GANTT_CONFIG_TAB: str = Field(default="Config", description="Gantt sheet Config tab name")
+    GANTT_MEETING_CADENCE_TAB: str = Field(
+        default="Meeting Cadence", description="Gantt sheet Meeting Cadence tab name"
+    )
+    GANTT_MAIN_TAB: str = Field(default="2026-2027", description="Gantt main year-sheet tab name")
+    GANTT_HEADER_ROWS: int = Field(default=5, description="Number of header rows in Gantt sheet")
 
     # ==========================================================================
     # v1.0 — Email Intelligence

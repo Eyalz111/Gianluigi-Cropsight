@@ -30,7 +30,13 @@ class OperatorAgent:
 
     async def execute_gantt_update(self, proposal_id: str) -> dict:
         """Execute an approved Gantt chart update."""
-        raise NotImplementedError("Gantt integration coming in Phase 2")
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.execute_approved_proposal(proposal_id)
+
+    async def rollback_gantt_update(self, proposal_id: str | None = None) -> dict:
+        """Rollback a Gantt chart update."""
+        from services.gantt_manager import gantt_manager
+        return await gantt_manager.rollback_proposal(proposal_id)
 
     async def generate_slide(self, **kwargs) -> dict:
         """Generate a presentation slide."""

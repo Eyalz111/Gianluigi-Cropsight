@@ -820,6 +820,27 @@ class GoogleSheetsService:
         ).execute()
         return metadata["sheets"][0]["properties"]["sheetId"]
 
+    def _get_sheet_id_by_name(self, spreadsheet_id: str, tab_name: str) -> int | None:
+        """
+        Get the numeric sheetId of a tab by its name.
+
+        Args:
+            spreadsheet_id: The Google Sheets spreadsheet ID.
+            tab_name: The name of the tab to find.
+
+        Returns:
+            The numeric sheetId, or None if the tab doesn't exist.
+        """
+        metadata = self.service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets.properties",
+        ).execute()
+        for sheet in metadata.get("sheets", []):
+            props = sheet.get("properties", {})
+            if props.get("title") == tab_name:
+                return props.get("sheetId")
+        return None
+
     def _clear_conditional_format_rules(self, spreadsheet_id: str) -> list[dict]:
         """
         Build deleteConditionalFormatRule requests for ALL existing rules.

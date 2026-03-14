@@ -77,6 +77,9 @@ class TaskReminderScheduler:
             f"Starting task reminder scheduler (interval: {self.check_interval}s)"
         )
 
+        # Wait 5 minutes before first check to avoid spamming on every restart
+        await asyncio.sleep(300)
+
         while self._running:
             try:
                 # Reset daily tracker if it's a new day

@@ -489,7 +489,207 @@ TOOL_GET_COMMITMENTS = {
 
 
 # =============================================================================
-# All Tools (v0.1 + v0.2 + v0.3)
+# v1.0 Phase 2 — Gantt Integration Tool Definitions
+# =============================================================================
+
+TOOL_GET_GANTT_STATUS = {
+    "name": "get_gantt_status",
+    "description": """
+        Get the current Gantt chart status for a given week.
+        Returns parsed, structured data for all sections including owner,
+        status (active/planned/blocked/completed), and item type.
+        Use for questions like "What's happening this week?" or
+        "What's the plan for W14?"
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "week": {
+                "type": "integer",
+                "description": "Week number (e.g., 11, 14). Defaults to current week if not specified."
+            }
+        },
+        "required": []
+    }
+}
+
+TOOL_GET_GANTT_SECTION = {
+    "name": "get_gantt_section",
+    "description": """
+        Deep dive into a specific Gantt section across multiple weeks.
+        Returns parsed cell data for all subsections within a section.
+        Use for questions like "Show me Product & Technology for W11-W15"
+        or "What's in the Commercial section?"
+        Section names are fuzzy matched — "Product & Tech" works.
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "section": {
+                "type": "string",
+                "description": "Section name (e.g., 'Product & Technology', 'Commercial'). Fuzzy matched."
+            },
+            "weeks": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "List of week numbers to include (defaults to current week ± 2)"
+            }
+        },
+        "required": ["section"]
+    }
+}
+
+TOOL_GET_MEETING_CADENCE = {
+    "name": "get_meeting_cadence",
+    "description": """
+        Get the expected meeting cadence from the Gantt's Meeting Cadence tab.
+        Returns meeting definitions including name, frequency, and expected attendees.
+        Use for questions like "What meetings are scheduled this week?"
+        or "What's our meeting cadence?"
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "week": {
+                "type": "integer",
+                "description": "Week number for context (defaults to current week)"
+            }
+        },
+        "required": []
+    }
+}
+
+TOOL_GET_GANTT_HORIZON = {
+    "name": "get_gantt_horizon",
+    "description": """
+        Look ahead in the Gantt to find upcoming milestones and transitions.
+        Use for questions like "What's coming up?" or
+        "What milestones are in the next 2 months?"
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "weeks_ahead": {
+                "type": "integer",
+                "description": "How many weeks to look ahead (default 8)"
+            }
+        },
+        "required": []
+    }
+}
+
+TOOL_PROPOSE_GANTT_UPDATE = {
+    "name": "propose_gantt_update",
+    "description": """
+        Propose changes to the Gantt chart. Creates a proposal that requires
+        CEO approval before being applied. Each change must include an owner
+        prefix (like [R], [E], [E/R]) and a status.
+        Use when Eyal asks to update, add, or modify Gantt entries.
+        NEVER writes directly — always creates a proposal for approval.
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "changes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "section": {
+                            "type": "string",
+                            "description": "Gantt section (e.g., 'Product & Technology')"
+                        },
+                        "subsection": {
+                            "type": "string",
+                            "description": "Subsection/row (e.g., 'Execution', 'Planning')"
+                        },
+                        "week": {
+                            "type": "integer",
+                            "description": "Target week number (for single-week changes)"
+                        },
+                        "week_start": {
+                            "type": "integer",
+                            "description": "Start week (for range changes, use instead of week)"
+                        },
+                        "week_end": {
+                            "type": "integer",
+                            "description": "End week (for range changes, use with week_start)"
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Cell value with owner prefix (e.g., '[R] MVP Sprint 2')"
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["active", "planned", "blocked", "completed", ""],
+                            "description": "Status for cell color (active=green, planned=blue, blocked=red)"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Why this change is being made"
+                        },
+                        "force_mode": {
+                            "type": "string",
+                            "enum": ["replace", "append"],
+                            "description": "Only set this AFTER getting a 'needs_confirmation' response. 'append' adds to existing content, 'replace' overwrites. Do NOT set on first call — let the system detect conflicts automatically."
+                        }
+                    },
+                    "required": ["section", "subsection", "value", "status", "reason"]
+                },
+                "description": "List of cell changes to propose"
+            },
+            "source": {
+                "type": "string",
+                "description": "Source of the change (meeting, telegram, email, manual)"
+            }
+        },
+        "required": ["changes"]
+    }
+}
+
+TOOL_GET_GANTT_HISTORY = {
+    "name": "get_gantt_history",
+    "description": """
+        Get recent changes made to the Gantt chart.
+        Shows approved proposals with their diffs (old value → new value).
+        Use for questions like "What changed in the Gantt recently?"
+        or "What updates were made last week?"
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of entries to return (default 10)"
+            }
+        },
+        "required": []
+    }
+}
+
+TOOL_ROLLBACK_GANTT_UPDATE = {
+    "name": "rollback_gantt_update",
+    "description": """
+        Undo a Gantt change by restoring cells from the saved snapshot.
+        If no proposal_id is given, rolls back the most recently approved change.
+        Use when Eyal says "undo the last Gantt change" or
+        "rollback that Gantt update".
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "proposal_id": {
+                "type": "string",
+                "description": "UUID of the proposal to rollback (optional, defaults to most recent)"
+            }
+        },
+        "required": []
+    }
+}
+
+
+# =============================================================================
+# All Tools (v0.1 + v0.2 + v0.3 + v1.0)
 # =============================================================================
 
 TOOL_DEFINITIONS = [
@@ -514,4 +714,12 @@ TOOL_DEFINITIONS = [
     TOOL_GET_ENTITY_INFO,
     TOOL_GET_ENTITY_TIMELINE,
     TOOL_GET_COMMITMENTS,
+    # v1.0 Phase 2 — Gantt Integration tools
+    TOOL_GET_GANTT_STATUS,
+    TOOL_GET_GANTT_SECTION,
+    TOOL_GET_MEETING_CADENCE,
+    TOOL_GET_GANTT_HORIZON,
+    TOOL_PROPOSE_GANTT_UPDATE,
+    TOOL_GET_GANTT_HISTORY,
+    TOOL_ROLLBACK_GANTT_UPDATE,
 ]
