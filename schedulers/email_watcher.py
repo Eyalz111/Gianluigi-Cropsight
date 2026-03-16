@@ -7,6 +7,9 @@ Routes:
 - Attachments -> document ingestion pipeline
 - Approval replies -> approval flow
 
+Phase 4 addition: After routing, classify + extract intelligence from
+team emails and queue for the morning brief (approved=False).
+
 Usage:
     from schedulers.email_watcher import email_watcher
     await email_watcher.start()
@@ -14,7 +17,9 @@ Usage:
 
 import asyncio
 import logging
+import os
 import re
+from datetime import date
 from typing import Any
 
 from config.settings import settings
@@ -24,6 +29,13 @@ from services.supabase_client import supabase_client
 from services.conversation_memory import conversation_memory
 
 logger = logging.getLogger(__name__)
+
+
+# Attachment filtering
+ALLOWED_ATTACHMENT_TYPES = {".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".csv"}
+BLOCKED_ATTACHMENT_TYPES = {".exe", ".zip", ".dmg", ".bat", ".png", ".jpg", ".gif"}
+MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024  # 25MB
+
 
 class EmailWatcher:
     """Watches Gianluigi's inbox for team emails."""
@@ -46,6 +58,8 @@ class EmailWatcher:
                 await self._check_inbox()
             except Exception as e:
                 logger.error(f"Error in email watcher: {e}")
+                from core.health_monitor import check_and_alert
+                await check_and_alert("email_watcher", e)
             await asyncio.sleep(self.check_interval)
 
     def stop(self) -> None:
@@ -104,6 +118,13 @@ class EmailWatcher:
                         message_id=msg.get("message_id"),
                     )
 
+                # Phase 4: After existing routing, extract and log for morning brief
+                await self._extract_and_log(
+                    msg=msg,
+                    sender_email=sender_email,
+                    member_name=member_name,
+                )
+
                 # Mark as read
                 await gmail_service.mark_as_read(msg_id)
                 self._processed_ids.add(msg_id)
@@ -118,6 +139,71 @@ class EmailWatcher:
             "[approval needed]" in subject_lower
             or "re: [approval needed]" in subject_lower
         )
+
+    async def _extract_and_log(
+        self,
+        msg: dict,
+        sender_email: str,
+        member_name: str,
+    ) -> None:
+        """
+        Classify, extract, and queue to email_scans (approved=False for morning brief).
+
+        Runs after existing routing. Does NOT send a separate notification.
+        Queued items are included in the next morning brief.
+        """
+        msg_id = msg.get("id", "")
+        subject = msg.get("subject", "")
+        body = msg.get("body", "")
+        thread_id = msg.get("threadId")
+
+        # Skip if already scanned (dedup)
+        if supabase_client.is_email_already_scanned(msg_id):
+            return
+
+        # Skip approval replies — they're routing artifacts, not intelligence
+        if self._is_approval_reply(subject):
+            return
+
+        try:
+            from processors.email_classifier import classify_email, extract_email_intelligence
+
+            classification = await classify_email(
+                sender=sender_email,
+                subject=subject,
+                body_preview=body[:500],
+            )
+
+            extracted_items = []
+            if classification in ("relevant", "borderline"):
+                extracted_items = await extract_email_intelligence(
+                    sender=sender_email,
+                    subject=subject,
+                    body=body,
+                )
+
+            # Log to email_scans — queued for morning brief, NOT auto-approved
+            supabase_client.create_email_scan(
+                scan_type="constant",
+                email_id=msg_id,
+                date=date.today().isoformat(),
+                sender=sender_email,
+                subject=subject,
+                classification=classification,
+                extracted_items=extracted_items if extracted_items else None,
+                thread_id=thread_id,
+                approved=False,
+                direction="inbound",
+            )
+
+            if extracted_items:
+                logger.info(
+                    f"Email intelligence: {len(extracted_items)} items from {member_name} "
+                    f"(classification: {classification})"
+                )
+
+        except Exception as e:
+            logger.error(f"Email extraction failed for {msg_id}: {e}")
 
     async def _handle_approval_reply(
         self, msg_id: str, body: str, member_name: str, subject: str
@@ -205,6 +291,19 @@ class EmailWatcher:
             attachment_id = att.get("attachmentId", "")
 
             if not attachment_id:
+                continue
+
+            # Phase 4: Attachment type/size filtering
+            ext = os.path.splitext(filename)[1].lower() if filename else ""
+            if ext in BLOCKED_ATTACHMENT_TYPES:
+                logger.info(f"Skipping blocked attachment type: {filename}")
+                continue
+            if ext and ext not in ALLOWED_ATTACHMENT_TYPES:
+                logger.info(f"Skipping unrecognized attachment type: {filename}")
+                continue
+            att_size = att.get("size", 0)
+            if att_size and att_size > MAX_ATTACHMENT_SIZE:
+                logger.info(f"Skipping oversized attachment: {filename} ({att_size} bytes)")
                 continue
 
             logger.info(f"Downloading attachment: {filename}")

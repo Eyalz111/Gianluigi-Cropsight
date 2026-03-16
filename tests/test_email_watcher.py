@@ -669,3 +669,92 @@ class TestEmailExtraction:
         email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', sender)
         assert email_match is not None
         assert email_match.group(0) == "eyal@cropsight.io"
+
+
+# =============================================================================
+# Phase 4: Tests for _extract_and_log() and attachment filtering
+# =============================================================================
+
+class TestExtractAndLog:
+    """Tests for the Phase 4 email extraction and queuing."""
+
+    @pytest.mark.asyncio
+    async def test_queues_with_approved_false(self, mock_settings_for_email_watcher):
+        """Extracted emails should be queued with approved=False for morning brief."""
+        from schedulers.email_watcher import EmailWatcher
+
+        watcher = EmailWatcher()
+        msg = {
+            "id": "msg-123",
+            "from": "Roye Tadmor <roye@cropsight.io>",
+            "subject": "CropSight update",
+            "body": "The Moldova pilot is progressing well.",
+            "threadId": "thread-456",
+        }
+
+        with patch("schedulers.email_watcher.supabase_client") as mock_sb, \
+             patch("processors.email_classifier.classify_email", new_callable=AsyncMock, return_value="relevant"), \
+             patch("processors.email_classifier.extract_email_intelligence", new_callable=AsyncMock, return_value=[{"type": "information", "text": "Moldova pilot progressing"}]):
+
+            mock_sb.is_email_already_scanned.return_value = False
+
+            await watcher._extract_and_log(msg, "roye@cropsight.io", "Roye Tadmor")
+
+            mock_sb.create_email_scan.assert_called_once()
+            call_kwargs = mock_sb.create_email_scan.call_args
+            assert call_kwargs[1]["approved"] is False
+            assert call_kwargs[1]["scan_type"] == "constant"
+            assert call_kwargs[1]["classification"] == "relevant"
+
+    @pytest.mark.asyncio
+    async def test_skips_already_scanned(self, mock_settings_for_email_watcher):
+        """Should skip emails already in email_scans."""
+        from schedulers.email_watcher import EmailWatcher
+
+        watcher = EmailWatcher()
+        msg = {"id": "msg-dupe", "subject": "Test", "body": "", "from": "x"}
+
+        with patch("schedulers.email_watcher.supabase_client") as mock_sb:
+            mock_sb.is_email_already_scanned.return_value = True
+
+            await watcher._extract_and_log(msg, "eyal@cropsight.io", "Eyal")
+
+            mock_sb.create_email_scan.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_approval_replies(self, mock_settings_for_email_watcher):
+        """Should skip approval reply emails."""
+        from schedulers.email_watcher import EmailWatcher
+
+        watcher = EmailWatcher()
+        msg = {"id": "msg-appr", "subject": "Re: [APPROVAL NEEDED] Summary", "body": "Approved", "from": "x"}
+
+        with patch("schedulers.email_watcher.supabase_client") as mock_sb:
+            mock_sb.is_email_already_scanned.return_value = False
+
+            await watcher._extract_and_log(msg, "eyal@cropsight.io", "Eyal")
+
+            mock_sb.create_email_scan.assert_not_called()
+
+
+class TestAttachmentFiltering:
+    """Tests for Phase 4 attachment type/size filtering."""
+
+    def test_blocked_types_skipped(self, mock_settings_for_email_watcher):
+        """Blocked attachment types (.exe, .zip, etc.) should be skipped."""
+        from schedulers.email_watcher import BLOCKED_ATTACHMENT_TYPES
+        assert ".exe" in BLOCKED_ATTACHMENT_TYPES
+        assert ".zip" in BLOCKED_ATTACHMENT_TYPES
+        assert ".bat" in BLOCKED_ATTACHMENT_TYPES
+
+    def test_allowed_types(self, mock_settings_for_email_watcher):
+        """Allowed attachment types should include common document formats."""
+        from schedulers.email_watcher import ALLOWED_ATTACHMENT_TYPES
+        assert ".pdf" in ALLOWED_ATTACHMENT_TYPES
+        assert ".docx" in ALLOWED_ATTACHMENT_TYPES
+        assert ".csv" in ALLOWED_ATTACHMENT_TYPES
+
+    def test_max_attachment_size(self, mock_settings_for_email_watcher):
+        """Max attachment size should be 25MB."""
+        from schedulers.email_watcher import MAX_ATTACHMENT_SIZE
+        assert MAX_ATTACHMENT_SIZE == 25 * 1024 * 1024

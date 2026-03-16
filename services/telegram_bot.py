@@ -162,6 +162,9 @@ class TelegramBot:
         # This will be populated when users interact with the bot
         self._telegram_user_map: dict[int, str] = {}
 
+        # Session lock: prevents overlapping interactive flows (debrief, edit)
+        self._active_interactive_session: str | None = None
+
     @property
     def app(self) -> Application:
         """Lazy initialization of the Telegram Application."""
@@ -197,6 +200,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("myid", self._handle_myid))
         self.app.add_handler(CommandHandler("debrief", self._handle_debrief))
         self.app.add_handler(CommandHandler("cancel", self._handle_cancel_debrief))
+        self.app.add_handler(CommandHandler("emailscan", self._handle_email_scan))
 
         # Add callback handler for inline buttons (approval flow, debrief)
         self.app.add_handler(
@@ -840,6 +844,9 @@ Or just send me a question and I'll search our meeting history to answer it!
             except Exception:
                 total_tokens = 0
 
+            # Pending approvals queue
+            pending_approvals = supabase_client.get_pending_approval_summary()
+
             from config.settings import settings as _settings
             env = _settings.ENVIRONMENT
 
@@ -854,6 +861,17 @@ Or just send me a question and I'll search our meeting history to answer it!
                 f"Monthly tokens: {total_tokens:,}",
                 f"Environment: {env}",
             ]
+
+            if pending_approvals:
+                lines.append(f"\n*Pending Approvals ({len(pending_approvals)}):*")
+                for pa in pending_approvals:
+                    ct = pa.get("content_type", "unknown")
+                    created = pa.get("created_at", "")[:16].replace("T", " ")
+                    expires = pa.get("expires_at")
+                    exp_str = f" (expires {expires[:16].replace('T', ' ')})" if expires else ""
+                    lines.append(f"  - {ct}: {pa.get('approval_id', '')[:8]}... ({created}){exp_str}")
+            else:
+                lines.append("\nNo pending approvals.")
 
             await self.send_message(update.effective_chat.id, "\n".join(lines))
 
@@ -914,6 +932,7 @@ Or just send me a question and I'll search our meeting history to answer it!
 /reprocess [title] - Reprocess a transcript (Eyal only)
 /debrief - Start end-of-day debrief (Eyal only)
 /cancel - Cancel active debrief (Eyal only)
+/emailscan - Trigger email scan + morning brief (Eyal only)
 /cost - API token usage summary (Eyal only)
 /status - System dashboard (Eyal only)
 
@@ -1335,6 +1354,22 @@ When you receive approval requests, use the buttons to approve, request changes,
             )
             return
 
+        # Session lock check
+        if self._active_interactive_session and self._active_interactive_session != "debrief":
+            await self.send_message(
+                update.effective_chat.id,
+                f"Another interactive session ({self._active_interactive_session}) is active. "
+                f"Finish or /cancel it first.",
+            )
+            return
+
+        # Surface pending approvals before debrief
+        pending = supabase_client.get_pending_approval_summary()
+        if pending:
+            pending_note = f"Heads up: {len(pending)} approval(s) pending. Use /status to review.\n\n"
+            await self.send_message(update.effective_chat.id, pending_note, parse_mode=None)
+
+        self._active_interactive_session = "debrief"
         from processors.debrief import start_debrief
 
         result = await start_debrief(user_id="eyal")
@@ -1389,10 +1424,71 @@ When you receive approval requests, use the buttons to approve, request changes,
         )
         context.user_data.pop("debrief_session_id", None)
         context.user_data.pop("debrief_editing", None)
+        self._active_interactive_session = None
         await self.send_message(
             update.effective_chat.id,
             "Debrief cancelled. You can start a new one anytime with /debrief.",
         )
+
+    async def _handle_email_scan(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle /emailscan — manually trigger email scan + morning brief."""
+        user = update.effective_user
+        is_eyal = str(user.id) == str(self.eyal_chat_id)
+
+        if not is_eyal:
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can trigger email scans.",
+            )
+            return
+
+        from datetime import date
+        from services.supabase_client import supabase_client
+
+        # Rate limiting: check if already scanned today
+        last_scan = supabase_client.get_last_scan_date(scan_type="daily")
+        today_str = date.today().isoformat()
+
+        if last_scan and last_scan == today_str:
+            force = context.user_data.get("emailscan_force", False)
+            if not force:
+                context.user_data["emailscan_force"] = True
+                await self.send_message(
+                    update.effective_chat.id,
+                    "Already scanned today. Send /emailscan again to force re-scan.",
+                )
+                return
+            # Reset force flag
+            context.user_data.pop("emailscan_force", None)
+
+        await self.send_message(
+            update.effective_chat.id,
+            "Running email scan + morning brief...",
+        )
+
+        try:
+            from processors.morning_brief import trigger_morning_brief
+            result = await trigger_morning_brief()
+            if result:
+                await self.send_message(
+                    update.effective_chat.id,
+                    "Email scan complete. Check above for the morning brief.",
+                )
+            else:
+                await self.send_message(
+                    update.effective_chat.id,
+                    "Email scan complete. Nothing new to report.",
+                )
+        except Exception as e:
+            logger.error(f"Email scan failed: {e}")
+            await self.send_message(
+                update.effective_chat.id,
+                f"Email scan failed: {e}",
+            )
 
     async def _handle_debrief_message(
         self,
@@ -2071,6 +2167,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             await query.edit_message_text("Approved! Injecting items...")
             result = await confirm_debrief(session_id, approved=True)
             context.user_data.pop("debrief_session_id", None)
+            self._active_interactive_session = None
             await self.send_message(
                 chat_id,
                 result.get("response", "Debrief saved."),
@@ -2096,6 +2193,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             result = await confirm_debrief(session_id, approved=False)
             context.user_data.pop("debrief_session_id", None)
             context.user_data.pop("debrief_editing", None)
+            self._active_interactive_session = None
             await query.edit_message_text("Debrief cancelled. Nothing was saved.")
 
     async def _handle_inject_callback(

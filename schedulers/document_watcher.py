@@ -77,6 +77,8 @@ class DocumentWatcher:
                     details={"error": str(e)},
                     triggered_by="auto",
                 )
+                from core.health_monitor import check_and_alert
+                await check_and_alert("document_watcher", e)
 
             await asyncio.sleep(self.poll_interval)
 

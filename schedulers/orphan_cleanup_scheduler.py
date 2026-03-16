@@ -66,6 +66,8 @@ class OrphanCleanupScheduler:
                     details={"error": str(e)},
                     triggered_by="auto",
                 )
+                from core.health_monitor import check_and_alert
+                await check_and_alert("orphan_cleanup_scheduler", e)
 
             await asyncio.sleep(self.check_interval)
 
@@ -85,6 +87,15 @@ class OrphanCleanupScheduler:
 
         results = {}
         notifications = []
+
+        # 0. Expire approvals past their expires_at
+        try:
+            from guardrails.approval_flow import expire_stale_approvals
+            expired = await expire_stale_approvals()
+            results["expired_approvals"] = len(expired)
+        except Exception as e:
+            logger.error(f"Error expiring approvals: {e}")
+            results["expired_approvals"] = 0
 
         # 1. Stale pending approvals
         stale = self._check_stale_approvals()

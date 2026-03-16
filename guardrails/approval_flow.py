@@ -27,7 +27,7 @@ Usage:
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -59,6 +59,9 @@ class ApprovalStatus(Enum):
 
 # Track pending auto-publish timers: {meeting_id: asyncio.Task}
 _pending_auto_publishes: dict[str, asyncio.Task] = {}
+
+# Track pending reminder tasks: {meeting_id: list[asyncio.Task]}
+_pending_reminders: dict[str, list[asyncio.Task]] = {}
 
 # NOTE: Pending approvals are now persisted in the `pending_approvals` Supabase
 # table (v0.4).  The in-memory dict was removed — all reads/writes go through
@@ -121,6 +124,67 @@ async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None
     _pending_auto_publishes.pop(meeting_id, None)
 
 
+async def _send_approval_reminder(meeting_id: str, hours: int, content_type: str) -> None:
+    """
+    Send a gentle Telegram reminder that an approval is waiting.
+
+    Args:
+        meeting_id: Approval ID to check.
+        hours: How many hours have passed (for the message).
+        content_type: Type of content awaiting approval.
+    """
+    await asyncio.sleep(hours * 3600)
+
+    # Check if still pending
+    row = supabase_client.get_pending_approval(meeting_id)
+    if not row or row.get("status") != "pending":
+        return
+
+    title = ""
+    content = row.get("content", {})
+    if isinstance(content, dict):
+        title = content.get("title", content_type)
+    else:
+        title = content_type
+
+    await telegram_bot.send_to_eyal(
+        f"Reminder: \"{title}\" is awaiting your approval ({hours}h).\n"
+        f"Reply approve/edit/reject, or use /status to see all pending items."
+    )
+
+
+def schedule_approval_reminders(meeting_id: str, content_type: str) -> None:
+    """
+    Schedule gentle reminder DMs for an unreviewed approval.
+
+    Args:
+        meeting_id: Approval ID.
+        content_type: Type of content for the reminder message.
+    """
+    if not settings.APPROVAL_REMINDER_ENABLED:
+        return
+
+    cancel_approval_reminders(meeting_id)
+    tasks = []
+    for hours in settings.approval_reminder_hours_list:
+        task = asyncio.create_task(
+            _send_approval_reminder(meeting_id, hours, content_type),
+            name=f"reminder_{meeting_id}_{hours}h",
+        )
+        tasks.append(task)
+    if tasks:
+        _pending_reminders[meeting_id] = tasks
+        logger.info(f"Scheduled reminders for {meeting_id} at {settings.approval_reminder_hours_list}h")
+
+
+def cancel_approval_reminders(meeting_id: str) -> None:
+    """Cancel any pending reminders for this approval."""
+    tasks = _pending_reminders.pop(meeting_id, [])
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+
+
 def schedule_auto_publish(meeting_id: str) -> None:
     """
     Schedule auto-publish if in auto_review mode.
@@ -160,6 +224,33 @@ def cancel_auto_publish(meeting_id: str) -> None:
     if task and not task.done():
         task.cancel()
         logger.info(f"Cancelled auto-publish for {meeting_id}")
+
+
+async def expire_stale_approvals() -> list[dict]:
+    """
+    Expire pending approvals past their expires_at timestamp.
+
+    Notifies Eyal about expired items so he's aware.
+
+    Returns:
+        List of expired approval records.
+    """
+    expired = supabase_client.expire_pending_approvals()
+    if expired:
+        lines = ["Expired approvals (no longer actionable):"]
+        for row in expired:
+            ct = row.get("content_type", "unknown")
+            title = ""
+            content = row.get("content", {})
+            if isinstance(content, dict):
+                title = content.get("title", ct)
+            lines.append(f"  - {title} ({ct})")
+            # Cancel any reminders/timers for expired items
+            cancel_approval_reminders(row["approval_id"])
+            cancel_auto_publish(row["approval_id"])
+        await telegram_bot.send_to_eyal("\n".join(lines))
+        logger.info(f"Expired {len(expired)} stale approvals")
+    return expired
 
 
 async def reconstruct_auto_publish_timers() -> int:
@@ -252,6 +343,19 @@ async def submit_for_approval(
     """
     logger.info(f"Submitting {content_type} for approval: {meeting_id}")
 
+    # Check for existing pending approvals of the same type
+    existing_pending = supabase_client.get_pending_approvals_by_status("pending")
+    same_type_pending = [
+        a for a in existing_pending
+        if a.get("content_type") == content_type and a.get("approval_id") != meeting_id
+    ]
+    queue_note = ""
+    if same_type_pending:
+        queue_note = (
+            f"\n\nNote: {len(same_type_pending)} other {content_type} approval(s) "
+            f"already pending."
+        )
+
     # Persist approval state to Supabase (survives restarts)
     # Delete any stale row first (upsert pattern for edit re-submissions)
     supabase_client.delete_pending_approval(meeting_id)
@@ -259,16 +363,26 @@ async def submit_for_approval(
     # Calculate auto_publish_at if in auto_review mode
     auto_publish_at = None
     if settings.APPROVAL_MODE == "auto_review":
-        from datetime import timedelta
         auto_publish_at = (
             datetime.now() + timedelta(minutes=settings.AUTO_REVIEW_WINDOW_MINUTES)
         ).isoformat()
+
+    # Calculate expires_at per content type
+    expiry_map = {
+        "morning_brief": timedelta(hours=24),
+        "debrief": timedelta(hours=48),
+        "weekly_digest": timedelta(days=7),
+    }
+    expires_at = None
+    if content_type in expiry_map:
+        expires_at = (datetime.now() + expiry_map[content_type]).isoformat()
 
     supabase_client.create_pending_approval(
         approval_id=meeting_id,
         content_type=content_type,
         content=content,
         auto_publish_at=auto_publish_at,
+        expires_at=expires_at,
     )
 
     # Extract key info for formatting
@@ -371,6 +485,25 @@ async def submit_for_approval(
             meeting_id=meeting_id,
         )
 
+    elif content_type == "morning_brief":
+        # Morning brief — consolidated daily touchpoint
+        formatted = content.get("formatted", "")
+        stats = content.get("stats", {})
+        total = stats.get("email_scans", 0) + stats.get("constant_items", 0)
+
+        preview = formatted if formatted else "<b>Morning Brief</b>\n\nNo details available."
+
+        telegram_sent = await telegram_bot.send_approval_request(
+            meeting_title=f"Morning Brief ({total} email items)",
+            summary_preview=preview,
+            meeting_id=meeting_id,
+        )
+        email_sent = await gmail_service.send_approval_request(
+            meeting_title="Morning Brief",
+            summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""),
+            meeting_id=meeting_id,
+        )
+
     else:
         # Default: meeting_summary (original behavior)
         # v0.3: Include cross-reference results if available
@@ -438,6 +571,9 @@ async def submit_for_approval(
     # Schedule auto-publish if in auto_review mode
     schedule_auto_publish(meeting_id)
 
+    # Schedule gentle reminders
+    schedule_approval_reminders(meeting_id, content_type)
+
     return {
         "approval_id": meeting_id,  # Use meeting_id as approval_id
         "status": "pending",
@@ -487,7 +623,8 @@ async def process_response(
         meeting_id.startswith("digest-")
         or meeting_id.startswith("prep-")
         or meeting_id.startswith("gantt-")
-        or (pending_info and pending_info["type"] in ("weekly_digest", "meeting_prep", "gantt_update"))
+        or meeting_id.startswith("brief-")
+        or (pending_info and pending_info["type"] in ("weekly_digest", "meeting_prep", "gantt_update", "morning_brief"))
     )
 
     if is_non_meeting:
@@ -505,8 +642,9 @@ async def process_response(
                 "next_step": "Please try again",
             }
 
-    # Cancel any pending auto-publish timer (Eyal is acting manually)
+    # Cancel any pending auto-publish timer and reminders (Eyal is acting manually)
     cancel_auto_publish(meeting_id)
+    cancel_approval_reminders(meeting_id)
 
     if action == "approve":
         # Delete from persistent store (already fetched above, now remove it)
@@ -521,6 +659,8 @@ async def process_response(
             content_type = "meeting_prep"
         elif meeting_id.startswith("gantt-"):
             content_type = "gantt_update"
+        elif meeting_id.startswith("brief-"):
+            content_type = "morning_brief"
         else:
             content_type = "meeting_summary"
 
@@ -593,6 +733,20 @@ async def process_response(
                     "execution": exec_result,
                 }
             return {"action": "approved", "edits": None, "next_step": "Approved but no proposal_id found"}
+
+        elif content_type == "morning_brief":
+            if not pending_info:
+                logger.warning(f"Morning brief {meeting_id} approved but content not in memory")
+                supabase_client.log_action(action="approval_status_approved", details={"meeting_id": meeting_id}, triggered_by="eyal")
+                return {"action": "approved", "edits": None, "next_step": "Approved (brief content not found)"}
+
+            result = await _apply_morning_brief_approval(pending_info["content"])
+            return {
+                "action": "approved",
+                "edits": None,
+                "next_step": "Morning brief items injected",
+                "injection": result,
+            }
 
         # Default: meeting_summary — gather all related data
         content = {
@@ -1659,3 +1813,95 @@ async def submit_stakeholder_updates_for_approval(
         "is_new": is_new,
         "telegram_sent": result,
     }
+
+
+# =============================================================================
+# Phase 4: Morning Brief Approval
+# =============================================================================
+
+async def _apply_morning_brief_approval(content: dict) -> dict:
+    """
+    Apply a morning brief approval — inject extracted items into the system.
+
+    Marks all included email_scans as approved, then injects tasks,
+    decisions, commitments from extracted items (reuses debrief injection pattern).
+    Creates RAG embeddings with source_type='email'.
+
+    Args:
+        content: Morning brief content dict with 'brief' and 'scan_ids'.
+
+    Returns:
+        Summary dict with counts.
+    """
+    from processors.debrief import _inject_debrief_items
+    from datetime import date as date_type
+
+    scan_ids = content.get("scan_ids", [])
+    brief = content.get("brief", {})
+    sections = brief.get("sections", [])
+
+    # Mark all email_scans as approved
+    for scan_id in scan_ids:
+        try:
+            supabase_client.update_email_scan(scan_id, approved=True)
+        except Exception as e:
+            logger.warning(f"Failed to mark email scan {scan_id} as approved: {e}")
+
+    # Collect all extracted items from all sections
+    all_items = []
+    for section in sections:
+        section_type = section.get("type", "")
+        if section_type in ("email_scan", "constant_layer"):
+            for item in section.get("items", []):
+                # Map email extraction types to debrief injection types
+                item_type = item.get("type", "information")
+                mapped = {
+                    "task": "task",
+                    "decision": "decision",
+                    "commitment": "commitment",
+                    "gantt_relevant": "gantt_update",
+                    "deadline_change": "information",
+                    "stakeholder_mention": "information",
+                    "information": "information",
+                }
+                debrief_item = {
+                    "type": mapped.get(item_type, "information"),
+                    "title": item.get("text", ""),
+                    "description": item.get("text", ""),
+                    "assignee": item.get("assignee"),
+                    "speaker": item.get("speaker"),
+                    "sensitive": item.get("_sensitive", False),
+                }
+                if item_type == "commitment":
+                    debrief_item["commitment_text"] = item.get("text", "")
+                    debrief_item["speaker"] = item.get("speaker", "Unknown")
+                all_items.append(debrief_item)
+
+    if not all_items:
+        logger.info("Morning brief approved but no items to inject")
+        supabase_client.log_action(
+            action="morning_brief_approved",
+            details={"items": 0, "scan_ids_count": len(scan_ids)},
+            triggered_by="eyal",
+        )
+        return {"summary": "No items to inject.", "counts": {}}
+
+    # Inject using the shared debrief pipeline
+    source_date = date_type.today().isoformat()
+    result = await _inject_debrief_items(
+        session_id=None,
+        items=all_items,
+        source_date=source_date,
+    )
+
+    supabase_client.log_action(
+        action="morning_brief_approved",
+        details={
+            "items": len(all_items),
+            "scan_ids_count": len(scan_ids),
+            "counts": result.get("counts", {}),
+        },
+        triggered_by="eyal",
+    )
+
+    return result

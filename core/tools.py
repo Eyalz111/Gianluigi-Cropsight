@@ -689,6 +689,39 @@ TOOL_ROLLBACK_GANTT_UPDATE = {
 
 
 # =============================================================================
+# v1.0 Phase 4 — Email Intelligence Tool Definitions
+# =============================================================================
+
+TOOL_GET_EMAIL_INTELLIGENCE = {
+    "name": "get_email_intelligence",
+    "description": """
+        Search email intelligence — extracted items from scanned emails.
+        Returns structured items (tasks, decisions, commitments, information)
+        extracted from team and personal email correspondence.
+        When citing results, say "from email correspondence" — never quote raw email text.
+    """,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query to match against extracted email items"
+            },
+            "sender": {
+                "type": "string",
+                "description": "Filter by sender email (optional)"
+            },
+            "days": {
+                "type": "integer",
+                "description": "Number of days to search back (default 30)"
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
+# =============================================================================
 # All Tools (v0.1 + v0.2 + v0.3 + v1.0)
 # =============================================================================
 
@@ -722,4 +755,6 @@ TOOL_DEFINITIONS = [
     TOOL_PROPOSE_GANTT_UPDATE,
     TOOL_GET_GANTT_HISTORY,
     TOOL_ROLLBACK_GANTT_UPDATE,
+    # v1.0 Phase 4 — Email Intelligence tools
+    TOOL_GET_EMAIL_INTELLIGENCE,
 ]

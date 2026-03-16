@@ -72,6 +72,8 @@ class AlertScheduler:
                     details={"error": str(e)},
                     triggered_by="auto",
                 )
+                from core.health_monitor import check_and_alert
+                await check_and_alert("alert_scheduler", e)
 
             await asyncio.sleep(self.check_interval)
 

@@ -195,14 +195,16 @@ async def start_services() -> None:
     )
     tasks.append(telegram_task)
 
-    # Start transcript watcher (only if Google Drive is available)
-    if init_status.get("google_drive"):
+    # Start transcript watcher (only if enabled and Google Drive is available)
+    if settings.TRANSCRIPT_WATCHER_ENABLED and init_status.get("google_drive"):
         logger.info("  Starting transcript watcher...")
         watcher_task = asyncio.create_task(
             transcript_watcher.start(),
             name="transcript_watcher"
         )
         tasks.append(watcher_task)
+    elif not settings.TRANSCRIPT_WATCHER_ENABLED:
+        logger.info("  Transcript watcher disabled (TRANSCRIPT_WATCHER_ENABLED=false)")
 
         # Start document watcher (polls Documents folder for team uploads)
         if settings.DOCUMENTS_FOLDER_ID:
@@ -284,6 +286,18 @@ async def start_services() -> None:
         tasks.append(email_watcher_task)
     else:
         logger.warning("  Email watcher disabled (Gmail not available)")
+
+    # Start morning brief scheduler (Phase 4)
+    if settings.MORNING_BRIEF_ENABLED:
+        from schedulers.morning_brief_scheduler import morning_brief_scheduler
+        logger.info("  Starting morning brief scheduler...")
+        brief_task = asyncio.create_task(
+            morning_brief_scheduler.start(),
+            name="morning_brief_scheduler"
+        )
+        tasks.append(brief_task)
+    else:
+        logger.info("  Morning brief scheduler disabled (MORNING_BRIEF_ENABLED=false)")
 
     logger.info("=" * 50)
     logger.info("  Gianluigi is ready!")
@@ -370,6 +384,14 @@ async def stop_services() -> None:
     email_watcher.stop()
     # alert_scheduler.stop()  # disabled
     orphan_cleanup_scheduler.stop()
+
+    # Stop morning brief scheduler if started
+    if settings.MORNING_BRIEF_ENABLED:
+        try:
+            from schedulers.morning_brief_scheduler import morning_brief_scheduler
+            morning_brief_scheduler.stop()
+        except Exception:
+            pass
 
     # Stop Telegram bot
     from services.telegram_bot import telegram_bot

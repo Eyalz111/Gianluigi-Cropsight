@@ -792,6 +792,26 @@ def _build_debrief_context(
     except Exception:
         pass
 
+    # Phase 4: Queued email extractions not yet in morning brief
+    try:
+        today_str = date.today().isoformat()
+        unapproved = supabase_client.get_unapproved_email_scans(date_from=today_str)
+        email_items = []
+        for scan in unapproved:
+            for item in scan.get("extracted_items") or []:
+                email_items.append(item)
+        if email_items:
+            parts.append(f"QUEUED EMAIL ITEMS ({len(email_items)} from today's emails):")
+            for item in email_items[:10]:
+                item_type = item.get("type", "info")
+                text = item.get("text", "")[:80]
+                parts.append(f"  - [{item_type}] {text}")
+            parts.append("")
+            parts.append("You can ask: 'I also captured items from emails today — want to review those too?'")
+            parts.append("")
+    except Exception:
+        pass
+
     return "\n".join(parts) if parts else ""
 
 

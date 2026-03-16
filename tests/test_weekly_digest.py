@@ -692,6 +692,9 @@ class TestWeeklyDigestSchedulerTrigger:
             mock_db.log_action = MagicMock()
             mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = ["eyal@test.com"]
+            mock_settings.WEEKLY_DIGEST_DAY = 6
+            mock_settings.WEEKLY_DIGEST_HOUR = 18
+            mock_settings.WEEKLY_DIGEST_WINDOW_HOURS = 2
 
             from schedulers.weekly_digest_scheduler import WeeklyDigestScheduler
 
@@ -807,6 +810,9 @@ class TestDuplicatePrevention:
             mock_db.log_action = MagicMock()
             mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = []
+            mock_settings.WEEKLY_DIGEST_DAY = 6
+            mock_settings.WEEKLY_DIGEST_HOUR = 18
+            mock_settings.WEEKLY_DIGEST_WINDOW_HOURS = 2
 
             from schedulers.weekly_digest_scheduler import WeeklyDigestScheduler
 
@@ -852,6 +858,9 @@ class TestDuplicatePrevention:
             mock_db.log_action = MagicMock()
             mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = []
+            mock_settings.WEEKLY_DIGEST_DAY = 6
+            mock_settings.WEEKLY_DIGEST_HOUR = 18
+            mock_settings.WEEKLY_DIGEST_WINDOW_HOURS = 2
 
             from schedulers.weekly_digest_scheduler import WeeklyDigestScheduler
 

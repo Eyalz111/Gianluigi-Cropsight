@@ -1,7 +1,7 @@
 """
 Weekly digest scheduler.
 
-Runs hourly, fires on Sunday 18:00-20:00 local time.
+Runs hourly, fires on the configured day/hour window (default: Friday 14:00-16:00).
 Generates digest, saves to Drive, sends to team via email + Telegram.
 """
 
@@ -22,9 +22,9 @@ class WeeklyDigestScheduler:
     """
     Scheduler that generates and distributes a weekly digest.
 
-    Checks every hour. On Sunday between 18:00 and 20:00 local time,
-    it generates the digest, saves it to Google Drive, emails the team,
-    and sends a Telegram summary to the group chat.
+    Checks every hour. On the configured day (default Friday) within the
+    configured hour window, it generates the digest, saves it to Google Drive,
+    emails the team, and sends a Telegram summary to the group chat.
 
     Tracks the last generated week to avoid duplicates.
     """
@@ -59,6 +59,8 @@ class WeeklyDigestScheduler:
                 await self._check_and_generate()
             except Exception as e:
                 logger.error(f"Error in weekly digest scheduler: {e}")
+                from core.health_monitor import check_and_alert
+                await check_and_alert("weekly_digest_scheduler", e)
             await asyncio.sleep(self.check_interval)
 
     def stop(self) -> None:
@@ -70,13 +72,16 @@ class WeeklyDigestScheduler:
         """
         Check if it's time to generate a digest.
 
-        Fires on Sunday (weekday 6) between 18:00 and 20:00 local time.
+        Fires on the configured day/hour window (default: Friday 14:00-16:00).
         Skips if a digest was already generated for this week.
         """
         now = datetime.now()
 
-        # Only fire on Sunday between 18:00-20:00
-        if now.weekday() != 6 or not (18 <= now.hour < 20):
+        digest_day = settings.WEEKLY_DIGEST_DAY
+        digest_hour = settings.WEEKLY_DIGEST_HOUR
+        digest_window = settings.WEEKLY_DIGEST_WINDOW_HOURS
+
+        if now.weekday() != digest_day or not (digest_hour <= now.hour < digest_hour + digest_window):
             return
 
         # Calculate week_of string (Monday of this week)

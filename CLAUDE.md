@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** March 14, 2026
-**Current Version:** v0.5 (tagged as v0.5-stable) → Building v1.0
-**Status:** v0.5 live on Cloud Run, v1.0 design approved, implementation starting
+**Last Updated:** March 16, 2026
+**Current Version:** v1.0 (Phases 0-4 complete, architecture review fixes applied)
+**Status:** v0.5 live on Cloud Run, v1.0 Phases 0-4 implemented, Phase 5 (meeting prep redesign) next
 
 ---
 
@@ -14,53 +14,57 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ---
 
-## Current State (v0.5)
+## Current State (Post Phase 4 + Architecture Review)
 
-- 579 tests, all passing
+- 933+ tests, all passing
 - Deployed to Cloud Run (europe-west1, 512Mi, min-instances=1)
 - Live tested with real meetings and team interactions
 - DB freshly rebuilt Mar 13, 2026
 
 ### What Works
 - Full transcript pipeline: Tactiq → Drive → Claude extraction → Supabase → approval → distribution
-- Hybrid RAG (semantic + full-text, RRF fusion, time-weighted, parent chunks)
-- Telegram bot with commands, Q&A, approval flow
+- Hybrid RAG (semantic + full-text, RRF fusion, time-weighted, parent chunks, source weights)
+- Telegram bot with commands, Q&A, approval flow, /status command
 - Gmail send/receive, Google Drive watchers, Calendar reading
 - Task deduplication, status inference, open question resolution
 - Entity registry, commitment tracking, proactive alerts
-- Meeting prep generation, weekly digest, pre-meeting reminders
+- Meeting prep generation, weekly digest (Friday), pre-meeting reminders
 - Word document summaries, Google Sheets integration
 - Cost optimization (tiered models: Opus/Sonnet/Haiku, prompt caching)
 - 5-layer inbound security
+- **v1.0 Phase 1:** Multi-agent pattern (Router/Conversation/Analyst/Operator)
+- **v1.0 Phase 2:** Bidirectional Gantt integration (read/write/rollback/backup)
+- **v1.0 Phase 3:** End-of-day debrief (quick injection + full interactive sessions)
+- **v1.0 Phase 4:** Email intelligence (personal Gmail scan, morning brief, email classifier)
+- **Architecture Review:** Approval reminders, expiry, health monitoring, RAG source weights, session locking
 
-### Known Issues (v0.5)
-- Meeting prep quality: too much noise, wrong context for meeting type, timing issues
-- Multi-turn conversation memory: data handling errors, formatting drift in long dialogues
-- See KNOWN_ISSUES.md for full list from live testing
+### Known Issues
+- Meeting prep quality: too much noise, wrong context for meeting type (Phase 5 target)
+- Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
+- Some schedulers disabled by default (morning brief, email scan, debrief prompt)
+- See KNOWN_ISSUES.md for full list
 
 ---
 
 ## v1.0 — "The AI Office Manager" (In Progress)
 
 **Design document:** `V1_DESIGN.md` (comprehensive spec, READ THIS FIRST for any v1.0 work)
+**Architecture review:** `docs/qa/ARCHITECTURE_REVIEW_ISSUES.md` (12 issues identified, most addressed)
 
-### Key Architecture Changes
+### Completed Phases
+- **Phase 0:** Database migration, new models
+- **Phase 1:** Multi-agent foundation
+- **Phase 2:** Gantt integration
+- **Phase 3:** Debrief flow
+- **Phase 4:** Email intelligence
+- **Post-Phase 4:** Architecture review fixes (approval expiry, health monitoring, RAG weights, session locking)
 
-1. **Multi-Agent Pattern:** Router (Haiku) → Conversation Agent (Sonnet) → Analyst Agent (Opus) → Operator Agent (Sonnet). Plain Python + Anthropic SDK, no CrewAI.
-
-2. **Bidirectional Gantt Integration:** Read/write the operational Gantt (Google Sheets) with schema awareness, versioning, rollback, and approval flow.
-
-3. **Email Intelligence:** Enhanced inbox monitoring + daily filtered scan of CEO's personal Gmail.
-
-4. **End-of-Day Debrief:** Interactive Telegram conversation with structured session state, follow-up questions, and verified extraction.
-
-5. **Weekly Review Session:** Calendar-driven CEO review via Claude.ai (MCP) or Telegram — Gantt updates, task review, slide generation, HTML report.
-
-6. **MCP Server:** Claude.ai interface for structured work sessions. Read tools first, write tools after stability.
-
-7. **Unified Heartbeat:** Single scheduler with multiple rhythms (pulse/5min, morning, evening, weekly_prep, weekly_post, alert).
-
-8. **RAG Upgrades:** New source types (email, debrief, gantt_change), source priority ranking, embedding lifecycle, conflict detection.
+### Remaining Phases
+- **Phase 5:** Meeting prep redesign
+- **Phase 6:** Weekly review + outputs
+- **Phase 7:** MCP server
+- **Phase 8:** Heartbeat unification
+- **Phase 9:** Integration testing
 
 ### What's NOT Changing
 - Supabase (EU region) as primary database
@@ -109,7 +113,7 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - All methods are **SYNC** (never await them)
 - Uses PostgREST API via supabase-py
 - pgvector for semantic search, tsvector for full-text
-- New v1.0 tables: gantt_schema, gantt_proposals, gantt_snapshots, debrief_sessions, email_scans, mcp_sessions, weekly_reports, meeting_prep_history
+- v1.0 tables: gantt_schema, gantt_proposals, gantt_snapshots, debrief_sessions, email_scans, mcp_sessions, weekly_reports, meeting_prep_history, pending_approvals (with expires_at)
 
 ## LLM Notes
 - **Opus:** Transcript extraction, document analysis (accuracy-critical) — Analyst Agent
@@ -125,16 +129,11 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ---
 
-## Build Sequence (v1.0)
-See V1_DESIGN.md Section 12 for detailed phased plan.
-Summary: Pre-work → Multi-agent foundation → Gantt integration → Debrief flow → Email intelligence → Meeting prep redesign → Weekly review + outputs → MCP server → Heartbeat unification → Integration testing
-
----
-
 ## Files to Read for Context
 1. `V1_DESIGN.md` — Full v1.0 specification (START HERE for new features)
 2. `config/settings.py` — All environment variables and configuration
 3. `config/team.py` — Team emails, filter keywords, blocklists
 4. `core/system_prompt.py` — Gianluigi's personality and guardrails
 5. `models/schemas.py` — All Pydantic data models
-6. `KNOWN_ISSUES.md` — Bugs from v0.5 live testing
+6. `KNOWN_ISSUES.md` — Bugs from live testing
+7. `docs/qa/ARCHITECTURE_REVIEW_ISSUES.md` — Architecture review findings

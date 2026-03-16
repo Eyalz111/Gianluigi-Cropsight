@@ -98,6 +98,8 @@ class TranscriptWatcher:
                     details={"error": str(e)},
                     triggered_by="auto",
                 )
+                from core.health_monitor import check_and_alert
+                await check_and_alert("transcript_watcher", e)
 
             # Wait for next poll
             await asyncio.sleep(self.poll_interval)

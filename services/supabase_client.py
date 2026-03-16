@@ -1621,6 +1621,7 @@ class SupabaseClient:
         content_type: str,
         content: dict,
         auto_publish_at: str | None = None,
+        expires_at: str | None = None,
     ) -> dict:
         """
         Create a pending approval record.
@@ -1630,6 +1631,7 @@ class SupabaseClient:
             content_type: 'meeting_summary', 'meeting_prep', or 'weekly_digest'.
             content: Full content dict (stored as JSONB).
             auto_publish_at: ISO timestamp for auto-publish, or None for manual mode.
+            expires_at: ISO timestamp for graceful expiry, or None for no expiry.
 
         Returns:
             Created pending approval record.
@@ -1642,6 +1644,8 @@ class SupabaseClient:
         }
         if auto_publish_at:
             data["auto_publish_at"] = auto_publish_at
+        if expires_at:
+            data["expires_at"] = expires_at
 
         result = self.client.table("pending_approvals").insert(data).execute()
         logger.info(f"Created pending approval: {approval_id} ({content_type})")
@@ -1751,6 +1755,58 @@ class SupabaseClient:
             .select("*")
             .eq("status", "pending")
             .not_.is_("auto_publish_at", "null")
+            .execute()
+        )
+        return result.data
+
+    def expire_pending_approvals(self) -> list[dict]:
+        """
+        Expire pending approvals whose expires_at is in the past.
+
+        Updates status to 'expired' and returns the expired rows.
+
+        Returns:
+            List of expired approval records.
+        """
+        now = datetime.now().isoformat()
+        try:
+            result = (
+                self.client.table("pending_approvals")
+                .select("*")
+                .eq("status", "pending")
+                .not_.is_("expires_at", "null")
+                .lt("expires_at", now)
+                .execute()
+            )
+            if not result.data:
+                return []
+
+            expired = []
+            for row in result.data:
+                self.client.table("pending_approvals").update(
+                    {"status": "expired"}
+                ).eq("approval_id", row["approval_id"]).execute()
+                expired.append(row)
+                logger.info(f"Expired approval: {row['approval_id']} ({row['content_type']})")
+
+            return expired
+        except Exception as e:
+            logger.error(f"Error expiring pending approvals: {e}")
+            return []
+
+    def get_pending_approval_summary(self) -> list[dict]:
+        """
+        Get a summary of all pending approvals for /status display.
+
+        Returns:
+            List of dicts with approval_id, content_type, created_at, expires_at.
+        """
+        result = (
+            self.client.table("pending_approvals")
+            .select("approval_id, content_type, created_at, expires_at")
+            .eq("status", "pending")
+            .order("created_at", desc=True)
+            .limit(20)
             .execute()
         )
         return result.data
@@ -2052,9 +2108,17 @@ class SupabaseClient:
                     recency_boost = 1.0 / (1.0 + days_ago / half_life_days)
                     rrf = item.get("rrf_score", 0)
                     base_score = rrf * 0.7 + recency_boost * 0.3
-                    # Debrief content (CEO's direct input) gets 1.5x priority
+                    # Source-type weighting from settings
                     source_type = item.get("metadata", {}).get("source_type") if item.get("metadata") else None
-                    source_weight = 1.5 if source_type == "debrief" else 1.0
+                    source_weight_map = {
+                        "debrief": settings.RAG_WEIGHT_DEBRIEF,
+                        "decision": settings.RAG_WEIGHT_DECISION,
+                        "email": settings.RAG_WEIGHT_EMAIL,
+                        "meeting": settings.RAG_WEIGHT_MEETING,
+                        "document": settings.RAG_WEIGHT_DOCUMENT,
+                        "gantt_change": settings.RAG_WEIGHT_GANTT,
+                    }
+                    source_weight = source_weight_map.get(source_type, 1.0)
                     item["rrf_score"] = base_score * source_weight
                 except (ValueError, TypeError):
                     pass
@@ -2386,12 +2450,27 @@ class SupabaseClient:
     # v1.0 — Email Scans
     # =========================================================================
 
-    def create_email_scan(self, scan_type: str, email_id: str, date: str, sender: str | None = None, subject: str | None = None, classification: str | None = None, extracted_items: list | None = None) -> dict:
-        """Record a scanned email."""
+    def create_email_scan(
+        self,
+        scan_type: str,
+        email_id: str,
+        date: str,
+        sender: str | None = None,
+        subject: str | None = None,
+        classification: str | None = None,
+        extracted_items: list | None = None,
+        recipient: str | None = None,
+        thread_id: str | None = None,
+        direction: str = "inbound",
+        approved: bool | None = None,
+        attachments_processed: list | None = None,
+    ) -> dict:
+        """Record a scanned email with all Phase 4 fields."""
         row = {
             "scan_type": scan_type,
             "email_id": email_id,
             "date": date,
+            "direction": direction,
         }
         if sender:
             row["sender"] = sender
@@ -2401,7 +2480,27 @@ class SupabaseClient:
             row["classification"] = classification
         if extracted_items is not None:
             row["extracted_items"] = extracted_items
+        if recipient:
+            row["recipient"] = recipient
+        if thread_id:
+            row["thread_id"] = thread_id
+        if approved is not None:
+            row["approved"] = approved
+        if attachments_processed is not None:
+            row["attachments_processed"] = attachments_processed
         result = self.client.table("email_scans").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def update_email_scan(self, scan_id: str, **kwargs) -> dict:
+        """Update an email scan record (e.g., approved=True after brief approval)."""
+        if not kwargs:
+            return {}
+        result = (
+            self.client.table("email_scans")
+            .update(kwargs)
+            .eq("id", scan_id)
+            .execute()
+        )
         return result.data[0] if result.data else {}
 
     def get_email_scans(self, scan_type: str | None = None, date_from: str | None = None, limit: int = 50) -> list[dict]:
@@ -2414,6 +2513,57 @@ class SupabaseClient:
         query = query.order("date", desc=True).limit(limit)
         result = query.execute()
         return result.data or []
+
+    def get_unapproved_email_scans(
+        self,
+        scan_type: str | None = None,
+        date_from: str | None = None,
+    ) -> list[dict]:
+        """Get scans classified as relevant/borderline but not yet approved. Used by morning brief."""
+        query = (
+            self.client.table("email_scans")
+            .select("*")
+            .eq("approved", False)
+            .in_("classification", ["relevant", "borderline"])
+        )
+        if scan_type:
+            query = query.eq("scan_type", scan_type)
+        if date_from:
+            query = query.gte("date", date_from)
+        query = query.order("date", desc=True).limit(100)
+        result = query.execute()
+        return result.data or []
+
+    def get_tracked_thread_ids(self, days: int = 30, scan_type: str | None = None) -> set[str]:
+        """Get distinct thread_ids from recent relevant email_scans."""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        query = (
+            self.client.table("email_scans")
+            .select("thread_id")
+            .gte("date", cutoff)
+            .in_("classification", ["relevant", "borderline"])
+            .not_.is_("thread_id", "null")
+        )
+        if scan_type:
+            query = query.eq("scan_type", scan_type)
+        query = query.limit(500)
+        result = query.execute()
+        return {row["thread_id"] for row in (result.data or []) if row.get("thread_id")}
+
+    def get_last_scan_date(self, scan_type: str = "daily") -> str | None:
+        """Get date of most recent scan. For /emailscan rate limiting."""
+        result = (
+            self.client.table("email_scans")
+            .select("date")
+            .eq("scan_type", scan_type)
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0].get("date")
+        return None
 
     def is_email_already_scanned(self, email_id: str) -> bool:
         """Check if an email has already been scanned (dedup)."""

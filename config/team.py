@@ -200,3 +200,117 @@ def is_team_email(email: str) -> bool:
         True if the email belongs to a team member, False otherwise.
     """
     return email.lower().strip() in [e.lower() for e in CROPSIGHT_TEAM_EMAILS if e]
+
+
+# =============================================================================
+# Email Intelligence — Filter Chain (Phase 4)
+# =============================================================================
+
+CROPSIGHT_EMAIL_KEYWORDS_BASELINE = [
+    "cropsight", "crop sight", "moldova", "gagauzia", "wheat", "yield",
+    "satellite", "iia", "tnufa", "pre-seed", "agtech",
+]
+
+
+def passes_email_filter_chain(
+    sender: str,
+    recipient: str,
+    subject: str,
+    tracked_thread_ids: set[str] | None = None,
+    thread_id: str | None = None,
+    filter_keywords: list[str] | None = None,
+) -> tuple[bool, str]:
+    """
+    Whitelist filter chain for the daily email scan. Any match = passes.
+
+    Rules applied in order:
+    1. Blocklist check (rejects immediately)
+    2. Sender/recipient is team member
+    3. Sender domain matches known stakeholder from entity registry
+    4. Subject contains CropSight keywords (live list)
+    5. Thread is already being tracked
+
+    Args:
+        sender: Sender email address.
+        recipient: Recipient email address.
+        subject: Email subject line.
+        tracked_thread_ids: Set of thread IDs from recent email_scans.
+        thread_id: This email's thread ID.
+        filter_keywords: Pre-built live keyword list.
+
+    Returns:
+        (passes: bool, reason: str)
+    """
+    sender_lower = sender.lower().strip()
+    recipient_lower = recipient.lower().strip()
+    subject_lower = subject.lower()
+
+    # Blocklist — reject immediately
+    if is_personal_contact_blocked(sender_lower):
+        return (False, "blocked_contact")
+
+    # Rule 1: Team member
+    if is_team_email(sender_lower) or is_team_email(recipient_lower):
+        return (True, "team_member")
+
+    # Rule 2: Known stakeholder domain
+    if is_known_stakeholder_domain(sender_lower):
+        return (True, "stakeholder_domain")
+
+    # Rule 3: Subject contains keywords
+    keywords = filter_keywords or CROPSIGHT_EMAIL_KEYWORDS_BASELINE
+    for keyword in keywords:
+        if keyword.lower() in subject_lower:
+            return (True, f"keyword:{keyword}")
+
+    # Rule 4: Thread already tracked
+    if tracked_thread_ids and thread_id and thread_id in tracked_thread_ids:
+        return (True, "tracked_thread")
+
+    return (False, "no_match")
+
+
+def is_known_stakeholder_domain(email: str) -> bool:
+    """
+    Check sender domain against entity registry organizations.
+
+    Extracts domain from email and checks if any organization entity
+    has a matching domain in its aliases or name.
+    """
+    if "@" not in email:
+        return False
+
+    domain = email.split("@")[1].lower()
+    # Skip generic providers
+    generic_domains = {
+        "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+        "live.com", "icloud.com", "mail.com", "protonmail.com",
+    }
+    if domain in generic_domains:
+        return False
+
+    try:
+        from services.supabase_client import supabase_client
+        entities = supabase_client.list_entities(entity_type="organization", limit=100)
+        for entity in entities:
+            name = entity.get("canonical_name", "").lower()
+            # Check if domain contains organization name or vice versa
+            domain_base = domain.split(".")[0]
+            if domain_base and len(domain_base) > 2:
+                if domain_base in name or name in domain_base:
+                    return True
+            # Check aliases
+            for alias in entity.get("aliases", []) or []:
+                alias_lower = alias.lower()
+                if domain_base in alias_lower or alias_lower in domain_base:
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
+def is_personal_contact_blocked(email: str) -> bool:
+    """Check against PERSONAL_CONTACTS_BLOCKLIST from settings."""
+    blocklist = settings.personal_contacts_blocklist_list
+    return email.lower().strip() in [e.lower() for e in blocklist]

@@ -554,6 +554,10 @@ class GianluigiAgent:
         elif tool_name == "rollback_gantt_update":
             return await self._tool_rollback_gantt_update(tool_input)
 
+        # v1.0 Phase 4 — Email Intelligence tools
+        elif tool_name == "get_email_intelligence":
+            return await self._tool_get_email_intelligence(tool_input)
+
         else:
             raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -995,6 +999,49 @@ class GianluigiAgent:
         return await gantt_manager.rollback_proposal(
             proposal_id=input.get("proposal_id")
         )
+
+    # =========================================================================
+    # v1.0 Phase 4 — Email Intelligence Tool Implementations
+    # =========================================================================
+
+    async def _tool_get_email_intelligence(self, input: dict) -> dict:
+        """Search email intelligence from scanned emails."""
+        query = input.get("query", "").lower()
+        sender_filter = input.get("sender", "")
+        days = input.get("days", 30)
+
+        from datetime import datetime, timedelta
+        date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+        scans = supabase_client.get_email_scans(date_from=date_from, limit=100)
+
+        results = []
+        for scan in scans:
+            # Filter by sender if specified
+            if sender_filter and sender_filter.lower() not in (scan.get("sender", "") or "").lower():
+                continue
+
+            # Only include classified relevant/borderline with items
+            classification = scan.get("classification", "")
+            if classification not in ("relevant", "borderline"):
+                continue
+
+            extracted = scan.get("extracted_items") or []
+            for item in extracted:
+                text = (item.get("text", "") or "").lower()
+                item_type = item.get("type", "")
+                # Simple keyword matching
+                if any(word in text for word in query.split() if len(word) > 2):
+                    results.append({
+                        "type": item_type,
+                        "text": item.get("text", ""),
+                        "date": scan.get("date", ""),
+                        "source": "email correspondence",
+                        "assignee": item.get("assignee"),
+                        "entity": item.get("entity"),
+                    })
+
+        return {"results": results[:20], "count": len(results)}
 
     # =========================================================================
     # Helper Methods

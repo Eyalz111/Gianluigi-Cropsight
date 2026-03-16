@@ -199,11 +199,14 @@ class Settings(BaseSettings):
     EMAIL_CHECK_INTERVAL: int = Field(
         default=300, description="Email watcher check interval (seconds)"
     )
+    TRANSCRIPT_WATCHER_ENABLED: bool = Field(
+        default=False, description="Enable transcript watcher (disabled during dev to save Opus costs)"
+    )
     TRANSCRIPT_POLL_INTERVAL: int = Field(
         default=300, description="Transcript watcher poll interval (seconds)"
     )
     DOCUMENT_POLL_INTERVAL: int = Field(
-        default=300, description="Document watcher poll interval (seconds)"
+        default=900, description="Document watcher poll interval (seconds)"
     )
     MEETING_PREP_CHECK_INTERVAL: int = Field(
         default=14400, description="Meeting prep scheduler check interval (seconds)"
@@ -265,6 +268,12 @@ class Settings(BaseSettings):
     EYAL_PERSONAL_EMAIL: str = Field(default="", description="Eyal's personal Gmail for daily scan")
     PERSONAL_CONTACTS_BLOCKLIST: str = Field(default="", description="Comma-separated blocklist for personal email scan")
     EYAL_GMAIL_REFRESH_TOKEN: str = Field(default="", description="OAuth refresh token for Eyal's personal Gmail")
+    EMAIL_DAILY_SCAN_HOUR: int = Field(default=7, description="IST hour for morning email scan")
+    EMAIL_DAILY_SCAN_ENABLED: bool = Field(default=False, description="Enable daily scan of Eyal's personal Gmail")
+    EMAIL_MAX_SCAN_RESULTS: int = Field(default=50, description="Max emails per daily scan")
+    MORNING_BRIEF_ENABLED: bool = Field(default=False, description="Enable morning brief (daily consolidated touchpoint)")
+    MORNING_BRIEF_HOUR: int = Field(default=7, description="IST hour for morning brief")
+    THREAD_TRACKING_EXPIRY_DAYS: int = Field(default=30, description="Tracked email threads expire after N days")
 
     # ==========================================================================
     # v1.0 — MCP Server
@@ -293,7 +302,7 @@ class Settings(BaseSettings):
     GANTT_SLIDES_FOLDER_ID: str = Field(default="", description="Gantt Slides Drive folder ID")
 
     # ==========================================================================
-    # Approval Mode (v0.2)
+    # Approval Mode (v0.2) + Reminders (post-Phase 4)
     # ==========================================================================
     APPROVAL_MODE: str = Field(
         default="manual",
@@ -302,6 +311,52 @@ class Settings(BaseSettings):
     AUTO_REVIEW_WINDOW_MINUTES: int = Field(
         default=60,
         description="Minutes to wait before auto-publishing in auto_review mode"
+    )
+    APPROVAL_REMINDER_HOURS: str = Field(
+        default="2,6",
+        description="Comma-separated hours after submission to send reminder DMs"
+    )
+    APPROVAL_REMINDER_ENABLED: bool = Field(
+        default=True,
+        description="Enable gentle Telegram reminders for unreviewed approvals"
+    )
+
+    # ==========================================================================
+    # Weekly Digest Scheduling (post-Phase 4)
+    # ==========================================================================
+    WEEKLY_DIGEST_DAY: int = Field(
+        default=4,
+        description="Day of week for digest (0=Mon, 4=Fri, 6=Sun)"
+    )
+    WEEKLY_DIGEST_HOUR: int = Field(
+        default=14,
+        description="Hour to start digest window"
+    )
+    WEEKLY_DIGEST_WINDOW_HOURS: int = Field(
+        default=2,
+        description="Hours the digest window stays open"
+    )
+    MORNING_BRIEF_SKIP_DAYS: str = Field(
+        default="Saturday",
+        description="Comma-separated day names to skip morning brief (e.g. Saturday)"
+    )
+
+    # ==========================================================================
+    # RAG Source Weights (post-Phase 4)
+    # ==========================================================================
+    RAG_WEIGHT_DEBRIEF: float = Field(default=1.5, description="RAG weight for debrief content")
+    RAG_WEIGHT_DECISION: float = Field(default=1.3, description="RAG weight for decisions")
+    RAG_WEIGHT_EMAIL: float = Field(default=1.0, description="RAG weight for email content")
+    RAG_WEIGHT_MEETING: float = Field(default=1.0, description="RAG weight for meeting transcripts")
+    RAG_WEIGHT_DOCUMENT: float = Field(default=0.9, description="RAG weight for documents")
+    RAG_WEIGHT_GANTT: float = Field(default=0.7, description="RAG weight for Gantt changes")
+
+    # ==========================================================================
+    # Health Monitoring (post-Phase 4)
+    # ==========================================================================
+    DAILY_HEALTH_REPORT_ENABLED: bool = Field(
+        default=True,
+        description="Enable daily health summary after morning brief"
     )
 
     @property
@@ -383,6 +438,20 @@ class Settings(BaseSettings):
         if not self.PERSONAL_CONTACTS_BLOCKLIST:
             return []
         return [e.strip() for e in self.PERSONAL_CONTACTS_BLOCKLIST.split(",") if e.strip()]
+
+    @property
+    def approval_reminder_hours_list(self) -> list[int]:
+        """Parse comma-separated reminder hours into a list of ints."""
+        if not self.APPROVAL_REMINDER_HOURS:
+            return []
+        return [int(h.strip()) for h in self.APPROVAL_REMINDER_HOURS.split(",") if h.strip()]
+
+    @property
+    def morning_brief_skip_days_list(self) -> list[str]:
+        """Parse comma-separated skip day names into a list."""
+        if not self.MORNING_BRIEF_SKIP_DAYS:
+            return []
+        return [d.strip() for d in self.MORNING_BRIEF_SKIP_DAYS.split(",") if d.strip()]
 
     @property
     def is_production(self) -> bool:
