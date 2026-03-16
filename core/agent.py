@@ -255,10 +255,49 @@ class GianluigiAgent:
             extra_context = await self._get_query_context(query_type, user_message)
             logger.info(f"Query classified as '{query_type}', pre-fetched context")
 
-        # Step 3: Dispatch to Conversation Agent
-        # Phase 1: All intents route to Conversation Agent regardless of classification.
-        # Phase 3+ will branch here: debrief → DebriefFlow, weekly_review → WeeklyReviewFlow,
-        # gantt_request → Operator Agent, etc.
+        # Step 3: Dispatch based on intent
+        if intent == "debrief":
+            from processors.debrief import start_debrief, process_debrief_message
+            session = supabase_client.get_active_debrief_session()
+            if session:
+                result = await process_debrief_message(
+                    session_id=session["id"],
+                    user_message=user_message,
+                    user_id=user_id,
+                )
+            else:
+                result = await start_debrief(user_id=user_id)
+            supabase_client.log_action(
+                action="message_processed",
+                details={
+                    "user_id": user_id,
+                    "message_preview": user_message[:100],
+                    "intent": intent,
+                    "debrief_action": result.get("action"),
+                },
+                triggered_by=user_id,
+            )
+            return result
+
+        elif intent == "information_injection":
+            from processors.debrief import process_quick_injection
+            result = await process_quick_injection(
+                user_message=user_message,
+                user_id=user_id,
+            )
+            supabase_client.log_action(
+                action="message_processed",
+                details={
+                    "user_id": user_id,
+                    "message_preview": user_message[:100],
+                    "intent": intent,
+                    "items_extracted": len(result.get("extracted_items", [])),
+                },
+                triggered_by=user_id,
+            )
+            return result
+
+        # All other intents → Conversation Agent
         result = await self.conversation_agent.respond(
             user_message=user_message,
             user_id=user_id,

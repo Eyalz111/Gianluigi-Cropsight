@@ -195,8 +195,10 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("meetings", self._handle_meetings))
         self.app.add_handler(CommandHandler("status", self._handle_status))
         self.app.add_handler(CommandHandler("myid", self._handle_myid))
+        self.app.add_handler(CommandHandler("debrief", self._handle_debrief))
+        self.app.add_handler(CommandHandler("cancel", self._handle_cancel_debrief))
 
-        # Add callback handler for inline buttons (approval flow)
+        # Add callback handler for inline buttons (approval flow, debrief)
         self.app.add_handler(
             CallbackQueryHandler(self._handle_callback_query)
         )
@@ -910,6 +912,8 @@ Or just send me a question and I'll search our meeting history to answer it!
 /decisions - List recent key decisions
 /questions - List open questions
 /reprocess [title] - Reprocess a transcript (Eyal only)
+/debrief - Start end-of-day debrief (Eyal only)
+/cancel - Cancel active debrief (Eyal only)
 /cost - API token usage summary (Eyal only)
 /status - System dashboard (Eyal only)
 
@@ -1312,6 +1316,244 @@ When you receive approval requests, use the buttons to approve, request changes,
         )
 
     # =========================================================================
+    # Debrief Handlers
+    # =========================================================================
+
+    async def _handle_debrief(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle /debrief command — start or resume a debrief session."""
+        user = update.effective_user
+        is_eyal = str(user.id) == str(self.eyal_chat_id)
+
+        if not is_eyal:
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can use the debrief feature.",
+            )
+            return
+
+        from processors.debrief import start_debrief
+
+        result = await start_debrief(user_id="eyal")
+        response = result.get("response", "Starting debrief...")
+        session_id = result.get("session_id")
+
+        # Store session ID in context as cache
+        if session_id:
+            context.user_data["debrief_session_id"] = session_id
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "Finish debrief",
+                callback_data=f"debrief_finish:{session_id}",
+            )]
+        ])
+
+        await self.send_message(
+            update.effective_chat.id,
+            response,
+            parse_mode=None,
+            reply_markup=keyboard,
+        )
+
+    async def _handle_cancel_debrief(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle /cancel command — cancel an active debrief session."""
+        user = update.effective_user
+        is_eyal = str(user.id) == str(self.eyal_chat_id)
+
+        if not is_eyal:
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can cancel a debrief.",
+            )
+            return
+
+        from services.supabase_client import supabase_client
+        active_session = supabase_client.get_active_debrief_session()
+        if not active_session:
+            await self.send_message(
+                update.effective_chat.id,
+                "No active debrief session to cancel.",
+            )
+            return
+
+        supabase_client.update_debrief_session(
+            active_session["id"], status="cancelled"
+        )
+        context.user_data.pop("debrief_session_id", None)
+        context.user_data.pop("debrief_editing", None)
+        await self.send_message(
+            update.effective_chat.id,
+            "Debrief cancelled. You can start a new one anytime with /debrief.",
+        )
+
+    async def _handle_debrief_message(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle a message during an active debrief session."""
+        from processors.debrief import (
+            process_debrief_message,
+            finalize_debrief,
+            is_done_signal,
+        )
+        from services.supabase_client import supabase_client
+
+        message_text = update.message.text
+        chat_id = update.effective_chat.id
+
+        # Check if in edit mode for debrief
+        editing_session = context.user_data.get("debrief_editing")
+        if editing_session:
+            from processors.debrief import edit_debrief_items
+
+            context.user_data.pop("debrief_editing", None)
+            result = await edit_debrief_items(
+                session_id=editing_session,
+                edit_instruction=message_text,
+                user_id="eyal",
+            )
+            response = result.get("response", "Items updated.")
+            session_id = result.get("session_id", editing_session)
+
+            # Show Approve/Edit/Cancel buttons
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Approve", callback_data=f"debrief_approve:{session_id}"),
+                    InlineKeyboardButton("Edit", callback_data=f"debrief_edit:{session_id}"),
+                    InlineKeyboardButton("Cancel", callback_data=f"debrief_reject:{session_id}"),
+                ]
+            ])
+            await self.send_message(chat_id, response, parse_mode=None, reply_markup=keyboard)
+            return
+
+        # Get active session
+        active_session = supabase_client.get_active_debrief_session()
+        if not active_session:
+            # Session gone — fall through to normal agent processing
+            context.user_data.pop("debrief_session_id", None)
+            logger.warning("Debrief session disappeared mid-conversation, routing to normal agent")
+            from core.agent import gianluigi_agent
+            result = await gianluigi_agent.process_message(
+                user_message=message_text,
+                user_id="eyal",
+            )
+            await self.send_message(
+                chat_id,
+                result.get("response", "I couldn't process your request."),
+            )
+            return
+
+        session_id = active_session["id"]
+
+        # Check for done signal (text-secondary)
+        if is_done_signal(message_text):
+            await self.send_message(chat_id, "Finalizing your debrief...")
+            result = await finalize_debrief(session_id)
+            await self._send_debrief_confirmation(chat_id, result)
+            return
+
+        # Process the debrief message
+        await self.send_message(chat_id, "Processing...")
+
+        result = await process_debrief_message(
+            session_id=session_id,
+            user_message=message_text,
+            user_id="eyal",
+        )
+
+        response = result.get("response", "Got it.")
+
+        # Include "Finish debrief" button on every response
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "Finish debrief",
+                callback_data=f"debrief_finish:{session_id}",
+            )]
+        ])
+
+        await self.send_message(
+            chat_id, response, parse_mode=None, reply_markup=keyboard,
+        )
+
+    async def _send_debrief_confirmation(
+        self,
+        chat_id: int | str,
+        result: dict,
+    ) -> None:
+        """Send debrief summary with Approve/Edit/Cancel buttons."""
+        response = result.get("response", "No items captured.")
+        session_id = result.get("session_id", "")
+        action = result.get("action", "")
+
+        if action == "debrief_cancelled" or not session_id:
+            await self.send_message(chat_id, response, parse_mode=None)
+            return
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Approve", callback_data=f"debrief_approve:{session_id}"),
+                InlineKeyboardButton("Edit", callback_data=f"debrief_edit:{session_id}"),
+                InlineKeyboardButton("Cancel", callback_data=f"debrief_reject:{session_id}"),
+            ]
+        ])
+
+        await self.send_message(
+            chat_id, response, parse_mode=None, reply_markup=keyboard,
+        )
+
+    async def _send_quick_injection_confirmation(
+        self,
+        chat_id: int | str,
+        result: dict,
+    ) -> None:
+        """Send quick injection summary with Inject/Dismiss buttons."""
+        from datetime import date as date_cls
+        from services.supabase_client import supabase_client
+
+        response = result.get("response", "")
+        items = result.get("extracted_items", [])
+
+        # Build summary
+        summary_lines = [response, ""]
+        for i, item in enumerate(items, 1):
+            item_type = item.get("type", "info")
+            title = item.get("title", item.get("description", ""))[:80]
+            summary_lines.append(f"  {i}. [{item_type}] {title}")
+
+        summary = "\n".join(summary_lines)
+
+        # Store items in a temporary debrief session for callback retrieval.
+        # Status="confirming" so it won't interfere with active debrief checks
+        # (get_active_debrief_session only returns status="in_progress").
+        today_str = date_cls.today().isoformat()
+        session = supabase_client.create_debrief_session(today_str)
+        supabase_client.update_debrief_session(
+            session["id"],
+            items_captured=items,
+            status="confirming",
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Inject", callback_data=f"inject_approve:{session['id']}"),
+                InlineKeyboardButton("Dismiss", callback_data=f"inject_dismiss:{session['id']}"),
+            ]
+        ])
+
+        await self.send_message(
+            chat_id, summary, parse_mode=None, reply_markup=keyboard,
+        )
+
+    # =========================================================================
     # Message Handlers
     # =========================================================================
 
@@ -1330,6 +1572,29 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         # Check if Eyal is in review mode (pending edit or replying to approval)
         is_eyal = str(user.id) == str(self.eyal_chat_id)
+
+        # Check for active debrief session (Supabase = source of truth, survives restarts)
+        if is_eyal:
+            # Debrief edit mode takes priority (local cache only, no DB call)
+            if context.user_data.get("debrief_editing"):
+                await self._handle_debrief_message(update, context)
+                return
+
+            # Fast path: skip DB call if we already know there's no active session.
+            # "debrief_session_id" is truthy (session ID) when active, False when
+            # we've checked and found nothing. Missing key = first check needed.
+            cached_session = context.user_data.get("debrief_session_id")
+            if cached_session is not False:
+                from services.supabase_client import supabase_client
+                active_session = supabase_client.get_active_debrief_session()
+                if active_session and active_session.get("status") == "in_progress":
+                    context.user_data["debrief_session_id"] = active_session["id"]
+                    await self._handle_debrief_message(update, context)
+                    return
+                else:
+                    # No active session — cache negative to skip DB on next message
+                    context.user_data["debrief_session_id"] = False
+
         has_pending_edit = bool(context.user_data.get("pending_edit_meeting_id"))
         if is_eyal and (update.message.reply_to_message or has_pending_edit):
             await self._handle_review_mode_message(update, context)
@@ -1438,6 +1703,35 @@ When you receive approval requests, use the buttons to approve, request changes,
                 conversation_history=history,
             )
 
+            # Handle quick injection confirmation
+            if result.get("action") == "quick_injection_confirm":
+                await self._send_quick_injection_confirmation(
+                    update.effective_chat.id, result
+                )
+                return
+
+            # Handle debrief actions (started/resumed via agent routing)
+            if result.get("action") in ("debrief_started", "debrief_resumed", "debrief_message"):
+                response = result.get("response", "")
+                session_id = result.get("session_id", "")
+                if session_id:
+                    context.user_data["debrief_session_id"] = session_id
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "Finish debrief",
+                            callback_data=f"debrief_finish:{session_id}",
+                        )]
+                    ])
+                    await self.send_message(
+                        update.effective_chat.id, response,
+                        parse_mode=None, reply_markup=keyboard,
+                    )
+                else:
+                    await self.send_message(
+                        update.effective_chat.id, response, parse_mode=None,
+                    )
+                return
+
             response = result.get("response", "I couldn't process your request.")
 
             # --- Outbound sanitization ---
@@ -1481,11 +1775,26 @@ When you receive approval requests, use the buttons to approve, request changes,
         query = update.callback_query
         await query.answer()  # Acknowledge the callback
 
-        data = query.data
+        data = query.data or ""
+        if ":" not in data:
+            logger.warning(f"Malformed callback data (no colon): {data!r}")
+            await query.edit_message_text("Invalid button data. Please try again.")
+            return
+
         action, meeting_id = data.split(":", 1)
 
         # Import here to avoid circular imports
         from services.supabase_client import supabase_client
+
+        # ---- Debrief callbacks ----
+        if action in ("debrief_finish", "debrief_approve", "debrief_edit", "debrief_reject"):
+            await self._handle_debrief_callback(query, context, action, meeting_id)
+            return
+
+        if action in ("inject_approve", "inject_dismiss"):
+            await self._handle_inject_callback(query, context, action, meeting_id)
+            return
+
         from guardrails.approval_flow import (
             distribute_approved_content,
             process_response,
@@ -1731,6 +2040,97 @@ When you receive approval requests, use the buttons to approve, request changes,
         # Clear the pending edit
         context.user_data.pop("pending_edit_meeting_id", None)
         logger.info(f"Edit instructions processed for meeting {meeting_id}")
+
+    # =========================================================================
+    # Debrief Callback Handlers
+    # =========================================================================
+
+    async def _handle_debrief_callback(
+        self,
+        query,
+        context: ContextTypes.DEFAULT_TYPE,
+        action: str,
+        session_id: str,
+    ) -> None:
+        """Handle debrief-related inline button callbacks."""
+        # Auth: only Eyal can interact with debrief buttons
+        if str(query.from_user.id) != str(self.eyal_chat_id):
+            await query.answer("Only Eyal can use debrief controls.", show_alert=True)
+            return
+
+        from processors.debrief import finalize_debrief, confirm_debrief
+
+        chat_id = query.message.chat_id
+
+        if action == "debrief_finish":
+            await query.edit_message_text("Finalizing your debrief...")
+            result = await finalize_debrief(session_id)
+            await self._send_debrief_confirmation(chat_id, result)
+
+        elif action == "debrief_approve":
+            await query.edit_message_text("Approved! Injecting items...")
+            result = await confirm_debrief(session_id, approved=True)
+            context.user_data.pop("debrief_session_id", None)
+            await self.send_message(
+                chat_id,
+                result.get("response", "Debrief saved."),
+                parse_mode=None,
+            )
+
+        elif action == "debrief_edit":
+            context.user_data["debrief_editing"] = session_id
+            # Keep the summary visible so user can reference it while editing
+            current_text = query.message.text or ""
+            edit_prompt = (
+                "\n\n--- EDIT MODE ---\n"
+                "Send your corrections (e.g., 'Change task 2 assignee to Roye', "
+                "'Remove the last decision', 'Add a task for Paolo')."
+            )
+            # Telegram has a 4096 char limit for messages
+            combined = current_text + edit_prompt
+            if len(combined) > 4096:
+                combined = current_text[:3900] + "\n...\n" + edit_prompt
+            await query.edit_message_text(combined)
+
+        elif action == "debrief_reject":
+            result = await confirm_debrief(session_id, approved=False)
+            context.user_data.pop("debrief_session_id", None)
+            context.user_data.pop("debrief_editing", None)
+            await query.edit_message_text("Debrief cancelled. Nothing was saved.")
+
+    async def _handle_inject_callback(
+        self,
+        query,
+        context: ContextTypes.DEFAULT_TYPE,
+        action: str,
+        session_id: str,
+    ) -> None:
+        """Handle quick injection Inject/Dismiss button callbacks."""
+        # Auth: only Eyal can interact with injection buttons
+        if str(query.from_user.id) != str(self.eyal_chat_id):
+            await query.answer("Only Eyal can use injection controls.", show_alert=True)
+            return
+
+        from processors.debrief import confirm_debrief
+        from services.supabase_client import supabase_client
+
+        chat_id = query.message.chat_id
+
+        if action == "inject_approve":
+            await query.edit_message_text("Injecting...")
+            result = await confirm_debrief(session_id, approved=True)
+            await self.send_message(
+                chat_id,
+                result.get("response", "Information saved."),
+                parse_mode=None,
+            )
+
+        elif action == "inject_dismiss":
+            if session_id and session_id != "0":
+                supabase_client.update_debrief_session(
+                    session_id, status="cancelled"
+                )
+            await query.edit_message_text("Dismissed. Nothing was saved.")
 
     # =========================================================================
     # Helper Methods

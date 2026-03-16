@@ -361,6 +361,9 @@ class SupabaseClient:
         """
         query = self.client.table("meetings").select("*")
 
+        # Exclude debrief pseudo-meetings from listing
+        query = query.neq("source_file_path", "debrief")
+
         if date_from:
             query = query.gte("date", self._serialize_datetime(date_from))
         if date_to:
@@ -2048,7 +2051,11 @@ class SupabaseClient:
                     days_ago = max(0, (now - meeting_date).days)
                     recency_boost = 1.0 / (1.0 + days_ago / half_life_days)
                     rrf = item.get("rrf_score", 0)
-                    item["rrf_score"] = rrf * 0.7 + recency_boost * 0.3
+                    base_score = rrf * 0.7 + recency_boost * 0.3
+                    # Debrief content (CEO's direct input) gets 1.5x priority
+                    source_type = item.get("metadata", {}).get("source_type") if item.get("metadata") else None
+                    source_weight = 1.5 if source_type == "debrief" else 1.0
+                    item["rrf_score"] = base_score * source_weight
                 except (ValueError, TypeError):
                     pass
 

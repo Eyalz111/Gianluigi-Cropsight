@@ -241,25 +241,28 @@ async def start_services() -> None:
     else:
         logger.warning("  Weekly digest scheduler disabled (Google Calendar not available)")
 
-    # Start task reminder scheduler (only if Sheets is available)
-    if init_status.get("google_sheets"):
-        logger.info("  Starting task reminder scheduler...")
-        reminder_task = asyncio.create_task(
-            task_reminder_scheduler.start(),
-            name="task_reminder_scheduler"
-        )
-        tasks.append(reminder_task)
-    else:
-        logger.warning("  Task reminder scheduler disabled (Google Sheets not available)")
+    # Task reminder scheduler disabled — fires on stale historical tasks.
+    # Re-enable after DB cleanup.
+    # if init_status.get("google_sheets"):
+    #     logger.info("  Starting task reminder scheduler...")
+    #     reminder_task = asyncio.create_task(
+    #         task_reminder_scheduler.start(),
+    #         name="task_reminder_scheduler"
+    #     )
+    #     tasks.append(reminder_task)
+    # else:
+    #     logger.warning("  Task reminder scheduler disabled (Google Sheets not available)")
 
-    # Start alert scheduler (always — only needs Supabase + Telegram)
-    from schedulers.alert_scheduler import alert_scheduler
-    logger.info("  Starting alert scheduler...")
-    alert_task = asyncio.create_task(
-        alert_scheduler.start(),
-        name="alert_scheduler"
-    )
-    tasks.append(alert_task)
+    # Alert scheduler disabled — fires on stale historical data and spams
+    # irrelevant alerts. Re-enable after DB cleanup or after adding time-window
+    # filters to the 4 detectors in processors/proactive_alerts.py.
+    # from schedulers.alert_scheduler import alert_scheduler
+    # logger.info("  Starting alert scheduler...")
+    # alert_task = asyncio.create_task(
+    #     alert_scheduler.start(),
+    #     name="alert_scheduler"
+    # )
+    # tasks.append(alert_task)
 
     # Start orphan cleanup scheduler (always — only needs Supabase + Telegram)
     from schedulers.orphan_cleanup_scheduler import orphan_cleanup_scheduler
@@ -356,16 +359,16 @@ async def stop_services() -> None:
     from schedulers.task_reminder_scheduler import task_reminder_scheduler
     from schedulers.weekly_digest_scheduler import weekly_digest_scheduler
     from schedulers.email_watcher import email_watcher
-    from schedulers.alert_scheduler import alert_scheduler
+    # from schedulers.alert_scheduler import alert_scheduler  # disabled
     from schedulers.orphan_cleanup_scheduler import orphan_cleanup_scheduler
 
     transcript_watcher.stop()
     document_watcher.stop()
     meeting_prep_scheduler.stop()
-    task_reminder_scheduler.stop()
+    # task_reminder_scheduler.stop()  # disabled
     weekly_digest_scheduler.stop()
     email_watcher.stop()
-    alert_scheduler.stop()
+    # alert_scheduler.stop()  # disabled
     orphan_cleanup_scheduler.stop()
 
     # Stop Telegram bot
