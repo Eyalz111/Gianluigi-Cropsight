@@ -155,6 +155,7 @@ class TelegramBot:
         """
         self._app: Application | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
+        self._ready: asyncio.Event = asyncio.Event()
         self.group_chat_id = settings.TELEGRAM_GROUP_CHAT_ID
         self.eyal_chat_id = settings.TELEGRAM_EYAL_CHAT_ID
 
@@ -162,8 +163,50 @@ class TelegramBot:
         # This will be populated when users interact with the bot
         self._telegram_user_map: dict[int, str] = {}
 
-        # Session lock: prevents overlapping interactive flows (debrief, edit)
-        self._active_interactive_session: str | None = None
+        # Session stack: allows debrief to interrupt weekly review
+        self._session_stack: list[str] = []
+
+    @property
+    def _active_interactive_session(self) -> str | None:
+        """Backward compat: returns current session type from stack."""
+        return self._session_stack[-1] if self._session_stack else None
+
+    @_active_interactive_session.setter
+    def _active_interactive_session(self, value: str | None) -> None:
+        """Backward compat: set/clear current session via stack."""
+        if value is None:
+            if self._session_stack:
+                self._session_stack.pop()
+        else:
+            if not self._session_stack or self._session_stack[-1] != value:
+                self._session_stack.append(value)
+
+    async def _reconstruct_session_stack(self) -> int:
+        """Rebuild session stack from Supabase on startup.
+
+        Design: The stack is derived from active session records rather than
+        persisted separately. Each session type (debrief, weekly_review) has
+        its own Supabase table with status tracking. We query those tables
+        and reconstruct the stack order from created_at timestamps. This
+        avoids a separate session_stack table and write-through overhead.
+        """
+        from services.supabase_client import supabase_client
+        sessions = []
+
+        review = supabase_client.get_active_weekly_review_session()
+        if review:
+            sessions.append(("weekly_review", review.get("created_at", "")))
+
+        try:
+            debrief = supabase_client.get_active_debrief_session()
+            if debrief:
+                sessions.append(("debrief", debrief.get("created_at", "")))
+        except Exception:
+            pass
+
+        sessions.sort(key=lambda x: x[1])  # older first (bottom of stack)
+        self._session_stack = [s[0] for s in sessions]
+        return len(self._session_stack)
 
     @property
     def app(self) -> Application:
@@ -201,6 +244,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("debrief", self._handle_debrief))
         self.app.add_handler(CommandHandler("cancel", self._handle_cancel_debrief))
         self.app.add_handler(CommandHandler("emailscan", self._handle_email_scan))
+        self.app.add_handler(CommandHandler("review", self._handle_review))
 
         # Add callback handler for inline buttons (approval flow, debrief)
         self.app.add_handler(
@@ -229,6 +273,7 @@ class TelegramBot:
             )
 
         logger.info("Telegram bot started and polling for messages")
+        self._ready.set()
 
         # Block until stop() is called — keeps this task alive
         # so asyncio.wait(FIRST_COMPLETED) doesn't trigger shutdown
@@ -249,6 +294,13 @@ class TelegramBot:
             await self.app.shutdown()
 
         logger.info("Telegram bot stopped")
+
+    async def wait_until_ready(self, timeout: float = 60):
+        """Wait until the Telegram bot is fully initialized."""
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Telegram bot ready timeout — proceeding anyway")
 
     # =========================================================================
     # Sending Messages
@@ -508,6 +560,47 @@ class TelegramBot:
         return await self.send_to_eyal(
             message, reply_markup=reply_markup, parse_mode="HTML"
         )
+
+    async def send_prep_outline(
+        self,
+        outline: dict,
+        approval_id: str,
+        confidence: str = "auto",
+    ) -> bool:
+        """
+        Send a meeting prep outline proposal to Eyal with inline buttons.
+
+        Args:
+            outline: Outline dict from generate_prep_outline().
+            approval_id: Unique ID for this prep outline approval.
+            confidence: 'auto' or 'ask' — determines button set.
+
+        Returns:
+            True if message was sent.
+        """
+        from processors.meeting_prep import format_outline_for_telegram
+
+        text = format_outline_for_telegram(outline, confidence)
+
+        # Build button rows
+        buttons = [
+            [
+                InlineKeyboardButton("Generate as-is", callback_data=f"prep_generate:{approval_id}"),
+                InlineKeyboardButton("Add focus", callback_data=f"prep_focus:{approval_id}"),
+            ],
+        ]
+        if confidence == "ask":
+            buttons.append([
+                InlineKeyboardButton("Wrong meeting type", callback_data=f"prep_reclassify:{approval_id}"),
+                InlineKeyboardButton("Skip this prep", callback_data=f"prep_skip:{approval_id}"),
+            ])
+        else:
+            buttons.append([
+                InlineKeyboardButton("Skip this prep", callback_data=f"prep_skip:{approval_id}"),
+            ])
+
+        reply_markup = InlineKeyboardMarkup(buttons)
+        return await self.send_to_eyal(text, reply_markup=reply_markup, parse_mode="HTML")
 
     async def send_stakeholder_approval_request(
         self,
@@ -865,13 +958,47 @@ Or just send me a question and I'll search our meeting history to answer it!
             if pending_approvals:
                 lines.append(f"\n*Pending Approvals ({len(pending_approvals)}):*")
                 for pa in pending_approvals:
-                    ct = pa.get("content_type", "unknown")
+                    ct = pa.get("content_type", "unknown").replace("_", " ")
                     created = pa.get("created_at", "")[:16].replace("T", " ")
                     expires = pa.get("expires_at")
                     exp_str = f" (expires {expires[:16].replace('T', ' ')})" if expires else ""
                     lines.append(f"  - {ct}: {pa.get('approval_id', '')[:8]}... ({created}){exp_str}")
             else:
                 lines.append("\nNo pending approvals.")
+
+            # Pending prep outlines
+            try:
+                prep_outlines = supabase_client.get_pending_prep_outlines()
+                if prep_outlines:
+                    lines.append(f"\n*Pending Prep Outlines ({len(prep_outlines)}):*")
+                    for po in prep_outlines:
+                        content = po.get("content", {})
+                        event = content.get("outline", {}).get("event", content.get("event", {}))
+                        ptitle = event.get("title", "Unknown")
+                        pstart = event.get("start", "")
+                        time_info = ""
+                        if pstart:
+                            try:
+                                pdt = datetime.fromisoformat(pstart.replace("Z", "+00:00"))
+                                hours_left = (pdt - datetime.now(pdt.tzinfo)).total_seconds() / 3600
+                                time_info = f" ({hours_left:.0f}h until meeting)"
+                            except (ValueError, TypeError):
+                                pass
+                        lines.append(f"  - {ptitle}{time_info}")
+            except Exception:
+                pass
+
+            # Weekly review session state
+            try:
+                review_session = supabase_client.get_active_weekly_review_session()
+                if review_session:
+                    rw = review_session.get("week_number", 0)
+                    rs = review_session.get("status", "unknown")
+                    rpart = review_session.get("current_part", 0)
+                    lines.append(f"\n*Weekly Review:*")
+                    lines.append(f"  W{rw} — {rs} (part {rpart})")
+            except Exception:
+                pass
 
             await self.send_message(update.effective_chat.id, "\n".join(lines))
 
@@ -1354,14 +1481,23 @@ When you receive approval requests, use the buttons to approve, request changes,
             )
             return
 
-        # Session lock check
-        if self._active_interactive_session and self._active_interactive_session != "debrief":
+        # Session lock check — debrief can interrupt weekly review (push onto stack)
+        active = self._active_interactive_session
+        if active and active != "debrief" and active != "weekly_review":
             await self.send_message(
                 update.effective_chat.id,
-                f"Another interactive session ({self._active_interactive_session}) is active. "
+                f"Another interactive session ({active}) is active. "
                 f"Finish or /cancel it first.",
             )
             return
+
+        if active == "weekly_review":
+            await self.send_message(
+                update.effective_chat.id,
+                "Pausing weekly review to start debrief. "
+                "You can resume the review when the debrief is done.",
+                parse_mode=None,
+            )
 
         # Surface pending approvals before debrief
         pending = supabase_client.get_pending_approval_summary()
@@ -1429,6 +1565,321 @@ When you receive approval requests, use the buttons to approve, request changes,
             update.effective_chat.id,
             "Debrief cancelled. You can start a new one anytime with /debrief.",
         )
+
+    # =========================================================================
+    # Weekly Review Handlers
+    # =========================================================================
+
+    async def _handle_review(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle /review command — start or resume a weekly review session."""
+        user = update.effective_user
+        is_eyal = str(user.id) == str(self.eyal_chat_id)
+
+        if not is_eyal:
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can use the weekly review feature.",
+            )
+            return
+
+        # Allow debrief to interrupt review (push onto stack)
+        # But don't start review if debrief is active
+        if self._active_interactive_session == "debrief":
+            await self.send_message(
+                update.effective_chat.id,
+                "A debrief is currently active. Finish or /cancel it first, "
+                "then start the weekly review.",
+            )
+            return
+
+        from processors.weekly_review_session import start_weekly_review
+
+        # Parse --fresh flag to force recompilation
+        args = (update.message.text or "").split()
+        force_fresh = "--fresh" in args
+
+        await self.send_message(
+            update.effective_chat.id,
+            "Starting weekly review..." + (" (fresh compilation)" if force_fresh else ""),
+            parse_mode=None,
+        )
+
+        result = await start_weekly_review(user_id="eyal", force_fresh=force_fresh)
+        response = result.get("response", "Starting weekly review...")
+        session_id = result.get("session_id")
+
+        if not session_id:
+            # Session creation failed — don't push onto stack
+            await self.send_message(
+                update.effective_chat.id,
+                response,
+                parse_mode=None,
+            )
+            return
+
+        self._session_stack.append("weekly_review")
+        context.user_data["review_session_id"] = session_id
+
+        keyboard = self._get_review_navigation_keyboard(
+            session_id or "", result.get("current_part", 1)
+        )
+
+        await self.send_message(
+            update.effective_chat.id,
+            response,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+
+    async def _handle_review_message(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle a message during an active weekly review session."""
+        from processors.weekly_review_session import process_review_message
+        from services.supabase_client import supabase_client
+
+        message_text = update.message.text
+        chat_id = update.effective_chat.id
+
+        session_id = context.user_data.get("review_session_id")
+        if not session_id:
+            # Try DB lookup
+            active = supabase_client.get_active_weekly_review_session()
+            if active:
+                session_id = active["id"]
+                context.user_data["review_session_id"] = session_id
+            else:
+                self._active_interactive_session = None
+                return
+
+        result = await process_review_message(
+            session_id=session_id,
+            user_message=message_text,
+            user_id="eyal",
+        )
+
+        response = result.get("response", "")
+        action = result.get("action", "")
+
+        if action in ("session_expired", "review_ended", "error"):
+            context.user_data.pop("review_session_id", None)
+            self._active_interactive_session = None
+            await self.send_message(chat_id, response, parse_mode="HTML")
+            return
+
+        keyboard = self._get_review_navigation_keyboard(
+            session_id, result.get("current_part", 1)
+        )
+
+        await self.send_message(
+            chat_id, response, parse_mode="HTML", reply_markup=keyboard,
+        )
+
+    def _get_review_navigation_keyboard(
+        self, session_id: str, current_part: int
+    ) -> InlineKeyboardMarkup:
+        """Build navigation keyboard for weekly review.
+
+        Layout per part:
+        Part 1: [Continue >>]           / [End review]
+        Part 2: [<< Back] [Continue >>] / [End review]
+        Part 3: [<< Back]              / [Generate Outputs] / [End review]
+        """
+        rows = []
+
+        # Row 1: Navigation
+        nav = []
+        if current_part > 1:
+            nav.append(InlineKeyboardButton(
+                "<< Back",
+                callback_data=f"review_back:{session_id}",
+            ))
+        if current_part < 3:
+            nav.append(InlineKeyboardButton(
+                "Continue >>",
+                callback_data=f"review_next:{session_id}",
+            ))
+        if nav:
+            rows.append(nav)
+
+        # Row 2: Action (Part 3 only)
+        if current_part == 3:
+            rows.append([InlineKeyboardButton(
+                "Generate Outputs",
+                callback_data=f"review_finalize:{session_id}",
+            )])
+
+        # Row 3: End review (always available)
+        rows.append([InlineKeyboardButton(
+            "End review",
+            callback_data=f"review_end:{session_id}",
+        )])
+
+        return InlineKeyboardMarkup(rows)
+
+    async def _handle_review_callback(
+        self,
+        query,
+        context: ContextTypes.DEFAULT_TYPE,
+        action: str,
+        session_id: str,
+    ) -> None:
+        """Handle weekly review inline button callbacks."""
+        if str(query.from_user.id) != str(self.eyal_chat_id):
+            await query.answer("Only Eyal can use review controls.", show_alert=True)
+            return
+
+        from processors.weekly_review_session import (
+            advance_to_part,
+            finalize_review,
+            confirm_review,
+        )
+        from services.supabase_client import supabase_client
+
+        chat_id = query.message.chat_id
+
+        if action == "review_next":
+            session = supabase_client.get_weekly_review_session(session_id)
+            current = session.get("current_part", 1) if session else 1
+            next_part = min(current + 1, 3)
+            result = await advance_to_part(session_id, next_part)
+            keyboard = self._get_review_navigation_keyboard(session_id, next_part)
+            await query.edit_message_text(
+                result.get("response", ""),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+
+        elif action == "review_back":
+            session = supabase_client.get_weekly_review_session(session_id)
+            current = session.get("current_part", 1) if session else 1
+            prev_part = max(current - 1, 1)
+            result = await advance_to_part(session_id, prev_part)
+            keyboard = self._get_review_navigation_keyboard(session_id, prev_part)
+            await query.edit_message_text(
+                result.get("response", ""),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+
+        elif action == "review_finalize":
+            await query.edit_message_text("Generating outputs...")
+            result = await finalize_review(session_id)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "Approve & Distribute",
+                        callback_data=f"review_approve:{session_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "Edit",
+                        callback_data=f"review_correct:{session_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "Cancel",
+                        callback_data=f"review_reject:{session_id}",
+                    ),
+                ],
+            ])
+            await self.send_message(
+                chat_id,
+                result.get("response", "Outputs ready."),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+
+        elif action == "review_approve":
+            await query.edit_message_text("Approved! Distributing...")
+            result = await confirm_review(session_id, approved=True)
+
+            if result.get("action") == "gantt_failed":
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "Distribute anyway",
+                            callback_data=f"review_force_distribute:{session_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "Hold",
+                            callback_data=f"review_hold:{session_id}",
+                        ),
+                    ],
+                ])
+                await self.send_message(
+                    chat_id,
+                    result.get("response", "Gantt update failed."),
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+            else:
+                context.user_data.pop("review_session_id", None)
+                self._active_interactive_session = None
+
+                # Offer debrief resume if review was interrupted
+                await self.send_message(
+                    chat_id,
+                    result.get("response", "Review approved."),
+                    parse_mode="HTML",
+                )
+
+        elif action == "review_reject":
+            result = await confirm_review(session_id, approved=False)
+            context.user_data.pop("review_session_id", None)
+            self._active_interactive_session = None
+            await query.edit_message_text("Weekly review cancelled.")
+
+        elif action == "review_correct":
+            context.user_data["review_correcting"] = session_id
+            await query.edit_message_text(
+                "Send your corrections (e.g., 'Change the title', "
+                "'Remove the funding section', 'Add a note about the MVP deadline')."
+            )
+
+        elif action == "review_end":
+            supabase_client.update_weekly_review_session(
+                session_id, status="cancelled"
+            )
+            context.user_data.pop("review_session_id", None)
+            self._active_interactive_session = None
+            await query.edit_message_text("Weekly review ended.")
+
+        elif action == "review_force_distribute":
+            # Force distribute without Gantt
+            result = await confirm_review(session_id, approved=True)
+            context.user_data.pop("review_session_id", None)
+            self._active_interactive_session = None
+            await self.send_message(
+                chat_id,
+                result.get("response", "Distributed."),
+                parse_mode="HTML",
+            )
+
+        elif action == "review_hold":
+            await query.edit_message_text(
+                "Distribution held. Fix the Gantt issue and try again."
+            )
+
+        elif action == "review_resume_after_debrief":
+            from processors.weekly_review_session import resume_after_debrief
+            await query.edit_message_text("Resuming weekly review with refreshed data...")
+            result = await resume_after_debrief(session_id)
+            keyboard = self._get_review_navigation_keyboard(
+                session_id, result.get("current_part", 1)
+            )
+            await self.send_message(
+                chat_id,
+                result.get("response", "Resumed."),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
 
     async def _handle_email_scan(
         self,
@@ -1669,6 +2120,53 @@ When you receive approval requests, use the buttons to approve, request changes,
         # Check if Eyal is in review mode (pending edit or replying to approval)
         is_eyal = str(user.id) == str(self.eyal_chat_id)
 
+        # Phase 5: Check for active prep focus input (before debrief/review routing)
+        if is_eyal:
+            handled = await self._handle_prep_focus_input(update, context)
+            if handled:
+                return
+
+        # Phase 6: Check for active weekly review correction mode
+        if is_eyal and context.user_data.get("review_correcting"):
+            from processors.weekly_review_session import process_correction
+            session_id = context.user_data.pop("review_correcting")
+            result = await process_correction(session_id, message_text, "eyal")
+            # Re-show approve/edit/cancel buttons after correction
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "Approve & Distribute",
+                        callback_data=f"review_approve:{session_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "Edit more",
+                        callback_data=f"review_correct:{session_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "Cancel",
+                        callback_data=f"review_reject:{session_id}",
+                    ),
+                ],
+            ])
+            await self.send_message(
+                update.effective_chat.id,
+                result.get("response", "Correction applied."),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            return
+
+        # Phase 6: Check for active weekly review session
+        if is_eyal and self._active_interactive_session == "weekly_review":
+            # Intercept debrief intent — redirect to /debrief handler
+            if message_text.strip().lower() in ("debrief", "/debrief", "start debrief"):
+                await self._handle_debrief(update, context)
+                return
+            await self._handle_review_message(update, context)
+            return
+
         # Check for active debrief session (Supabase = source of truth, survives restarts)
         if is_eyal:
             # Debrief edit mode takes priority (local cache only, no DB call)
@@ -1881,6 +2379,29 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         # Import here to avoid circular imports
         from services.supabase_client import supabase_client
+
+        # ---- Prep outline callbacks (Phase 5) ----
+        if action in ("prep_generate", "prep_focus", "prep_reclassify", "prep_skip"):
+            await self._handle_prep_outline_callback(query, context, action, meeting_id)
+            return
+
+        if action == "prep_settype":
+            # Format: prep_settype:approval_id:meeting_type
+            parts = meeting_id.split(":", 1)
+            if len(parts) == 2:
+                await self._handle_prep_reclassify_callback(query, context, parts[0], parts[1])
+            return
+
+        # ---- Weekly review callbacks ----
+        review_actions = (
+            "review_next", "review_back", "review_finalize",
+            "review_approve", "review_reject", "review_correct",
+            "review_end", "review_force_distribute", "review_hold",
+            "review_resume_after_debrief",
+        )
+        if action in review_actions:
+            await self._handle_review_callback(query, context, action, meeting_id)
+            return
 
         # ---- Debrief callbacks ----
         if action in ("debrief_finish", "debrief_approve", "debrief_edit", "debrief_reject"):
@@ -2174,6 +2695,35 @@ When you receive approval requests, use the buttons to approve, request changes,
                 parse_mode=None,
             )
 
+            # Phase 6: Offer to resume weekly review if one was paused
+            if self._session_stack and self._session_stack[-1] == "weekly_review":
+                review_session_id = context.user_data.get("review_session_id")
+                if not review_session_id:
+                    # DB fallback (context lost after restart)
+                    active_review = supabase_client.get_active_weekly_review_session()
+                    if active_review:
+                        review_session_id = active_review["id"]
+                        context.user_data["review_session_id"] = review_session_id
+                if review_session_id:
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "Resume weekly review",
+                                callback_data=f"review_resume_after_debrief:{review_session_id}",
+                            ),
+                            InlineKeyboardButton(
+                                "End review",
+                                callback_data=f"review_end:{review_session_id}",
+                            ),
+                        ],
+                    ])
+                    await self.send_message(
+                        chat_id,
+                        "Resume your weekly review?",
+                        parse_mode=None,
+                        reply_markup=keyboard,
+                    )
+
         elif action == "debrief_edit":
             context.user_data["debrief_editing"] = session_id
             # Keep the summary visible so user can reference it while editing
@@ -2229,6 +2779,219 @@ When you receive approval requests, use the buttons to approve, request changes,
                     session_id, status="cancelled"
                 )
             await query.edit_message_text("Dismissed. Nothing was saved.")
+
+    # =========================================================================
+    # Phase 5 — Prep Outline Callbacks
+    # =========================================================================
+
+    async def _handle_prep_outline_callback(
+        self,
+        query,
+        context: ContextTypes.DEFAULT_TYPE,
+        action: str,
+        approval_id: str,
+    ) -> None:
+        """Handle prep outline button callbacks (generate/focus/reclassify/skip)."""
+        if str(query.from_user.id) != str(self.eyal_chat_id):
+            await query.answer("Only Eyal can manage prep outlines.", show_alert=True)
+            return
+
+        from services.supabase_client import supabase_client
+
+        if action == "prep_generate":
+            await query.edit_message_text("Generating prep document...")
+            try:
+                from processors.meeting_prep import generate_meeting_prep_from_outline
+                result = await generate_meeting_prep_from_outline(approval_id)
+                if result.get("status") == "success":
+                    await self.send_to_eyal(
+                        "Prep document generated and submitted for your approval.",
+                        parse_mode=None,
+                    )
+                else:
+                    await self.send_to_eyal(
+                        f"Prep generation issue: {result.get('error', 'unknown')}",
+                        parse_mode=None,
+                    )
+            except Exception as e:
+                logger.error(f"Error generating prep from outline: {e}")
+                await self.send_to_eyal(f"Error generating prep: {e}", parse_mode=None)
+
+        elif action == "prep_focus":
+            # Store focus state in Supabase (survives restarts) + cache in context
+            row = supabase_client.get_pending_approval(approval_id)
+            if row:
+                content = row.get("content", {})
+                content["focus_active"] = True
+                supabase_client.update_pending_approval(approval_id, content=content)
+            context.user_data["prep_focus_approval_id"] = approval_id
+            await query.edit_message_text(
+                "What should I focus on? Examples:\n"
+                "- 'Focus on MVP timeline'\n"
+                "- 'Skip stakeholder section'\n"
+                "- 'Check what Paolo said about Lavazza'"
+            )
+
+        elif action == "prep_reclassify":
+            # Show template picker buttons
+            from config.meeting_prep_templates import MEETING_PREP_TEMPLATES
+            buttons = []
+            row_buttons = []
+            for key, tmpl in MEETING_PREP_TEMPLATES.items():
+                row_buttons.append(InlineKeyboardButton(
+                    tmpl["display_name"],
+                    callback_data=f"prep_settype:{approval_id}:{key}",
+                ))
+                if len(row_buttons) == 2:
+                    buttons.append(row_buttons)
+                    row_buttons = []
+            if row_buttons:
+                buttons.append(row_buttons)
+
+            reply_markup = InlineKeyboardMarkup(buttons)
+            await query.edit_message_text(
+                "Select the correct meeting type:",
+                reply_markup=reply_markup,
+            )
+
+        elif action == "prep_skip":
+            supabase_client.update_pending_approval(approval_id, status="skipped")
+            supabase_client.log_action(
+                action="prep_outline_skipped",
+                details={"approval_id": approval_id},
+                triggered_by="eyal",
+            )
+            await query.edit_message_text("Prep skipped.")
+
+    async def _handle_prep_reclassify_callback(
+        self,
+        query,
+        context: ContextTypes.DEFAULT_TYPE,
+        approval_id: str,
+        new_type: str,
+    ) -> None:
+        """Handle meeting type reclassification — regenerate outline with new template."""
+        if str(query.from_user.id) != str(self.eyal_chat_id):
+            await query.answer("Only Eyal can reclassify meetings.", show_alert=True)
+            return
+
+        from services.supabase_client import supabase_client
+        from processors.meeting_type_matcher import remember_meeting_type
+        from processors.meeting_prep import generate_prep_outline
+
+        await query.edit_message_text(f"Reclassifying and regenerating outline...")
+
+        try:
+            # Load existing outline data
+            row = supabase_client.get_pending_approval(approval_id)
+            if not row:
+                await self.send_to_eyal("Could not find outline to reclassify.", parse_mode=None)
+                return
+
+            content = row.get("content", {})
+            event = content.get("outline", {}).get("event", content.get("event", {}))
+            title = event.get("title", "")
+
+            # Persist learning
+            remember_meeting_type(title, new_type)
+
+            # Regenerate outline
+            outline = await generate_prep_outline(event, new_type)
+
+            # Update approval content
+            content["outline"] = outline
+            content["meeting_type"] = new_type
+            content["confidence"] = "auto"  # User selected, so now auto
+            supabase_client.update_pending_approval(approval_id, content=content)
+
+            # Send new outline with buttons
+            await self.send_prep_outline(outline, approval_id, confidence="auto")
+
+        except Exception as e:
+            logger.error(f"Error reclassifying prep: {e}")
+            await self.send_to_eyal(f"Error reclassifying: {e}", parse_mode=None)
+
+    async def _handle_prep_focus_input(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        """
+        Handle focus input text from Eyal for a prep outline.
+
+        Checks context cache first, then falls back to Supabase for restart safety.
+
+        Args:
+            update: Telegram update.
+            context: Bot context.
+
+        Returns:
+            True if this message was handled as focus input, False otherwise.
+        """
+        approval_id = context.user_data.get("prep_focus_approval_id")
+
+        # Restart-safe fallback: check Supabase for active focus
+        if not approval_id:
+            from services.supabase_client import supabase_client
+            pending = supabase_client.get_pending_prep_outlines()
+            for row in pending:
+                content = row.get("content", {})
+                if content.get("focus_active"):
+                    approval_id = row["approval_id"]
+                    break
+
+        if not approval_id:
+            return False
+
+        message_text = update.message.text
+        from services.supabase_client import supabase_client
+
+        try:
+            row = supabase_client.get_pending_approval(approval_id)
+            if not row:
+                context.user_data.pop("prep_focus_approval_id", None)
+                return False
+
+            content = row.get("content", {})
+
+            # Add focus instruction
+            focus_list = content.get("focus_instructions", [])
+            focus_list.append(message_text)
+            content["focus_instructions"] = focus_list
+            content["focus_active"] = False  # Clear active flag
+
+            supabase_client.update_pending_approval(approval_id, content=content)
+
+            # Clear cache
+            context.user_data.pop("prep_focus_approval_id", None)
+
+            # Send updated outline with buttons
+            outline = content.get("outline", {})
+            buttons = [
+                [
+                    InlineKeyboardButton("Generate", callback_data=f"prep_generate:{approval_id}"),
+                    InlineKeyboardButton("Edit more", callback_data=f"prep_focus:{approval_id}"),
+                ],
+                [
+                    InlineKeyboardButton("Skip", callback_data=f"prep_skip:{approval_id}"),
+                ],
+            ]
+            reply_markup = InlineKeyboardMarkup(buttons)
+
+            await self.send_message(
+                update.effective_chat.id,
+                f"Focus added: \"{message_text}\"\n\n"
+                f"Total focus instructions: {len(focus_list)}\n"
+                f"Ready to generate or add more.",
+                reply_markup=reply_markup,
+                parse_mode=None,
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Error handling prep focus input: {e}")
+            context.user_data.pop("prep_focus_approval_id", None)
+            return False
 
     # =========================================================================
     # Helper Methods

@@ -292,6 +292,16 @@ class DebriefStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class WeeklyReviewStatus(str, Enum):
+    """Status of a weekly review session."""
+    PREPARING = "preparing"
+    READY = "ready"
+    IN_PROGRESS = "in_progress"
+    CONFIRMING = "confirming"
+    APPROVED = "approved"
+    CANCELLED = "cancelled"
+
+
 class EmailClassification(str, Enum):
     """Classification of a scanned email."""
     RELEVANT = "relevant"
@@ -418,6 +428,25 @@ class MCPSession(BaseModel):
 # v1.0 Models — Weekly Review & Reports
 # =============================================================================
 
+class WeeklyReviewSession(BaseModel):
+    """An interactive weekly review session with the CEO."""
+    id: UUID | None = None
+    workspace_id: str = "cropsight"
+    week_number: int
+    year: int
+    status: WeeklyReviewStatus = WeeklyReviewStatus.PREPARING
+    current_part: int = 0
+    agenda_data: dict = Field(default_factory=dict)
+    gantt_proposals: list[dict] = Field(default_factory=list)
+    corrections: list[dict] = Field(default_factory=list)
+    report_id: UUID | None = None
+    calendar_event_id: str | None = None
+    trigger_type: str = "calendar"
+    raw_messages: list[dict] = Field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class WeeklyReport(BaseModel):
     """A generated weekly report with associated artifacts."""
     id: UUID | None = None
@@ -429,6 +458,11 @@ class WeeklyReport(BaseModel):
     digest_drive_id: str | None = None
     gantt_backup_drive_id: str | None = None
     data: dict | None = None
+    html_content: str | None = None
+    access_token: str | None = None
+    session_id: UUID | None = None
+    status: str = "draft"
+    distributed_at: datetime | None = None
     created_at: datetime | None = None
 
 

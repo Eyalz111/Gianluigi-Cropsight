@@ -230,6 +230,12 @@ async def expire_stale_approvals() -> list[dict]:
     """
     Expire pending approvals past their expires_at timestamp.
 
+    For prep_outline approvals:
+    - If meeting is still in the future → auto-generate with defaults
+    - If meeting has passed → expire silently
+
+    Also cleans stale focus_active flags.
+
     Notifies Eyal about expired items so he's aware.
 
     Returns:
@@ -238,18 +244,84 @@ async def expire_stale_approvals() -> list[dict]:
     expired = supabase_client.expire_pending_approvals()
     if expired:
         lines = ["Expired approvals (no longer actionable):"]
+        auto_generated = []
+
         for row in expired:
             ct = row.get("content_type", "unknown")
+            approval_id = row["approval_id"]
             title = ""
             content = row.get("content", {})
             if isinstance(content, dict):
                 title = content.get("title", ct)
-            lines.append(f"  - {title} ({ct})")
+
             # Cancel any reminders/timers for expired items
-            cancel_approval_reminders(row["approval_id"])
-            cancel_auto_publish(row["approval_id"])
+            cancel_approval_reminders(approval_id)
+            cancel_auto_publish(approval_id)
+
+            # Special handling for prep_outline: auto-generate if meeting still future
+            if ct == "prep_outline":
+                event_start = content.get("event_start_time", "")
+                meeting_future = False
+                if event_start:
+                    try:
+                        from datetime import datetime, timezone
+                        start_dt = datetime.fromisoformat(event_start.replace("Z", "+00:00"))
+                        meeting_future = start_dt > datetime.now(timezone.utc)
+                    except (ValueError, TypeError):
+                        pass
+
+                if meeting_future:
+                    try:
+                        # Re-set to pending temporarily so generate can read it
+                        supabase_client.update_pending_approval(approval_id, status="pending")
+                        from processors.meeting_prep import generate_meeting_prep_from_outline
+                        result = await generate_meeting_prep_from_outline(approval_id)
+                        if result.get("status") == "success":
+                            auto_generated.append(title)
+                            lines.append(f"  - {title} (prep_outline → auto-generated)")
+                            continue
+                    except Exception as e:
+                        logger.error(f"Auto-generate on expiry failed for {approval_id}: {e}")
+
+                # Past meeting or auto-gen failed — just expire silently
+                lines.append(f"  - {title} (prep_outline, meeting passed)")
+                continue
+
+            lines.append(f"  - {title} ({ct})")
+
+        if auto_generated:
+            await telegram_bot.send_to_eyal(
+                f"Auto-generated {len(auto_generated)} prep(s) on expiry: "
+                f"{', '.join(auto_generated)}"
+            )
+
         await telegram_bot.send_to_eyal("\n".join(lines))
         logger.info(f"Expired {len(expired)} stale approvals")
+
+    # Clean stale focus_active flags
+    try:
+        focus_timeout = settings.MEETING_PREP_FOCUS_TIMEOUT_MINUTES
+        pending_preps = supabase_client.get_pending_prep_outlines()
+        for pp in pending_preps:
+            content = pp.get("content", {})
+            if content.get("focus_active"):
+                # Check if it's been too long
+                updated_at = pp.get("updated_at", pp.get("created_at", ""))
+                if updated_at:
+                    try:
+                        from datetime import datetime, timezone, timedelta
+                        updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                        if datetime.now(timezone.utc) - updated_dt > timedelta(minutes=focus_timeout):
+                            content["focus_active"] = False
+                            supabase_client.update_pending_approval(
+                                pp["approval_id"], content=content
+                            )
+                            logger.info(f"Cleared stale focus_active for {pp['approval_id']}")
+                    except (ValueError, TypeError):
+                        pass
+    except Exception as e:
+        logger.debug(f"Focus cleanup failed: {e}")
+
     return expired
 
 
@@ -372,10 +444,16 @@ async def submit_for_approval(
         "morning_brief": timedelta(hours=24),
         "debrief": timedelta(hours=48),
         "weekly_digest": timedelta(days=7),
+        "weekly_review": timedelta(days=7),  # Phase 6
+        "prep_outline": timedelta(hours=24),  # Phase 5
     }
     expires_at = None
     if content_type in expiry_map:
         expires_at = (datetime.now() + expiry_map[content_type]).isoformat()
+    elif content_type == "prep_outline":
+        # Use template-specific lead hours if available
+        outline_lead = content.get("outline_lead_hours", 24)
+        expires_at = (datetime.now() + timedelta(hours=outline_lead)).isoformat()
 
     supabase_client.create_pending_approval(
         approval_id=meeting_id,
@@ -397,27 +475,43 @@ async def submit_for_approval(
     meeting_date = content.get("date", datetime.now().strftime("%Y-%m-%d"))
 
     if content_type == "meeting_prep":
-        # Meeting prep — send preview to Eyal for approval
-        drive_link = content.get("drive_link", "")
-        sensitivity = content.get("sensitivity", "normal")
-        preview = (
-            f"<b>Meeting Prep — Awaiting Approval</b>\n\n"
-            f"Meeting: {meeting_title}\n"
-            f"Time: {content.get('start_time', 'TBD')}\n"
-            f"Sensitivity: {sensitivity}\n"
-        )
-        if drive_link:
-            preview += f"Prep document: {drive_link}\n"
-        preview += f"\n{summary[:500]}" if summary else ""
+        # Meeting prep — minimal Telegram card (no Drive link yet — uploaded after approval).
+        # Sent directly (not through send_approval_request which adds
+        # "Discussion Summary" wrapping and HTML-escapes our HTML).
+        from processors.meeting_prep import format_prep_approval_card
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        telegram_sent = await telegram_bot.send_approval_request(
-            meeting_title=f"Prep: {meeting_title}",
-            summary_preview=preview,
-            meeting_id=meeting_id,
+        sensitivity = content.get("sensitivity", "normal")
+        section_names = None
+        if content.get("meeting_type"):
+            from config.meeting_prep_templates import get_template
+            tmpl = get_template(content["meeting_type"])
+            section_names = [s for s in tmpl.get("structure", []) if s != "Suggested Agenda"]
+
+        card = format_prep_approval_card(
+            title=meeting_title,
+            start_time=content.get("start_time", ""),
+            sections=section_names,
+            sensitivity=sensitivity,
         )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Approve + send", callback_data=f"approve:{meeting_id}"),
+                InlineKeyboardButton("Edit", callback_data=f"edit:{meeting_id}"),
+            ],
+            [
+                InlineKeyboardButton("Reject", callback_data=f"reject:{meeting_id}"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        telegram_sent = await telegram_bot.send_to_eyal(
+            card, reply_markup=reply_markup, parse_mode="HTML"
+        )
+
         email_sent = await gmail_service.send_approval_request(
             meeting_title=f"Meeting Prep: {meeting_title}",
-            summary_preview=summary[:1000] if summary else "See attached prep document.",
+            summary_preview=f"Prep document ready for: {meeting_title}. Review and approve via Telegram.",
             meeting_id=meeting_id,
         )
 
@@ -503,6 +597,29 @@ async def submit_for_approval(
             summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""),
             meeting_id=meeting_id,
         )
+
+    elif content_type == "weekly_review":
+        # Weekly review — handled by its own session flow.
+        # Just log the submission; notification sent via session.
+        logger.info(
+            f"Weekly review submitted for approval: W{content.get('week_number', '')}"
+        )
+        telegram_sent = True  # Sent separately by session flow
+        email_sent = False  # Review is Telegram-only
+
+    elif content_type == "prep_outline":
+        # Prep outline — Telegram-only, no email. The outline is sent via
+        # telegram_bot.send_prep_outline() by the scheduler, not here.
+        # We just log the submission.
+        event = content.get("event", {})
+        meeting_title = event.get("title", "Untitled")
+        meeting_type = content.get("meeting_type", "generic")
+        mode = content.get("timeline_mode", "normal")
+        logger.info(
+            f"Prep outline submitted: {meeting_title} (type={meeting_type}, mode={mode})"
+        )
+        telegram_sent = True  # Sent separately by scheduler
+        email_sent = False  # Outlines are Telegram-only
 
     else:
         # Default: meeting_summary (original behavior)
@@ -622,10 +739,20 @@ async def process_response(
     is_non_meeting = (
         meeting_id.startswith("digest-")
         or meeting_id.startswith("prep-")
+        or meeting_id.startswith("outline-")
         or meeting_id.startswith("gantt-")
         or meeting_id.startswith("brief-")
-        or (pending_info and pending_info["type"] in ("weekly_digest", "meeting_prep", "gantt_update", "morning_brief"))
+        or meeting_id.startswith("review-")
+        or (pending_info and pending_info["type"] in ("weekly_digest", "meeting_prep", "gantt_update", "morning_brief", "prep_outline", "weekly_review"))
     )
+
+    # Phase 5: Reject email responses for prep_outline — Telegram-only
+    if pending_info and pending_info["type"] == "prep_outline" and response_source == "email":
+        return {
+            "action": "error",
+            "error": "Prep outlines can only be managed via Telegram.",
+            "next_step": "Use Telegram to review this prep outline.",
+        }
 
     if is_non_meeting:
         # Non-meeting content — build a stub meeting dict, skip DB lookup
@@ -661,6 +788,8 @@ async def process_response(
             content_type = "gantt_update"
         elif meeting_id.startswith("brief-"):
             content_type = "morning_brief"
+        elif meeting_id.startswith("review-"):
+            content_type = "weekly_review"
         else:
             content_type = "meeting_summary"
 
@@ -671,9 +800,9 @@ async def process_response(
         if content_type == "meeting_prep":
             if not pending_info:
                 # Content was submitted from another process (lost on restart)
-                logger.warning(f"Meeting prep {meeting_id} approved but content not in memory (already saved to Drive)")
+                logger.warning(f"Meeting prep {meeting_id} approved but content not found — cannot upload to Drive")
                 supabase_client.log_action(action="approval_status_approved", details={"meeting_id": meeting_id}, triggered_by="eyal")
-                return {"action": "approved", "edits": None, "next_step": "Approved (content already saved to Drive)"}
+                return {"action": "approved", "edits": None, "next_step": "Approved but content not found — please regenerate"}
             distribution_result = await distribute_approved_prep(
                 meeting_id=meeting_id,
                 content=pending_info["content"],
@@ -748,6 +877,27 @@ async def process_response(
                 "injection": result,
             }
 
+        elif content_type == "weekly_review":
+            # Weekly review handled by its own session flow (confirm_review)
+            # This path is for standalone approvals submitted outside the session
+            if not pending_info:
+                logger.warning(f"Weekly review {meeting_id} approved but content not in memory")
+                supabase_client.log_action(action="approval_status_approved", details={"meeting_id": meeting_id}, triggered_by="eyal")
+                return {"action": "approved", "edits": None, "next_step": "Approved (review content not found)"}
+
+            distribution_result = await distribute_approved_review(
+                session_id=pending_info["content"].get("session_id", ""),
+                agenda_data=pending_info["content"].get("agenda_data", {}),
+                week_number=pending_info["content"].get("week_number", 0),
+                year=pending_info["content"].get("year", 0),
+            )
+            return {
+                "action": "approved",
+                "edits": None,
+                "next_step": "Weekly review distributed",
+                "distribution": distribution_result,
+            }
+
         # Default: meeting_summary — gather all related data
         content = {
             "title": meeting.get("title"),
@@ -816,32 +966,50 @@ async def process_response(
         if not is_non_meeting:
             await update_approval_status(meeting_id, ApprovalStatus.EDITING)
 
+        # Determine content type for resubmission
+        resubmit_content_type = "meeting_summary"
+        if pending_info:
+            resubmit_content_type = pending_info.get("type", "meeting_summary")
+        elif meeting_id.startswith("prep-"):
+            resubmit_content_type = "meeting_prep"
+        elif meeting_id.startswith("digest-"):
+            resubmit_content_type = "weekly_digest"
+
         # Parse edit instructions
         edits = await parse_edit_instructions_with_claude(response, meeting)
 
         if edits:
-            # Gather current structured data for the edit LLM
-            current_structured = {}
-            if pending_info and pending_info.get("content"):
-                for key in ("decisions", "tasks", "follow_ups", "open_questions"):
-                    if key in pending_info["content"]:
-                        current_structured[key] = pending_info["content"][key]
+            if resubmit_content_type == "meeting_prep":
+                # Meeting prep edits: apply to the summary text, carry over prep fields
+                updated_content = await apply_edits(meeting_id, edits)
 
-            # Apply edits to summary AND structured data
-            updated_content = await apply_edits(
-                meeting_id, edits, structured_data=current_structured
-            )
+                # Carry over all prep-specific fields
+                if pending_info and pending_info.get("content"):
+                    for key in ("title", "start_time", "sensitivity", "meeting_type",
+                                "focus_instructions", "sections", "attendees"):
+                        if key in pending_info["content"] and key not in updated_content:
+                            updated_content[key] = pending_info["content"][key]
+            else:
+                # Meeting summary edits: original flow
+                current_structured = {}
+                if pending_info and pending_info.get("content"):
+                    for key in ("decisions", "tasks", "follow_ups", "open_questions"):
+                        if key in pending_info["content"]:
+                            current_structured[key] = pending_info["content"][key]
 
-            # Carry over fields from pending info that aren't edited
-            if pending_info and pending_info.get("content"):
-                for key in ("executive_summary", "discussion_summary",
-                            "stakeholders", "cross_reference", "commitments"):
-                    if key in pending_info["content"] and key not in updated_content:
-                        updated_content[key] = pending_info["content"][key]
+                updated_content = await apply_edits(
+                    meeting_id, edits, structured_data=current_structured
+                )
+
+                if pending_info and pending_info.get("content"):
+                    for key in ("executive_summary", "discussion_summary",
+                                "stakeholders", "cross_reference", "commitments"):
+                        if key in pending_info["content"] and key not in updated_content:
+                            updated_content[key] = pending_info["content"][key]
 
             # Resubmit for approval with edited content
             await submit_for_approval(
-                content_type="meeting_summary",
+                content_type=resubmit_content_type,
                 content=updated_content,
                 meeting_id=meeting_id,
             )
@@ -1456,7 +1624,11 @@ async def distribute_approved_prep(
     """
     Distribute an approved meeting prep document to the team.
 
-    Sensitivity-aware: sensitive meetings only notify Eyal.
+    Sensitivity-aware:
+    - Sensitive meetings: Eyal-only + Drive, with note about manual forwarding.
+    - Normal meetings: email to participants + Telegram group + Drive.
+
+    Generates .docx and uploads to Drive alongside the Markdown version.
 
     Args:
         meeting_id: Identifier for this prep approval.
@@ -1469,30 +1641,124 @@ async def distribute_approved_prep(
 
     results = {
         "telegram_sent": False,
+        "email_sent": False,
+        "drive_uploaded": False,
+        "docx_uploaded": False,
         "type": "meeting_prep",
     }
 
     title = content.get("title", "Untitled Meeting")
     sensitivity = content.get("sensitivity", "normal")
-    drive_link = content.get("drive_link", "")
     start_time = content.get("start_time", "TBD")
+    meeting_type = content.get("meeting_type", "generic")
+    focus_instructions = content.get("focus_instructions", [])
+    prep_document = content.get("summary", "")
+    date_str = start_time[:10] if start_time and len(start_time) >= 10 else "TBD"
+    drive_link = ""
 
+    # Upload prep document to Google Drive as Google Doc (viewable on mobile)
+    try:
+        from services.google_drive import drive_service
+        filename = f"{date_str} - Prep - {title}"
+
+        drive_result = await drive_service.save_meeting_prep(
+            content=prep_document,
+            filename=filename,
+        )
+        if drive_result:
+            drive_link = drive_result.get("webViewLink", "")
+            results["drive_uploaded"] = True
+            results["drive_link"] = drive_link
+
+    except Exception as e:
+        logger.warning(f"Failed to upload prep Google Doc: {e}")
+
+    # Generate and upload .docx version
+    try:
+        from services.word_generator import generate_prep_docx
+
+        attendees = content.get("attendees", [])
+        participants = [
+            a.get("displayName") or a.get("email", "").split("@")[0]
+            for a in attendees
+        ] if attendees else []
+
+        sections = content.get("sections", [])
+
+        docx_bytes = generate_prep_docx(
+            title=title,
+            date=date_str,
+            meeting_type=meeting_type,
+            participants=participants,
+            sections=sections,
+            focus_areas=focus_instructions if focus_instructions else None,
+        )
+
+        from services.google_drive import drive_service
+        docx_filename = f"{date_str} - Prep - {title}.docx"
+        docx_result = await drive_service.upload_file(
+            content=docx_bytes,
+            filename=docx_filename,
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        if docx_result:
+            results["docx_uploaded"] = True
+            results["docx_link"] = docx_result.get("webViewLink", "")
+
+    except Exception as e:
+        logger.warning(f"Failed to generate/upload .docx for prep: {e}")
+
+    # Build notification message
     message = (
         f"<b>Meeting Prep Ready</b>\n\n"
         f"Meeting: {title}\n"
         f"Time: {start_time}\n"
     )
     if drive_link:
-        message += f"Prep document: {drive_link}"
+        message += f'<a href="{drive_link}">View prep document</a>\n'
 
     try:
-        if sensitivity == "sensitive" or settings.ENVIRONMENT != "production":
-            logger.info(f"Eyal-only distribution (sensitive={sensitivity}, env={settings.ENVIRONMENT})")
-            await telegram_bot.send_to_eyal(message)
+        if sensitivity == "sensitive":
+            message += (
+                "\n<i>This prep contains sensitive content — not distributed to "
+                "other participants. Forward manually if appropriate.</i>"
+            )
+            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            results["telegram_sent"] = True
+            results["distribution"] = "eyal_only"
+            logger.info(f"Sensitive prep — Eyal-only distribution for {title}")
+        elif settings.ENVIRONMENT != "production":
+            # Non-production: Eyal only
+            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            results["telegram_sent"] = True
+            results["distribution"] = "eyal_only"
         else:
-            await telegram_bot.send_to_eyal(message)
-            await telegram_bot.send_to_group(message)
-        results["telegram_sent"] = True
+            # Normal: full team distribution
+            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            await telegram_bot.send_to_group(message, parse_mode="HTML")
+            results["telegram_sent"] = True
+            results["distribution"] = "team"
+
+            # Send email to participants
+            try:
+                attendee_emails = [
+                    a.get("email") for a in content.get("attendees", [])
+                    if a.get("email")
+                ]
+                if attendee_emails and drive_link:
+                    email_body = (
+                        f"Meeting prep document for '{title}' ({start_time}) "
+                        f"is ready: {drive_link}"
+                    )
+                    await gmail_service.send_email(
+                        to=attendee_emails,
+                        subject=f"Meeting Prep: {title}",
+                        body=email_body,
+                    )
+                    results["email_sent"] = True
+            except Exception as e:
+                logger.warning(f"Failed to send prep email: {e}")
+
     except Exception as e:
         logger.error(f"Error sending prep notification: {e}")
 
@@ -1502,6 +1768,9 @@ async def distribute_approved_prep(
             "meeting_id": meeting_id,
             "title": title,
             "sensitivity": sensitivity,
+            "distribution": results.get("distribution", "unknown"),
+            "drive_uploaded": results["drive_uploaded"],
+            "docx_uploaded": results["docx_uploaded"],
         },
         triggered_by="eyal",
     )
@@ -1905,3 +2174,203 @@ async def _apply_morning_brief_approval(content: dict) -> dict:
     )
 
     return result
+
+
+async def distribute_approved_review(
+    session_id: str,
+    agenda_data: dict,
+    week_number: int,
+    year: int,
+) -> dict:
+    """
+    Distribute an approved weekly review to the team.
+
+    Post-approval pipeline (steps 3-8 from plan — Gantt execution and backup
+    are handled by confirm_review() before calling this):
+    3. Upload PPTX to Drive (GANTT_SLIDES_FOLDER_ID)
+    4. Upload digest to Drive (WEEKLY_DIGESTS_FOLDER_ID)
+    5. Update weekly_reports with Drive IDs + status='distributed'
+    6. Email to team (sensitivity-aware)
+    7. Telegram group notification
+    8. Log audit trail
+
+    Args:
+        session_id: Weekly review session ID.
+        agenda_data: Compiled weekly review data.
+        week_number: ISO week number.
+        year: Year.
+
+    Returns:
+        Dict with distribution results.
+    """
+    logger.info(f"Distributing approved weekly review: W{week_number}/{year}")
+
+    results = {
+        "pptx_uploaded": False,
+        "digest_uploaded": False,
+        "email_sent": False,
+        "telegram_sent": False,
+        "type": "weekly_review",
+    }
+
+    # 3. Upload PPTX to Drive
+    try:
+        from processors.gantt_slide import generate_gantt_slide
+        pptx_bytes = await generate_gantt_slide(week_number, year)
+
+        if pptx_bytes and settings.GANTT_SLIDES_FOLDER_ID:
+            filename = f"CropSight_Gantt_W{week_number}_{year}.pptx"
+            pptx_result = await drive_service._upload_bytes_file(
+                folder_id=settings.GANTT_SLIDES_FOLDER_ID,
+                filename=filename,
+                content=pptx_bytes,
+                mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+            results["pptx_uploaded"] = True
+            results["pptx_drive_id"] = pptx_result.get("id", "")
+            logger.info(f"PPTX uploaded to Drive: {results['pptx_drive_id']}")
+    except Exception as e:
+        logger.error(f"PPTX upload failed: {e}")
+
+    # 4. Upload digest to Drive
+    digest_link = ""
+    try:
+        week_in_review = agenda_data.get("week_in_review", {})
+        meetings_count = week_in_review.get("meetings_count", 0)
+        decisions_count = week_in_review.get("decisions_count", 0)
+
+        digest_content = (
+            f"CropSight Weekly Review — Week {week_number}, {year}\n"
+            f"{'=' * 50}\n\n"
+            f"Meetings: {meetings_count}\n"
+            f"Decisions: {decisions_count}\n\n"
+        )
+
+        # Add decisions
+        decisions = week_in_review.get("decisions", [])
+        if decisions:
+            digest_content += "Key Decisions:\n"
+            for d in decisions[:20]:
+                digest_content += f"  - {d.get('description', '')}\n"
+            digest_content += "\n"
+
+        # Add task summary
+        task_summary = week_in_review.get("task_summary", {})
+        completed = task_summary.get("completed_this_week", [])
+        overdue = task_summary.get("overdue", [])
+        if completed:
+            digest_content += f"Tasks Completed ({len(completed)}):\n"
+            for t in completed[:20]:
+                digest_content += f"  - {t.get('title', '')}\n"
+            digest_content += "\n"
+        if overdue:
+            digest_content += f"Tasks Overdue ({len(overdue)}):\n"
+            for t in overdue[:20]:
+                digest_content += f"  - {t.get('title', '')}\n"
+            digest_content += "\n"
+
+        digest_content += f"\nGenerated by Gianluigi on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+        if settings.WEEKLY_DIGESTS_FOLDER_ID:
+            week_of = datetime.now().strftime("%Y-%m-%d")
+            drive_result = await drive_service.save_weekly_digest(
+                week_of=week_of,
+                digest_content=digest_content,
+            )
+            digest_link = drive_result.get("link", "")
+            results["digest_uploaded"] = True
+            results["digest_drive_id"] = drive_result.get("id", "")
+            logger.info(f"Digest uploaded to Drive: {results['digest_drive_id']}")
+    except Exception as e:
+        logger.error(f"Digest upload failed: {e}")
+
+    # 5. Update weekly_reports with distribution status
+    try:
+        session = supabase_client.get_weekly_review_session(session_id)
+        report_id = session.get("report_id") if session else None
+        if report_id:
+            supabase_client.update_weekly_report(
+                report_id,
+                status="distributed",
+                distributed_at=datetime.now().isoformat(),
+            )
+    except Exception as e:
+        logger.error(f"Report status update failed: {e}")
+
+    # 6. Email to team (sensitivity-aware)
+    try:
+        if settings.ENVIRONMENT != "production":
+            review_emails = [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
+        else:
+            review_emails = settings.team_emails
+
+        if review_emails:
+            week_in_review = agenda_data.get("week_in_review", {})
+            subject = f"CropSight Weekly Review — W{week_number}/{year}"
+            body = (
+                f"Weekly review for Week {week_number}, {year} has been approved.\n\n"
+                f"Meetings: {week_in_review.get('meetings_count', 0)}\n"
+                f"Decisions: {week_in_review.get('decisions_count', 0)}\n"
+            )
+            if digest_link:
+                body += f"\nFull digest: {digest_link}"
+
+            await gmail_service.send_email(
+                to=review_emails,
+                subject=subject,
+                body=body,
+            )
+            results["email_sent"] = True
+            results["emails_to"] = review_emails
+    except Exception as e:
+        logger.error(f"Review email failed: {e}")
+
+    # 7. Telegram group notification
+    try:
+        week_in_review = agenda_data.get("week_in_review", {})
+        summary_msg = (
+            f"<b>CropSight Weekly Review — W{week_number}/{year}</b>\n\n"
+            f"Meetings: {week_in_review.get('meetings_count', 0)}\n"
+            f"Decisions: {week_in_review.get('decisions_count', 0)}\n"
+        )
+
+        # Add report link if available
+        try:
+            session = supabase_client.get_weekly_review_session(session_id)
+            report_id = session.get("report_id") if session else None
+            if report_id:
+                report = supabase_client.get_weekly_report(week_number, year)
+                if report and report.get("access_token"):
+                    base_url = settings.REPORTS_BASE_URL.rstrip("/") if settings.REPORTS_BASE_URL else ""
+                    if base_url:
+                        summary_msg += f"\nReport: {base_url}/reports/weekly/{report['access_token']}"
+        except Exception:
+            pass
+
+        if digest_link:
+            summary_msg += f"\nDigest: {digest_link}"
+
+        if settings.ENVIRONMENT != "production":
+            await telegram_bot.send_to_eyal(summary_msg)
+        else:
+            await telegram_bot.send_to_group(summary_msg)
+        results["telegram_sent"] = True
+    except Exception as e:
+        logger.error(f"Review Telegram notification failed: {e}")
+
+    # 8. Audit trail
+    supabase_client.log_action(
+        action="weekly_review_distributed",
+        details={
+            "session_id": session_id,
+            "week_number": week_number,
+            "year": year,
+            "pptx_uploaded": results["pptx_uploaded"],
+            "digest_uploaded": results["digest_uploaded"],
+            "email_sent": results["email_sent"],
+            "telegram_sent": results["telegram_sent"],
+        },
+        triggered_by="eyal",
+    )
+
+    return results

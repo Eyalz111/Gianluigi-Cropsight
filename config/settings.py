@@ -137,6 +137,12 @@ class Settings(BaseSettings):
         default="",
         description="Google Calendar color ID for CropSight meetings (purple)"
     )
+    EYAL_CALENDAR_REFRESH_TOKEN: str = Field(
+        default="",
+        description="OAuth refresh token for Eyal's Google account (calendar.readonly scope). "
+                    "Lets Gianluigi read Eyal's calendar AS Eyal — sees colors, declined status, etc. "
+                    "Get via: python scripts/get_calendar_token.py"
+    )
 
     # ==========================================================================
     # Application Settings
@@ -214,6 +220,24 @@ class Settings(BaseSettings):
     MEETING_PREP_HOURS_BEFORE: int = Field(
         default=24, description="Hours before meeting to generate prep document"
     )
+    MEETING_PREP_OUTLINE_LEAD_HOURS: int = Field(
+        default=24, description="Hours before meeting to send outline proposal"
+    )
+    MEETING_PREP_GENERATION_LEAD_HOURS: int = Field(
+        default=12, description="Hours before meeting to generate full prep doc"
+    )
+    MEETING_PREP_REMINDER_HOURS: str = Field(
+        default="4,8,12", description="Comma-separated hours for prep outline reminders"
+    )
+    MEETING_PREP_EMERGENCY_HOURS: int = Field(
+        default=6, description="Hours threshold for emergency prep mode"
+    )
+    MEETING_PREP_SKIP_HOURS: int = Field(
+        default=2, description="Hours threshold below which prep is skipped"
+    )
+    MEETING_PREP_FOCUS_TIMEOUT_MINUTES: int = Field(
+        default=30, description="Minutes before stale focus_active flags are cleared"
+    )
     WEEKLY_DIGEST_CHECK_INTERVAL: int = Field(
         default=3600, description="Weekly digest scheduler check interval (seconds)"
     )
@@ -287,6 +311,27 @@ class Settings(BaseSettings):
     WEEKLY_REVIEW_CALENDAR_TITLE: str = Field(
         default="CropSight: Weekly Review with Gianluigi",
         description="Calendar event title for weekly review sessions"
+    )
+    WEEKLY_REVIEW_PREP_HOURS: int = Field(
+        default=3, description="Hours before weekly review to compile data"
+    )
+    WEEKLY_REVIEW_NOTIFY_MINUTES: int = Field(
+        default=30, description="Minutes before weekly review to send notification"
+    )
+    WEEKLY_REVIEW_MAX_CORRECTIONS: int = Field(
+        default=10, description="Safety cap: max corrections per weekly review session"
+    )
+    WEEKLY_REVIEW_SESSION_EXPIRY_HOURS: int = Field(
+        default=48, description="Weekly review session expires after this many hours"
+    )
+    WEEKLY_REVIEW_DAY: int = Field(
+        default=4, description="Day of week for weekly review fallback prompt (0=Mon, 4=Fri)"
+    )
+    WEEKLY_REVIEW_ENABLED: bool = Field(
+        default=False, description="Enable weekly review scheduler (safe rollout)"
+    )
+    WEEKLY_REVIEW_SCHEDULER_INTERVAL: int = Field(
+        default=900, description="Weekly review scheduler check interval (seconds)"
     )
 
     # ==========================================================================
@@ -445,6 +490,13 @@ class Settings(BaseSettings):
         if not self.APPROVAL_REMINDER_HOURS:
             return []
         return [int(h.strip()) for h in self.APPROVAL_REMINDER_HOURS.split(",") if h.strip()]
+
+    @property
+    def meeting_prep_reminder_hours_list(self) -> list[int]:
+        """Parse comma-separated prep reminder hours into a list of ints."""
+        if not self.MEETING_PREP_REMINDER_HOURS:
+            return []
+        return [int(h.strip()) for h in self.MEETING_PREP_REMINDER_HOURS.split(",") if h.strip()]
 
     @property
     def morning_brief_skip_days_list(self) -> list[str]:

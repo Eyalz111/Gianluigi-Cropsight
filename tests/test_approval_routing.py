@@ -37,6 +37,7 @@ class TestSubmitForApprovalRouting:
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
         ):
             mock_tg.send_approval_request = AsyncMock(return_value=True)
+            mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-1"})
             mock_db.delete_pending_approval = MagicMock(return_value=False)
@@ -50,7 +51,6 @@ class TestSubmitForApprovalRouting:
             content = {
                 "title": "Investor Call",
                 "summary": "Prep for investor meeting with slides.",
-                "drive_link": "https://drive.google.com/file/prep-123",
                 "sensitivity": "normal",
                 "start_time": "2026-02-27 10:00",
             }
@@ -74,10 +74,10 @@ class TestSubmitForApprovalRouting:
             assert result["telegram_sent"] is True
             assert result["email_sent"] is True
 
-            # Telegram message should include "Prep:" prefix
-            tg_call_kwargs = mock_tg.send_approval_request.call_args.kwargs
-            assert "Prep:" in tg_call_kwargs["meeting_title"]
-            assert tg_call_kwargs["meeting_id"] == "prep-001"
+            # Telegram: meeting_prep now uses send_to_eyal directly (minimal card)
+            mock_tg.send_to_eyal.assert_awaited_once()
+            tg_msg = mock_tg.send_to_eyal.call_args[0][0]
+            assert "Investor Call" in tg_msg
 
             # Email should include "Meeting Prep:" prefix
             email_call_kwargs = mock_gmail.send_approval_request.call_args.kwargs
@@ -197,8 +197,8 @@ class TestSubmitForApprovalRouting:
             assert email_call_kwargs["tasks"] == content["tasks"]
 
     @pytest.mark.asyncio
-    async def test_prep_telegram_preview_includes_drive_link_and_sensitivity(self):
-        """Meeting prep Telegram preview should show drive link and sensitivity."""
+    async def test_prep_telegram_preview_includes_sensitivity(self):
+        """Meeting prep Telegram preview should show sensitivity (no Drive link before approval)."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
@@ -207,6 +207,7 @@ class TestSubmitForApprovalRouting:
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
         ):
             mock_tg.send_approval_request = AsyncMock(return_value=True)
+            mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
             mock_db.delete_pending_approval = MagicMock()
@@ -220,7 +221,6 @@ class TestSubmitForApprovalRouting:
             content = {
                 "title": "Board Meeting",
                 "summary": "Important board meeting prep.",
-                "drive_link": "https://drive.google.com/file/board-prep",
                 "sensitivity": "sensitive",
                 "start_time": "2026-03-01 14:00",
             }
@@ -231,12 +231,11 @@ class TestSubmitForApprovalRouting:
                 meeting_id="prep-002",
             )
 
-            # Check that the Telegram preview text includes the expected fields
-            tg_call_kwargs = mock_tg.send_approval_request.call_args.kwargs
-            preview = tg_call_kwargs["summary_preview"]
-            assert "Sensitivity: sensitive" in preview
-            assert "https://drive.google.com/file/board-prep" in preview
-            assert "Board Meeting" in preview
+            # Meeting prep now uses send_to_eyal directly (minimal card with HTML)
+            mock_tg.send_to_eyal.assert_awaited_once()
+            card = mock_tg.send_to_eyal.call_args[0][0]
+            assert "sensitive" in card.lower()
+            assert "Board Meeting" in card
 
     @pytest.mark.asyncio
     async def test_digest_telegram_preview_includes_stats(self):
@@ -298,7 +297,7 @@ class TestProcessResponseRouting:
             "title": "Investor Call",
             "summary": "Prep notes for investor call.",
             "sensitivity": "normal",
-            "drive_link": "https://drive.google.com/file/prep-x",
+            "meeting_type": "generic",
             "start_time": "2026-02-28 09:00",
         }
         pending_row = {
@@ -563,18 +562,20 @@ class TestDistributeApprovedPrep:
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            patch("services.google_drive.drive_service") as mock_drive,
         ):
             mock_settings.ENVIRONMENT = "production"
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_drive.save_meeting_prep = AsyncMock(return_value={"webViewLink": "https://drive/prep"})
 
             from guardrails.approval_flow import distribute_approved_prep
 
             content = {
                 "title": "Sprint Planning",
                 "sensitivity": "normal",
-                "drive_link": "https://drive.google.com/file/prep-normal",
+                "summary": "Prep doc content here.",
                 "start_time": "2026-02-27 09:00",
             }
 
@@ -585,6 +586,7 @@ class TestDistributeApprovedPrep:
 
             assert result["telegram_sent"] is True
             assert result["type"] == "meeting_prep"
+            assert result["drive_uploaded"] is True
 
             # Should send to both Eyal and group in production
             mock_tg.send_to_eyal.assert_awaited_once()
@@ -593,7 +595,6 @@ class TestDistributeApprovedPrep:
             # Verify message content
             eyal_msg = mock_tg.send_to_eyal.call_args[0][0]
             assert "Sprint Planning" in eyal_msg
-            assert "https://drive.google.com/file/prep-normal" in eyal_msg
             assert "Meeting Prep Ready" in eyal_msg
 
     @pytest.mark.asyncio
@@ -602,17 +603,19 @@ class TestDistributeApprovedPrep:
         with (
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
+            patch("services.google_drive.drive_service") as mock_drive,
         ):
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_drive.save_meeting_prep = AsyncMock(return_value={"webViewLink": "https://drive/prep"})
 
             from guardrails.approval_flow import distribute_approved_prep
 
             content = {
                 "title": "Board Compensation",
                 "sensitivity": "sensitive",
-                "drive_link": "https://drive.google.com/file/board-prep",
+                "summary": "Sensitive prep content.",
                 "start_time": "2026-03-01 14:00",
             }
 
@@ -634,17 +637,19 @@ class TestDistributeApprovedPrep:
         with (
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
+            patch("services.google_drive.drive_service") as mock_drive,
         ):
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_drive.save_meeting_prep = AsyncMock(return_value={})
 
             from guardrails.approval_flow import distribute_approved_prep
 
             content = {
                 "title": "Team Sync",
                 "sensitivity": "normal",
-                "drive_link": "",
+                "summary": "Sync prep content.",
                 "start_time": "2026-02-28 11:00",
             }
 
@@ -668,18 +673,20 @@ class TestDistributeApprovedPrep:
         with (
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
+            patch("services.google_drive.drive_service") as mock_drive,
         ):
             mock_tg.send_to_eyal = AsyncMock(
                 side_effect=Exception("Telegram API error")
             )
             mock_db.log_action = MagicMock()
+            mock_drive.save_meeting_prep = AsyncMock(return_value={})
 
             from guardrails.approval_flow import distribute_approved_prep
 
             content = {
                 "title": "Broken Meeting",
                 "sensitivity": "normal",
-                "drive_link": "",
+                "summary": "Content here.",
                 "start_time": "2026-02-28 12:00",
             }
 

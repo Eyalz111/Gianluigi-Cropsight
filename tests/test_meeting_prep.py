@@ -627,282 +627,154 @@ class TestFindOpenQuestions:
 # =============================================================================
 
 class TestSchedulerSensitivityDistribution:
-    """Tests for sensitivity-aware distribution via approval flow."""
+    """Tests for Phase 5 scheduler — outline creation with meeting type classification."""
 
     @pytest.mark.asyncio
-    async def test_sensitive_meeting_submits_for_approval(self):
-        """Sensitive meetings should submit for approval with sensitivity=sensitive."""
-        event = {
-            "id": "event-sensitive",
-            "title": "Investor Meeting Prep",  # contains "investor"
-            "start": "2026-02-25T10:00:00Z",
-            "attendees": [],
-            "location": "",
-            "description": "",
-        }
-
-        with patch("schedulers.meeting_prep_scheduler.find_related_meetings", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.find_relevant_decisions", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler._find_open_questions", return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.get_stakeholder_context", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.find_participant_tasks", new_callable=AsyncMock, return_value={}), \
-             patch("schedulers.meeting_prep_scheduler.format_prep_document", return_value="# Prep"), \
-             patch("schedulers.meeting_prep_scheduler.drive_service") as mock_drive, \
-             patch("schedulers.meeting_prep_scheduler.submit_for_approval", new_callable=AsyncMock) as mock_submit, \
-             patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
-
-            mock_drive.save_meeting_prep = AsyncMock(
-                return_value={"webViewLink": "https://drive.google.com/test"}
-            )
-            mock_submit.return_value = {"status": "pending"}
-            mock_db.log_action = MagicMock()
-
-            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
-
-            scheduler = MeetingPrepScheduler()
-            result = await scheduler._generate_prep_for_meeting(event)
-
-        assert result["status"] == "success"
-        assert result["sensitivity"] == "sensitive"
-
-        # Should have submitted for approval with correct content type
-        mock_submit.assert_awaited_once()
-        call_kwargs = mock_submit.call_args[1]
-        assert call_kwargs["content_type"] == "meeting_prep"
-        assert call_kwargs["content"]["sensitivity"] == "sensitive"
-
-    @pytest.mark.asyncio
-    async def test_normal_meeting_submits_for_approval(self):
-        """Normal meetings should submit for approval with sensitivity=normal."""
-        event = {
-            "id": "event-normal",
-            "title": "CropSight Sprint Planning",
-            "start": "2026-02-25T10:00:00Z",
-            "attendees": [],
-            "location": "",
-            "description": "",
-        }
-
-        with patch("schedulers.meeting_prep_scheduler.find_related_meetings", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.find_relevant_decisions", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler._find_open_questions", return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.get_stakeholder_context", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.find_participant_tasks", new_callable=AsyncMock, return_value={}), \
-             patch("schedulers.meeting_prep_scheduler.format_prep_document", return_value="# Prep"), \
-             patch("schedulers.meeting_prep_scheduler.drive_service") as mock_drive, \
-             patch("schedulers.meeting_prep_scheduler.submit_for_approval", new_callable=AsyncMock) as mock_submit, \
-             patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
-
-            mock_drive.save_meeting_prep = AsyncMock(
-                return_value={"webViewLink": "https://drive.google.com/test"}
-            )
-            mock_submit.return_value = {"status": "pending"}
-            mock_db.log_action = MagicMock()
-
-            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
-
-            scheduler = MeetingPrepScheduler()
-            result = await scheduler._generate_prep_for_meeting(event)
-
-        assert result["status"] == "success"
-        assert result["sensitivity"] == "normal"
-
-        # Should have submitted for approval with correct content type
-        mock_submit.assert_awaited_once()
-        call_kwargs = mock_submit.call_args[1]
-        assert call_kwargs["content_type"] == "meeting_prep"
-        assert call_kwargs["content"]["sensitivity"] == "normal"
-
-
-# =============================================================================
-# Test Pre-Meeting Reminders (Phase 5)
-# =============================================================================
-
-class TestPreMeetingReminder:
-    """Tests for _send_pre_meeting_reminder() in the scheduler."""
-
-    @pytest.mark.asyncio
-    async def test_reminder_fires_when_meeting_2_to_3_hours_away(self):
-        """Should send reminder when meeting is 2-3 hours away."""
+    async def test_creates_outline_and_submits(self):
+        """Scheduler should classify meeting type, generate outline, and submit for approval."""
         from datetime import timezone, timedelta
 
         now = datetime.now(timezone.utc)
-        # Meeting 2.5 hours from now
-        meeting_start = (now + timedelta(hours=2, minutes=30)).isoformat()
-
         event = {
-            "id": "event-reminder-1",
-            "title": "CropSight Standup",
-            "start": meeting_start,
+            "id": "event-test",
+            "title": "Tech Review",
+            "start": (now + timedelta(hours=30)).isoformat(),
             "attendees": [
                 {"email": "eyal@cropsight.io", "displayName": "Eyal Zror"},
                 {"email": "roye@cropsight.io", "displayName": "Roye Tadmor"},
             ],
         }
 
-        with patch("schedulers.meeting_prep_scheduler.find_related_meetings", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.find_participant_tasks", new_callable=AsyncMock, return_value={}), \
-             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg, \
+        with patch("schedulers.meeting_prep_scheduler.classify_meeting_type") as mock_classify, \
+             patch("schedulers.meeting_prep_scheduler.generate_prep_outline", new_callable=AsyncMock) as mock_outline, \
+             patch("schedulers.meeting_prep_scheduler.submit_for_approval", new_callable=AsyncMock) as mock_submit, \
              patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
 
-            mock_tg.send_to_eyal = AsyncMock(return_value=True)
-            mock_db.log_action = MagicMock()
-
-            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
-
-            scheduler = MeetingPrepScheduler()
-            result = await scheduler._send_pre_meeting_reminder(event)
-
-        assert result is True
-        mock_tg.send_to_eyal.assert_awaited_once()
-        # Message should contain the meeting title
-        sent_msg = mock_tg.send_to_eyal.call_args[0][0]
-        assert "CropSight Standup" in sent_msg
-
-    @pytest.mark.asyncio
-    async def test_reminder_skipped_when_too_far(self):
-        """Should not send reminder when meeting is more than 3 hours away."""
-        from datetime import timezone, timedelta
-
-        now = datetime.now(timezone.utc)
-        # Meeting 5 hours from now
-        meeting_start = (now + timedelta(hours=5)).isoformat()
-
-        event = {
-            "id": "event-too-far",
-            "title": "Future Meeting",
-            "start": meeting_start,
-            "attendees": [],
-        }
-
-        with patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg, \
-             patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
-
-            mock_tg.send_to_eyal = AsyncMock(return_value=True)
-            mock_db.log_action = MagicMock()
-
-            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
-
-            scheduler = MeetingPrepScheduler()
-            result = await scheduler._send_pre_meeting_reminder(event)
-
-        assert result is False
-        mock_tg.send_to_eyal.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_reminder_skipped_when_too_close(self):
-        """Should not send reminder when meeting is less than 2 hours away."""
-        from datetime import timezone, timedelta
-
-        now = datetime.now(timezone.utc)
-        # Meeting 1 hour from now
-        meeting_start = (now + timedelta(hours=1)).isoformat()
-
-        event = {
-            "id": "event-too-close",
-            "title": "Imminent Meeting",
-            "start": meeting_start,
-            "attendees": [],
-        }
-
-        with patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg, \
-             patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
-
-            mock_tg.send_to_eyal = AsyncMock(return_value=True)
-            mock_db.log_action = MagicMock()
-
-            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
-
-            scheduler = MeetingPrepScheduler()
-            result = await scheduler._send_pre_meeting_reminder(event)
-
-        assert result is False
-        mock_tg.send_to_eyal.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_duplicate_reminder_prevention(self):
-        """Should not send the same reminder twice."""
-        from datetime import timezone, timedelta
-
-        now = datetime.now(timezone.utc)
-        meeting_start = (now + timedelta(hours=2, minutes=30)).isoformat()
-
-        event = {
-            "id": "event-dup-test",
-            "title": "Dup Test Meeting",
-            "start": meeting_start,
-            "attendees": [],
-        }
-
-        with patch("schedulers.meeting_prep_scheduler.find_related_meetings", new_callable=AsyncMock, return_value=[]), \
-             patch("schedulers.meeting_prep_scheduler.find_participant_tasks", new_callable=AsyncMock, return_value={}), \
-             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg, \
-             patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
-
-            mock_tg.send_to_eyal = AsyncMock(return_value=True)
-            mock_db.log_action = MagicMock()
-
-            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
-
-            scheduler = MeetingPrepScheduler()
-
-            # First call should send
-            result1 = await scheduler._send_pre_meeting_reminder(event)
-            # Second call should skip (duplicate)
-            result2 = await scheduler._send_pre_meeting_reminder(event)
-
-        assert result1 is True
-        assert result2 is False
-        # Only one message sent
-        assert mock_tg.send_to_eyal.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_reminder_includes_related_meeting_context(self):
-        """Should include related meeting info in the reminder message."""
-        from datetime import timezone, timedelta
-
-        now = datetime.now(timezone.utc)
-        meeting_start = (now + timedelta(hours=2, minutes=30)).isoformat()
-
-        event = {
-            "id": "event-context-test",
-            "title": "CropSight Sprint",
-            "start": meeting_start,
-            "attendees": [
-                {"email": "eyal@cropsight.io", "displayName": "Eyal Zror"},
-            ],
-        }
-
-        mock_related = [
-            {
-                "title": "Previous Sprint",
-                "date": "2026-02-20",
-                "summary": "Planned next steps.",
+            mock_classify.return_value = ("founders_technical", "auto", ["title_match"])
+            mock_outline.return_value = {
+                "meeting_type": "founders_technical",
+                "template_name": "Founders Technical Review",
+                "event": event,
+                "sections": [],
+                "suggested_agenda": [],
+                "event_start_time": event["start"],
             }
-        ]
-        mock_tasks = {
-            "Eyal Zror": [
-                {"id": "t-1", "title": "Review proposal", "status": "pending"},
-                {"id": "t-2", "title": "Write spec", "status": "pending"},
-            ]
+            mock_submit.return_value = {"status": "pending"}
+            mock_db.log_action = MagicMock()
+            mock_db.get_pending_approval.return_value = {"content": {}}
+            mock_db.update_pending_approval.return_value = {}
+
+            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
+
+            scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
+            scheduler._prep_generated = set()
+            scheduler._reminders_sent = set()
+            scheduler._pending_prep_timers = {}
+
+            result = await scheduler._create_outline_for_meeting(event)
+
+        assert result["status"] == "success"
+        assert result["meeting_type"] == "founders_technical"
+
+        mock_submit.assert_awaited_once()
+        call_kwargs = mock_submit.call_args[1]
+        assert call_kwargs["content_type"] == "prep_outline"
+
+        # Cleanup timers
+        for tasks in scheduler._pending_prep_timers.values():
+            for t in tasks:
+                t.cancel()
+
+    @pytest.mark.asyncio
+    async def test_skip_mode_for_late_meeting(self):
+        """Meeting <2h away should be skipped."""
+        from datetime import timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        event = {
+            "id": "event-late",
+            "title": "Late Meeting",
+            "start": (now + timedelta(hours=1)).isoformat(),
+            "attendees": [],
         }
 
-        with patch("schedulers.meeting_prep_scheduler.find_related_meetings", new_callable=AsyncMock, return_value=mock_related), \
-             patch("schedulers.meeting_prep_scheduler.find_participant_tasks", new_callable=AsyncMock, return_value=mock_tasks), \
-             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg, \
-             patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
-
-            mock_tg.send_to_eyal = AsyncMock(return_value=True)
+        with patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db:
             mock_db.log_action = MagicMock()
 
             from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
 
-            scheduler = MeetingPrepScheduler()
-            result = await scheduler._send_pre_meeting_reminder(event)
+            scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
+            scheduler._prep_generated = set()
+            scheduler._reminders_sent = set()
+            scheduler._pending_prep_timers = {}
 
-        assert result is True
-        sent_msg = mock_tg.send_to_eyal.call_args[0][0]
-        assert "Previous Sprint" in sent_msg
-        assert "2026-02-20" in sent_msg
-        assert "Open tasks for attendees: 2" in sent_msg
-        assert "Eyal Zror" in sent_msg
+            result = await scheduler._create_outline_for_meeting(event)
+
+        assert result["status"] == "skipped"
+
+
+# =============================================================================
+# Test Prep Reminder (Phase 5 — new flow)
+# =============================================================================
+
+class TestPreMeetingReminder:
+    """Tests for _send_prep_reminder() in the new scheduler."""
+
+    @pytest.mark.asyncio
+    async def test_reminder_sends_when_pending(self):
+        """Reminder should send when outline is still pending."""
+        with patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db, \
+             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg:
+
+            mock_db.get_pending_approval.return_value = {
+                "status": "pending",
+                "content": {
+                    "outline": {"event": {"title": "Tech Review"}},
+                },
+            }
+            mock_db.log_action.return_value = None
+            mock_tg.send_to_eyal = AsyncMock(return_value=True)
+
+            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
+            scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
+            scheduler._pending_prep_timers = {}
+
+            await scheduler._send_prep_reminder("outline-123", 0)
+
+            mock_tg.send_to_eyal.assert_awaited_once()
+            sent_msg = mock_tg.send_to_eyal.call_args[0][0]
+            assert "Tech Review" in sent_msg
+
+    @pytest.mark.asyncio
+    async def test_reminder_skipped_when_not_pending(self):
+        """Reminder should not send when outline is already generated."""
+        with patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db, \
+             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg:
+
+            mock_db.get_pending_approval.return_value = {
+                "status": "generated",
+                "content": {},
+            }
+            mock_tg.send_to_eyal = AsyncMock()
+
+            from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
+            scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
+
+            await scheduler._send_prep_reminder("outline-123", 0)
+
+            mock_tg.send_to_eyal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_timer_cancellation(self):
+        """cancel_prep_timers should cancel tasks and remove from dict."""
+        from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
+        scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
+        scheduler._pending_prep_timers = {}
+
+        mock_task = MagicMock()
+        scheduler._pending_prep_timers["outline-123"] = [mock_task]
+
+        scheduler.cancel_prep_timers("outline-123")
+
+        mock_task.cancel.assert_called_once()
+        assert "outline-123" not in scheduler._pending_prep_timers

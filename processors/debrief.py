@@ -182,6 +182,24 @@ async def start_debrief(
             calendar_events_remaining=uncovered_events,
         )
 
+    # Check for pending prep outlines
+    pending_preps_note = ""
+    try:
+        pending_preps = supabase_client.get_pending_prep_outlines()
+        if pending_preps:
+            titles = []
+            for pp in pending_preps:
+                content = pp.get("content", {})
+                event = content.get("outline", {}).get("event", content.get("event", {}))
+                titles.append(event.get("title", "Unknown"))
+            if titles:
+                pending_preps_note = (
+                    f"\n\nYou have {len(titles)} pending prep outline(s): "
+                    f"{', '.join(titles)}. Handle those first?"
+                )
+    except Exception as e:
+        logger.debug(f"Pending prep check in debrief failed: {e}")
+
     # Build greeting
     greeting = "Let's do your end-of-day debrief."
     if uncovered_events:
@@ -195,6 +213,9 @@ async def start_debrief(
     else:
         greeting += "\n\nNo CropSight meetings on the calendar today."
         greeting += " What happened today that should be captured?"
+
+    if pending_preps_note:
+        greeting += pending_preps_note
 
     return {
         "response": greeting,

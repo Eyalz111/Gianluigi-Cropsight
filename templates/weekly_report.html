@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CropSight Weekly Report — W{{ week_number }}/{{ year }}</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; color: #333; }
+.container { max-width: 800px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); overflow: hidden; }
+.header { background: linear-gradient(135deg, #2d5016, #4a7c23); color: white; padding: 24px 32px; }
+.header h1 { margin: 0; font-size: 24px; }
+.header p { margin: 8px 0 0; opacity: 0.85; }
+.content { padding: 24px 32px; }
+.section { margin-bottom: 24px; }
+.section h2 { font-size: 18px; color: #2d5016; border-bottom: 2px solid #e0e0e0; padding-bottom: 8px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat { background: #f8faf5; border-radius: 6px; padding: 16px; text-align: center; }
+.stat .number { font-size: 28px; font-weight: bold; color: #2d5016; }
+.stat .label { font-size: 12px; color: #666; text-transform: uppercase; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; }
+th { background: #f8faf5; font-weight: 600; }
+.alert { padding: 8px 12px; background: #fff3cd; border-left: 3px solid #ffc107; margin-bottom: 8px; border-radius: 4px; }
+.milestone { padding: 8px 12px; background: #e8f5e9; border-left: 3px solid #4caf50; margin-bottom: 8px; border-radius: 4px; }
+.footer { padding: 16px 32px; background: #f8f8f8; color: #999; font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>CropSight Weekly Report</h1>
+    <p>Week {{ week_number }}, {{ year }}</p>
+  </div>
+  <div class="content">
+    {% set wir = data.get('week_in_review', {}) %}
+    {% set task_summary = wir.get('task_summary', {}) %}
+    <div class="stats">
+      <div class="stat">
+        <div class="number">{{ wir.get('meetings_count', 0) }}</div>
+        <div class="label">Meetings</div>
+      </div>
+      <div class="stat">
+        <div class="number">{{ wir.get('decisions_count', 0) }}</div>
+        <div class="label">Decisions</div>
+      </div>
+      <div class="stat">
+        <div class="number">{{ task_summary.get('completed_this_week', [])|length }}</div>
+        <div class="label">Tasks Done</div>
+      </div>
+      <div class="stat">
+        <div class="number">{{ task_summary.get('overdue', [])|length }}</div>
+        <div class="label">Overdue</div>
+      </div>
+    </div>
+
+    {% set scorecard = wir.get('commitment_scorecard', {}) %}
+    {% if scorecard.get('open_count', 0) or scorecard.get('fulfilled_count', 0) %}
+    <div class="section">
+      <h2>Commitments</h2>
+      <p>{{ scorecard.get('open_count', 0) }} open, {{ scorecard.get('fulfilled_count', 0) }} fulfilled</p>
+      {% for speaker, items in scorecard.get('open_by_speaker', {}).items() %}
+      <p><strong>{{ speaker }}:</strong> {{ items|length }} open commitment(s)</p>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% set attention = data.get('attention_needed', {}) %}
+    {% set stale = attention.get('stale_tasks', []) %}
+    {% set alerts = attention.get('alerts', []) %}
+    {% if stale or alerts %}
+    <div class="section">
+      <h2>Attention Needed</h2>
+      {% for task in stale[:10] %}
+      <div class="alert">{{ task.get('title', '') }} — {{ task.get('assignee', '') }}</div>
+      {% endfor %}
+      {% for alert in alerts[:5] %}
+      <div class="alert">{{ alert.get('title', alert.get('message', '')) }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% set gantt = data.get('gantt_proposals', {}) %}
+    {% set proposals = gantt.get('proposals', []) %}
+    {% if proposals %}
+    <div class="section">
+      <h2>Gantt Proposals ({{ proposals|length }})</h2>
+      <table>
+        <tr><th>Proposal</th><th>Source</th></tr>
+        {% for p in proposals[:20] %}
+        <tr>
+          <td>{{ p.get('changes', [{}])[0].get('description', 'Update') if p.get('changes') else 'Update' }}</td>
+          <td>{{ p.get('source_type', '') }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% endif %}
+
+    {% set preview = data.get('next_week_preview', {}) %}
+    {% set upcoming = preview.get('upcoming_meetings', []) %}
+    {% if upcoming %}
+    <div class="section">
+      <h2>Next Week ({{ upcoming|length }} meetings)</h2>
+      <table>
+        <tr><th>Meeting</th><th>Time</th></tr>
+        {% for event in upcoming[:20] %}
+        <tr>
+          <td>{{ event.get('title', 'Untitled') }}</td>
+          <td>{{ event.get('start', '') }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% endif %}
+
+    {% set horizon = data.get('horizon_check', {}) %}
+    {% set milestones = horizon.get('milestones', []) %}
+    {% if milestones %}
+    <div class="section">
+      <h2>Strategic Horizon</h2>
+      {% for ms in milestones[:10] %}
+      <div class="milestone">{{ ms.get('name', ms) if ms is mapping else ms }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% set meetings = wir.get('meetings', []) %}
+    {% if meetings %}
+    <div class="section">
+      <h2>Meetings This Week</h2>
+      <table>
+        <tr><th>Meeting</th><th>Date</th></tr>
+        {% for m in meetings[:20] %}
+        <tr>
+          <td>{{ m.get('title', 'Untitled') }}</td>
+          <td>{{ m.get('date', '')[:10] }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% endif %}
+
+    {% set decisions = wir.get('decisions', []) %}
+    {% if decisions %}
+    <div class="section">
+      <h2>Decisions ({{ decisions|length }})</h2>
+      <table>
+        <tr><th>Decision</th><th>Meeting</th></tr>
+        {% for d in decisions[:20] %}
+        <tr>
+          <td>{{ d.get('description', '') }}</td>
+          <td>{{ d.get('_meeting_title', '') }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% endif %}
+  </div>
+  <div class="footer">
+    Generated by Gianluigi on {{ generated_at }}<br>
+    CropSight — Confidential
+  </div>
+</div>
+</body>
+</html>

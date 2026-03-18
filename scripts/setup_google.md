@@ -159,7 +159,27 @@ Get the folder IDs:
 
 ---
 
-## Step 10: Get Calendar Color ID
+## Step 10: Get Eyal's Calendar Token
+
+Gianluigi needs to read Eyal's calendar **as Eyal** (not via sharing) so we
+can see his event colors (purple = CropSight meetings).
+
+1. Run: `python scripts/get_calendar_token.py`
+2. A browser window opens — **sign in as Eyal** (eyalz111@gmail.com)
+3. Grant "Google Calendar (read-only)" access
+4. Copy the refresh token printed in the console
+5. Add to `.env`: `EYAL_CALENDAR_REFRESH_TOKEN=<token>`
+
+**Why not share the calendar?** Calendar colors are per-user — when another
+account reads a shared calendar, colors are always null. By authenticating as
+Eyal, we see exactly what he sees.
+
+**Future:** When CropSight moves to Google Workspace (@cropsight.com), replace
+per-user tokens with a service account + domain-wide delegation.
+
+---
+
+## Step 11: Get Calendar Color ID
 
 1. Open Google Calendar
 2. Create a test event

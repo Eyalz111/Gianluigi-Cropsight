@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** March 16, 2026
-**Current Version:** v1.0 (Phases 0-4 complete, architecture review fixes applied)
-**Status:** v0.5 live on Cloud Run, v1.0 Phases 0-4 implemented, Phase 5 (meeting prep redesign) next
+**Last Updated:** March 18, 2026
+**Current Version:** v1.0 (Phases 0-6 complete, live tested, QA fixes applied)
+**Status:** v1.0 Phases 0-6 complete, Phase 7 (MCP server) next
 
 ---
 
@@ -14,12 +14,12 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ---
 
-## Current State (Post Phase 4 + Architecture Review)
+## Current State (Post Phase 6)
 
-- 933+ tests, all passing
+- 1288 tests, all passing
 - Deployed to Cloud Run (europe-west1, 512Mi, min-instances=1)
 - Live tested with real meetings and team interactions
-- DB freshly rebuilt Mar 13, 2026
+- DB freshly rebuilt Mar 13, 2026 (Phase 5 migration Mar 18, Phase 6 migration Mar 18)
 
 ### What Works
 - Full transcript pipeline: Tactiq → Drive → Claude extraction → Supabase → approval → distribution
@@ -37,11 +37,13 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **v1.0 Phase 3:** End-of-day debrief (quick injection + full interactive sessions)
 - **v1.0 Phase 4:** Email intelligence (personal Gmail scan, morning brief, email classifier)
 - **Architecture Review:** Approval reminders, expiry, health monitoring, RAG source weights, session locking
+- **v1.0 Phase 5:** Meeting prep redesign — propose-discuss-generate pipeline, template-driven prep, meeting type classifier, Telegram inline outline flow, timeline modes, restart-safe state, .docx generation, sensitivity-aware distribution
+- **v1.0 Phase 6:** Weekly review + outputs — interactive 3-part session (stats → decisions → outputs), HTML report with per-report tokens, Gantt proposal distribution, session corrections with Haiku/Sonnet fallback, digest/review scheduler coexistence, 48h session expiry, debrief interruption support
 
 ### Known Issues
-- Meeting prep quality: too much noise, wrong context for meeting type (Phase 5 target)
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
 - Some schedulers disabled by default (morning brief, email scan, debrief prompt)
+- Transcript watcher disabled by default (TRANSCRIPT_WATCHER_ENABLED=false) — enable for live testing
 - See KNOWN_ISSUES.md for full list
 
 ---
@@ -50,6 +52,8 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 **Design document:** `V1_DESIGN.md` (comprehensive spec, READ THIS FIRST for any v1.0 work)
 **Architecture review:** `docs/qa/ARCHITECTURE_REVIEW_ISSUES.md` (12 issues identified, most addressed)
+**Phase 5 architecture:** `docs/system_architecture_v1_phase5.md` (post-Phase 5 system visualization)
+**Phase 6 architecture:** `docs/system_architecture_v1_phase6.md` (post-Phase 6 system visualization)
 
 ### Completed Phases
 - **Phase 0:** Database migration, new models
@@ -58,11 +62,11 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **Phase 3:** Debrief flow
 - **Phase 4:** Email intelligence
 - **Post-Phase 4:** Architecture review fixes (approval expiry, health monitoring, RAG weights, session locking)
+- **Phase 5:** Meeting prep redesign (propose-discuss-generate, templates, type classifier, timeline modes)
+- **Phase 6:** Weekly review + outputs (3-part interactive session, HTML reports, Gantt distribution, live QA fixes)
 
 ### Remaining Phases
-- **Phase 5:** Meeting prep redesign
-- **Phase 6:** Weekly review + outputs
-- **Phase 7:** MCP server
+- **Phase 7:** MCP server (Claude.ai as primary CEO dashboard — weekly review primary interface)
 - **Phase 8:** Heartbeat unification
 - **Phase 9:** Integration testing
 
@@ -101,7 +105,7 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 | Email | Gmail API (gianluigi.cropsight@gmail.com) |
 | Files | Google Drive API |
 | Tasks/Gantt | Google Sheets API |
-| Calendar | Google Calendar API (read-only) |
+| Calendar | Google Calendar API (read-only, authenticated as Eyal via per-user OAuth token) |
 | Hosting | Google Cloud Run (europe-west1) |
 | Transcription | Tactiq (Chrome extension) |
 | CEO Interface | Claude.ai via MCP server |
@@ -113,14 +117,21 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - All methods are **SYNC** (never await them)
 - Uses PostgREST API via supabase-py
 - pgvector for semantic search, tsvector for full-text
-- v1.0 tables: gantt_schema, gantt_proposals, gantt_snapshots, debrief_sessions, email_scans, mcp_sessions, weekly_reports, meeting_prep_history, pending_approvals (with expires_at)
+- v1.0 tables: gantt_schema, gantt_proposals, gantt_snapshots, debrief_sessions, email_scans, mcp_sessions, weekly_reports (+ html_content, access_token, expires_at), weekly_review_sessions, meeting_prep_history (+ outline_content, focus_instructions, timeline_mode), pending_approvals (with expires_at), calendar_classifications (+ meeting_type), meetings (+ meeting_type)
 
 ## LLM Notes
 - **Opus:** Transcript extraction, document analysis (accuracy-critical) — Analyst Agent
 - **Sonnet:** Conversations, tool use, Gantt operations — Conversation + Operator Agents
-- **Haiku:** Classification, intent routing — Router Agent
+- **Haiku:** Classification, intent routing, outline agenda generation, focus classification — Router Agent
 - Prompt caching via `cache_control: {"type": "ephemeral"}` on system prompts
 - All calls go through `core/llm.py` centralized helper
+
+## Calendar Architecture
+- Gianluigi reads Eyal's calendar using **Eyal's OAuth token** (`EYAL_CALENDAR_REFRESH_TOKEN`), not a shared calendar
+- This lets us see Eyal's event colors (purple = CropSight), declined status, etc.
+- Token obtained via `python scripts/get_calendar_token.py` (calendar.readonly scope)
+- Falls back to Gianluigi's token if Eyal's not set (but colors won't be visible)
+- **Future (Phase B):** When CropSight moves to Google Workspace, replace per-user tokens with service account + domain-wide delegation
 
 ## Important IDs
 - Eyal Telegram DM: `8190904141`
@@ -137,3 +148,6 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 5. `models/schemas.py` — All Pydantic data models
 6. `KNOWN_ISSUES.md` — Bugs from live testing
 7. `docs/qa/ARCHITECTURE_REVIEW_ISSUES.md` — Architecture review findings
+8. `docs/system_architecture_v1_phase5.md` — Post-Phase 5 system architecture
+9. `docs/system_architecture_v1_phase6.md` — Post-Phase 6 system architecture
+10. `config/meeting_prep_templates.py` — Meeting prep template definitions

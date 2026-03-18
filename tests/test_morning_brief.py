@@ -82,6 +82,8 @@ class TestCompileMorningBrief:
         with patch("processors.morning_brief.supabase_client") as mock_sc, \
              patch("services.google_calendar.calendar_service") as mock_cal:
             mock_sc.get_unapproved_email_scans.return_value = []
+            mock_sc.get_pending_prep_outlines.return_value = []
+            mock_sc.get_active_weekly_review_session.return_value = None
             mock_cal.get_todays_events = AsyncMock(return_value=[])
             from processors.morning_brief import compile_morning_brief
             brief = await compile_morning_brief()
@@ -267,3 +269,110 @@ class TestTriggerMorningBrief:
         mock_submit.assert_called_once()
         call_kwargs = mock_submit.call_args
         assert call_kwargs.kwargs.get("content_type") == "morning_brief"
+
+
+# =========================================================================
+# Upcoming Review Calendar Check Tests (Item 11)
+# =========================================================================
+
+class TestUpcomingReviewInBrief:
+    """Test section 7: calendar check for upcoming weekly review."""
+
+    @pytest.mark.asyncio
+    async def test_review_event_found_no_session(self):
+        """Review event on calendar, no active session → shows in brief."""
+        mock_cal = MagicMock()
+        mock_cal.get_todays_events = AsyncMock(return_value=[
+            {"title": "CropSight: Weekly Review with Gianluigi", "start": "2026-03-18T14:00:00Z"},
+        ])
+
+        mock_scheduler = MagicMock()
+        mock_scheduler._is_review_event = MagicMock(return_value=True)
+
+        with patch("processors.morning_brief.supabase_client") as mock_db, \
+             patch.dict("sys.modules", {
+                 "services.google_calendar": MagicMock(calendar_service=mock_cal),
+                 "schedulers.weekly_review_scheduler": MagicMock(weekly_review_scheduler=mock_scheduler),
+             }):
+            mock_db.get_unapproved_email_scans.return_value = []
+            mock_db.get_active_weekly_review_session.return_value = None
+            mock_db.get_pending_prep_outlines.return_value = []
+
+            from processors.morning_brief import compile_morning_brief
+            brief = await compile_morning_brief()
+            types = [s["type"] for s in brief["sections"]]
+            assert "upcoming_review" in types
+
+    @pytest.mark.asyncio
+    async def test_review_event_found_session_exists(self):
+        """Review event on calendar, active session exists → not shown (avoid duplicate)."""
+        mock_cal = MagicMock()
+        mock_cal.get_todays_events = AsyncMock(return_value=[
+            {"title": "CropSight: Weekly Review with Gianluigi", "start": "2026-03-18T14:00:00Z"},
+        ])
+
+        mock_scheduler = MagicMock()
+        mock_scheduler._is_review_event = MagicMock(return_value=True)
+
+        with patch("processors.morning_brief.supabase_client") as mock_db, \
+             patch.dict("sys.modules", {
+                 "services.google_calendar": MagicMock(calendar_service=mock_cal),
+                 "schedulers.weekly_review_scheduler": MagicMock(weekly_review_scheduler=mock_scheduler),
+             }):
+            mock_db.get_unapproved_email_scans.return_value = []
+            # First call for section 6, second for section 7
+            mock_db.get_active_weekly_review_session.return_value = {"id": "s-1", "status": "ready", "week_number": 12}
+            mock_db.get_pending_prep_outlines.return_value = []
+
+            from processors.morning_brief import compile_morning_brief
+            brief = await compile_morning_brief()
+            types = [s["type"] for s in brief["sections"]]
+            assert "upcoming_review" not in types
+
+    @pytest.mark.asyncio
+    async def test_no_review_event(self):
+        """No review event on calendar → no upcoming_review section."""
+        mock_cal = MagicMock()
+        mock_cal.get_todays_events = AsyncMock(return_value=[
+            {"title": "Team standup", "start": "2026-03-18T09:00:00Z"},
+        ])
+
+        mock_scheduler = MagicMock()
+        mock_scheduler._is_review_event = MagicMock(return_value=False)
+
+        with patch("processors.morning_brief.supabase_client") as mock_db, \
+             patch.dict("sys.modules", {
+                 "services.google_calendar": MagicMock(calendar_service=mock_cal),
+                 "schedulers.weekly_review_scheduler": MagicMock(weekly_review_scheduler=mock_scheduler),
+             }):
+            mock_db.get_unapproved_email_scans.return_value = []
+            mock_db.get_active_weekly_review_session.return_value = None
+            mock_db.get_pending_prep_outlines.return_value = []
+
+            from processors.morning_brief import compile_morning_brief
+            brief = await compile_morning_brief()
+            types = [s["type"] for s in brief["sections"]]
+            assert "upcoming_review" not in types
+
+
+class TestUpcomingReviewFormatting:
+    """Test formatting of upcoming_review section."""
+
+    def test_format_upcoming_review_with_time(self):
+        from processors.morning_brief import format_morning_brief
+        brief = {
+            "sections": [{"type": "upcoming_review", "title": "Weekly Review", "time": "14:00"}],
+            "stats": {},
+        }
+        result = format_morning_brief(brief)
+        assert "at 14:00" in result
+        assert "prep starts 3h before" in result
+
+    def test_format_upcoming_review_no_time(self):
+        from processors.morning_brief import format_morning_brief
+        brief = {
+            "sections": [{"type": "upcoming_review", "title": "Weekly Review", "time": ""}],
+            "stats": {},
+        }
+        result = format_morning_brief(brief)
+        assert "today" in result

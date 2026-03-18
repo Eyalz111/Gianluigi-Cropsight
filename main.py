@@ -231,7 +231,17 @@ async def start_services() -> None:
     else:
         logger.warning("  Meeting prep scheduler disabled (Google Calendar not available)")
 
-    # Start weekly digest scheduler (only if Calendar is available)
+    # Start weekly review scheduler (if enabled and calendar available)
+    if init_status.get("google_calendar") and settings.WEEKLY_REVIEW_ENABLED:
+        from schedulers.weekly_review_scheduler import weekly_review_scheduler
+        logger.info("  Starting weekly review scheduler...")
+        review_task = asyncio.create_task(
+            weekly_review_scheduler.start(),
+            name="weekly_review_scheduler"
+        )
+        tasks.append(review_task)
+
+    # Digest always starts — it self-skips when a review session exists
     if init_status.get("google_calendar"):
         from schedulers.weekly_digest_scheduler import weekly_digest_scheduler
         logger.info("  Starting weekly digest scheduler...")
@@ -241,7 +251,7 @@ async def start_services() -> None:
         )
         tasks.append(digest_task)
     else:
-        logger.warning("  Weekly digest scheduler disabled (Google Calendar not available)")
+        logger.warning("  Weekly digest/review schedulers disabled (Google Calendar not available)")
 
     # Task reminder scheduler disabled — fires on stale historical tasks.
     # Re-enable after DB cleanup.
@@ -315,6 +325,22 @@ async def start_services() -> None:
     except Exception as e:
         logger.warning(f"  Timer reconstruction failed (non-fatal): {e}")
 
+    # Reconstruct prep outline timers from persistent state (Phase 5)
+    try:
+        prep_reconstructed = await meeting_prep_scheduler.reconstruct_prep_timers()
+        if prep_reconstructed:
+            logger.info(f"  Reconstructed {prep_reconstructed} prep timer(s)")
+    except Exception as e:
+        logger.warning(f"  Prep timer reconstruction failed (non-fatal): {e}")
+
+    # Reconstruct interactive session stack from persistent state (Phase 6)
+    try:
+        reconstructed = await telegram_bot._reconstruct_session_stack()
+        if reconstructed:
+            logger.info(f"  Reconstructed {reconstructed} interactive session(s)")
+    except Exception as e:
+        logger.warning(f"  Session stack reconstruction failed (non-fatal): {e}")
+
     # Log to Supabase
     from services.supabase_client import supabase_client
     supabase_client.log_action(
@@ -384,6 +410,14 @@ async def stop_services() -> None:
     email_watcher.stop()
     # alert_scheduler.stop()  # disabled
     orphan_cleanup_scheduler.stop()
+
+    # Stop weekly review scheduler if started
+    if settings.WEEKLY_REVIEW_ENABLED:
+        try:
+            from schedulers.weekly_review_scheduler import weekly_review_scheduler
+            weekly_review_scheduler.stop()
+        except Exception:
+            pass
 
     # Stop morning brief scheduler if started
     if settings.MORNING_BRIEF_ENABLED:

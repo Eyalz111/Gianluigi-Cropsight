@@ -356,11 +356,14 @@ class GoogleDriveService:
         filename: str
     ) -> dict:
         """
-        Save a meeting prep document to the Meeting Prep folder.
+        Save a meeting prep document to the Meeting Prep folder as a Google Doc.
+
+        Uploads as Google Doc (not .md) so it's viewable on any device
+        including mobile phones without needing to download.
 
         Args:
-            content: The markdown content of the prep document.
-            filename: Name for the file (e.g., "2026-02-27 - Prep - Accuracy.md").
+            content: The markdown/text content of the prep document.
+            filename: Name for the file (e.g., "2026-02-27 - Prep - Tech Review").
 
         Returns:
             File metadata including the new file ID and webViewLink.
@@ -369,11 +372,14 @@ class GoogleDriveService:
             logger.warning("MEETING_PREP_FOLDER_ID not configured")
             return {}
 
-        return await self._upload_text_file(
+        # Strip .md extension if present — Google Doc doesn't need it
+        if filename.endswith(".md"):
+            filename = filename[:-3]
+
+        return await self._upload_as_google_doc(
             content=content,
             filename=filename,
             folder_id=settings.MEETING_PREP_FOLDER_ID,
-            mime_type="text/markdown"
         )
 
     async def save_weekly_digest(
@@ -445,6 +451,44 @@ class GoogleDriveService:
 
         except Exception as e:
             logger.error(f"Error uploading file {filename}: {e}")
+            return {}
+
+    async def _upload_as_google_doc(
+        self,
+        content: str,
+        filename: str,
+        folder_id: str,
+    ) -> dict:
+        """
+        Upload text content as a native Google Doc (viewable on any device).
+
+        Google Drive converts the uploaded text into a Google Doc automatically
+        when mimeType is set to 'application/vnd.google-apps.document'.
+        """
+        try:
+            file_metadata = {
+                "name": filename,
+                "parents": [folder_id],
+                "mimeType": "application/vnd.google-apps.document",
+            }
+
+            media = MediaIoBaseUpload(
+                io.BytesIO(content.encode("utf-8")),
+                mimetype="text/plain",
+                resumable=True,
+            )
+
+            file = self.service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id, name, webViewLink, createdTime",
+            ).execute()
+
+            logger.info(f"Uploaded Google Doc: {filename} ({file.get('id')})")
+            return file
+
+        except Exception as e:
+            logger.error(f"Error uploading Google Doc {filename}: {e}")
             return {}
 
     async def _upload_bytes_file(

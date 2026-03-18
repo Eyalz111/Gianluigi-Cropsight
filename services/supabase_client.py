@@ -48,6 +48,64 @@ class SupabaseClient:
         """
         self._client: Client | None = None
 
+    def get_last_meeting_of_type(self, meeting_type: str) -> dict | None:
+        """Get the most recent meeting with the given meeting_type."""
+        try:
+            result = self.client.table("meetings").select("*").eq(
+                "meeting_type", meeting_type
+            ).order("meeting_date", desc=True).limit(1).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.warning(f"Failed to get last meeting of type {meeting_type}: {e}")
+            return None
+
+    def get_changes_since(self, since_date: str, limit: int = 30) -> dict:
+        """Get tasks completed, new decisions, and commitments fulfilled since a date.
+
+        Args:
+            since_date: ISO date string (e.g. '2026-03-10').
+            limit: Max items per category.
+
+        Returns:
+            Dict with 'tasks_completed', 'tasks_newly_overdue', 'new_decisions', 'commitments_fulfilled'.
+        """
+        result = {}
+        try:
+            completed = self.client.table("tasks").select("*").eq(
+                "status", "completed"
+            ).gte("updated_at", since_date).limit(limit).execute()
+            result["tasks_completed"] = completed.data if completed.data else []
+        except Exception:
+            result["tasks_completed"] = []
+
+        try:
+            overdue = self.client.table("tasks").select("*").eq(
+                "status", "pending"
+            ).lte("due_date", datetime.now().isoformat()).gte(
+                "due_date", since_date
+            ).limit(limit).execute()
+            result["tasks_newly_overdue"] = overdue.data if overdue.data else []
+        except Exception:
+            result["tasks_newly_overdue"] = []
+
+        try:
+            decisions = self.client.table("decisions").select("*").gte(
+                "created_at", since_date
+            ).limit(limit).execute()
+            result["new_decisions"] = decisions.data if decisions.data else []
+        except Exception:
+            result["new_decisions"] = []
+
+        try:
+            fulfilled = self.client.table("commitments").select("*").eq(
+                "status", "fulfilled"
+            ).gte("updated_at", since_date).limit(limit).execute()
+            result["commitments_fulfilled"] = fulfilled.data if fulfilled.data else []
+        except Exception:
+            result["commitments_fulfilled"] = []
+
+        return result
+
     @property
     def client(self) -> Client:
         """
@@ -1882,6 +1940,84 @@ class SupabaseClient:
         )
         return result.data
 
+    def update_classification_meeting_type(self, title: str, meeting_type: str) -> dict | None:
+        """
+        Set the meeting_type on a calendar classification by title.
+
+        Args:
+            title: Meeting title (matched case-insensitive via title_lower).
+            meeting_type: Template key (e.g. 'founders_technical').
+
+        Returns:
+            Updated record or None.
+        """
+        try:
+            result = (
+                self.client.table("calendar_classifications")
+                .update({"meeting_type": meeting_type})
+                .eq("title_lower", title.lower())
+                .execute()
+            )
+            if result.data:
+                logger.info(f"Updated classification meeting_type: '{title}' → {meeting_type}")
+                return result.data[0]
+            # No existing row — create one
+            data = {
+                "title": title,
+                "is_cropsight": True,
+                "classified_by": "system",
+                "meeting_type": meeting_type,
+            }
+            result = self.client.table("calendar_classifications").insert(data).execute()
+            logger.info(f"Created classification with meeting_type: '{title}' → {meeting_type}")
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error updating classification meeting_type: {e}")
+            return None
+
+    def get_classifications_by_meeting_type(self, meeting_type: str) -> list[dict]:
+        """
+        Get all classifications with a given meeting_type.
+
+        Args:
+            meeting_type: Template key to filter by.
+
+        Returns:
+            List of matching classification records.
+        """
+        try:
+            result = (
+                self.client.table("calendar_classifications")
+                .select("*")
+                .eq("meeting_type", meeting_type)
+                .execute()
+            )
+            return result.data
+        except Exception as e:
+            logger.error(f"Error getting classifications by meeting_type: {e}")
+            return []
+
+    def get_pending_prep_outlines(self) -> list[dict]:
+        """
+        Get all pending prep outline approvals.
+
+        Returns:
+            List of pending_approvals where content_type='prep_outline' and status='pending'.
+        """
+        try:
+            result = (
+                self.client.table("pending_approvals")
+                .select("*")
+                .eq("content_type", "prep_outline")
+                .eq("status", "pending")
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return result.data
+        except Exception as e:
+            logger.error(f"Error getting pending prep outlines: {e}")
+            return []
+
     # =========================================================================
     # Orphan Cleanup Helpers (v0.5)
     # =========================================================================
@@ -2637,6 +2773,125 @@ class SupabaseClient:
             .execute()
         )
         return result.data[0] if result.data else {}
+
+    # =========================================================================
+    # v1.0 — Weekly Review Sessions
+    # =========================================================================
+
+    def create_weekly_review_session(self, week_number: int, year: int, **kwargs) -> dict:
+        """Create a new weekly review session."""
+        row = {"week_number": week_number, "year": year, **kwargs}
+        result = self.client.table("weekly_review_sessions").insert(row).execute()
+        return result.data[0] if result.data else {}
+
+    def get_weekly_review_session(self, session_id: str) -> dict | None:
+        """Get a weekly review session by ID."""
+        result = (
+            self.client.table("weekly_review_sessions")
+            .select("*")
+            .eq("id", str(session_id))
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def get_active_weekly_review_session(self) -> dict | None:
+        """Get the current active weekly review session (preparing/ready/in_progress/confirming)."""
+        result = (
+            self.client.table("weekly_review_sessions")
+            .select("*")
+            .in_("status", ["preparing", "ready", "in_progress", "confirming"])
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def update_weekly_review_session(self, session_id: str, **kwargs) -> dict:
+        """Update a weekly review session's fields."""
+        from datetime import datetime
+        kwargs["updated_at"] = datetime.utcnow().isoformat()
+        result = (
+            self.client.table("weekly_review_sessions")
+            .update(kwargs)
+            .eq("id", str(session_id))
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
+    def get_weekly_report_by_token(self, access_token: str) -> dict | None:
+        """Get a weekly report by its per-report access token."""
+        result = (
+            self.client.table("weekly_reports")
+            .select("*")
+            .eq("access_token", access_token)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def count_items_since(self, table: str, since_timestamp: str) -> int:
+        """Count items created since a given timestamp."""
+        try:
+            result = (
+                self.client.table(table)
+                .select("id", count="exact")
+                .gt("created_at", since_timestamp)
+                .execute()
+            )
+            return result.count or 0
+        except Exception:
+            return 0
+
+    def get_stale_tasks(self, days: int = 14) -> list[dict]:
+        """Get tasks that have been pending for more than N days."""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        result = (
+            self.client.table("tasks")
+            .select("*")
+            .eq("status", "pending")
+            .lt("created_at", cutoff)
+            .order("created_at", desc=False)
+            .limit(50)
+            .execute()
+        )
+        return result.data or []
+
+    def get_debrief_sessions_for_week(self, week_start: str, week_end: str) -> list[dict]:
+        """Get debrief sessions within a date range."""
+        result = (
+            self.client.table("debrief_sessions")
+            .select("*")
+            .gte("date", week_start)
+            .lte("date", week_end)
+            .order("date", desc=True)
+            .execute()
+        )
+        return result.data or []
+
+    def get_email_scans_for_week(self, week_start: str, week_end: str) -> list[dict]:
+        """Get email scans within a date range."""
+        result = (
+            self.client.table("email_scans")
+            .select("*")
+            .gte("created_at", week_start)
+            .lte("created_at", week_end)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return result.data or []
+
+    def get_pending_gantt_proposals(self) -> list[dict]:
+        """Get all pending Gantt change proposals."""
+        result = (
+            self.client.table("gantt_proposals")
+            .select("*")
+            .eq("status", "pending")
+            .order("proposed_at", desc=True)
+            .execute()
+        )
+        return result.data or []
 
     # =========================================================================
     # v1.0 — Meeting Prep History

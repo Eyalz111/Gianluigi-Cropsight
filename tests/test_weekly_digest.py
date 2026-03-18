@@ -690,6 +690,7 @@ class TestWeeklyDigestSchedulerTrigger:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_db.get_active_weekly_review_session.return_value = None
             mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = ["eyal@test.com"]
             mock_settings.WEEKLY_DIGEST_DAY = 6
@@ -808,6 +809,7 @@ class TestDuplicatePrevention:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_db.get_active_weekly_review_session.return_value = None
             mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = []
             mock_settings.WEEKLY_DIGEST_DAY = 6
@@ -856,6 +858,7 @@ class TestDuplicatePrevention:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
+            mock_db.get_active_weekly_review_session.return_value = None
             mock_af_db.log_action = MagicMock()
             mock_settings.team_emails = []
             mock_settings.WEEKLY_DIGEST_DAY = 6

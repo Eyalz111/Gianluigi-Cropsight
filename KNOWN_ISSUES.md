@@ -1,16 +1,11 @@
-# Known Issues — Gianluigi v1.0 (Post Phase 4)
+# Known Issues — Gianluigi v1.0 (Post Phase 6)
 
-Bugs and limitations discovered during live testing (Feb 25 – Mar 16, 2026).
+Bugs and limitations discovered during live testing (Feb 25 – Mar 18, 2026).
 Issues marked **FIXED** have been resolved. Open issues should be addressed in upcoming phases.
 
 ---
 
 ## Open Issues
-
-### Meeting Prep Quality (Phase 5 Target)
-- **Too much noise:** Prep docs pull in loosely related context, making them long and unfocused. The RAG search returns quantity over relevance for prep generation.
-- **Wrong context for meeting type:** A BD meeting prep might include unrelated product/legal context. No filtering by meeting category or attendee relevance.
-- **Timing issues:** Prep generation triggers based on calendar proximity, but sometimes fires too early or too late depending on how far ahead the meeting was created.
 
 ### Email Intelligence (Known Limitations)
 - **Forwarded thread dedup:** Forwarded email threads may not deduplicate perfectly. At current volume (~50 emails/day scan), this is cosmetic. Noted for Phase 5+.
@@ -25,11 +20,41 @@ Issues marked **FIXED** have been resolved. Open issues should be addressed in u
 - **No image processing:** Charts, diagrams, and images in PPTX/DOCX are ignored.
 - **Basic chunking:** Fixed-size character chunking doesn't respect document structure (sections, headings).
 
+### Calendar Filter False Positives
+- **OR-chain classification:** Calendar filter uses an OR chain (blocklist → color → participants → prefix → uncertain). A personal meeting with 2+ team members (e.g., Saturday lunch with Yoram) gets classified as CropSight even without purple color. Needs AND-logic or confidence scoring to distinguish personal from business meetings with team members.
+
+### Weekly Review UX
+- **Too heavy for Telegram:** The 3-part weekly review (stats → decisions → outputs) works but is cumbersome in a chat interface. Phase 7 will move this to Claude.ai as the primary interface, with Telegram as notification/fallback.
+- **HTML report requires Cloud Run:** Report URLs use `REPORTS_BASE_URL` (Cloud Run). Locally falls back to `localhost:8080` which requires the health server to be running.
+
 ### Disabled Schedulers
 These schedulers are implemented but disabled by default. Enable via settings:
 - `MORNING_BRIEF_ENABLED=true` — Daily morning brief
 - `EMAIL_DAILY_SCAN_ENABLED=true` — Personal Gmail scan
 - `DEBRIEF_EVENING_PROMPT_ENABLED=true` — Scheduled evening debrief prompt
+- `TRANSCRIPT_WATCHER_ENABLED=true` — Google Drive transcript watcher
+
+---
+
+## Fixed Issues (Phase 6 QA — Mar 18)
+
+### Weekly Review Smoke Test Fixes (Fixed Mar 18)
+- **Button order swapped:** [<< Back] was on right, [Continue >>] on left — swapped to correct positions
+- **Part 2 misleading title:** "Decisions needed" showed calendar meetings confusingly — renamed to "Next week + decisions", meetings shown first
+- **HTML report URL broken locally:** Bare relative path when `REPORTS_BASE_URL` empty — added `localhost:8080` fallback
+- **No distribution feedback:** After approval, no output shown — now shows success/failure per channel
+- **Debrief text not intercepted:** Typing "debrief" during review did nothing — added text interception
+- **Session TTL conflict:** `WEEKLY_REVIEW_TTL_MINUTES` (120 min) conflicted with 48h expiry — removed, unified to `WEEKLY_REVIEW_SESSION_EXPIRY_HOURS`
+- **Stack-before-validation:** Session stack push happened before validation — moved after successful start
+- **Correction flow missing buttons:** After editing, [Approve & Distribute] buttons disappeared — re-shown after correction
+
+---
+
+## Fixed Issues (Phase 5 — Mar 17)
+
+### Meeting Prep Quality (Fixed Mar 17)
+- **Issue:** Prep docs pulled loosely related context, wrong context for meeting type, bad timing.
+- **Fix:** Phase 5 redesign — template-driven prep per meeting type (founders_technical, founders_business, monthly_strategic, generic), scoring-based type classifier, propose-discuss-generate flow with Telegram inline outline proposals, timeline modes (normal/compressed/urgent/emergency/skip), graceful degradation per data query.
 
 ---
 

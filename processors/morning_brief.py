@@ -183,6 +183,72 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"Alert detection for morning brief skipped: {e}")
 
+    # 5. Pending prep outlines
+    try:
+        pending_preps = supabase_client.get_pending_prep_outlines()
+        if pending_preps:
+            prep_items = []
+            for pp in pending_preps:
+                content = pp.get("content", {})
+                event = content.get("outline", {}).get("event", content.get("event", {}))
+                ptitle = event.get("title", "Unknown meeting")
+                pstart = event.get("start", "")
+                time_str = ""
+                if isinstance(pstart, str) and "T" in pstart:
+                    try:
+                        dt = datetime.fromisoformat(pstart.replace("Z", "+00:00"))
+                        time_str = dt.strftime("%H:%M")
+                    except (ValueError, TypeError):
+                        time_str = pstart
+                prep_items.append({"title": ptitle, "time": time_str})
+            sections.append({
+                "type": "pending_prep_outlines",
+                "title": "Pending Prep Outlines",
+                "items": prep_items,
+            })
+    except Exception as e:
+        logger.debug(f"Pending prep outlines check for morning brief failed: {e}")
+
+    # 6. Pending weekly review session (existing)
+    try:
+        review_session = supabase_client.get_active_weekly_review_session()
+        if review_session:
+            review_week = review_session.get("week_number", 0)
+            review_status = review_session.get("status", "unknown")
+            sections.append({
+                "type": "weekly_review",
+                "title": "Weekly Review",
+                "week_number": review_week,
+                "status": review_status,
+            })
+    except Exception as e:
+        logger.debug(f"Weekly review check for morning brief failed: {e}")
+
+    # 7. Calendar check for upcoming weekly review today (if no session exists)
+    try:
+        from services.google_calendar import calendar_service
+        from schedulers.weekly_review_scheduler import weekly_review_scheduler
+        events = await calendar_service.get_todays_events()
+        for event in events:
+            if weekly_review_scheduler._is_review_event(event.get("title", "")):
+                if not supabase_client.get_active_weekly_review_session():
+                    start = event.get("start", "")
+                    time_str = ""
+                    if isinstance(start, str) and "T" in start:
+                        try:
+                            dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                            time_str = dt.strftime("%H:%M")
+                        except (ValueError, TypeError):
+                            pass
+                    sections.append({
+                        "type": "upcoming_review",
+                        "title": "Weekly Review",
+                        "time": time_str,
+                    })
+                break
+    except Exception as e:
+        logger.debug(f"Calendar review check failed: {e}")
+
     return {
         "sections": sections,
         "stats": stats,
@@ -266,6 +332,33 @@ def format_morning_brief(brief: dict) -> str:
                     icon = "🔴" if severity == "high" else "🟡" if severity == "medium" else "🔵"
                     lines.append(f"  {icon} {msg}")
                 lines.append("")
+
+        elif section_type == "pending_prep_outlines":
+            items = section.get("items", [])
+            if items:
+                lines.append(f"<b>{title} ({len(items)}):</b>")
+                for item in items:
+                    time_str = f" at {item['time']}" if item.get("time") else ""
+                    lines.append(f"  • {item.get('title', 'Unknown')}{time_str}")
+                lines.append("")
+
+        elif section_type == "upcoming_review":
+            time_str = section.get("time", "")
+            time_part = f" at {time_str}" if time_str else " today"
+            lines.append(f"<b>Weekly Review{time_part}:</b> prep starts 3h before")
+            lines.append("")
+
+        elif section_type == "weekly_review":
+            week_num = section.get("week_number", 0)
+            status = section.get("status", "unknown")
+            status_label = {
+                "preparing": "being prepared",
+                "ready": "ready — use /review to start",
+                "in_progress": "in progress",
+                "confirming": "awaiting final confirmation",
+            }.get(status, status)
+            lines.append(f"<b>Weekly Review W{week_num}:</b> {status_label}")
+            lines.append("")
 
     # Stats footer
     stats = brief.get("stats", {})

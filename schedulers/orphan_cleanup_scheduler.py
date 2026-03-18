@@ -97,6 +97,27 @@ class OrphanCleanupScheduler:
             logger.error(f"Error expiring approvals: {e}")
             results["expired_approvals"] = 0
 
+        # 0b. Expire old weekly review sessions
+        try:
+            from config.settings import settings
+            expired_cutoff = (
+                datetime.utcnow() - timedelta(hours=settings.WEEKLY_REVIEW_SESSION_EXPIRY_HOURS)
+            ).isoformat()
+            expired_reviews = (
+                supabase_client.client.table("weekly_review_sessions")
+                .update({"status": "expired"})
+                .in_("status", ["preparing", "ready", "in_progress", "confirming"])
+                .lt("created_at", expired_cutoff)
+                .execute()
+            )
+            expired_count = len(expired_reviews.data) if expired_reviews.data else 0
+            results["expired_review_sessions"] = expired_count
+            if expired_count:
+                logger.info(f"Expired {expired_count} stale weekly review session(s)")
+        except Exception as e:
+            logger.error(f"Error expiring review sessions: {e}")
+            results["expired_review_sessions"] = 0
+
         # 1. Stale pending approvals
         stale = self._check_stale_approvals()
         results["stale_approvals"] = len(stale)

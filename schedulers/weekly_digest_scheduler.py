@@ -92,6 +92,17 @@ class WeeklyDigestScheduler:
         if self._last_digest_week == week_of:
             return
 
+        # Check for active review session — skip digest if review exists
+        try:
+            review = supabase_client.get_active_weekly_review_session()
+            if review and review.get("status") not in ("expired", "cancelled"):
+                logger.info(
+                    f"Active review session found (status={review.get('status')}) — skipping digest"
+                )
+                return
+        except Exception:
+            pass
+
         logger.info(f"Generating weekly digest for week of {week_of}")
         await self._generate_and_distribute(week_start)
         self._last_digest_week = week_of
