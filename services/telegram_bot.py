@@ -62,6 +62,40 @@ def _escape_markdown(text: str) -> str:
     return text
 
 
+def _split_message(text: str, max_len: int = 4000) -> list[str]:
+    """
+    Split a long message into parts that fit within Telegram's limit.
+
+    Splits on double-newline (section boundaries) when possible,
+    falls back to single newline, then hard cut.
+    """
+    if len(text) <= max_len:
+        return [text]
+
+    parts = []
+    remaining = text
+    while len(remaining) > max_len:
+        # Try to split at a section boundary (double newline)
+        cut = remaining[:max_len].rfind("\n\n")
+        if cut > max_len // 2:
+            parts.append(remaining[:cut])
+            remaining = remaining[cut + 2:]
+            continue
+        # Fall back to single newline
+        cut = remaining[:max_len].rfind("\n")
+        if cut > max_len // 2:
+            parts.append(remaining[:cut])
+            remaining = remaining[cut + 1:]
+            continue
+        # Hard cut
+        parts.append(remaining[:max_len])
+        remaining = remaining[max_len:]
+
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
 def _format_cross_reference_section(cross_ref: dict) -> list[str]:
     """
     Format cross-reference results as HTML lines for the Telegram approval message.
@@ -326,16 +360,31 @@ class TelegramBot:
             True if message was sent successfully.
         """
         try:
-            # Truncate if too long (Telegram limit is 4096 chars)
+            # Split long messages (Telegram limit is 4096 chars).
+            # Send overflow parts first, buttons only on the last part.
             if len(text) > 4000:
-                text = text[:4000] + "\n\n... _(message truncated)_"
-
-            await self.app.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup,
-            )
+                parts = _split_message(text, max_len=4000)
+                # Send all parts except the last without buttons
+                for part in parts[:-1]:
+                    await self.app.bot.send_message(
+                        chat_id=chat_id,
+                        text=part,
+                        parse_mode=parse_mode,
+                    )
+                # Send the last part with buttons
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=parts[-1],
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+            else:
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
             return True
         except Exception as e:
             logger.error(f"Error sending message to {chat_id}: {e}")
