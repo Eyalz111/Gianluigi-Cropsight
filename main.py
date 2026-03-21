@@ -147,12 +147,29 @@ async def start_services() -> None:
 
     logger.info("Starting Gianluigi services...")
 
-    # Start health server early (Cloud Run needs HTTP on PORT for liveness probe)
-    from services.health_server import health_server
-    try:
-        await health_server.start()
-    except Exception as e:
-        logger.warning(f"Health server failed to start (non-fatal): {e}")
+    # Start HTTP server early (Cloud Run needs HTTP on PORT for liveness probe).
+    # When MCP_AUTH_TOKEN is set, use the MCP server (includes health routes).
+    # Otherwise, fall back to the lightweight aiohttp health server.
+    _http_server = None
+    if settings.MCP_AUTH_TOKEN:
+        from services.mcp_server import mcp_server
+        _http_server = mcp_server
+        try:
+            mcp_task = asyncio.create_task(
+                mcp_server.start(), name="mcp_server"
+            )
+            # Give uvicorn a moment to bind the port
+            await asyncio.sleep(0.5)
+            logger.info("MCP server started (includes health routes)")
+        except Exception as e:
+            logger.warning(f"MCP server failed to start (non-fatal): {e}")
+    else:
+        from services.health_server import health_server
+        _http_server = health_server
+        try:
+            await health_server.start()
+        except Exception as e:
+            logger.warning(f"Health server failed to start (non-fatal): {e}")
 
     # Validate configuration
     errors = settings.validate_required()
@@ -186,6 +203,10 @@ async def start_services() -> None:
 
     # Create tasks for all background services
     tasks = []
+
+    # Include MCP server task if it was started
+    if settings.MCP_AUTH_TOKEN:
+        tasks.append(mcp_task)
 
     # Start Telegram bot
     logger.info("  Starting Telegram bot...")
@@ -314,7 +335,7 @@ async def start_services() -> None:
     logger.info("=" * 50)
 
     # Signal readiness to Cloud Run health check
-    health_server.set_ready(True)
+    _http_server.set_ready(True)
 
     # Reconstruct auto-publish timers from persistent state (v0.4)
     from guardrails.approval_flow import reconstruct_auto_publish_timers
@@ -431,9 +452,13 @@ async def stop_services() -> None:
     from services.telegram_bot import telegram_bot
     await telegram_bot.stop()
 
-    # Stop health server
-    from services.health_server import health_server
-    await health_server.stop()
+    # Stop HTTP server (MCP or health server)
+    if settings.MCP_AUTH_TOKEN:
+        from services.mcp_server import mcp_server
+        await mcp_server.stop()
+    else:
+        from services.health_server import health_server
+        await health_server.stop()
 
     # Log shutdown
     from services.supabase_client import supabase_client

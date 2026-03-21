@@ -41,6 +41,8 @@ python-dotenv>=1.0.0           # Load .env files
 httpx>=0.27.0                  # Async HTTP client
 aiohttp>=3.9.0                 # HTTP server for health checks (Cloud Run)
 aiofiles>=24.1.0               # Async file operations
+mcp>=1.0.0                     # MCP Python SDK (SSE transport for Claude.ai)
+uvicorn>=0.30.0                # ASGI server for MCP Starlette app
 
 # =============================================================================
 # Document Processing

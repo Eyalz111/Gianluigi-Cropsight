@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** March 18, 2026
-**Current Version:** v1.0 (Phases 0-6 complete, live tested, QA fixes applied)
-**Status:** v1.0 Phases 0-6 complete, Phase 7 (MCP server) next
+**Last Updated:** March 21, 2026
+**Current Version:** v1.0 (Phases 0-7 complete, MCP server live)
+**Status:** v1.0 Phases 0-7 complete, Phase 7.5 (weekly review migration) next
 
 ---
 
@@ -16,7 +16,7 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ## Current State (Post Phase 6)
 
-- 1288 tests, all passing
+- 1348 tests, all passing (1288 existing + 60 MCP)
 - Deployed to Cloud Run (europe-west1, 512Mi, min-instances=1)
 - Live tested with real meetings and team interactions
 - DB freshly rebuilt Mar 13, 2026 (Phase 5 migration Mar 18, Phase 6 migration Mar 18)
@@ -39,6 +39,7 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **Architecture Review:** Approval reminders, expiry, health monitoring, RAG source weights, session locking
 - **v1.0 Phase 5:** Meeting prep redesign — propose-discuss-generate pipeline, template-driven prep, meeting type classifier, Telegram inline outline flow, timeline modes, restart-safe state, .docx generation, sensitivity-aware distribution
 - **v1.0 Phase 6:** Weekly review + outputs — interactive 3-part session (stats → decisions → outputs), HTML report with per-report tokens, Gantt proposal distribution, session corrections with Haiku/Sonnet fallback, digest/review scheduler coexistence, 48h session expiry, debrief interruption support
+- **v1.0 Phase 7:** MCP Core + Read Tools — FastMCP SSE server on port 8080, 15 read-only tools (thin wrappers around existing brain functions), bearer token auth, rate limiting (100/hr), audit logging, `get_system_context()` onboarding tool, session save/load, health/ready/report routes on same port
 
 ### Known Issues
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
@@ -64,11 +65,12 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **Post-Phase 4:** Architecture review fixes (approval expiry, health monitoring, RAG weights, session locking)
 - **Phase 5:** Meeting prep redesign (propose-discuss-generate, templates, type classifier, timeline modes)
 - **Phase 6:** Weekly review + outputs (3-part interactive session, HTML reports, Gantt distribution, live QA fixes)
+- **Phase 7:** MCP Core + Read Tools (SSE server, 15 read tools, auth, rate limiting, audit logging)
 
 ### Remaining Phases
-- **Phase 7:** MCP server (Claude.ai as primary CEO dashboard — weekly review primary interface)
-- **Phase 8:** Heartbeat unification
-- **Phase 9:** Integration testing
+- **Phase 7.5:** Weekly review migration (weekly review via Claude.ai, Telegram notification-only)
+- **Phase 8:** Heartbeat unification + security hardening
+- **Phase 9:** Write tools + expansion
 
 ### What's NOT Changing
 - Supabase (EU region) as primary database
@@ -108,7 +110,8 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 | Calendar | Google Calendar API (read-only, authenticated as Eyal via per-user OAuth token) |
 | Hosting | Google Cloud Run (europe-west1) |
 | Transcription | Tactiq (Chrome extension) |
-| CEO Interface | Claude.ai via MCP server |
+| CEO Interface | Claude.ai via MCP server (SSE transport, FastMCP SDK) |
+| MCP Server | `mcp` Python SDK + uvicorn, SSE on port 8080 |
 | Language | Python 3.11+, async |
 
 ---
@@ -151,3 +154,5 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 8. `docs/system_architecture_v1_phase5.md` — Post-Phase 5 system architecture
 9. `docs/system_architecture_v1_phase6.md` — Post-Phase 6 system architecture
 10. `config/meeting_prep_templates.py` — Meeting prep template definitions
+11. `services/mcp_server.py` — MCP server with 15 read-only tools
+12. `guardrails/mcp_auth.py` — MCP bearer token auth, rate limiting, audit logging

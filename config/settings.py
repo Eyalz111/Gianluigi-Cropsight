@@ -304,6 +304,9 @@ class Settings(BaseSettings):
     # ==========================================================================
     MCP_AUTH_TOKEN: str = Field(default="", description="Auth token for MCP server")
     MCP_PORT: int = Field(default=8080, description="MCP server port (shared with health server)")
+    MCP_RATE_LIMIT_PER_HOUR: int = Field(
+        default=100, description="Max MCP tool calls per hour per token"
+    )
 
     # ==========================================================================
     # v1.0 — Weekly Review
