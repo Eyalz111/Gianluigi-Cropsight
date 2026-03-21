@@ -80,6 +80,35 @@ When `MCP_AUTH_TOKEN` is set, the MCP Starlette server replaces the aiohttp heal
 - `get_system_context`: Week 12, team of 4, real operational state
 - `save_session_summary`: Session persisted with UUID
 
+### Full Cycle Test (Live, March 22)
+
+- Transcript watcher picked up real meeting from Google Drive (65K chars)
+- Claude Opus extracted 6 decisions, 12 tasks, 5 commitments, 9 open questions, 4 follow-ups
+- Approval delivered to Telegram with proper HTML formatting (multi-message split)
+- CEO approved → distribution: Drive (.md + .docx), email (Eyal-only in dev), Telegram DM, 13 tasks to Sheets
+- Claude.ai CropSight Ops project queried via MCP: returned real Gantt status, tasks, commitments, calendar
+- **Full pipeline works end-to-end.**
+
+### Bugs Fixed During Live QA
+
+| Bug | Fix |
+|-----|-----|
+| JSON extraction truncated (4096 max_tokens) | Increased to 16384 |
+| Telegram messages truncated at 4000 chars | Split into multiple messages |
+| DNS rebinding protection blocked Cloud Run | Disabled (Cloud Run handles host validation) |
+| Claude.ai connector requires authless | Made auth optional (validates if provided, allows if not) |
+| Meeting prep hallucinated fake names | Added anti-fabrication guard to Haiku prompt |
+| Cloud Run CPU throttled background tasks | Enabled `--no-cpu-throttling` |
+
+### Known Issues Deferred to Phase 7.5+
+
+- Task deadlines hallucinated (Claude guesses dates not in transcript)
+- Tasks added to wrong Sheets tab ("Commitment" instead of Tasks)
+- Stakeholders not added to Stakeholder Tracker
+- Task granularity too fine (too many small tasks)
+- MCP tool calls slow (7+ sequential round-trips for status update)
+- Claude.ai personal data leakage (mitigated by dedicated Claude Project)
+
 ---
 
 ## Revised Phase Roadmap

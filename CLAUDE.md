@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** March 21, 2026
-**Current Version:** v1.0 (Phases 0-7 complete, MCP server live)
-**Status:** v1.0 Phases 0-7 complete, Phase 7.5 (weekly review migration) next
+**Last Updated:** March 22, 2026
+**Current Version:** v1.0 (Phases 0-7 complete, MCP server live, full cycle verified)
+**Status:** v1.0 Phases 0-7 complete + live QA fixes. Phase 7.5 (weekly review migration) next
 
 ---
 
@@ -14,11 +14,13 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ---
 
-## Current State (Post Phase 6)
+## Current State (Post Phase 7)
 
 - 1348 tests, all passing (1288 existing + 60 MCP)
-- Deployed to Cloud Run (europe-west1, 512Mi, min-instances=1)
-- Live tested with real meetings and team interactions
+- Deployed to Cloud Run (europe-west1, 1Gi, min-instances=1, no-cpu-throttling)
+- MCP server live on Cloud Run, connected to Claude.ai via CropSight Ops project
+- Full cycle verified: transcript → extraction → approval → distribution → MCP query
+- Live tested with real meeting transcript (March 22, 2026)
 - DB freshly rebuilt Mar 13, 2026 (Phase 5 migration Mar 18, Phase 6 migration Mar 18)
 
 ### What Works
