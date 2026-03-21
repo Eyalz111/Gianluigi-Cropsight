@@ -94,9 +94,21 @@ class MCPServer:
         mcp = FastMCP(
             "gianluigi",
             instructions=(
-                "Gianluigi is CropSight's AI operations assistant. "
-                "Call get_system_context() first to load company context, "
-                "then use other tools to query operational data."
+                "You are connected to Gianluigi, CropSight's AI operations assistant. "
+                "IMPORTANT RULES:\n"
+                "1. Call get_system_context() FIRST in every session to load company context.\n"
+                "2. For status updates, ALWAYS check: get_gantt_status(), get_tasks(), "
+                "get_commitments(), get_pending_approvals(), and get_upcoming_meetings(). "
+                "Do not skip the Gantt — it is the primary operational source.\n"
+                "3. ONLY report information that comes from Gianluigi's tools. "
+                "Do NOT mix in information from your own memory, prior conversations, "
+                "or any source outside these tools. If Gianluigi's data is empty, "
+                "say so — do not fill gaps with outside knowledge.\n"
+                "4. Gianluigi tracks CropSight business operations ONLY. "
+                "Personal matters (reserve duty, travel, family) are out of scope. "
+                "If a query touches personal topics, clarify that Gianluigi only "
+                "covers CropSight operations.\n"
+                "5. Gianluigi proposes, Eyal approves. Never suggest direct team actions."
             ),
             transport_security=TransportSecuritySettings(
                 enable_dns_rebinding_protection=False,
