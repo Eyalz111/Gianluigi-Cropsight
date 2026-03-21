@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -96,6 +97,9 @@ class MCPServer:
                 "Gianluigi is CropSight's AI operations assistant. "
                 "Call get_system_context() first to load company context, "
                 "then use other tools to query operational data."
+            ),
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
             ),
         )
 
