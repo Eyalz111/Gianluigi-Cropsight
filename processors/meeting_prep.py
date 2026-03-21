@@ -678,6 +678,8 @@ async def _generate_outline_narrative(sections: list[dict], template_name: str) 
     prompt = f"""You are an executive assistant writing a brief status update for a CEO.
 Summarize this meeting prep data in 3-5 short lines. Be specific — mention names, numbers, and what's overdue or notable. No headers, no bullets, just flowing text. Keep it under 200 characters per line.
 
+CRITICAL: ONLY use information from the data below. Do NOT invent names, companies, numbers, or details. If the data is sparse, say so briefly — never fabricate.
+
 Meeting type: {template_name}
 Data:
 {chr(10).join(context_parts)}"""
