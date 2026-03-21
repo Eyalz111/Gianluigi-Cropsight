@@ -112,13 +112,20 @@ class MCPAuth:
 
 class MCPAuthMiddleware:
     """
-    Pure ASGI middleware that enforces Bearer token auth on MCP paths.
+    Pure ASGI middleware for MCP auth on /sse and /messages/ paths.
 
     Uses raw ASGI protocol instead of BaseHTTPMiddleware to avoid
     breaking SSE streaming responses.
 
-    Protects /sse and /messages/ endpoints.
-    Passes through health, ready, and report endpoints without auth.
+    Auth behavior:
+    - If a Bearer token IS provided, it must be valid (reject bad tokens).
+    - If NO token is provided, allow through (authless mode for Claude.ai,
+      which doesn't support custom headers). Rate limiting uses IP instead.
+    - Health, ready, and report endpoints always pass through without auth.
+
+    This is a pragmatic compromise: Claude.ai connectors only support
+    authless or OAuth. We keep token validation for programmatic clients
+    and add OAuth in Phase 8.
     """
 
     def __init__(self, app):
@@ -131,7 +138,7 @@ class MCPAuthMiddleware:
 
         path = scope.get("path", "")
 
-        # Only protect MCP-specific paths
+        # Only check auth on MCP-specific paths
         if not any(path.startswith(prefix) for prefix in _PROTECTED_PREFIXES):
             await self.app(scope, receive, send)
             return
@@ -140,21 +147,22 @@ class MCPAuthMiddleware:
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode()
 
-        if not auth_header.startswith("Bearer "):
-            logger.warning(f"MCP auth: missing Bearer token for {path}")
-            await self._send_json_error(
-                send, 401, {"error": "Missing or invalid Authorization header"}
-            )
-            return
+        if auth_header.startswith("Bearer "):
+            # Token provided — validate it (reject bad tokens)
+            token = auth_header[7:]
+            if not mcp_auth.validate_token(token):
+                logger.warning(f"MCP auth: invalid token for {path}")
+                await self._send_json_error(send, 401, {"error": "Invalid token"})
+                return
+            rate_key = f"token:{token}"
+        else:
+            # No token — authless mode (Claude.ai connector)
+            # Use client IP for rate limiting
+            client_host = scope.get("client", ("unknown", 0))[0]
+            rate_key = f"ip:{client_host}"
+            logger.debug(f"MCP authless access from {client_host} to {path}")
 
-        token = auth_header[7:]  # Strip "Bearer "
-
-        if not mcp_auth.validate_token(token):
-            logger.warning(f"MCP auth: invalid token for {path}")
-            await self._send_json_error(send, 401, {"error": "Invalid token"})
-            return
-
-        if not mcp_auth.check_rate_limit(token):
+        if not mcp_auth.check_rate_limit(rate_key):
             logger.warning(f"MCP auth: rate limit exceeded for {path}")
             await self._send_json_error(
                 send, 429, {"error": "Rate limit exceeded", "retry_after_seconds": 3600}

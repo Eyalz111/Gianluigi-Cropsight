@@ -189,18 +189,23 @@ class TestAuthMiddleware:
         mock_auth.validate_token.assert_not_called()
 
     @patch("guardrails.mcp_auth.mcp_auth")
-    def test_sse_requires_auth(self, mock_auth):
+    def test_sse_authless_allowed(self, mock_auth):
+        """No token = authless mode (Claude.ai connector). Should pass through."""
+        mock_auth.check_rate_limit.return_value = True
         app = self._make_test_app()
         client = TestClient(app)
         response = client.get("/sse")
-        assert response.status_code == 401
+        assert response.status_code == 200
+        mock_auth.validate_token.assert_not_called()
 
     @patch("guardrails.mcp_auth.mcp_auth")
-    def test_messages_requires_auth(self, mock_auth):
+    def test_messages_authless_allowed(self, mock_auth):
+        """No token on /messages = authless mode. Should pass through."""
+        mock_auth.check_rate_limit.return_value = True
         app = self._make_test_app()
         client = TestClient(app)
         response = client.get("/messages/test")
-        assert response.status_code == 401
+        assert response.status_code == 200
 
     @patch("guardrails.mcp_auth.mcp_auth")
     def test_sse_with_valid_token(self, mock_auth):
@@ -216,7 +221,8 @@ class TestAuthMiddleware:
         mock_auth.validate_token.assert_called_with("valid-token")
 
     @patch("guardrails.mcp_auth.mcp_auth")
-    def test_sse_with_invalid_token(self, mock_auth):
+    def test_sse_with_invalid_token_rejected(self, mock_auth):
+        """Bad token provided = reject (don't fall through to authless)."""
         mock_auth.validate_token.return_value = False
         app = self._make_test_app()
         client = TestClient(app)
@@ -227,7 +233,7 @@ class TestAuthMiddleware:
         assert response.status_code == 401
 
     @patch("guardrails.mcp_auth.mcp_auth")
-    def test_sse_rate_limited(self, mock_auth):
+    def test_sse_rate_limited_with_token(self, mock_auth):
         mock_auth.validate_token.return_value = True
         mock_auth.check_rate_limit.return_value = False
         app = self._make_test_app()
@@ -238,3 +244,12 @@ class TestAuthMiddleware:
         )
         assert response.status_code == 429
         assert "Rate limit" in response.json()["error"]
+
+    @patch("guardrails.mcp_auth.mcp_auth")
+    def test_sse_rate_limited_authless(self, mock_auth):
+        """Authless connections are still rate-limited by IP."""
+        mock_auth.check_rate_limit.return_value = False
+        app = self._make_test_app()
+        client = TestClient(app)
+        response = client.get("/sse")
+        assert response.status_code == 429
