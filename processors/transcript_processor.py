@@ -472,7 +472,7 @@ Apply all tone guardrails: no emotional characterizations, professional language
             response_text, _ = call_llm(
                 prompt=prompt,
                 model=settings.model_extraction,
-                max_tokens=4096,
+                max_tokens=16384,
                 system=extraction_system,
                 call_site="transcript_extraction",
             )
