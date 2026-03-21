@@ -27,6 +27,11 @@ Issues marked **FIXED** have been resolved. Open issues should be addressed in u
 - **Too heavy for Telegram:** The 3-part weekly review (stats → decisions → outputs) works but is cumbersome in a chat interface. Phase 7 will move this to Claude.ai as the primary interface, with Telegram as notification/fallback.
 - **HTML report requires Cloud Run:** Report URLs use `REPORTS_BASE_URL` (Cloud Run). Locally falls back to `localhost:8080` which requires the health server to be running.
 
+### MCP / Claude.ai Integration
+- **Personal data leakage:** Claude.ai mixes Gianluigi tool results with its own conversation history. When Gianluigi returns empty data, Claude fills gaps from personal context (reserve duty, travel plans, academic work). MCP `instructions` field is treated as guidance, not a hard sandbox. **Mitigation:** Use a dedicated Claude Project with its own system prompt to isolate CropSight conversations from personal chat history. **Future fix:** OAuth + per-session context isolation if Claude.ai adds support (Phase 8+).
+- **Gantt not auto-queried:** Claude doesn't always call `get_gantt_status()` for status updates despite instructions. Improved in instructions update (March 21), but Claude.ai tool selection is probabilistic. Users should explicitly ask for Gantt data if not included.
+- **Google Sheets token expiry:** OAuth consent screen in "Testing" mode causes refresh tokens to expire every 7 days. **Fix:** Move OAuth consent screen to "Production" mode in Google Cloud Console (one-time action, no code change needed).
+
 ### Disabled Schedulers
 These schedulers are implemented but disabled by default. Enable via settings:
 - `MORNING_BRIEF_ENABLED=true` — Daily morning brief

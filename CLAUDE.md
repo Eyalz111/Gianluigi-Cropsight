@@ -69,8 +69,11 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ### Remaining Phases
 - **Phase 7.5:** Weekly review migration (weekly review via Claude.ai, Telegram notification-only)
-- **Phase 8:** Heartbeat unification + security hardening
+- **Phase 8:** Heartbeat unification + security hardening (includes OAuth for MCP, data boundary enforcement)
 - **Phase 9:** Write tools + expansion
+
+### Known MCP Limitation: Personal Data Leakage
+Claude.ai mixes MCP tool results with its own conversation memory. MCP `instructions` are guidance, not a sandbox — Claude.ai can and will use prior conversation context when Gianluigi data is sparse. **Current mitigation:** Use a dedicated Claude Project ("CropSight Ops") to isolate business conversations. **Future:** OAuth integration (Phase 8) may enable stricter session isolation. This is a Claude.ai platform limitation, not a Gianluigi bug.
 
 ### What's NOT Changing
 - Supabase (EU region) as primary database
