@@ -273,8 +273,11 @@ class WeeklyReviewScheduler:
 
         message = f"Weekly review for W{week_number} starts in 30 minutes."
         if report_url:
-            message += f"\n\nPreview report: {report_url}"
-        message += "\n\nUse /review when you're ready."
+            message += f"\nPreview report: {report_url}"
+        message += (
+            "\n\nOpen Claude.ai (CropSight Ops project) to start your review."
+            "\nOr use /review here as fallback."
+        )
 
         await telegram_bot.send_to_eyal(message, parse_mode=None)
         logger.info(f"Weekly review notification sent for W{week_number}")
@@ -313,7 +316,8 @@ class WeeklyReviewScheduler:
         from services.telegram_bot import telegram_bot
         await telegram_bot.send_to_eyal(
             "No weekly review event found on your calendar today.\n"
-            "Use /review to start manually, or I'll send a basic digest at end of day.",
+            "Open Claude.ai (CropSight Ops project) to start your review.\n"
+            "Or use /review here as fallback.",
             parse_mode=None,
         )
 

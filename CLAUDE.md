@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
 **Last Updated:** March 22, 2026
-**Current Version:** v1.0 (Phases 0-7 complete, MCP server live, full cycle verified)
-**Status:** v1.0 Phases 0-7 complete + live QA fixes. Phase 7.5 (weekly review migration) next
+**Current Version:** v1.0 (Phases 0-7 complete + QA hardening, MCP server live, full cycle verified)
+**Status:** v1.0 Phases 0-7 + QA Hardening complete. Phase 7.5 (weekly review migration) in progress
 
 ---
 
@@ -16,12 +16,12 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ## Current State (Post Phase 7)
 
-- 1348 tests, all passing (1288 existing + 60 MCP)
-- Deployed to Cloud Run (europe-west1, 1Gi, min-instances=1, no-cpu-throttling)
+- 1350+ tests, all passing
+- Deployed to Cloud Run (europe-west1, 1Gi, min-instances=1, no-cpu-throttling) — revision 15, Mar 22
 - MCP server live on Cloud Run, connected to Claude.ai via CropSight Ops project
 - Full cycle verified: transcript → extraction → approval → distribution → MCP query
-- Live tested with real meeting transcript (March 22, 2026)
-- DB freshly rebuilt Mar 13, 2026 (Phase 5 migration Mar 18, Phase 6 migration Mar 18)
+- QA Hardening applied: 16 issues fixed, commitments deprecated, extraction improved
+- DB wiped and rebuilt Mar 22, 2026 (QA hardening migration applied)
 
 ### What Works
 - Full transcript pipeline: Tactiq → Drive → Claude extraction → Supabase → approval → distribution
@@ -29,7 +29,7 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - Telegram bot with commands, Q&A, approval flow, /status command
 - Gmail send/receive, Google Drive watchers, Calendar reading
 - Task deduplication, status inference, open question resolution
-- Entity registry, commitment tracking, proactive alerts
+- Entity registry, proactive alerts, system failure alerts (CRITICAL → Telegram DM, WARNING → batched)
 - Meeting prep generation, weekly digest (Friday), pre-meeting reminders
 - Word document summaries, Google Sheets integration
 - Cost optimization (tiered models: Opus/Sonnet/Haiku, prompt caching)
@@ -41,7 +41,8 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **Architecture Review:** Approval reminders, expiry, health monitoring, RAG source weights, session locking
 - **v1.0 Phase 5:** Meeting prep redesign — propose-discuss-generate pipeline, template-driven prep, meeting type classifier, Telegram inline outline flow, timeline modes, restart-safe state, .docx generation, sensitivity-aware distribution
 - **v1.0 Phase 6:** Weekly review + outputs — interactive 3-part session (stats → decisions → outputs), HTML report with per-report tokens, Gantt proposal distribution, session corrections with Haiku/Sonnet fallback, digest/review scheduler coexistence, 48h session expiry, debrief interruption support
-- **v1.0 Phase 7:** MCP Core + Read Tools — FastMCP SSE server on port 8080, 15 read-only tools (thin wrappers around existing brain functions), bearer token auth, rate limiting (100/hr), audit logging, `get_system_context()` onboarding tool, session save/load, health/ready/report routes on same port
+- **v1.0 Phase 7:** MCP Core + Read Tools — FastMCP SSE server on port 8080, 16 tools (15 read + `get_full_status()` composite), bearer token auth, rate limiting (100/hr), audit logging, `get_system_context()` onboarding tool, session save/load, health/ready/report routes on same port
+- **QA Hardening:** 16 issues fixed — commitments deprecated (unified into action items), extraction prompt improved (deadline-only-if-explicit, consolidation 3-7 items), decisions exported to Sheets, summary teaser distribution, all schedulers Israel timezone, system failure alerts (`services/alerting.py`), MCP `_success(warnings=...)` pattern, stakeholder tab fix, silent logging fixes
 
 ### Known Issues
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
@@ -67,10 +68,11 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **Post-Phase 4:** Architecture review fixes (approval expiry, health monitoring, RAG weights, session locking)
 - **Phase 5:** Meeting prep redesign (propose-discuss-generate, templates, type classifier, timeline modes)
 - **Phase 6:** Weekly review + outputs (3-part interactive session, HTML reports, Gantt distribution, live QA fixes)
-- **Phase 7:** MCP Core + Read Tools (SSE server, 15 read tools, auth, rate limiting, audit logging)
+- **Phase 7:** MCP Core + Read Tools (SSE server, 16 tools, auth, rate limiting, audit logging)
+- **QA Hardening:** 16 issues fixed (commitments deprecated, extraction improved, alerting, timezone, decisions export, MCP composite tool)
 
 ### Remaining Phases
-- **Phase 7.5:** Weekly review migration (weekly review via Claude.ai, Telegram notification-only)
+- **Phase 7.5:** Weekly review migration (weekly review via Claude.ai, Telegram notification-only) — IN PROGRESS
 - **Phase 8:** Heartbeat unification + security hardening (includes OAuth for MCP, data boundary enforcement)
 - **Phase 9:** Write tools + expansion
 

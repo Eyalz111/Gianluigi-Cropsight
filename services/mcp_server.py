@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 16 read-only tools as thin wrappers around existing brain functions.
+Provides 18 tools (16 read + 2 write) tools as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -85,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 16 read-only tools.
+    MCP server with SSE transport, auth middleware, and 18 tools (16 read + 2 write) tools.
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -116,7 +116,10 @@ class MCPServer:
                 "Personal matters (reserve duty, travel, family) are out of scope. "
                 "If a query touches personal topics, clarify that Gianluigi only "
                 "covers CropSight operations.\n"
-                "5. Gianluigi proposes, Eyal approves. Never suggest direct team actions."
+                "5. Gianluigi proposes, Eyal approves. Never suggest direct team actions.\n"
+                "6. For weekly reviews, call start_weekly_review() to begin, then "
+                "confirm_weekly_review(session_id) when Eyal approves. "
+                "See the project instructions for the full weekly review workflow."
             ),
             transport_security=TransportSecuritySettings(
                 enable_dns_rebinding_protection=False,
@@ -198,7 +201,7 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (16 read-only tools)
+    # MCP Tools (18 tools (16 read + 2 write) tools)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
@@ -799,6 +802,273 @@ class MCPServer:
                 source="composite",
                 warnings=warnings if warnings else None,
             )
+
+        # ============================================================
+        # 17. start_weekly_review (write)
+        # ============================================================
+        @mcp.tool(
+            name="start_weekly_review",
+            description=(
+                "Start or resume the weekly CEO review session. Returns all compiled "
+                "data (week stats, Gantt proposals, attention items, next week preview, "
+                "horizon check) in one payload for conversational presentation. "
+                "Call this when Eyal wants to do the weekly review. "
+                "Works any time — not restricted to the Friday calendar window."
+            ),
+        )
+        async def start_weekly_review(force_fresh: bool = False) -> dict:
+            try:
+                from processors.weekly_review_session import (
+                    start_weekly_review as _start_review,
+                )
+                from services.supabase_client import supabase_client as _sc
+
+                # Create or resume session
+                result = await _start_review(
+                    user_id="eyal",
+                    trigger="mcp",
+                    force_fresh=force_fresh,
+                )
+
+                session_id = result.get("session_id")
+                if not session_id:
+                    return _error(result.get("response", "Failed to start review"))
+
+                # Fetch full session data (raw agenda, not Telegram-formatted)
+                session = _sc.get_weekly_review_session(session_id)
+                if not session:
+                    return _error("Session created but not found in DB")
+
+                agenda_data = session.get("agenda_data", {}) or {}
+
+                # Staleness warning (>4 hours)
+                stale_warning = None
+                compiled_at = agenda_data.get("meta", {}).get("compiled_at", "")
+                if compiled_at:
+                    try:
+                        compiled_dt = datetime.fromisoformat(
+                            compiled_at.replace("Z", "+00:00")
+                        )
+                        if compiled_dt.tzinfo is None:
+                            compiled_dt = compiled_dt.replace(tzinfo=timezone.utc)
+                        age_hours = (
+                            datetime.now(timezone.utc) - compiled_dt
+                        ).total_seconds() / 3600
+                        if age_hours > 4:
+                            stale_warning = (
+                                f"Data compiled {age_hours:.0f}h ago. "
+                                f"Use force_fresh=True to recompile."
+                            )
+                    except (ValueError, TypeError):
+                        pass
+
+                # Attach report URL if available
+                report_url = None
+                week_number = session.get("week_number", 0)
+                year = session.get("year", 0)
+                try:
+                    report = _sc.get_weekly_report(week_number, year)
+                    if report and report.get("access_token"):
+                        base_url = (
+                            settings.REPORTS_BASE_URL.rstrip("/")
+                            if settings.REPORTS_BASE_URL
+                            else ""
+                        )
+                        if base_url:
+                            report_url = (
+                                f"{base_url}/reports/weekly/{report['access_token']}"
+                            )
+                except Exception:
+                    pass
+
+                # Audit log
+                _sc.log_action(
+                    action="weekly_review_started",
+                    details={
+                        "session_id": session_id,
+                        "week_number": week_number,
+                        "year": year,
+                        "force_fresh": force_fresh,
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                response = {
+                    "session_id": session_id,
+                    "action": result.get("action", "review_started"),
+                    "week_number": week_number,
+                    "year": year,
+                    "compiled_at": compiled_at,
+                    "stale_warning": stale_warning,
+                    **agenda_data,
+                    "report_url": report_url,
+                }
+
+                mcp_auth.log_call(
+                    "start_weekly_review",
+                    {"force_fresh": force_fresh, "session_id": session_id},
+                )
+                return _success(response, source="composite")
+
+            except Exception as e:
+                logger.error(f"start_weekly_review error: {e}")
+                mcp_auth.log_call(
+                    "start_weekly_review", success=False, error=str(e)
+                )
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL,
+                        "mcp_weekly_review",
+                        f"start_weekly_review failed: {e}",
+                        error=e,
+                    )
+                except Exception:
+                    pass
+                return _error(str(e))
+
+        # ============================================================
+        # 18. confirm_weekly_review (write)
+        # ============================================================
+        @mcp.tool(
+            name="confirm_weekly_review",
+            description=(
+                "Approve, execute, and distribute the weekly review. "
+                "Generates outputs (HTML report, PPTX), executes approved Gantt "
+                "proposals, uploads to Drive, emails team, and notifies Telegram. "
+                "Call when Eyal says 'approve', 'looks good', 'distribute', etc. "
+                "Set cancel=True to cancel the review instead. "
+                "Set approve_gantt=False to distribute without executing Gantt changes."
+            ),
+        )
+        async def confirm_weekly_review(
+            session_id: str,
+            approve_gantt: bool = True,
+            cancel: bool = False,
+        ) -> dict:
+            try:
+                from processors.weekly_review_session import (
+                    finalize_review,
+                    confirm_review,
+                )
+                from services.supabase_client import supabase_client as _sc
+
+                # Validate session
+                session = _sc.get_weekly_review_session(session_id)
+                if not session:
+                    return _error(f"Session {session_id} not found")
+
+                status = session.get("status", "")
+
+                # Cancel flow
+                if cancel:
+                    _sc.update_weekly_review_session(
+                        session_id, status="cancelled"
+                    )
+                    _sc.log_action(
+                        action="weekly_review_cancelled",
+                        details={"session_id": session_id, "source": "mcp"},
+                        triggered_by="eyal",
+                    )
+                    mcp_auth.log_call(
+                        "confirm_weekly_review", {"action": "cancelled"}
+                    )
+                    return _success(
+                        {"session_id": session_id, "action": "review_cancelled"}
+                    )
+
+                # Guard: already done
+                if status in ("approved", "cancelled"):
+                    return _error(
+                        f"This review has already been {status}."
+                    )
+
+                # Finalize if not yet done (generates HTML + PPTX)
+                # Fast no-op if already in "confirming" state (T-3h prep did it)
+                warnings: list[str] = []
+                if status in ("in_progress", "ready"):
+                    try:
+                        fin_result = await finalize_review(session_id)
+                        if fin_result.get("action") == "error":
+                            return _error(
+                                fin_result.get("response", "Finalization failed")
+                            )
+                    except Exception as e:
+                        warnings.append(f"Output generation issue: {e}")
+
+                # Execute approval (Gantt + distribution)
+                result = await confirm_review(
+                    session_id,
+                    approved=True,
+                    execute_gantt=approve_gantt,
+                )
+
+                action = result.get("action", "")
+                if action == "gantt_failed":
+                    return _success(
+                        {
+                            "session_id": session_id,
+                            "action": "gantt_failed",
+                            "gantt_executed": False,
+                            "backup_available": True,
+                            "message": (
+                                "Gantt execution failed. You can retry, "
+                                "or call with approve_gantt=False to distribute "
+                                "without Gantt changes."
+                            ),
+                        },
+                        warnings=["Gantt execution failed"],
+                    )
+
+                # Audit log
+                _sc.log_action(
+                    action="weekly_review_confirmed",
+                    details={
+                        "session_id": session_id,
+                        "approve_gantt": approve_gantt,
+                        "action": action,
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call(
+                    "confirm_weekly_review",
+                    {"session_id": session_id, "action": action},
+                )
+
+                response = {
+                    "session_id": session_id,
+                    "action": action,
+                    "gantt_executed": approve_gantt and action != "gantt_failed",
+                    "distribution": result.get("distribution", {}),
+                    "response": result.get("response", ""),
+                }
+                return _success(
+                    response,
+                    source="composite",
+                    warnings=warnings if warnings else None,
+                )
+
+            except Exception as e:
+                logger.error(f"confirm_weekly_review error: {e}")
+                mcp_auth.log_call(
+                    "confirm_weekly_review", success=False, error=str(e)
+                )
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL,
+                        "mcp_weekly_review",
+                        f"confirm_weekly_review failed: {e}",
+                        error=e,
+                    )
+                except Exception:
+                    pass
+                return _error(str(e))
 
     # ------------------------------------------------------------------
     # Server lifecycle

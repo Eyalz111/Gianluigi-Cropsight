@@ -1711,19 +1711,26 @@ When you receive approval requests, use the buttons to approve, request changes,
             )
             return
 
-        from processors.weekly_review_session import start_weekly_review
-
         # Parse --fresh flag to force recompilation
         args = (update.message.text or "").split()
         force_fresh = "--fresh" in args
 
+        # Suggest Claude.ai as primary interface, offer Telegram as fallback
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "Continue here in Telegram",
+                callback_data=f"review_start_telegram:{'fresh' if force_fresh else 'normal'}",
+            )],
+        ])
         await self.send_message(
             update.effective_chat.id,
-            "Starting weekly review..." + (" (fresh compilation)" if force_fresh else ""),
+            "The weekly review works best in Claude.ai (CropSight Ops project) "
+            "where you can have a natural conversation.\n\n"
+            "Want to continue here in Telegram instead?",
             parse_mode=None,
+            reply_markup=keyboard,
         )
-
-        result = await start_weekly_review(user_id="eyal", force_fresh=force_fresh)
+        return
         response = result.get("response", "Starting weekly review...")
         session_id = result.get("session_id")
 
@@ -1858,6 +1865,31 @@ When you receive approval requests, use the buttons to approve, request changes,
         from services.supabase_client import supabase_client
 
         chat_id = query.message.chat_id
+
+        # Handle "Continue here in Telegram" redirect button
+        if action == "review_start_telegram":
+            await query.answer()
+            force_fresh = session_id == "fresh"  # session_id carries the flag here
+
+            from processors.weekly_review_session import start_weekly_review
+
+            await self.send_message(chat_id, "Starting weekly review...", parse_mode=None)
+            result = await start_weekly_review(user_id="eyal", force_fresh=force_fresh)
+            response = result.get("response", "Starting weekly review...")
+            sid = result.get("session_id")
+
+            if not sid:
+                await self.send_message(chat_id, response, parse_mode=None)
+                return
+
+            self._session_stack.append("weekly_review")
+            context.user_data["review_session_id"] = sid
+
+            keyboard = self._get_review_navigation_keyboard(
+                sid, result.get("current_part", 1)
+            )
+            await self.send_message(chat_id, response, parse_mode="HTML", reply_markup=keyboard)
+            return
 
         if action == "review_next":
             session = supabase_client.get_weekly_review_session(session_id)
@@ -2512,7 +2544,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             "review_next", "review_back", "review_finalize",
             "review_approve", "review_reject", "review_correct",
             "review_end", "review_force_distribute", "review_hold",
-            "review_resume_after_debrief",
+            "review_resume_after_debrief", "review_start_telegram",
         )
         if action in review_actions:
             await self._handle_review_callback(query, context, action, meeting_id)

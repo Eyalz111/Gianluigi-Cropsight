@@ -82,14 +82,13 @@ async def _compile_week_in_review(
     week_start: datetime,
     week_end: datetime,
 ) -> dict:
-    """Compile week stats: meetings, decisions, tasks, commitments, activity counts."""
+    """Compile week stats: meetings, decisions, tasks, activity counts."""
     result = {
         "meetings": [],
         "meetings_count": 0,
         "decisions": [],
         "decisions_count": 0,
         "task_summary": {},
-        "commitment_scorecard": {},
         "cross_reference_summary": {},
         "debrief_count": 0,
         "email_scan_count": 0,
@@ -121,12 +120,8 @@ async def _compile_week_in_review(
     except Exception as e:
         logger.error(f"Week-in-review task summary failed: {e}")
 
-    # Commitment scorecard
-    try:
-        from processors.weekly_digest import get_commitment_scorecard
-        result["commitment_scorecard"] = await get_commitment_scorecard()
-    except Exception as e:
-        logger.error(f"Week-in-review commitment scorecard failed: {e}")
+    # DEPRECATED: Commitment scorecard removed — commitments merged into tasks.
+    # Previously: result["commitment_scorecard"] = await get_commitment_scorecard()
 
     # Cross-reference summary
     try:

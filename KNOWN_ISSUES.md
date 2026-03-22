@@ -24,7 +24,7 @@ Issues marked **FIXED** have been resolved. Open issues should be addressed in u
 - **OR-chain classification:** Calendar filter uses an OR chain (blocklist → color → participants → prefix → uncertain). A personal meeting with 2+ team members (e.g., Saturday lunch with Yoram) gets classified as CropSight even without purple color. Needs AND-logic or confidence scoring to distinguish personal from business meetings with team members.
 
 ### Weekly Review UX
-- **Too heavy for Telegram:** The 3-part weekly review (stats → decisions → outputs) works but is cumbersome in a chat interface. Phase 7 will move this to Claude.ai as the primary interface, with Telegram as notification/fallback.
+- **RESOLVED (Phase 7.5):** Weekly review migrated to Claude.ai as primary interface via MCP (`start_weekly_review` + `confirm_weekly_review` tools). Telegram retained as fallback with redirect prompt.
 - **HTML report requires Cloud Run:** Report URLs use `REPORTS_BASE_URL` (Cloud Run). Locally falls back to `localhost:8080` which requires the health server to be running.
 
 ### MCP / Claude.ai Integration

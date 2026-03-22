@@ -484,12 +484,17 @@ async def process_correction(
         }
 
 
-async def confirm_review(session_id: str, approved: bool) -> dict:
+async def confirm_review(session_id: str, approved: bool, execute_gantt: bool = True) -> dict:
     """
     Confirm or cancel a finalized review.
 
-    If approved: execute Gantt proposals FIRST, then upload + distribute.
-    Uses atomic claim to prevent double-approval.
+    If approved: execute Gantt proposals FIRST (unless execute_gantt=False),
+    then upload + distribute. Uses atomic claim to prevent double-approval.
+
+    Args:
+        session_id: Weekly review session ID.
+        approved: True to approve, False to cancel.
+        execute_gantt: If False, skip Gantt proposal execution (still distribute outputs).
 
     Returns:
         Dict with response, action, distribution details.
@@ -535,16 +540,16 @@ async def confirm_review(session_id: str, approved: bool) -> dict:
     distribution = {"gantt_executed": False, "drive_uploaded": False, "distributed": False}
 
     # 0. Backup Gantt BEFORE execution (pre-write snapshot)
-    if gantt_proposals and any(p.get("approved") for p in gantt_proposals):
+    if execute_gantt and gantt_proposals and any(p.get("approved") for p in gantt_proposals):
         try:
             from services.gantt_manager import gantt_manager
             await gantt_manager.backup_full_gantt()
         except Exception as e:
             logger.warning(f"Pre-review Gantt backup failed: {e}")
 
-    # 1. Execute approved Gantt proposals
+    # 1. Execute approved Gantt proposals (skip if execute_gantt=False)
     gantt_failed = False
-    if gantt_proposals:
+    if execute_gantt and gantt_proposals:
         try:
             from services.gantt_manager import gantt_manager
             for proposal in gantt_proposals:
@@ -681,13 +686,7 @@ def _format_part1(agenda_data: dict, week_number: int) -> str:
         lines.append(f"  • Email scans: {email_count}")
     lines.append("")
 
-    # Commitment scorecard
-    scorecard = wir.get("commitment_scorecard", {})
-    open_c = scorecard.get("open_count", 0)
-    fulfilled_c = scorecard.get("fulfilled_count", 0)
-    if open_c or fulfilled_c:
-        lines.append(f"<b>Commitments:</b> {open_c} open, {fulfilled_c} fulfilled")
-        lines.append("")
+    # DEPRECATED: Commitment scorecard removed — commitments merged into tasks.
 
     # Attention needed
     attention = agenda_data.get("attention_needed", {})
