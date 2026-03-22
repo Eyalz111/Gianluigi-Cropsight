@@ -346,11 +346,12 @@ async def start_services() -> None:
     except Exception as e:
         logger.warning(f"  Timer reconstruction failed (non-fatal): {e}")
 
-    # Reconstruct prep outline timers from persistent state (Phase 5)
+    # NOTE: reconstruct_prep_timers() now runs inside start() before the main loop.
+    # This external call is kept as a safety net but is effectively a no-op.
     try:
         prep_reconstructed = await meeting_prep_scheduler.reconstruct_prep_timers()
         if prep_reconstructed:
-            logger.info(f"  Reconstructed {prep_reconstructed} prep timer(s)")
+            logger.info(f"  Reconstructed {prep_reconstructed} additional prep timer(s)")
     except Exception as e:
         logger.warning(f"  Prep timer reconstruction failed (non-fatal): {e}")
 

@@ -85,6 +85,15 @@ class MeetingPrepScheduler:
         except Exception:
             pass  # If bot not available, proceed anyway
 
+        # Populate _prep_generated cache from DB BEFORE entering the loop.
+        # Without this, the first check treats all existing outlines as "new"
+        # and re-sends Telegram notifications on every restart.
+        try:
+            count = await self.reconstruct_prep_timers()
+            logger.info(f"Reconstructed {count} prep timers from DB on startup")
+        except Exception as e:
+            logger.error(f"Failed to reconstruct prep timers on startup: {e}")
+
         while self._running:
             try:
                 await self._check_and_generate_preps()
