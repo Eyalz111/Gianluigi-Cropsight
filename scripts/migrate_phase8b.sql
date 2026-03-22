@@ -27,7 +27,10 @@ ALTER TABLE decisions ADD COLUMN description_tsv tsvector
 CREATE INDEX IF NOT EXISTS idx_decisions_description_tsv ON decisions USING GIN(description_tsv);
 
 -- Update the RPC function to use 'simple' instead of 'english'
-CREATE OR REPLACE FUNCTION search_embeddings_fulltext(
+-- Drop first to allow return type change
+DROP FUNCTION IF EXISTS search_embeddings_fulltext(text, integer, text);
+
+CREATE FUNCTION search_embeddings_fulltext(
     search_query TEXT,
     match_count INT DEFAULT 20,
     source_filter TEXT DEFAULT NULL
