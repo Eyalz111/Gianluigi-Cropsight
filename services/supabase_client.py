@@ -2955,6 +2955,74 @@ class SupabaseClient:
         )
         return result.data[0] if result.data else {}
 
+    # =========================================================================
+    # Scheduler Heartbeats
+    # =========================================================================
+
+    def upsert_scheduler_heartbeat(
+        self,
+        name: str,
+        status: str = "ok",
+        details: dict | None = None,
+    ) -> None:
+        """
+        Record a scheduler heartbeat (last successful/failed run).
+
+        Args:
+            name: Scheduler name (e.g., "transcript_watcher").
+            status: "ok" or "error".
+            details: Optional error details or metrics.
+        """
+        from datetime import datetime, timezone
+
+        data = {
+            "scheduler_name": name,
+            "last_run_at": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "details": details or {},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.client.table("scheduler_heartbeats").upsert(
+            data, on_conflict="scheduler_name"
+        ).execute()
+
+    def get_scheduler_heartbeats(self) -> list[dict]:
+        """Get all scheduler heartbeat records."""
+        result = (
+            self.client.table("scheduler_heartbeats")
+            .select("*")
+            .order("scheduler_name")
+            .execute()
+        )
+        return result.data or []
+
+    # =========================================================================
+    # Token Usage (Cost Queries)
+    # =========================================================================
+
+    def get_token_usage_summary(self, days: int = 7) -> list[dict]:
+        """
+        Get token usage records for the past N days.
+
+        Args:
+            days: Number of days to look back.
+
+        Returns:
+            List of token_usage records.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        result = (
+            self.client.table("token_usage")
+            .select("*")
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(2000)
+            .execute()
+        )
+        return result.data or []
+
 
 # Singleton instance for easy import
 db = SupabaseClient()

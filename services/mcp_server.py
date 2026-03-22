@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 24 tools (16 read + 8 write) tools as thin wrappers around existing brain functions.
+Provides 26 tools (18 read + 8 write) tools as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -85,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 24 tools (16 read + 8 write) tools.
+    MCP server with SSE transport, auth middleware, and 26 tools (18 read + 8 write) tools.
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -202,7 +202,7 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (24 tools (16 read + 8 write) tools)
+    # MCP Tools (26 tools (18 read + 8 write) tools)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
@@ -1347,7 +1347,58 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 23. propose_gantt_update (write)
+        # 23. get_system_health (read)
+        # ============================================================
+        @mcp.tool(
+            name="get_system_health",
+            description=(
+                "Get system health: scheduler status (last run, stale detection), "
+                "component health (Supabase, Google, Telegram), error counts, "
+                "and data freshness. Use when Eyal asks 'is everything working?'"
+            ),
+        )
+        async def get_system_health() -> dict:
+            try:
+                from core.health_monitor import collect_health_data
+
+                data = collect_health_data()
+                mcp_auth.log_call("get_system_health")
+                return _success(data, source="health_monitor")
+
+            except Exception as e:
+                logger.error(f"get_system_health error: {e}")
+                mcp_auth.log_call("get_system_health", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 24. get_cost_summary (read)
+        # ============================================================
+        @mcp.tool(
+            name="get_cost_summary",
+            description=(
+                "Get LLM token usage and estimated costs for the past N days. "
+                "Shows total cost, breakdown by model and by feature, and daily trend."
+            ),
+        )
+        async def get_cost_summary(days: int = 7) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+                from core.cost_calculator import compute_cost_summary
+
+                records = _sc.get_token_usage_summary(days=days)
+                summary = compute_cost_summary(records)
+                summary["period_days"] = days
+
+                mcp_auth.log_call("get_cost_summary", {"days": days})
+                return _success(summary, source="token_usage")
+
+            except Exception as e:
+                logger.error(f"get_cost_summary error: {e}")
+                mcp_auth.log_call("get_cost_summary", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 25. propose_gantt_update (write)
         # ============================================================
         @mcp.tool(
             name="propose_gantt_update",
@@ -1440,7 +1491,7 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 24. approve_gantt_proposal (write)
+        # 26. approve_gantt_proposal (write)
         # ============================================================
         @mcp.tool(
             name="approve_gantt_proposal",

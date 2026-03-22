@@ -163,6 +163,14 @@ async def _compile_week_in_review(
     except Exception as e:
         logger.debug(f"Email scan count failed: {e}")
 
+    # Cost summary (7-day window)
+    try:
+        from core.cost_calculator import compute_cost_summary
+        usage = supabase_client.get_token_usage_summary(days=7)
+        result["cost_summary"] = compute_cost_summary(usage)
+    except Exception as e:
+        logger.debug(f"Cost summary failed: {e}")
+
     return result
 
 

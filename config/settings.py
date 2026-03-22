@@ -407,6 +407,10 @@ class Settings(BaseSettings):
         default=True,
         description="Enable daily health summary after morning brief"
     )
+    DAILY_COST_ALERT_THRESHOLD: float = Field(
+        default=5.0,
+        description="USD daily cost threshold for warning alert"
+    )
 
     @property
     def model_extraction(self) -> str:

@@ -277,13 +277,14 @@ $$;
 -- =============================================================================
 
 -- Add generated tsvector columns for full-text search on embeddings.chunk_text
+-- Uses 'simple' config (not 'english') for Hebrew + English support
 ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS chunk_text_tsv tsvector
-    GENERATED ALWAYS AS (to_tsvector('english', coalesce(chunk_text, ''))) STORED;
+    GENERATED ALWAYS AS (to_tsvector('simple', coalesce(chunk_text, ''))) STORED;
 CREATE INDEX IF NOT EXISTS idx_embeddings_chunk_text_tsv ON embeddings USING GIN(chunk_text_tsv);
 
 -- Add generated tsvector column for full-text search on decisions.description
 ALTER TABLE decisions ADD COLUMN IF NOT EXISTS description_tsv tsvector
-    GENERATED ALWAYS AS (to_tsvector('english', coalesce(description, ''))) STORED;
+    GENERATED ALWAYS AS (to_tsvector('simple', coalesce(description, ''))) STORED;
 CREATE INDEX IF NOT EXISTS idx_decisions_description_tsv ON decisions USING GIN(description_tsv);
 
 
@@ -452,10 +453,10 @@ BEGIN
         e.speaker,
         e.timestamp_range,
         e.metadata,
-        ts_rank(e.chunk_text_tsv, plainto_tsquery('english', search_query))::FLOAT AS rank
+        ts_rank(e.chunk_text_tsv, plainto_tsquery('simple', search_query))::FLOAT AS rank
     FROM embeddings e
     WHERE
-        e.chunk_text_tsv @@ plainto_tsquery('english', search_query)
+        e.chunk_text_tsv @@ plainto_tsquery('simple', search_query)
         AND (filter_source_type IS NULL OR e.source_type = filter_source_type)
     ORDER BY rank DESC
     LIMIT match_count;

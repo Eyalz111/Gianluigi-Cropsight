@@ -60,10 +60,18 @@ class WeeklyDigestScheduler:
         while self._running:
             try:
                 await self._check_and_generate()
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("weekly_digest")
+                except Exception:
+                    pass  # Never let monitoring kill the thing being monitored
             except Exception as e:
                 logger.error(f"Error in weekly digest scheduler: {e}")
                 from core.health_monitor import check_and_alert
                 await check_and_alert("weekly_digest_scheduler", e)
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("weekly_digest", status="error", details={"error": str(e)})
+                except Exception:
+                    pass
             await asyncio.sleep(self.check_interval)
 
     def stop(self) -> None:

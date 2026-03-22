@@ -55,8 +55,18 @@ class WeeklyReviewScheduler:
         while self._running:
             try:
                 await self._check_cycle()
+                try:
+                    from services.supabase_client import supabase_client
+                    supabase_client.upsert_scheduler_heartbeat("weekly_review")
+                except Exception:
+                    pass  # Never let monitoring kill the thing being monitored
             except Exception as e:
                 logger.error(f"Weekly review scheduler cycle error: {e}")
+                try:
+                    from services.supabase_client import supabase_client
+                    supabase_client.upsert_scheduler_heartbeat("weekly_review", status="error", details={"error": str(e)})
+                except Exception:
+                    pass
 
             await asyncio.sleep(self.check_interval)
 

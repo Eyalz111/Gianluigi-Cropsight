@@ -91,6 +91,58 @@ def collect_health_data() -> dict:
     except Exception:
         data["metrics"]["meetings_7d"] = -1
 
+    # 7. Scheduler heartbeats
+    try:
+        heartbeats = supabase_client.get_scheduler_heartbeats()
+        now = datetime.now()
+        scheduler_status = []
+
+        # Expected intervals per scheduler (seconds)
+        expected_intervals = {
+            "transcript_watcher": 300,      # 5 min
+            "document_watcher": 300,        # 5 min
+            "email_watcher": 300,           # 5 min
+            "meeting_prep": 14400,          # 4 hours
+            "weekly_digest": 3600,          # 1 hour check
+            "weekly_review": 3600,          # 1 hour check
+            "orphan_cleanup": 86400,        # 24 hours
+            "alert_scheduler": 43200,       # 12 hours
+            "task_reminder": 3600,          # 1 hour
+        }
+
+        for hb in heartbeats:
+            name = hb.get("scheduler_name", "?")
+            last_run = hb.get("last_run_at", "")
+            status = hb.get("status", "ok")
+            stale = False
+
+            if last_run:
+                try:
+                    last_dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+                    if last_dt.tzinfo:
+                        from datetime import timezone
+                        last_dt = last_dt.replace(tzinfo=None)
+                        now_compare = datetime.utcnow()
+                    else:
+                        now_compare = now
+                    age_seconds = (now_compare - last_dt).total_seconds()
+                    expected = expected_intervals.get(name, 3600)
+                    stale = age_seconds > expected * 2
+                except (ValueError, TypeError):
+                    pass
+
+            scheduler_status.append({
+                "name": name,
+                "last_run": last_run,
+                "status": status,
+                "stale": stale,
+                "details": hb.get("details"),
+            })
+
+        data["schedulers"] = scheduler_status
+    except Exception:
+        data["schedulers"] = []
+
     return data
 
 

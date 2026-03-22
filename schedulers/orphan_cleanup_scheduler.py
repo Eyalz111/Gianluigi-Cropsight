@@ -62,6 +62,10 @@ class OrphanCleanupScheduler:
         while self._running:
             try:
                 await self._run_cleanup()
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("orphan_cleanup")
+                except Exception:
+                    pass  # Never let monitoring kill the thing being monitored
             except Exception as e:
                 logger.error(f"Error in orphan cleanup scheduler: {e}")
                 supabase_client.log_action(
@@ -71,6 +75,10 @@ class OrphanCleanupScheduler:
                 )
                 from core.health_monitor import check_and_alert
                 await check_and_alert("orphan_cleanup_scheduler", e)
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("orphan_cleanup", status="error", details={"error": str(e)})
+                except Exception:
+                    pass
 
             await asyncio.sleep(self.check_interval)
 

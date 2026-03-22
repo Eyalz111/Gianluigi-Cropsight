@@ -92,6 +92,10 @@ class TaskReminderScheduler:
                     self._last_reminder_date = today
 
                 await self._check_and_send_reminders()
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("task_reminder")
+                except Exception:
+                    pass  # Never let monitoring kill the thing being monitored
             except Exception as e:
                 logger.error(f"Error in task reminder scheduler: {e}")
                 supabase_client.log_action(
@@ -101,6 +105,10 @@ class TaskReminderScheduler:
                 )
                 from core.health_monitor import check_and_alert
                 await check_and_alert("task_reminder_scheduler", e)
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("task_reminder", status="error", details={"error": str(e)})
+                except Exception:
+                    pass
 
             # Wait for next check
             await asyncio.sleep(self.check_interval)

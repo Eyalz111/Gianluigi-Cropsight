@@ -70,6 +70,10 @@ class DocumentWatcher:
         while self._running:
             try:
                 await self._poll_once()
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("document_watcher")
+                except Exception:
+                    pass  # Never let monitoring kill the thing being monitored
             except Exception as e:
                 logger.error(f"Error in document watcher poll: {e}")
                 supabase_client.log_action(
@@ -79,6 +83,10 @@ class DocumentWatcher:
                 )
                 from core.health_monitor import check_and_alert
                 await check_and_alert("document_watcher", e)
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("document_watcher", status="error", details={"error": str(e)})
+                except Exception:
+                    pass
 
             await asyncio.sleep(self.poll_interval)
 

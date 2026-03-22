@@ -93,6 +93,10 @@ class TranscriptWatcher:
         while self._running:
             try:
                 await self._poll_once()
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("transcript_watcher")
+                except Exception:
+                    pass  # Never let monitoring kill the thing being monitored
             except Exception as e:
                 logger.error(f"Error in transcript watcher poll: {e}")
                 # Log to audit
@@ -103,6 +107,10 @@ class TranscriptWatcher:
                 )
                 from core.health_monitor import check_and_alert
                 await check_and_alert("transcript_watcher", e)
+                try:
+                    supabase_client.upsert_scheduler_heartbeat("transcript_watcher", status="error", details={"error": str(e)})
+                except Exception:
+                    pass
 
             # Wait for next poll
             await asyncio.sleep(self.poll_interval)
