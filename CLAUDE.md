@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
 **Last Updated:** March 22, 2026
-**Current Version:** v1.0 (Phases 0-7 complete + QA hardening, MCP server live, full cycle verified)
-**Status:** v1.0 Phases 0-7 + QA Hardening complete. Phase 7.5 (weekly review migration) in progress
+**Current Version:** v1.0 (Phases 0-7.5 complete + QA hardening, MCP server live)
+**Status:** Phase 8a in progress (intelligence + write tools). Phases 0-7.5 + QA Hardening complete.
 
 ---
 
@@ -71,10 +71,13 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **Phase 7:** MCP Core + Read Tools (SSE server, 16 tools, auth, rate limiting, audit logging)
 - **QA Hardening:** 16 issues fixed (commitments deprecated, extraction improved, alerting, timezone, decisions export, MCP composite tool)
 
+- **Phase 7.5:** Weekly review migration (2 write MCP tools: start_weekly_review + confirm_weekly_review, Telegram redirect, enriched Claude project prompt)
+- **Phase 8a (partial):** Extraction intelligence — task continuity (existing tasks as context), team roles, priority-aware escalation, weekly review hygiene items, Hebrew extraction instruction
+
 ### Remaining Phases
-- **Phase 7.5:** Weekly review migration (weekly review via Claude.ai, Telegram notification-only) — IN PROGRESS
-- **Phase 8:** Heartbeat unification + security hardening (includes OAuth for MCP, data boundary enforcement)
-- **Phase 9:** Write tools + expansion
+- **Phase 8a (cont):** MCP write tools (task CRUD, quick inject, Gantt propose) + Sheets sync
+- **Phase 8b:** Health monitoring (scheduler heartbeats), cost monitoring, tsvector Hebrew fix, index audit
+- **Phase 9:** Future expansion
 
 ### Known MCP Limitation: Personal Data Leakage
 Claude.ai mixes MCP tool results with its own conversation memory. MCP `instructions` are guidance, not a sandbox — Claude.ai can and will use prior conversation context when Gianluigi data is sparse. **Current mitigation:** Use a dedicated Claude Project ("CropSight Ops") to isolate business conversations. **Future:** OAuth integration (Phase 8) may enable stricter session isolation. This is a Claude.ai platform limitation, not a Gianluigi bug.
