@@ -18,24 +18,40 @@ TEAM_MEMBERS = {
     "eyal": {
         "name": "Eyal Zror",
         "role": "CEO",
+        "role_description": (
+            "Strategy, fundraising, investor relations, overall leadership. "
+            "Owns company direction, key partnerships, and board communication."
+        ),
         "email": settings.EYAL_EMAIL,
         "is_admin": True,  # Has full access to all features
     },
     "roye": {
         "name": "Roye Tadmor",
         "role": "CTO",
+        "role_description": (
+            "All technical execution: ML models, data pipeline, cloud infrastructure, "
+            "accuracy metrics, platform development. Owns the product roadmap."
+        ),
         "email": settings.ROYE_EMAIL,
         "is_admin": False,
     },
     "paolo": {
         "name": "Paolo Vailetti",
         "role": "BD",
+        "role_description": (
+            "Business development, partnerships, Italy/Europe markets, client outreach. "
+            "Owns the Moldova pilot relationship and partner pipeline."
+        ),
         "email": settings.PAOLO_EMAIL,
         "is_admin": False,
     },
     "yoram": {
         "name": "Prof. Yoram Weiss",
         "role": "Senior Advisor",
+        "role_description": (
+            "Academic guidance, agronomy expertise, research methodology. "
+            "Advises on scientific validation and academic partnerships."
+        ),
         "email": settings.YORAM_EMAIL,
         "is_admin": False,
     },

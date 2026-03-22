@@ -44,6 +44,7 @@ def generate_alerts() -> list[dict]:
 
     try:
         alerts.extend(_check_overdue_clusters())
+        alerts.extend(_check_overdue_escalation())
     except Exception as e:
         logger.error(f"Error checking overdue clusters: {e}")
 
@@ -212,6 +213,119 @@ def _check_overdue_clusters() -> list[dict]:
             })
 
     return alerts
+
+
+def _check_overdue_escalation() -> list[dict]:
+    """
+    Detect individual tasks at high/critical escalation tiers (priority-aware).
+
+    Uses graduated thresholds: high-priority tasks escalate faster than low-priority.
+    Only generates alerts for high and critical tiers (lower tiers surface in weekly review only).
+
+    Returns:
+        List of alerts for critically overdue individual tasks.
+    """
+    from config.escalation import classify_overdue_tier
+
+    alerts = []
+    overdue_tasks = supabase_client.get_tasks(status="overdue")
+
+    if not overdue_tasks:
+        return alerts
+
+    today = datetime.now().date()
+
+    for task in overdue_tasks:
+        deadline_str = task.get("deadline")
+        if not deadline_str:
+            continue
+        try:
+            if isinstance(deadline_str, str):
+                deadline = datetime.fromisoformat(deadline_str).date()
+            else:
+                deadline = deadline_str
+            days_overdue = (today - deadline).days
+        except (ValueError, TypeError):
+            continue
+
+        priority = task.get("priority", "M")
+        tier = classify_overdue_tier(days_overdue, priority)
+
+        if tier in ("high", "critical"):
+            title = task.get("title", "?")[:60]
+            assignee = task.get("assignee", "Unassigned")
+            alerts.append({
+                "type": "overdue_escalation",
+                "severity": "high" if tier == "high" else "critical",
+                "title": f"[{priority}] {title} — {days_overdue}d overdue ({assignee})",
+                "details": (
+                    f"Task \"{title}\" assigned to {assignee} is {days_overdue} days overdue "
+                    f"(priority {priority}, escalation tier: {tier})."
+                ),
+                "items": [{
+                    "task_id": task.get("id"),
+                    "title": title,
+                    "assignee": assignee,
+                    "priority": priority,
+                    "days_overdue": days_overdue,
+                    "tier": tier,
+                }],
+            })
+
+    return alerts
+
+
+def get_escalation_items() -> list[dict]:
+    """
+    Get all overdue tasks classified by escalation tier (for weekly review).
+
+    Returns all tiers (low through critical), not just high/critical.
+    Used by weekly review compilation to surface graduated attention items.
+
+    Returns:
+        List of dicts with task info and escalation tier.
+    """
+    from config.escalation import classify_overdue_tier
+
+    items = []
+    overdue_tasks = supabase_client.get_tasks(status="overdue")
+
+    if not overdue_tasks:
+        return items
+
+    today = datetime.now().date()
+
+    for task in overdue_tasks:
+        deadline_str = task.get("deadline")
+        if not deadline_str:
+            continue
+        try:
+            if isinstance(deadline_str, str):
+                deadline = datetime.fromisoformat(deadline_str).date()
+            else:
+                deadline = deadline_str
+            days_overdue = (today - deadline).days
+        except (ValueError, TypeError):
+            continue
+
+        priority = task.get("priority", "M")
+        tier = classify_overdue_tier(days_overdue, priority)
+
+        if tier:
+            items.append({
+                "task_id": task.get("id"),
+                "title": task.get("title", "?")[:80],
+                "assignee": task.get("assignee", ""),
+                "priority": priority,
+                "days_overdue": days_overdue,
+                "tier": tier,
+            })
+
+    # Sort by tier severity (critical first)
+    tier_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    items.sort(key=lambda x: tier_order.get(x.get("tier", "low"), 4))
+
+    return items
 
 
 def _check_stale_commitments() -> list[dict]:

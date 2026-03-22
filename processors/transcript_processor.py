@@ -367,6 +367,38 @@ async def extract_structured_data(
     Returns:
         Dict with all extracted elements.
     """
+    # Build team roles context from config
+    from config.team import TEAM_MEMBERS
+
+    team_lines = []
+    for m in TEAM_MEMBERS.values():
+        desc = m.get("role_description", m.get("role", ""))
+        team_lines.append(f"- {m['name']} ({m['role']}): {desc}")
+    team_roles = "\n".join(team_lines)
+
+    # Fetch existing open tasks for context (participant-first, max 30)
+    # Graceful degradation: if this fails, extraction proceeds without context
+    existing_tasks = None
+    try:
+        participant_names_lower = {p.lower() for p in participants}
+        pending = supabase_client.get_tasks(status="pending", limit=50)
+        in_progress = supabase_client.get_tasks(status="in_progress", limit=30)
+        all_open = pending + in_progress
+
+        # Sort: participant tasks first, then by created_at desc
+        def task_sort_key(t):
+            assignee = (t.get("assignee") or "").lower()
+            is_participant = 1 if any(
+                name in assignee for name in participant_names_lower if name
+            ) else 0
+            priority_rank = {"H": 0, "M": 1, "L": 2}.get(t.get("priority", "M"), 1)
+            return (-is_participant, priority_rank)
+
+        all_open.sort(key=task_sort_key)
+        existing_tasks = all_open[:30]
+    except Exception as e:
+        logger.warning(f"Could not fetch existing tasks for extraction context: {e}")
+
     # Build the extraction prompt
     prompt = get_summary_extraction_prompt(
         transcript=transcript,
@@ -374,6 +406,8 @@ async def extract_structured_data(
         meeting_date=meeting_date,
         participants=participants,
         duration_minutes=duration_minutes,
+        team_roles=team_roles,
+        existing_tasks=existing_tasks,
     )
 
     # Use a structured extraction approach with JSON output
@@ -440,6 +474,8 @@ ACTION ITEM EXTRACTION RULES:
   Example: "set up AWS account", "configure IAM roles", "prepare budget" → "Prepare AWS infrastructure (account, IAM, budget)"
 - DEADLINE: Only set a deadline if the transcript explicitly mentions a specific date, day of the week, or relative timeframe (e.g., "by Friday", "next week", "March 30"). "ASAP", "soon", "as early as possible" are NOT deadlines — set to null. Do NOT infer deadlines from context or urgency.
 - DEDUPLICATION: Never extract the same action as two separate items. If someone says "I'll do X" and is later formally assigned X, extract only once.
+- ASSIGNEE: Only assign to a specific person if the transcript makes it clear who is responsible. If unclear, set "assignee" to "" (empty string). Do NOT use "team", "everyone", or "TBD".
+- EXISTING TASK AWARENESS: If the prompt includes an EXISTING OPEN TASKS section, reference it. When the discussion clearly refers to an existing task, do NOT extract it as new. If the discussion reveals a status change (completed, blocked, in progress), prefix the title with "UPDATE:" so post-processing can match it. The "UPDATE:" prefix is a hint for deduplication — it is not machine-parsed.
 
 DISCUSSION SUMMARY RULES:
 - Opening paragraph: What was the meeting's purpose and key outcome?
@@ -454,6 +490,14 @@ STAKEHOLDER EXTRACTION RULES:
 A "stakeholder" is someone CropSight has a DIRECT business relationship with — someone you'd put in a CRM.
 INCLUDE: specific advisors/contacts, partner companies, grant bodies, named pilot sites/projects.
 EXCLUDE: big tech/infra (AWS, Google, Microsoft, IBM), countries/cities mentioned casually, tools/platforms (Zoom, Slack, Tactiq), generic terms, meeting participants, CropSight team members.
+
+LANGUAGE HANDLING:
+Meetings may be in Hebrew, English, or mixed. Regardless of language:
+- Extract ALL field values in English
+- Translate Hebrew titles, descriptions to English
+- Person names are proper nouns — keep as-is (Eyal, Roye, Paolo, Yoram)
+- Keep company/organization names as-is
+- If a Hebrew term has no clear English equivalent, transliterate and add brief explanation
 
 Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps."""
 

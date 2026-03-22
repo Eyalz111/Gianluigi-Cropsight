@@ -313,6 +313,8 @@ def get_summary_extraction_prompt(
     meeting_date: str,
     participants: list[str],
     duration_minutes: int | None = None,
+    team_roles: str | None = None,
+    existing_tasks: list[dict] | None = None,
 ) -> str:
     """
     Build the prompt for extracting structured data from a transcript.
@@ -323,12 +325,38 @@ def get_summary_extraction_prompt(
         meeting_date: Date of the meeting (e.g., "2026-02-22").
         participants: List of participant names.
         duration_minutes: Meeting duration in minutes (optional).
+        team_roles: Formatted string of team member roles (optional).
+        existing_tasks: List of existing open tasks for context (optional).
 
     Returns:
         The extraction prompt to be sent to Claude.
     """
     participants_str = ", ".join(participants)
     duration_str = f"{duration_minutes} minutes" if duration_minutes else "unknown"
+
+    # Build optional context sections
+    team_section = ""
+    if team_roles:
+        team_section = f"""
+CROPSIGHT TEAM ROLES:
+{team_roles}
+Use these roles to correctly assign tasks. If assignee is unclear, set to "" (empty string).
+"""
+
+    tasks_section = ""
+    if existing_tasks:
+        task_lines = []
+        for i, t in enumerate(existing_tasks[:30], 1):
+            assignee = t.get("assignee", "")
+            status = t.get("status", "pending")
+            title = t.get("title", "")[:80]
+            task_lines.append(f"  {i}. \"{title}\" ({assignee}, {status})")
+        tasks_section = f"""
+EXISTING OPEN TASKS (for reference — do NOT duplicate these):
+{chr(10).join(task_lines)}
+If a task from this list is discussed, note the update (e.g., "UPDATE: [title] — now completed")
+rather than creating a new entry. Only create genuinely new tasks.
+"""
 
     return f"""Analyze the following meeting transcript and extract structured information.
 
@@ -337,6 +365,7 @@ MEETING CONTEXT:
 - Date: {meeting_date}
 - Participants: {participants_str}
 - Duration: {duration_str}
+{team_section}{tasks_section}
 
 EXTRACTION INSTRUCTIONS:
 1. Extract all KEY DECISIONS made during the meeting

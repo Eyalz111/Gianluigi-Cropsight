@@ -671,6 +671,32 @@ class SupabaseClient:
         result = query.order("deadline", desc=False).limit(limit).execute()
         return result.data
 
+    def get_tasks_without_assignee(self, limit: int = 50) -> list[dict]:
+        """Get open tasks with empty or null assignee."""
+        result = (
+            self.client.table("tasks")
+            .select("*, meetings(title, date)")
+            .in_("status", ["pending", "in_progress", "overdue"])
+            .or_("assignee.is.null,assignee.eq.")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+
+    def get_tasks_without_deadline(self, limit: int = 50) -> list[dict]:
+        """Get open tasks with no deadline set."""
+        result = (
+            self.client.table("tasks")
+            .select("*, meetings(title, date)")
+            .in_("status", ["pending", "in_progress", "overdue"])
+            .is_("deadline", "null")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+
     def update_task(
         self,
         task_id: str,

@@ -184,11 +184,14 @@ async def _compile_gantt_proposals() -> dict:
 
 
 async def _compile_attention_needed() -> dict:
-    """Compile alerts, stale tasks, approaching milestones."""
+    """Compile alerts, stale tasks, approaching milestones, and task hygiene items."""
     result = {
         "alerts": [],
         "stale_tasks": [],
         "approaching_milestones": [],
+        "escalation_items": [],
+        "tasks_no_assignee": [],
+        "tasks_no_deadline": [],
     }
 
     # Proactive alerts
@@ -213,6 +216,24 @@ async def _compile_attention_needed() -> dict:
         result["approaching_milestones"] = milestones
     except Exception as e:
         logger.debug(f"Approaching milestones failed: {e}")
+
+    # Escalation items (priority-aware graduated tiers)
+    try:
+        from processors.proactive_alerts import get_escalation_items
+        result["escalation_items"] = get_escalation_items()
+    except Exception as e:
+        logger.debug(f"Escalation items failed: {e}")
+
+    # Task hygiene: unassigned and no-deadline tasks
+    try:
+        result["tasks_no_assignee"] = supabase_client.get_tasks_without_assignee()
+    except Exception as e:
+        logger.debug(f"Tasks without assignee query failed: {e}")
+
+    try:
+        result["tasks_no_deadline"] = supabase_client.get_tasks_without_deadline()
+    except Exception as e:
+        logger.debug(f"Tasks without deadline query failed: {e}")
 
     return result
 
