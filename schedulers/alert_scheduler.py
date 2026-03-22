@@ -13,8 +13,11 @@ Usage:
 import asyncio
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
+
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from processors.proactive_alerts import generate_alerts, format_alerts_message
 from services.supabase_client import supabase_client
 from services.telegram_bot import telegram_bot
@@ -56,7 +59,7 @@ class AlertScheduler:
 
         while self._running:
             try:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = datetime.now(_ISRAEL_TZ).strftime("%Y-%m-%d")
 
                 # Only send once per day
                 if today != self._last_alert_date:

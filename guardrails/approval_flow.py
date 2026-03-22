@@ -1428,21 +1428,30 @@ async def distribute_approved_content(
             logger.info(f"Added {len(tasks)} tasks to tracker")
     except Exception as e:
         logger.error(f"Error adding tasks to Sheets: {e}")
+        from services.alerting import send_system_alert, AlertSeverity
+        await send_system_alert(
+            AlertSeverity.CRITICAL, "google_sheets",
+            f"Failed to add tasks to Sheets for '{meeting_title}': {e}", error=e,
+        )
 
-    # 2b. Add commitments to Commitments tab
+    # 2b. DEPRECATED — Commitments merged into tasks (action items).
+    # The Commitments Sheets tab is no longer written to.
+    # Previously: await sheets_service.add_commitments_batch_to_sheet(...)
+
+    # 2c. Add decisions to Decisions tab
     try:
-        commitments = content.get("commitments", [])
-        if not commitments and meeting_id:
-            commitments = supabase_client.get_commitments(meeting_id=meeting_id)
-        if commitments:
-            await sheets_service.add_commitments_batch_to_sheet(
-                commitments=commitments,
+        decisions = content.get("decisions", [])
+        if decisions:
+            await sheets_service.ensure_decisions_tab()
+            await sheets_service.add_decisions_batch_to_sheet(
+                decisions=decisions,
                 source_meeting=meeting_title,
-                created_date=meeting_date,
+                meeting_date=meeting_date,
             )
-            results["commitments_added"] = len(commitments)
+            results["decisions_added"] = len(decisions)
+            logger.info(f"Added {len(decisions)} decisions to Decisions tab")
     except Exception as e:
-        logger.error(f"Error adding commitments to Sheets: {e}")
+        logger.error(f"Error adding decisions to Sheets: {e}")
 
     # 3. Add follow-up meetings to Task Tracker as action items
     try:
@@ -1480,12 +1489,32 @@ async def distribute_approved_content(
     # 6. Send Telegram notification
     try:
         drive_link = results.get("drive_link", "")
-        telegram_result = await telegram_bot.send_meeting_summary(
-            title=meeting_title,
-            summary=summary[:500] + "..." if len(summary) > 500 else summary,
-            drive_link=drive_link,
-            sensitive=(sensitivity == "sensitive"),
-        )
+        participants = meeting_record.get("participants", []) if meeting_record else []
+
+        if sensitivity == "sensitive":
+            # Sensitive: send full summary to Eyal only
+            telegram_result = await telegram_bot.send_meeting_summary(
+                title=meeting_title,
+                summary=summary,
+                drive_link=drive_link,
+                sensitive=True,
+            )
+        else:
+            # Normal: send teaser to group (or Eyal in dev)
+            from services.telegram_bot import format_summary_teaser
+
+            teaser = format_summary_teaser(
+                title=meeting_title,
+                date=meeting_date,
+                participants=participants,
+                content=content,
+                drive_link=drive_link,
+            )
+            if settings.ENVIRONMENT != "production":
+                telegram_result = await telegram_bot.send_to_eyal(teaser)
+            else:
+                telegram_result = await telegram_bot.send_to_group(teaser)
+
         results["telegram_sent"] = telegram_result
         logger.info(f"Telegram notification sent: {telegram_result}")
     except Exception as e:
@@ -2344,8 +2373,8 @@ async def distribute_approved_review(
                     base_url = settings.REPORTS_BASE_URL.rstrip("/") if settings.REPORTS_BASE_URL else ""
                     if base_url:
                         summary_msg += f"\nReport: {base_url}/reports/weekly/{report['access_token']}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to append report URL: {e}")
 
         if digest_link:
             summary_msg += f"\nDigest: {digest_link}"

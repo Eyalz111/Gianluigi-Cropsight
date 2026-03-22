@@ -551,9 +551,10 @@ class GoogleSheetsService:
             logger.warning("STAKEHOLDER_TRACKER_SHEET_ID not configured")
             return []
 
+        tab = settings.STAKEHOLDER_TAB_NAME
         rows = await self._read_sheet_range(
             sheet_id=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-            range_name="A:P"  # 16 columns
+            range_name=f"'{tab}'!A:P"  # 16 columns
         )
 
         if not rows or len(rows) < 2:
@@ -754,7 +755,10 @@ class GoogleSheetsService:
         values = []
         for s in stakeholders:
             name = s.get("name", "")
-            if not name or name.lower() in existing_names:
+            if not name:
+                continue
+            if name.lower() in existing_names:
+                logger.debug(f"Stakeholder '{name}' already exists, skipping")
                 continue
 
             context = s.get("context", "")
@@ -782,9 +786,11 @@ class GoogleSheetsService:
             return True
 
         try:
+            tab = settings.STAKEHOLDER_TAB_NAME
+            logger.info(f"Adding {len(values)} new stakeholders (filtered from {len(stakeholders)} extracted)")
             self.service.spreadsheets().values().append(
                 spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-                range="A:P",
+                range=f"'{tab}'!A:P",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": values}
@@ -1098,9 +1104,10 @@ class GoogleSheetsService:
                     updates.get("notes", ""),
                 ]
 
+                tab = settings.STAKEHOLDER_TAB_NAME
                 await self._append_row_to_range(
                     sheet_id=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-                    range_name="A:P",
+                    range_name=f"'{tab}'!A:P",
                     values=new_row,
                 )
 
@@ -1114,10 +1121,15 @@ class GoogleSheetsService:
 
     # =========================================================================
     # Commitment Dashboard (v0.4.1)
+    # DEPRECATED — Commitments merged into tasks (action items) as of QA hardening.
+    # These methods are kept for backward compatibility but no longer called from
+    # the approval flow. Will be removed in a future cleanup pass.
     # =========================================================================
 
     async def ensure_commitments_tab(self) -> int | None:
         """
+        DEPRECATED: Commitments merged into tasks.
+
         Ensure a 'Commitments' tab exists in the Task Tracker spreadsheet.
 
         Creates the tab with a header row if it doesn't exist.
@@ -1184,6 +1196,8 @@ class GoogleSheetsService:
         created_date: str,
     ) -> bool:
         """
+        DEPRECATED: Commitments merged into tasks.
+
         Add a batch of commitments to the Commitments tab.
 
         Args:
@@ -1233,6 +1247,124 @@ class GoogleSheetsService:
 
         except Exception as e:
             logger.error(f"Error adding commitments to sheet: {e}")
+            return False
+
+    # =========================================================================
+    # Decisions Dashboard
+    # =========================================================================
+
+    async def ensure_decisions_tab(self) -> int | None:
+        """
+        Ensure a 'Decisions' tab exists in the Task Tracker spreadsheet.
+
+        Creates the tab with a header row if it doesn't exist.
+
+        Returns:
+            The sheetId of the Decisions tab, or None if no spreadsheet configured.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return None
+
+        try:
+            meta = self.service.spreadsheets().get(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                fields="sheets.properties",
+            ).execute()
+
+            for sheet in meta.get("sheets", []):
+                props = sheet.get("properties", {})
+                if props.get("title") == "Decisions":
+                    logger.info(f"Decisions tab already exists (sheetId={props['sheetId']})")
+                    return props["sheetId"]
+
+            # Create the tab
+            resp = self.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={
+                    "requests": [
+                        {"addSheet": {"properties": {"title": "Decisions"}}}
+                    ]
+                },
+            ).execute()
+
+            new_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+            logger.info(f"Created Decisions tab (sheetId={new_sheet_id})")
+
+            # Write header row
+            headers = [
+                "Decision", "Context", "Participants",
+                "Source Meeting", "Meeting Date", "Status", "Timestamp",
+            ]
+            self.service.spreadsheets().values().update(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range="Decisions!A1:G1",
+                valueInputOption="RAW",
+                body={"values": [headers]},
+            ).execute()
+
+            return new_sheet_id
+
+        except Exception as e:
+            logger.error(f"Error ensuring Decisions tab: {e}")
+            return None
+
+    async def add_decisions_batch_to_sheet(
+        self,
+        decisions: list[dict],
+        source_meeting: str,
+        meeting_date: str,
+    ) -> bool:
+        """
+        Add a batch of decisions to the Decisions tab.
+
+        Args:
+            decisions: List of decision dicts from extraction.
+            source_meeting: Name of the source meeting.
+            meeting_date: Date of the meeting.
+
+        Returns:
+            True if decisions were added successfully.
+        """
+        if not decisions:
+            return True
+
+        if not settings.TASK_TRACKER_SHEET_ID:
+            logger.warning("TASK_TRACKER_SHEET_ID not configured")
+            return False
+
+        try:
+            sheet_id = await self.ensure_decisions_tab()
+            if sheet_id is None:
+                return False
+
+            rows = []
+            for d in decisions:
+                participants = d.get("participants_involved", [])
+                if isinstance(participants, list):
+                    participants = ", ".join(participants)
+                rows.append([
+                    d.get("description", ""),
+                    d.get("context", ""),
+                    participants,
+                    source_meeting,
+                    meeting_date,
+                    "Active",
+                    d.get("transcript_timestamp", ""),
+                ])
+
+            self.service.spreadsheets().values().append(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range="Decisions!A:G",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": rows},
+            ).execute()
+
+            logger.info(f"Added {len(rows)} decisions to Decisions tab")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error adding decisions to sheet: {e}")
             return False
 
     # =========================================================================

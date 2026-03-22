@@ -12,6 +12,9 @@ Manual /review without calendar event: works without scheduler trigger.
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 
 from config.settings import settings
 
@@ -164,7 +167,7 @@ class WeeklyReviewScheduler:
         """Compile data and create session at T-3h."""
         from services.supabase_client import supabase_client
 
-        now = datetime.now()
+        now = datetime.now(_ISRAEL_TZ)
         week_number = now.isocalendar()[1]
         year = now.isocalendar()[0]
 
@@ -278,7 +281,7 @@ class WeeklyReviewScheduler:
 
     async def _check_fallback_needed(self) -> None:
         """If it's review day with no event, prompt Eyal once."""
-        now = datetime.now()
+        now = datetime.now(_ISRAEL_TZ)
         if now.weekday() != settings.WEEKLY_REVIEW_DAY:
             return
         if now.hour < 10 or now.hour > 16:

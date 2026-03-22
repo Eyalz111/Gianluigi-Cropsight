@@ -8,6 +8,9 @@ Generates digest, saves to Drive, sends to team via email + Telegram.
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 
 from config.settings import settings
 from processors.weekly_digest import generate_weekly_digest
@@ -75,7 +78,7 @@ class WeeklyDigestScheduler:
         Fires on the configured day/hour window (default: Friday 14:00-16:00).
         Skips if a digest was already generated for this week.
         """
-        now = datetime.now()
+        now = datetime.now(_ISRAEL_TZ)
 
         digest_day = settings.WEEKLY_DIGEST_DAY
         digest_hour = settings.WEEKLY_DIGEST_HOUR
@@ -178,7 +181,7 @@ class WeeklyDigestScheduler:
             Result dict from generate_weekly_digest().
         """
         if week_start is None:
-            now = datetime.now()
+            now = datetime.now(_ISRAEL_TZ)
             week_start = now - timedelta(days=now.weekday())
         return await self._generate_and_distribute(week_start)
 

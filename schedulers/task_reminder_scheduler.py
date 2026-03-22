@@ -24,8 +24,11 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
+
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from config.team import CROPSIGHT_TEAM_EMAILS, TEAM_TELEGRAM_IDS
 from services.google_sheets import sheets_service
 from services.supabase_client import supabase_client
@@ -83,7 +86,7 @@ class TaskReminderScheduler:
         while self._running:
             try:
                 # Reset daily tracker if it's a new day
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = datetime.now(_ISRAEL_TZ).strftime("%Y-%m-%d")
                 if today != self._last_reminder_date:
                     self._reminders_sent_today.clear()
                     self._last_reminder_date = today
@@ -123,7 +126,7 @@ class TaskReminderScheduler:
             logger.debug("No tasks found")
             return {"reminders_sent": 0}
 
-        today = datetime.now().date()
+        today = datetime.now(_ISRAEL_TZ).date()
         summary = {
             "overdue": [],
             "due_today": [],
@@ -402,7 +405,7 @@ class TaskReminderScheduler:
             "by_assignee": {},
         }
 
-        today = datetime.now().date()
+        today = datetime.now(_ISRAEL_TZ).date()
 
         for task in tasks:
             status = task.get("status", "pending")

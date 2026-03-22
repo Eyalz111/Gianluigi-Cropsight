@@ -158,7 +158,9 @@ async def process_transcript(
         meeting_id=meeting_id,
         transcript=file_content,
         new_tasks=extracted.get("tasks", []),
-        pre_extracted_commitments=extracted.get("commitments", []),
+        # DEPRECATED: Commitments merged into tasks (action items) as of QA hardening.
+        # Pass empty list for backward compatibility with cross_reference signature.
+        pre_extracted_commitments=[],
     )
 
     # Use deduplicated tasks — only insert genuinely new ones
@@ -424,22 +426,20 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "relationship": "advisor / investor / partner / client / grant_body / pilot_site / vendor / other"
         }
     ],
-    "commitments": [
-        {
-            "speaker": "Name of person making the commitment",
-            "commitment_text": "What they committed to (concise)",
-            "context": "Brief surrounding context (1 sentence)",
-            "implied_deadline": "Deadline mentioned or 'none'"
-        }
-    ],
     "discussion_summary": "2-4 paragraphs — see DISCUSSION SUMMARY RULES below"
 }
 
-TASK EXTRACTION RULES:
-Each task title should answer: WHO does WHAT by WHEN and WHY.
+ACTION ITEM EXTRACTION RULES:
+- Extract ACTION ITEMS: anything a participant agreed to do, was asked to do, or volunteered to do.
+- Include both formally assigned tasks ("Eyal, can you draft the abstract?") and verbal promises ("I'll send that over").
+- Each action item title should answer: WHO does WHAT by WHEN and WHY.
 - BAD: "Write accuracy abstract"
-- GOOD: "Write 1-page accuracy abstract documenting model performance benchmarks — needed before the client meeting so the team can discuss accuracy claims"
-Include the business context from the conversation, not just the bare action.
+- GOOD: "Write 1-page accuracy abstract documenting model performance benchmarks — needed before the client meeting"
+- Include the business context from the conversation, not just the bare action.
+- CONSOLIDATION: Combine related sub-tasks into one higher-level action item. If multiple items serve the same deliverable, merge them. Aim for 3-7 action items per meeting, not 10-15.
+  Example: "set up AWS account", "configure IAM roles", "prepare budget" → "Prepare AWS infrastructure (account, IAM, budget)"
+- DEADLINE: Only set a deadline if the transcript explicitly mentions a specific date, day of the week, or relative timeframe (e.g., "by Friday", "next week", "March 30"). "ASAP", "soon", "as early as possible" are NOT deadlines — set to null. Do NOT infer deadlines from context or urgency.
+- DEDUPLICATION: Never extract the same action as two separate items. If someone says "I'll do X" and is later formally assigned X, extract only once.
 
 DISCUSSION SUMMARY RULES:
 - Opening paragraph: What was the meeting's purpose and key outcome?
@@ -454,12 +454,6 @@ STAKEHOLDER EXTRACTION RULES:
 A "stakeholder" is someone CropSight has a DIRECT business relationship with — someone you'd put in a CRM.
 INCLUDE: specific advisors/contacts, partner companies, grant bodies, named pilot sites/projects.
 EXCLUDE: big tech/infra (AWS, Google, Microsoft, IBM), countries/cities mentioned casually, tools/platforms (Zoom, Slack, Tactiq), generic terms, meeting participants, CropSight team members.
-
-COMMITMENT EXTRACTION RULES:
-A "commitment" is a verbal promise to do something specific.
-INCLUDE: "I'll send that by Friday", "Let me set up a meeting with Jason"
-EXCLUDE: past-tense ("I already sent it"), observations ("We should think about this"), questions ("Can you look into it?")
-Be conservative — only include clear, actionable commitments.
 
 Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps."""
 

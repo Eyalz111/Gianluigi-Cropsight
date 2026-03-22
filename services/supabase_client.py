@@ -81,8 +81,8 @@ class SupabaseClient:
         try:
             overdue = self.client.table("tasks").select("*").eq(
                 "status", "pending"
-            ).lte("due_date", datetime.now().isoformat()).gte(
-                "due_date", since_date
+            ).lte("deadline", datetime.now().isoformat()).gte(
+                "deadline", since_date
             ).limit(limit).execute()
             result["tasks_newly_overdue"] = overdue.data if overdue.data else []
         except Exception:

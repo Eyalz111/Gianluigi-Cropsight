@@ -18,8 +18,11 @@ Usage:
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
+
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from services.supabase_client import supabase_client
 from services.telegram_bot import telegram_bot
 
@@ -209,7 +212,7 @@ class OrphanCleanupScheduler:
             List of notification dicts for stale tasks.
         """
         try:
-            cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+            cutoff = (datetime.now(_ISRAEL_TZ) - timedelta(days=30)).isoformat()
             result = (
                 supabase_client.client.table("tasks")
                 .select("id, title, assignee, created_at")
@@ -248,7 +251,7 @@ class OrphanCleanupScheduler:
             List of notification dicts for failed auto-publishes.
         """
         try:
-            now = datetime.now().isoformat()
+            now = datetime.now(_ISRAEL_TZ).isoformat()
             result = (
                 supabase_client.client.table("pending_approvals")
                 .select("*")

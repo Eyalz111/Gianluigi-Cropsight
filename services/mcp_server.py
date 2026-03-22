@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 15 read-only tools as thin wrappers around existing brain functions.
+Provides 16 read-only tools as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -38,7 +38,12 @@ logger = logging.getLogger(__name__)
 # Helper: standard response wrapper
 # ---------------------------------------------------------------------------
 
-def _success(data, source: str = "supabase", record_count: int | None = None) -> dict:
+def _success(
+    data,
+    source: str = "supabase",
+    record_count: int | None = None,
+    warnings: list[str] | None = None,
+) -> dict:
     """Wrap data in standard MCP tool response format."""
     meta = {
         "source": source,
@@ -48,6 +53,8 @@ def _success(data, source: str = "supabase", record_count: int | None = None) ->
         meta["record_count"] = record_count
     elif isinstance(data, list):
         meta["record_count"] = len(data)
+    if warnings:
+        meta["warnings"] = warnings
     return {"status": "success", "data": data, "metadata": meta}
 
 
@@ -78,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 15 read-only tools.
+    MCP server with SSE transport, auth middleware, and 16 read-only tools.
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -97,8 +104,9 @@ class MCPServer:
                 "You are connected to Gianluigi, CropSight's AI operations assistant. "
                 "IMPORTANT RULES:\n"
                 "1. Call get_system_context() FIRST in every session to load company context.\n"
-                "2. For status updates, ALWAYS check: get_gantt_status(), get_tasks(), "
-                "get_commitments(), get_pending_approvals(), and get_upcoming_meetings(). "
+                "2. For status updates, call get_full_status() for a complete snapshot in one call, "
+                "or use individual tools (get_gantt_status, get_tasks, get_pending_approvals, "
+                "get_upcoming_meetings) for focused queries. "
                 "Do not skip the Gantt — it is the primary operational source.\n"
                 "3. ONLY report information that comes from Gianluigi's tools. "
                 "Do NOT mix in information from your own memory, prior conversations, "
@@ -165,8 +173,8 @@ class MCPServer:
                                 content=_expired_report_html(),
                                 media_type="text/html",
                             )
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Failed to parse expires_at '{expires_at}': {e}")
 
                 html_content = report.get("html_content", "")
                 if not html_content:
@@ -190,7 +198,7 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (15 read-only tools)
+    # MCP Tools (16 read-only tools)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
@@ -470,7 +478,11 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_commitments",
-            description="Query team commitments with optional filters by assignee or status.",
+            description=(
+                "DEPRECATED: Commitments have been merged into tasks. "
+                "Use get_tasks() for all action items. "
+                "This tool still returns legacy commitment records for backward compatibility."
+            ),
         )
         async def get_commitments(
             assignee: str | None = None,
@@ -484,7 +496,12 @@ class MCPServer:
                     status=status,
                 )
                 mcp_auth.log_call("get_commitments", {"assignee": assignee, "status": status})
-                return _success(commitments)
+                result = _success(commitments)
+                result["note"] = (
+                    "Commitments have been merged into tasks (action items). "
+                    "Use get_tasks() for all action items going forward."
+                )
+                return result
 
             except Exception as e:
                 logger.error(f"get_commitments error: {e}")
@@ -682,6 +699,19 @@ class MCPServer:
                     week_number=iso_cal.week,
                     year=iso_cal.year,
                 )
+
+                # Attach report URL if a report exists for this week
+                try:
+                    from services.supabase_client import supabase_client as _sc
+
+                    report = _sc.get_weekly_report(iso_cal.week, iso_cal.year)
+                    if report and report.get("access_token"):
+                        base_url = settings.REPORTS_BASE_URL.rstrip("/") if settings.REPORTS_BASE_URL else ""
+                        if base_url:
+                            data["report_url"] = f"{base_url}/reports/weekly/{report['access_token']}"
+                except Exception as report_err:
+                    logger.debug(f"Could not attach report URL: {report_err}")
+
                 mcp_auth.log_call("get_weekly_summary", response_size=len(str(data)))
                 return _success(data, source="composite")
 
@@ -689,6 +719,86 @@ class MCPServer:
                 logger.error(f"get_weekly_summary error: {e}")
                 mcp_auth.log_call("get_weekly_summary", success=False, error=str(e))
                 return _error(str(e))
+
+        # ============================================================
+        # 16. get_full_status (composite)
+        # ============================================================
+        @mcp.tool(
+            name="get_full_status",
+            description=(
+                "Get a complete operational status in one call — tasks, Gantt status, "
+                "pending approvals, upcoming meetings, and attention items. "
+                "Use this instead of calling 5+ individual tools for status updates."
+            ),
+        )
+        async def get_full_status() -> dict:
+            import asyncio
+
+            warnings: list[str] = []
+            result: dict = {}
+
+            # Sync calls (supabase)
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                result["tasks"] = _sc.get_tasks(limit=50)
+            except Exception as e:
+                warnings.append(f"Tasks unavailable: {e}")
+                result["tasks"] = []
+
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                result["pending_approvals"] = _sc.get_pending_approval_summary()
+            except Exception as e:
+                warnings.append(f"Approvals unavailable: {e}")
+                result["pending_approvals"] = []
+
+            # Async calls with timeout
+            try:
+                from services.gantt_manager import gantt_manager
+
+                result["gantt_status"] = await asyncio.wait_for(
+                    gantt_manager.get_gantt_status(), timeout=10,
+                )
+            except asyncio.TimeoutError:
+                warnings.append("Gantt status timed out (10s)")
+                result["gantt_status"] = None
+            except Exception as e:
+                warnings.append(f"Gantt unavailable: {e}")
+                result["gantt_status"] = None
+
+            try:
+                from services.google_calendar import calendar_service
+
+                result["upcoming_meetings"] = await asyncio.wait_for(
+                    calendar_service.get_upcoming_events(days=7), timeout=10,
+                )
+            except asyncio.TimeoutError:
+                warnings.append("Calendar timed out (10s)")
+                result["upcoming_meetings"] = []
+            except Exception as e:
+                warnings.append(f"Meetings unavailable: {e}")
+                result["upcoming_meetings"] = []
+
+            try:
+                from processors.proactive_alerts import generate_alerts
+
+                alerts = generate_alerts()
+                result["attention_items"] = [
+                    f"[{a.get('severity', 'info').upper()}] {a.get('title', '')}"
+                    for a in (alerts or [])[:5]
+                ]
+            except Exception as e:
+                warnings.append(f"Alerts unavailable: {e}")
+                result["attention_items"] = []
+
+            mcp_auth.log_call("get_full_status", response_size=len(str(result)))
+            return _success(
+                result,
+                source="composite",
+                warnings=warnings if warnings else None,
+            )
 
     # ------------------------------------------------------------------
     # Server lifecycle

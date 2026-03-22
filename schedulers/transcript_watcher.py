@@ -27,8 +27,11 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
+
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from services.google_drive import drive_service
 from services.telegram_bot import telegram_bot
 from services.supabase_client import supabase_client
@@ -271,13 +274,34 @@ class TranscriptWatcher:
             participants = self._extract_participants_from_transcript(content)
 
         # Process transcript
-        result = await process_transcript(
-            file_content=content,
-            meeting_title=metadata["title"],
-            meeting_date=metadata["date"],
-            participants=participants,
-            source_file_path=file_name,
-        )
+        try:
+            result = await process_transcript(
+                file_content=content,
+                meeting_title=metadata["title"],
+                meeting_date=metadata["date"],
+                participants=participants,
+                source_file_path=file_name,
+            )
+        except Exception as e:
+            from services.alerting import send_system_alert, AlertSeverity
+            await send_system_alert(
+                AlertSeverity.CRITICAL,
+                "transcript_processor",
+                f"Failed to process transcript '{metadata['title']}': {e}",
+                error=e,
+            )
+            raise
+
+        # Quality gate: zero tasks from a long transcript
+        tasks_count = len(result.get("tasks", []))
+        if tasks_count == 0 and len(content) > 5000:
+            from services.alerting import send_system_alert, AlertSeverity
+            await send_system_alert(
+                AlertSeverity.WARNING,
+                "extraction_quality",
+                f"Zero tasks extracted from meeting '{metadata['title']}' "
+                f"({len(content)} chars) — possible extraction issue",
+            )
 
         # Mark file as processed
         drive_service.mark_file_processed(file_id)
@@ -413,7 +437,7 @@ class TranscriptWatcher:
 
         # No date found - use today
         return {
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": datetime.now(_ISRAEL_TZ).strftime("%Y-%m-%d"),
             "title": name.strip(),
             "participants": [],
         }

@@ -96,6 +96,72 @@ def _split_message(text: str, max_len: int = 4000) -> list[str]:
     return parts
 
 
+def format_summary_teaser(
+    title: str,
+    date: str,
+    participants: list[str],
+    content: dict,
+    drive_link: str,
+) -> str:
+    """
+    Format a short teaser for team distribution after approval.
+
+    Shows counts, top decisions, top action items, and a Drive link.
+    Designed to be under ~800 chars naturally (no truncation needed).
+    """
+    decisions = content.get("decisions", [])
+    tasks = content.get("tasks", [])
+    follow_ups = content.get("follow_ups", [])
+
+    parts = [f"*Meeting Summary: {title}* ({date})"]
+    if participants:
+        parts.append(f"Participants: {', '.join(participants)}")
+
+    # Counts line
+    counts = []
+    if decisions:
+        counts.append(f"{len(decisions)} decisions")
+    if tasks:
+        counts.append(f"{len(tasks)} action items")
+    if follow_ups:
+        counts.append(f"{len(follow_ups)} follow-ups")
+    if counts:
+        parts.append("")
+        parts.append(" · ".join(counts))
+
+    # Top decisions (max 3)
+    if decisions:
+        parts.append("")
+        parts.append("*Key decisions:*")
+        for d in decisions[:3]:
+            desc = d.get("description", "")
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            parts.append(f"• {desc}")
+        if len(decisions) > 3:
+            parts.append(f"  _...and {len(decisions) - 3} more in full summary_")
+
+    # Top action items (max 5, H priority first)
+    if tasks:
+        sorted_tasks = sorted(tasks, key=lambda t: {"H": 0, "M": 1, "L": 2}.get(t.get("priority", "M"), 1))
+        parts.append("")
+        parts.append("*Top action items:*")
+        for t in sorted_tasks[:5]:
+            assignee = t.get("assignee", "TBD")
+            title_text = t.get("title", "")
+            if len(title_text) > 60:
+                title_text = title_text[:57] + "..."
+            deadline = t.get("deadline") or "no deadline"
+            parts.append(f"• {assignee}: {title_text} — {deadline}")
+
+    # Drive link
+    if drive_link:
+        parts.append("")
+        parts.append(f"[Full summary]({drive_link})")
+
+    return "\n".join(parts)
+
+
 def _format_cross_reference_section(cross_ref: dict) -> list[str]:
     """
     Format cross-reference results as HTML lines for the Telegram approval message.

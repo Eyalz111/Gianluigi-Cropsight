@@ -348,6 +348,7 @@ class TestApplyStakeholderUpdateNew:
             "services.google_sheets.settings"
         ) as mock_settings:
             mock_settings.STAKEHOLDER_TRACKER_SHEET_ID = "sheet-456"
+            mock_settings.STAKEHOLDER_TAB_NAME = "Stakeholder Tracker"
 
             from services.google_sheets import GoogleSheetsService
 
@@ -375,7 +376,7 @@ class TestApplyStakeholderUpdateNew:
             # Check the row data
             call_kwargs = svc._append_row_to_range.call_args.kwargs
             assert call_kwargs["sheet_id"] == "sheet-456"
-            assert call_kwargs["range_name"] == "A:P"
+            assert call_kwargs["range_name"] == "'Stakeholder Tracker'!A:P"
             row_values = call_kwargs["values"]
             assert row_values[0] == "New Partner Inc"  # organization_name
             assert row_values[1] == "Investor"          # type
