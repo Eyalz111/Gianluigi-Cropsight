@@ -436,6 +436,88 @@ class GoogleSheetsService:
             logger.error(f"Error updating task status: {e}")
             return False
 
+    async def find_task_row(self, title: str) -> int | None:
+        """
+        Find the row number of a task in the Task Tracker by title.
+
+        Args:
+            title: Task title to search for (case-insensitive partial match).
+
+        Returns:
+            Row number if found, None otherwise.
+        """
+        all_tasks = await self.get_all_tasks()
+        title_lower = title.lower()
+        for task in all_tasks:
+            if title_lower in task.get("task", "").lower():
+                return task["row_number"]
+        return None
+
+    async def update_task_row(
+        self,
+        row_number: int,
+        **fields,
+    ) -> bool:
+        """
+        Update specific fields of a task row in the Task Tracker.
+
+        Columns: A=Task, B=Category, C=Assignee, D=Source, E=Deadline,
+                 F=Status, G=Priority, H=Created, I=Updated
+
+        Args:
+            row_number: The row number to update (1-indexed, header is row 1).
+            **fields: Field names to update. Supported: task, category, assignee,
+                      deadline, status, priority.
+
+        Returns:
+            True if update was successful.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+
+        column_map = {
+            "task": "A",
+            "category": "B",
+            "assignee": "C",
+            "deadline": "E",
+            "status": "F",
+            "priority": "G",
+        }
+
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            batch_data = []
+
+            for field, value in fields.items():
+                col = column_map.get(field)
+                if col:
+                    batch_data.append({
+                        "range": f"'Tasks'!{col}{row_number}",
+                        "values": [[value if value is not None else ""]],
+                    })
+
+            # Always update the Updated Date column (I)
+            batch_data.append({
+                "range": f"'Tasks'!I{row_number}",
+                "values": [[today]],
+            })
+
+            if batch_data:
+                self.service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={
+                        "valueInputOption": "RAW",
+                        "data": batch_data,
+                    },
+                ).execute()
+                logger.info(f"Updated task row {row_number}: {list(fields.keys())}")
+                return True
+            return False
+
+        except Exception as e:
+            logger.error(f"Error updating task row {row_number}: {e}")
+            return False
+
     async def get_all_tasks(self) -> list[dict]:
         """
         Get all tasks from the Task Tracker.

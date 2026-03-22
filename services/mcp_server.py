@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 18 tools (16 read + 2 write) tools as thin wrappers around existing brain functions.
+Provides 24 tools (16 read + 8 write) tools as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -85,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 18 tools (16 read + 2 write) tools.
+    MCP server with SSE transport, auth middleware, and 24 tools (16 read + 8 write) tools.
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -118,8 +118,9 @@ class MCPServer:
                 "covers CropSight operations.\n"
                 "5. Gianluigi proposes, Eyal approves. Never suggest direct team actions.\n"
                 "6. For weekly reviews, call start_weekly_review() to begin, then "
-                "confirm_weekly_review(session_id) when Eyal approves. "
-                "See the project instructions for the full weekly review workflow."
+                "confirm_weekly_review(session_id) when Eyal approves.\n"
+                "7. Use create_task() and update_task() to manage tasks. "
+                "Always confirm changes with Eyal before executing."
             ),
             transport_security=TransportSecuritySettings(
                 enable_dns_rebinding_protection=False,
@@ -201,7 +202,7 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (18 tools (16 read + 2 write) tools)
+    # MCP Tools (24 tools (16 read + 8 write) tools)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
@@ -1065,6 +1066,438 @@ class MCPServer:
                         "mcp_weekly_review",
                         f"confirm_weekly_review failed: {e}",
                         error=e,
+                    )
+                except Exception:
+                    pass
+                return _error(str(e))
+
+        # ============================================================
+        # 19. update_task (write)
+        # ============================================================
+        @mcp.tool(
+            name="update_task",
+            description=(
+                "Update an existing task's assignee, deadline, status, or priority. "
+                "Use get_tasks() first to find the task_id. "
+                "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
+                "Always confirm the change with Eyal before calling this tool."
+            ),
+        )
+        async def update_task(
+            task_id: str,
+            assignee: str | None = None,
+            deadline: str | None = None,
+            status: str | None = None,
+            priority: str | None = None,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+                from services.google_sheets import sheets_service
+
+                # Build update dict from non-None params
+                updates = {}
+                if assignee is not None:
+                    updates["assignee"] = assignee
+                if status is not None:
+                    updates["status"] = status
+                if priority is not None:
+                    updates["priority"] = priority
+
+                # Parse deadline (natural language support)
+                parsed_deadline = None
+                if deadline is not None:
+                    try:
+                        from dateutil.parser import parse as parse_date
+                        parsed_deadline = parse_date(deadline, fuzzy=True).date()
+                        updates["deadline"] = parsed_deadline.isoformat()
+                    except (ValueError, ImportError):
+                        updates["deadline"] = deadline  # Pass as-is, let DB handle
+
+                if not updates:
+                    return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority.")
+
+                # Get current task for response context
+                current = _sc.get_task(task_id) if hasattr(_sc, "get_task") else None
+
+                # Update in Supabase
+                updated = _sc.update_task(task_id, **updates)
+
+                # Sheets sync: find row and update
+                warnings: list[str] = []
+                try:
+                    title = updated.get("title", "") or (current or {}).get("title", "")
+                    if title:
+                        row = await sheets_service.find_task_row(title)
+                        if row:
+                            sheet_fields = {}
+                            if assignee is not None:
+                                sheet_fields["assignee"] = assignee
+                            if status is not None:
+                                sheet_fields["status"] = status
+                            if priority is not None:
+                                sheet_fields["priority"] = priority
+                            if parsed_deadline is not None:
+                                sheet_fields["deadline"] = parsed_deadline.isoformat()
+                            await sheets_service.update_task_row(row, **sheet_fields)
+                        else:
+                            warnings.append("Task not found in Google Sheets — Sheets not synced")
+                except Exception as sheets_err:
+                    warnings.append(f"Sheets sync failed: {sheets_err}")
+
+                # Note unusual transitions
+                notes = []
+                if status and current:
+                    old_status = current.get("status", "")
+                    if old_status == "done" and status == "pending":
+                        notes.append("Reopening completed task.")
+
+                # Audit log
+                _sc.log_action(
+                    action="task_updated",
+                    details={
+                        "task_id": task_id,
+                        "updates": updates,
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                response = {
+                    "task_id": task_id,
+                    "updated_fields": list(updates.keys()),
+                    "task": updated,
+                }
+                if notes:
+                    response["notes"] = notes
+
+                mcp_auth.log_call("update_task", {"task_id": task_id, "fields": list(updates.keys())})
+                return _success(response, warnings=warnings if warnings else None)
+
+            except Exception as e:
+                logger.error(f"update_task error: {e}")
+                mcp_auth.log_call("update_task", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 20. create_task (write)
+        # ============================================================
+        @mcp.tool(
+            name="create_task",
+            description=(
+                "Create a new task. Assignee should be a team member name "
+                "(Eyal, Roye, Paolo, Yoram) or empty string if unassigned. "
+                "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
+                "Always confirm with Eyal before creating."
+            ),
+        )
+        async def create_task(
+            title: str,
+            assignee: str = "",
+            deadline: str | None = None,
+            priority: str = "M",
+            category: str | None = None,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+                from services.google_sheets import sheets_service
+
+                # Parse deadline
+                parsed_deadline = None
+                if deadline:
+                    try:
+                        from dateutil.parser import parse as parse_date
+                        parsed_deadline = parse_date(deadline, fuzzy=True).date()
+                    except (ValueError, ImportError):
+                        pass  # Will pass as None
+
+                # Create in Supabase
+                task = _sc.create_task(
+                    title=title,
+                    assignee=assignee,
+                    priority=priority,
+                    deadline=parsed_deadline,
+                    category=category,
+                )
+
+                # Sheets sync
+                warnings: list[str] = []
+                try:
+                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    await sheets_service.add_task(
+                        task=title,
+                        assignee=assignee,
+                        source_meeting="Via Claude.ai",
+                        deadline=parsed_deadline.isoformat() if parsed_deadline else None,
+                        status="pending",
+                        priority=priority,
+                        created_date=today,
+                        category=category or "",
+                    )
+                except Exception as sheets_err:
+                    warnings.append(f"Sheets sync failed: {sheets_err}")
+
+                # Audit log
+                _sc.log_action(
+                    action="task_created",
+                    details={
+                        "task_id": task.get("id"),
+                        "title": title,
+                        "assignee": assignee,
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call("create_task", {"title": title[:50]})
+                return _success(
+                    {"task": task, "action": "task_created"},
+                    warnings=warnings if warnings else None,
+                )
+
+            except Exception as e:
+                logger.error(f"create_task error: {e}")
+                mcp_auth.log_call("create_task", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 21. quick_inject (write)
+        # ============================================================
+        @mcp.tool(
+            name="quick_inject",
+            description=(
+                "Inject information into Gianluigi's memory. Send natural language "
+                "and Gianluigi extracts tasks, decisions, and information. "
+                "Returns extracted items for Eyal's review before saving. "
+                "NEVER auto-confirm — always present items to Eyal first, then "
+                "call confirm_quick_inject() after approval."
+            ),
+        )
+        async def quick_inject(text: str) -> dict:
+            try:
+                from processors.debrief import process_quick_injection
+
+                result = await process_quick_injection(
+                    user_message=text,
+                    user_id="eyal",
+                )
+
+                mcp_auth.log_call("quick_inject", {"text_length": len(text)})
+                return _success({
+                    "response": result.get("response", ""),
+                    "extracted_items": result.get("extracted_items", []),
+                    "action": result.get("action", "none"),
+                    "instructions": (
+                        "Present these items to Eyal for review. "
+                        "If he wants changes, modify the items dict. "
+                        "Then call confirm_quick_inject(items) to save."
+                    ),
+                })
+
+            except Exception as e:
+                logger.error(f"quick_inject error: {e}")
+                mcp_auth.log_call("quick_inject", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 22. confirm_quick_inject (write)
+        # ============================================================
+        @mcp.tool(
+            name="confirm_quick_inject",
+            description=(
+                "Save previously extracted quick injection items after Eyal approves. "
+                "Items schema: [{type: 'task'|'decision'|'info'|'gantt_update', "
+                "text: str, assignee?: str, priority?: str, deadline?: str}]. "
+                "Call only after Eyal reviews and approves the items from quick_inject()."
+            ),
+        )
+        async def confirm_quick_inject(items: list[dict]) -> dict:
+            try:
+                from processors.debrief import _inject_debrief_items
+                from services.supabase_client import supabase_client as _sc
+
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                result = await _inject_debrief_items(
+                    session_id=None,
+                    items=items,
+                    source_date=today,
+                )
+
+                # Audit log
+                _sc.log_action(
+                    action="quick_inject_confirmed",
+                    details={
+                        "items_count": len(items),
+                        "result": result.get("summary", ""),
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call("confirm_quick_inject", {"items_count": len(items)})
+                return _success({
+                    "action": "items_injected",
+                    "summary": result.get("summary", ""),
+                    "counts": result.get("counts", {}),
+                    "meeting_id": result.get("meeting_id"),
+                })
+
+            except Exception as e:
+                logger.error(f"confirm_quick_inject error: {e}")
+                mcp_auth.log_call("confirm_quick_inject", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 23. propose_gantt_update (write)
+        # ============================================================
+        @mcp.tool(
+            name="propose_gantt_update",
+            description=(
+                "Propose changes to the operational Gantt chart. Creates a proposal "
+                "for Eyal's approval — changes are NOT applied until approved via "
+                "approve_gantt_proposal(). "
+                "Changes schema: [{section, subsection, week (int), value, reason?}]. "
+                "OWNER PREFIX RULE: Every cell value MUST include an owner prefix "
+                "like [R], [E], [P], [Y], [E/R], [ALL], [TBD]. "
+                "Example: [{\"section\": \"Product & Technology\", "
+                "\"subsection\": \"Execution\", \"week\": 14, "
+                "\"value\": \"[R] Completed\", \"reason\": \"Per founders review\"}]"
+            ),
+        )
+        async def propose_gantt_update(
+            changes: list[dict],
+            reason: str = "",
+        ) -> dict:
+            try:
+                from services.gantt_manager import gantt_manager
+                from services.supabase_client import supabase_client as _sc
+
+                # Add reason to each change if provided at top level
+                if reason:
+                    for c in changes:
+                        if not c.get("reason"):
+                            c["reason"] = reason
+
+                result = await gantt_manager.propose_gantt_update(
+                    changes=changes,
+                    source="mcp",
+                )
+
+                status = result.get("status", "")
+
+                if status == "rejected":
+                    mcp_auth.log_call("propose_gantt_update", {"status": "rejected"})
+                    return _error(
+                        f"Proposal rejected: {result.get('errors', [])}"
+                    )
+
+                if status == "needs_confirmation":
+                    # Conflicts — return details for Claude to explain
+                    conflicts = result.get("conflicts", [])
+                    conflict_details = []
+                    for c in conflicts:
+                        conflict_details.append(
+                            f"{c.get('section')} → {c.get('subsection')} (W{c.get('week')}): "
+                            f"current='{c.get('existing_content')}', "
+                            f"proposed='{c.get('proposed_content')}'"
+                        )
+                    mcp_auth.log_call("propose_gantt_update", {"status": "needs_confirmation"})
+                    return _success({
+                        "status": "needs_confirmation",
+                        "conflicts": conflict_details,
+                        "message": (
+                            "Some cells already have content. Present each conflict "
+                            "to Eyal and ask whether to replace or append."
+                        ),
+                    })
+
+                # Success — proposal created
+                proposal_id = result.get("proposal_id", "")
+
+                _sc.log_action(
+                    action="gantt_proposal_created",
+                    details={
+                        "proposal_id": proposal_id,
+                        "changes_count": len(changes),
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call("propose_gantt_update", {"proposal_id": proposal_id})
+                return _success({
+                    "status": "pending",
+                    "proposal_id": proposal_id,
+                    "changes_count": len(result.get("changes", [])),
+                    "message": (
+                        "Proposal created. Present the changes to Eyal and "
+                        "call approve_gantt_proposal(proposal_id) when approved."
+                    ),
+                })
+
+            except Exception as e:
+                logger.error(f"propose_gantt_update error: {e}")
+                mcp_auth.log_call("propose_gantt_update", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 24. approve_gantt_proposal (write)
+        # ============================================================
+        @mcp.tool(
+            name="approve_gantt_proposal",
+            description=(
+                "Execute an approved Gantt proposal. Creates a backup snapshot first, "
+                "then applies changes to the Gantt chart. Call only after Eyal "
+                "explicitly approves the proposal from propose_gantt_update()."
+            ),
+        )
+        async def approve_gantt_proposal(proposal_id: str) -> dict:
+            try:
+                from services.gantt_manager import gantt_manager
+                from services.supabase_client import supabase_client as _sc
+
+                result = await gantt_manager.execute_approved_proposal(proposal_id)
+
+                status = result.get("status", "")
+                if status == "error":
+                    return _error(result.get("error", "Execution failed"))
+
+                # Build human-readable change descriptions
+                changes_applied = []
+                for c in result.get("changes_applied", result.get("changes", [])):
+                    desc = (
+                        f"{c.get('section', '')} → {c.get('subsection', '')}: "
+                        f"'{c.get('old_value', '')}' → '{c.get('new_value', '')}' "
+                        f"(W{c.get('week', '?')})"
+                    )
+                    changes_applied.append(desc)
+
+                _sc.log_action(
+                    action="gantt_proposal_executed",
+                    details={
+                        "proposal_id": proposal_id,
+                        "changes_count": len(changes_applied),
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call("approve_gantt_proposal", {"proposal_id": proposal_id})
+                return _success({
+                    "executed": True,
+                    "proposal_id": proposal_id,
+                    "changes_applied": changes_applied,
+                    "snapshot_id": result.get("snapshot_id", ""),
+                    "message": f"Applied {len(changes_applied)} Gantt changes. Snapshot saved for rollback.",
+                })
+
+            except Exception as e:
+                logger.error(f"approve_gantt_proposal error: {e}")
+                mcp_auth.log_call("approve_gantt_proposal", success=False, error=str(e))
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL, "gantt_execution",
+                        f"Gantt proposal execution failed: {e}", error=e,
                     )
                 except Exception:
                     pass
