@@ -30,6 +30,7 @@ TRUNCATE TABLE gantt_proposals CASCADE;
 TRUNCATE TABLE gantt_snapshots CASCADE;
 TRUNCATE TABLE token_usage CASCADE;
 TRUNCATE TABLE audit_log CASCADE;
+TRUNCATE TABLE scheduler_heartbeats CASCADE;
 
 -- Keep calendar_classifications (learned knowledge, not test data)
 -- Keep gantt_schema (structural, not operational)
