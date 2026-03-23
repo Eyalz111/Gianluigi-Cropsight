@@ -898,28 +898,43 @@ async def process_response(
                 "distribution": distribution_result,
             }
 
-        # Default: meeting_summary — gather all related data
+        # Default: meeting_summary — gather all related data.
+        # Prefer edited content from pending_approvals (has edits applied)
+        # over raw DB tables (which may still have pre-edit data).
+        pending_content = (pending_info or {}).get("content", {})
+        has_edited_data = any(
+            key in pending_content
+            for key in ("tasks", "decisions", "follow_ups", "open_questions")
+        )
+
         content = {
-            "title": meeting.get("title"),
-            "summary": meeting.get("summary"),
-            "date": meeting.get("date"),
+            "title": pending_content.get("title") or meeting.get("title"),
+            "summary": pending_content.get("summary") or meeting.get("summary"),
+            "date": pending_content.get("date") or meeting.get("date"),
         }
 
-        # Get related data from Supabase
-        decisions = supabase_client.list_decisions(meeting_id=meeting_id)
-        tasks = supabase_client.get_tasks(status=None)
-        tasks = [t for t in tasks if t.get("meeting_id") == meeting_id]
-        follow_ups = supabase_client.list_follow_up_meetings(
-            source_meeting_id=meeting_id
-        )
-        open_questions = supabase_client.get_open_questions(
-            meeting_id=meeting_id
-        )
-
-        content["decisions"] = decisions
-        content["tasks"] = tasks
-        content["follow_ups"] = follow_ups
-        content["open_questions"] = open_questions
+        if has_edited_data:
+            # Use edited data from pending_approvals (post-edit version)
+            content["decisions"] = pending_content.get("decisions", [])
+            content["tasks"] = pending_content.get("tasks", [])
+            content["follow_ups"] = pending_content.get("follow_ups", [])
+            content["open_questions"] = pending_content.get("open_questions", [])
+            logger.info("Using edited content from pending_approvals for distribution")
+        else:
+            # No edits — read fresh from DB tables
+            decisions = supabase_client.list_decisions(meeting_id=meeting_id)
+            tasks = supabase_client.get_tasks(status=None)
+            tasks = [t for t in tasks if t.get("meeting_id") == meeting_id]
+            follow_ups = supabase_client.list_follow_up_meetings(
+                source_meeting_id=meeting_id
+            )
+            open_questions = supabase_client.get_open_questions(
+                meeting_id=meeting_id
+            )
+            content["decisions"] = decisions
+            content["tasks"] = tasks
+            content["follow_ups"] = follow_ups
+            content["open_questions"] = open_questions
 
         # v0.3: Carry cross-reference data through to distribution
         if pending_info and pending_info.get("content", {}).get("cross_reference"):
@@ -1306,6 +1321,53 @@ Return ONLY the JSON object, no other text."""
 
         logger.info(f"Applied {len(edits)} edits to meeting {meeting_id}")
 
+        # Sync edited structured data back to DB tables.
+        # This ensures DB, pending_approvals, distribution, and Sheets stay consistent.
+        try:
+            # Delete old records and insert edited ones for this meeting
+            # Tasks
+            old_tasks = supabase_client.get_tasks(status=None)
+            old_task_ids = [t["id"] for t in old_tasks if t.get("meeting_id") == meeting_id]
+            for tid in old_task_ids:
+                supabase_client.client.table("tasks").delete().eq("id", tid).execute()
+            if edited_tasks:
+                supabase_client.create_tasks_batch(meeting_id, edited_tasks)
+
+            # Decisions
+            supabase_client.client.table("decisions").delete().eq(
+                "meeting_id", meeting_id
+            ).execute()
+            if edited_decisions:
+                supabase_client.create_decisions_batch(meeting_id, edited_decisions)
+
+            # Follow-ups
+            supabase_client.client.table("follow_up_meetings").delete().eq(
+                "source_meeting_id", meeting_id
+            ).execute()
+            if edited_follow_ups:
+                for fu in edited_follow_ups:
+                    supabase_client.create_follow_up_meeting(
+                        source_meeting_id=meeting_id,
+                        title=fu.get("title", ""),
+                        led_by=fu.get("led_by", ""),
+                    )
+
+            # Open questions
+            supabase_client.client.table("open_questions").delete().eq(
+                "meeting_id", meeting_id
+            ).execute()
+            if edited_questions:
+                for q in edited_questions:
+                    supabase_client.create_open_question(
+                        meeting_id=meeting_id,
+                        question=q.get("question", ""),
+                        raised_by=q.get("raised_by", ""),
+                    )
+
+            logger.info(f"Synced edited data to DB for meeting {meeting_id}")
+        except Exception as e:
+            logger.error(f"Failed to sync edited data to DB: {e}")
+
         return {
             "title": meeting.get("title"),
             "summary": updated_summary,
@@ -1405,6 +1467,7 @@ async def distribute_approved_content(
             filename=f"{meeting_date} - {meeting_title}.docx",
         )
         results["docx_link"] = docx_result.get("webViewLink", "")
+        results["docx_bytes"] = docx_bytes  # For email attachment
         logger.info(f"Saved .docx to Drive: {docx_result.get('id')}")
     except Exception as e:
         logger.error(f"Error saving Word document: {e}")
@@ -1531,6 +1594,7 @@ async def distribute_approved_content(
                 meeting_date=meeting_date,
                 executive_summary=exec_summary,
                 tasks=tasks,
+                docx_bytes=results.get("docx_bytes"),
             )
             results["email_sent"] = email_result
             results["emails_to"] = distribution_emails

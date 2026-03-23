@@ -266,6 +266,9 @@ class TelegramBot:
         # Session stack: allows debrief to interrupt weekly review
         self._session_stack: list[str] = []
 
+        # Track approval message IDs for cleanup on edit/resubmit
+        self._approval_message_ids: dict[str, list[int]] = {}
+
     @property
     def _active_interactive_session(self) -> str | None:
         """Backward compat: returns current session type from stack."""
@@ -672,9 +675,44 @@ class TelegramBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        return await self.send_to_eyal(
-            message, reply_markup=reply_markup, parse_mode="HTML"
-        )
+        # Delete old approval messages for this meeting (cleanup on resubmit after edit)
+        old_msg_ids = self._approval_message_ids.pop(meeting_id, [])
+        for msg_id in old_msg_ids:
+            try:
+                await self.app.bot.delete_message(
+                    chat_id=self.eyal_chat_id, message_id=msg_id,
+                )
+            except Exception:
+                pass  # Message may already be deleted or too old
+
+        # Send and track message IDs for multi-part cleanup
+        sent_message_ids = []
+        try:
+            chat_id = self.eyal_chat_id
+            if len(message) > 4000:
+                parts = _split_message(message, max_len=4000)
+                for part in parts[:-1]:
+                    msg = await self.app.bot.send_message(
+                        chat_id=chat_id, text=part, parse_mode="HTML",
+                    )
+                    sent_message_ids.append(msg.message_id)
+                msg = await self.app.bot.send_message(
+                    chat_id=chat_id, text=parts[-1], parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                sent_message_ids.append(msg.message_id)
+            else:
+                msg = await self.app.bot.send_message(
+                    chat_id=chat_id, text=message, parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                sent_message_ids.append(msg.message_id)
+
+            self._approval_message_ids[meeting_id] = sent_message_ids
+            return True
+        except Exception as e:
+            logger.error(f"Error sending approval request: {e}")
+            return False
 
     async def send_prep_outline(
         self,

@@ -394,29 +394,10 @@ async def run_cross_reference(
         transcript=transcript,
     )
 
-    # v0.3 Tier 2: Extract commitments (prefer Opus pre-extraction over Haiku fallback)
-    if pre_extracted_commitments:
-        new_commitments = pre_extracted_commitments
-        logger.info(f"Using {len(new_commitments)} pre-extracted commitments from Opus")
-    else:
-        new_commitments = await extract_commitments(
-            meeting_id=meeting_id,
-            transcript=transcript,
-            participants=[],  # Participants not available here, but not critical
-        )
-
-    # Store new commitments in Supabase
-    if new_commitments:
-        try:
-            supabase_client.create_commitments_batch(meeting_id, new_commitments)
-        except Exception as e:
-            logger.error(f"Error storing commitments: {e}")
-
-    # v0.3 Tier 2: Check for commitment fulfillment
-    fulfillments = await check_commitment_fulfillment(
-        meeting_id=meeting_id,
-        transcript=transcript,
-    )
+    # DEPRECATED: Commitments merged into tasks (action items) as of QA hardening.
+    # Previously: extracted and stored commitments separately. Now skipped.
+    new_commitments = []
+    fulfillments = []
 
     # Create task_mention records for duplicates and updates
     mentions_to_create = []

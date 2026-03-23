@@ -418,6 +418,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     "executive_summary": "One sentence capturing the meeting's most important outcome or decision. Write for someone deciding whether to read the full summary.",
     "decisions": [
         {
+            "label": "2-3 word topic label for quick scanning",
             "description": "The decision made",
             "context": "Surrounding context",
             "participants_involved": ["Name1", "Name2"],
@@ -426,6 +427,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     ],
     "tasks": [
         {
+            "label": "2-3 word topic label for quick scanning",
             "title": "Task description — see TASK EXTRACTION RULES below",
             "assignee": "Name",
             "deadline": "YYYY-MM-DD or null",
@@ -436,6 +438,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     ],
     "follow_ups": [
         {
+            "label": "2-3 word topic label for quick scanning",
             "title": "Meeting title",
             "proposed_date": "Description or null",
             "led_by": "Name",
@@ -446,6 +449,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     ],
     "open_questions": [
         {
+            "label": "2-3 word topic label for quick scanning",
             "question": "The question",
             "raised_by": "Name",
             "transcript_timestamp": "MM:SS"
@@ -476,6 +480,10 @@ ACTION ITEM EXTRACTION RULES:
 - DEDUPLICATION: Never extract the same action as two separate items. If someone says "I'll do X" and is later formally assigned X, extract only once.
 - ASSIGNEE: Only assign to a specific person if the transcript makes it clear who is responsible. If unclear, set "assignee" to "" (empty string). Do NOT use "team", "everyone", or "TBD".
 - EXISTING TASK AWARENESS: If the prompt includes an EXISTING OPEN TASKS section, reference it. When the discussion clearly refers to an existing task, do NOT extract it as new. If the discussion reveals a status change (completed, blocked, in progress), prefix the title with "UPDATE:" so post-processing can match it. The "UPDATE:" prefix is a hint for deduplication — it is not machine-parsed.
+- PERSONAL FILTER: EXCLUDE personal academic commitments, thesis work, university courses, degree programs, or other non-CropSight activities. Only extract items directly related to CropSight business. If a team member mentions personal academic work, do NOT create a task or decision for it.
+
+LABEL RULES:
+Every decision, task, follow-up meeting, and open question MUST include a "label" field — a 2-3 word topic tag for quick scanning (e.g., "Moldova Pilot", "Accuracy Docs", "Investor Update", "AWS Setup"). Labels help humans scan long lists without reading every detail.
 
 DISCUSSION SUMMARY RULES:
 - Opening paragraph: What was the meeting's purpose and key outcome?

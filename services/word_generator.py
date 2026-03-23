@@ -91,28 +91,37 @@ def generate_summary_docx(
     else:
         doc.add_paragraph("No key decisions recorded.", style="No Spacing")
 
-    # --- Action Items (table) ---
+    # --- Action Items (compact table) ---
     doc.add_heading("Action Items", level=2)
     if tasks:
-        table = doc.add_table(rows=1, cols=6)
+        table = doc.add_table(rows=1, cols=4)
         table.style = "Light Grid Accent 1"
-        headers = ["#", "Task", "Assignee", "Deadline", "Priority", "Ref"]
+        headers = ["Pri", "Action Item", "Owner", "Deadline"]
         for j, header in enumerate(headers):
             cell = table.rows[0].cells[j]
             cell.text = header
-            # Bold header
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
                     run.bold = True
+                paragraph.paragraph_format.space_after = Pt(2)
 
-        for i, t in enumerate(tasks, 1):
+        for t in tasks:
             row = table.add_row()
-            row.cells[0].text = str(i)
-            row.cells[1].text = t.get("title", "")
-            row.cells[2].text = t.get("assignee", "TBD")
-            row.cells[3].text = str(t.get("deadline", "TBD") or "TBD")
-            row.cells[4].text = t.get("priority", "M")
-            row.cells[5].text = f"~{t.get('transcript_timestamp', '')}"
+            row.cells[0].text = t.get("priority", "M")
+            # Use label + title for compact display
+            label = t.get("label", "")
+            title = t.get("title", "")
+            row.cells[1].text = f"[{label}] {title}" if label else title
+            row.cells[2].text = t.get("assignee", "") or "—"
+            row.cells[3].text = str(t.get("deadline", "") or "—")
+
+            # Compact row spacing
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    paragraph.paragraph_format.space_before = Pt(1)
+                    paragraph.paragraph_format.space_after = Pt(1)
+                    for run in paragraph.runs:
+                        run.font.size = Pt(9)
     else:
         doc.add_paragraph("No action items recorded.", style="No Spacing")
 
