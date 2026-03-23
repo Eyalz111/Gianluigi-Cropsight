@@ -911,6 +911,9 @@ async def process_response(
             "title": pending_content.get("title") or meeting.get("title"),
             "summary": pending_content.get("summary") or meeting.get("summary"),
             "date": pending_content.get("date") or meeting.get("date"),
+            "executive_summary": pending_content.get("executive_summary", ""),
+            "discussion_summary": pending_content.get("discussion_summary", ""),
+            "stakeholders": pending_content.get("stakeholders", []),
         }
 
         if has_edited_data:
