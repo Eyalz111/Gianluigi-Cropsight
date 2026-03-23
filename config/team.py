@@ -50,7 +50,8 @@ TEAM_MEMBERS = {
         "role": "Senior Advisor",
         "role_description": (
             "Academic guidance, agronomy expertise, research methodology. "
-            "Advises on scientific validation and academic partnerships."
+            "Advisory role only — does not execute operational tasks. "
+            "Assigns tasks TO others, not assigned tasks himself."
         ),
         "email": settings.YORAM_EMAIL,
         "is_admin": False,

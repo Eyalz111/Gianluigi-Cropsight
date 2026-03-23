@@ -586,36 +586,44 @@ class TelegramBot:
         if decisions:
             lines.append(f"<b>Decisions ({len(decisions)})</b>")
             for i, d in enumerate(decisions, 1):
+                label = d.get("label", "")
                 desc = _escape_html(d.get("description", ""))
-                lines.append(f"  {i}. {desc}")
+                prefix = f"<b>{_escape_html(label)}</b> — " if label else ""
+                lines.append(f"  {i}. {prefix}{desc}")
             lines.append("")
 
         # Tasks
         if tasks:
             lines.append(f"<b>Action Items ({len(tasks)})</b>")
             for i, t in enumerate(tasks, 1):
+                label = t.get("label", "")
                 title = _escape_html(t.get("title", ""))
-                assignee = t.get("assignee", "TBD")
+                assignee = t.get("assignee", "") or "—"
                 priority = t.get("priority", "M")
-                lines.append(f"  {i}. [{priority}] {title} -> {assignee}")
+                label_prefix = f"<b>{_escape_html(label)}</b>: " if label else ""
+                lines.append(f"  {i}. [{priority}] {label_prefix}{title} -> {assignee}")
             lines.append("")
 
         # Follow-ups
         if follow_ups:
             lines.append(f"<b>Follow-up Meetings ({len(follow_ups)})</b>")
             for f in follow_ups:
+                label = f.get("label", "")
                 title = _escape_html(f.get("title", ""))
                 led_by = f.get("led_by", "TBD")
-                lines.append(f"  - {title} (led by {led_by})")
+                label_prefix = f"<b>{_escape_html(label)}</b>: " if label else ""
+                lines.append(f"  - {label_prefix}{title} (led by {led_by})")
             lines.append("")
 
         # Open questions
         if open_questions:
             lines.append(f"<b>Open Questions ({len(open_questions)})</b>")
             for q in open_questions:
+                label = q.get("label", "")
                 question = _escape_html(q.get("question", ""))
                 raised_by = q.get("raised_by", "")
-                lines.append(f"  - {question}")
+                label_prefix = f"<b>{_escape_html(label)}</b>: " if label else ""
+                lines.append(f"  - {label_prefix}{question}")
                 if raised_by:
                     lines.append(f"    (raised by {raised_by})")
             lines.append("")
