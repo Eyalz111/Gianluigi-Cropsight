@@ -1598,6 +1598,7 @@ async def distribute_approved_content(
                 executive_summary=exec_summary,
                 tasks=tasks,
                 docx_bytes=results.get("docx_bytes"),
+                discussion_summary=content.get("discussion_summary", ""),
             )
             results["email_sent"] = email_result
             results["emails_to"] = distribution_emails
