@@ -63,6 +63,11 @@ def generate_alerts() -> list[dict]:
     except Exception as e:
         logger.error(f"Error checking question pileup: {e}")
 
+    try:
+        alerts.extend(_check_stale_tasks())
+    except Exception as e:
+        logger.error(f"Error checking stale tasks: {e}")
+
     # Sort by severity: high > medium > low
     severity_order = {"high": 0, "medium": 1, "low": 2}
     alerts.sort(key=lambda a: severity_order.get(a.get("severity", "low"), 3))
@@ -445,6 +450,74 @@ def _check_question_pileup() -> list[dict]:
                 f"resolved. Consider dedicating meeting time to address them."
             ),
             "items": q_summaries,
+        })
+
+    return alerts
+
+
+def _check_stale_tasks() -> list[dict]:
+    """
+    Detect open tasks that haven't been mentioned in any meeting since creation.
+
+    Tasks open for 7+ days with no task_mention record are "stale" —
+    likely forgotten or not being tracked actively.
+
+    Returns:
+        List of alerts for stale tasks.
+    """
+    alerts = []
+
+    open_tasks = supabase_client.get_tasks(status="pending", limit=100)
+    open_tasks += supabase_client.get_tasks(status="in_progress", limit=50)
+
+    if not open_tasks:
+        return alerts
+
+    today = datetime.now().date()
+    stale_tasks = []
+
+    for task in open_tasks:
+        created = task.get("created_at", "")
+        if not created:
+            continue
+
+        try:
+            created_date = datetime.fromisoformat(created.replace("Z", "+00:00")).date()
+            days_open = (today - created_date).days
+        except (ValueError, TypeError):
+            continue
+
+        if days_open < 7:
+            continue
+
+        # Check if task has any task_mention records
+        try:
+            mentions = supabase_client.client.table("task_mentions").select(
+                "id", count="exact"
+            ).eq("task_id", task["id"]).execute()
+            mention_count = mentions.count or 0
+        except Exception:
+            mention_count = 0
+
+        if mention_count == 0:
+            stale_tasks.append({
+                "title": task.get("title", "?")[:60],
+                "assignee": task.get("assignee", ""),
+                "days_open": days_open,
+                "task_id": task.get("id"),
+            })
+
+    if stale_tasks:
+        stale_tasks.sort(key=lambda t: t["days_open"], reverse=True)
+        alerts.append({
+            "type": "stale_tasks",
+            "severity": "medium",
+            "title": f"{len(stale_tasks)} tasks open 7+ days with no follow-up discussion",
+            "details": (
+                f"{len(stale_tasks)} tasks have been open for over a week without being "
+                f"mentioned in any subsequent meeting."
+            ),
+            "items": stale_tasks[:5],
         })
 
     return alerts

@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 32 tools (22 read + 10 write) tools as thin wrappers around existing brain functions.
+Provides 33 tools (23 read + 10 write) tools as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -85,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 32 tools (22 read + 10 write) tools.
+    MCP server with SSE transport, auth middleware, and 33 tools (23 read + 10 write) tools.
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -202,7 +202,7 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (32 tools (22 read + 10 write) tools)
+    # MCP Tools (33 tools (23 read + 10 write) tools)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
@@ -615,12 +615,22 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_gantt_status",
-            description="Get current Gantt chart status for a specific week (defaults to current week).",
+            description=(
+                "[GANTT] Get current Gantt chart status. Default: current week data. "
+                "Set view='now_next_later' for a prioritized Now/Next/Later view."
+            ),
         )
         async def get_gantt_status(
             week: int | None = None,
+            view: str | None = None,
         ) -> dict:
             try:
+                if view == "now_next_later":
+                    from processors.gantt_intelligence import generate_now_next_later
+                    nnl = await generate_now_next_later()
+                    mcp_auth.log_call("get_gantt_status", {"view": "now_next_later"})
+                    return _success(nnl, source="gantt_intelligence")
+
                 from services.gantt_manager import gantt_manager
 
                 status = await gantt_manager.get_gantt_status(week=week)
@@ -1289,7 +1299,31 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 25. update_task (write) — Phase 8a
+        # ============================================================
+        # 25. get_gantt_metrics (read) — Phase 9C
+        # ============================================================
+        @mcp.tool(
+            name="get_gantt_metrics",
+            description=(
+                "[GANTT] Get computed Gantt metrics: velocity (cells completed vs active), "
+                "slippage ratio (blocked/total), and milestone risk scores."
+            ),
+        )
+        async def get_gantt_metrics() -> dict:
+            try:
+                from processors.gantt_intelligence import compute_gantt_metrics
+
+                metrics = await compute_gantt_metrics()
+                mcp_auth.log_call("get_gantt_metrics")
+                return _success(metrics, source="gantt_intelligence")
+
+            except Exception as e:
+                logger.error(f"get_gantt_metrics error: {e}")
+                mcp_auth.log_call("get_gantt_metrics", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 26. update_task (write) — Phase 8a
         # ============================================================
         @mcp.tool(
             name="update_task",
