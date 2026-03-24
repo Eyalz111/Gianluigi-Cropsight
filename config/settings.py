@@ -412,6 +412,14 @@ class Settings(BaseSettings):
         default=5.0,
         description="USD daily cost threshold for warning alert"
     )
+    TASK_ARCHIVAL_ENABLED: bool = Field(
+        default=False,
+        description="Enable daily archival of completed tasks to Sheets Archive tab"
+    )
+    TASK_ARCHIVAL_DAYS: int = Field(
+        default=30,
+        description="Archive completed tasks older than this many days"
+    )
 
     @property
     def model_extraction(self) -> str:

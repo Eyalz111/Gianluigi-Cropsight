@@ -112,12 +112,14 @@ class TestServerBuild:
             "approve_gantt_proposal",
             "get_system_health",
             "get_cost_summary",
+            "update_decision",
+            "get_decisions_for_review",
         ]
 
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 26
+        assert len(tool_names) == 28
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

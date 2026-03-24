@@ -159,8 +159,9 @@ async def process_transcript(
         transcript=file_content,
         new_tasks=extracted.get("tasks", []),
         # DEPRECATED: Commitments merged into tasks (action items) as of QA hardening.
-        # Pass empty list for backward compatibility with cross_reference signature.
         pre_extracted_commitments=[],
+        # Phase 9A: pass decisions for supersession detection
+        new_decisions=extracted.get("decisions", []),
     )
 
     # Use deduplicated tasks — only insert genuinely new ones
@@ -410,6 +411,10 @@ async def extract_structured_data(
         existing_tasks=existing_tasks,
     )
 
+    # Build canonical project names for label normalization
+    from config.projects import get_canonical_names_for_prompt
+    canonical_names = get_canonical_names_for_prompt()
+
     # Use a structured extraction approach with JSON output
     extraction_system = """You are an expert meeting analyst. Extract structured information from meeting transcripts.
 
@@ -418,8 +423,11 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     "executive_summary": "One sentence capturing the meeting's most important outcome or decision. Write for someone deciding whether to read the full summary.",
     "decisions": [
         {
-            "label": "2-3 word topic label for quick scanning",
+            "label": "2-3 word topic label — use canonical project names when possible",
             "description": "The decision made",
+            "rationale": "Why this was decided (the reasoning behind it)",
+            "options_considered": ["Option A that was discussed", "Option B that was rejected"],
+            "confidence": 3,
             "context": "Surrounding context",
             "participants_involved": ["Name1", "Name2"],
             "transcript_timestamp": "MM:SS"
@@ -483,7 +491,13 @@ ACTION ITEM EXTRACTION RULES:
 - PERSONAL FILTER: EXCLUDE personal academic commitments, thesis work, university courses, degree programs, or other non-CropSight activities. Only extract items directly related to CropSight business. If a team member mentions personal academic work, do NOT create a task or decision for it.
 
 LABEL RULES:
-Every decision, task, follow-up meeting, and open question MUST include a "label" field — a 2-3 word topic tag for quick scanning (e.g., "Moldova Pilot", "Accuracy Docs", "Investor Update", "AWS Setup"). Labels help humans scan long lists without reading every detail.
+Every decision, task, follow-up meeting, and open question MUST include a "label" field — a 2-3 word topic tag for quick scanning. Use canonical project names when possible: {canonical_names}. If a topic doesn't match any canonical name, create a short descriptive label (2-4 words). Normalize variations: "Moldova PoC", "Gagauzia project", "Moldova wheat" → "Moldova Pilot".
+
+DECISION EXTRACTION RULES:
+- Every decision MUST include "rationale" (why it was decided) and "options_considered" (alternatives discussed).
+- "confidence" is a 1-5 scale: 1=tentative/exploratory, 2=leaning toward, 3=agreed but flexible, 4=firm decision, 5=irreversible commitment.
+- If rationale or options were not explicitly discussed, infer from context. If truly unclear, set rationale to "Not explicitly discussed" and options_considered to [].
+- "review_date" defaults to 30 days from the meeting date. For urgent/time-sensitive decisions, set earlier.
 
 DISCUSSION SUMMARY RULES:
 - Opening paragraph: What was the meeting's purpose and key outcome?
@@ -507,7 +521,7 @@ Meetings may be in Hebrew, English, or mixed. Regardless of language:
 - Keep company/organization names as-is
 - If a Hebrew term has no clear English equivalent, transliterate and add brief explanation
 
-Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps."""
+Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names)
 
     # Retry with exponential backoff for transient errors (529 overloaded, 500, etc.)
     max_retries = 4

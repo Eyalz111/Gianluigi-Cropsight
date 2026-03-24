@@ -353,6 +353,7 @@ async def run_cross_reference(
     transcript: str,
     new_tasks: list[dict],
     pre_extracted_commitments: list[dict] | None = None,
+    **kwargs,
 ) -> dict:
     """
     Orchestrate all cross-reference analyses for a meeting.
@@ -456,7 +457,113 @@ async def run_cross_reference(
         f"{len(fulfillments)} fulfillments"
     )
 
+    # Phase 9A: Detect decision supersessions
+    try:
+        new_decisions = kwargs.get("new_decisions", [])
+        if new_decisions:
+            supersessions = await detect_supersessions(meeting_id, new_decisions)
+            result["supersessions"] = supersessions
+        else:
+            result["supersessions"] = []
+    except Exception as e:
+        logger.error(f"Supersession detection failed (non-fatal): {e}")
+        result["supersessions"] = []
+
     return result
+
+
+async def detect_supersessions(
+    meeting_id: str,
+    new_decisions: list[dict],
+) -> list[dict]:
+    """
+    Detect when new decisions contradict or supersede existing active decisions.
+
+    Uses Sonnet (not Haiku) because this is a reasoning task, not classification.
+
+    Args:
+        meeting_id: UUID of the current meeting.
+        new_decisions: List of newly extracted decisions.
+
+    Returns:
+        List of supersession pairs: [{new_decision, old_decision_id, reason}]
+    """
+    if not new_decisions:
+        return []
+
+    # Fetch active decisions with labels
+    existing = supabase_client.list_decisions(limit=50)
+    active_decisions = [
+        d for d in existing
+        if d.get("decision_status", "active") == "active"
+        and d.get("meeting_id") != meeting_id
+    ]
+
+    if not active_decisions:
+        return []
+
+    # Build comparison prompt
+    existing_list = []
+    for i, d in enumerate(active_decisions[:20], 1):
+        label = d.get("label", "")
+        desc = d.get("description", "")[:100]
+        existing_list.append(f"  {i}. [{label}] {desc} (id: {d['id']})")
+
+    new_list = []
+    for i, d in enumerate(new_decisions, 1):
+        label = d.get("label", "")
+        desc = d.get("description", "")[:100]
+        new_list.append(f"  {i}. [{label}] {desc}")
+
+    prompt = f"""Compare these NEW decisions from today's meeting against EXISTING active decisions.
+
+EXISTING ACTIVE DECISIONS:
+{chr(10).join(existing_list)}
+
+NEW DECISIONS:
+{chr(10).join(new_list)}
+
+For each new decision, determine if it SUPERSEDES (contradicts, replaces, or significantly updates) any existing decision. Be conservative — only flag true contradictions or replacements, not mere elaborations.
+
+Return JSON: {{"supersessions": [{{"new_index": 1, "old_id": "uuid", "reason": "brief explanation"}}]}}
+If no supersessions found, return: {{"supersessions": []}}"""
+
+    try:
+        from core.llm import call_llm
+        import json
+
+        response_text, _usage = call_llm(
+            prompt=prompt,
+            model=settings.model_agent,  # Sonnet — reasoning task
+            max_tokens=1024,
+            call_site="supersession_detection",
+            meeting_id=meeting_id,
+        )
+
+        clean = response_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+        if clean.endswith("```"):
+            clean = clean[:-3]
+
+        parsed = json.loads(clean.strip())
+        supersessions = parsed.get("supersessions", [])
+
+        # Validate IDs
+        valid_ids = {d["id"] for d in active_decisions}
+        validated = [
+            s for s in supersessions
+            if s.get("old_id") in valid_ids
+        ]
+
+        if validated:
+            logger.info(f"Detected {len(validated)} decision supersessions in meeting {meeting_id}")
+
+        return validated
+
+    except Exception as e:
+        logger.error(f"Supersession detection LLM call failed: {e}")
+        return []
 
 
 async def extract_commitments(

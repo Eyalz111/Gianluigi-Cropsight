@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 26 tools (18 read + 8 write) tools as thin wrappers around existing brain functions.
+Provides 28 tools (20 read + 8 write) tools as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -85,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 26 tools (18 read + 8 write) tools.
+    MCP server with SSE transport, auth middleware, and 28 tools (20 read + 8 write) tools.
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -202,7 +202,7 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (26 tools (18 read + 8 write) tools)
+    # MCP Tools (28 tools (20 read + 8 write) tools)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
@@ -1072,7 +1072,76 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 19. update_task (write)
+        # ============================================================
+        # 19. update_decision (write) — Phase 9A
+        # ============================================================
+        @mcp.tool(
+            name="update_decision",
+            description=(
+                "[DECISIONS] Update a decision's lifecycle status, review date, or rationale. "
+                "Use get_decisions() to find the decision_id first. "
+                "Status values: active, superseded, reversed."
+            ),
+        )
+        async def update_decision(
+            decision_id: str,
+            decision_status: str | None = None,
+            review_date: str | None = None,
+            rationale: str | None = None,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                updates = {}
+                if decision_status:
+                    updates["decision_status"] = decision_status
+                if review_date:
+                    updates["review_date"] = review_date
+                if rationale:
+                    updates["rationale"] = rationale
+
+                if not updates:
+                    return _error("No fields to update.")
+
+                updated = _sc.update_decision(decision_id, **updates)
+                _sc.log_action(
+                    action="decision_updated",
+                    details={"decision_id": decision_id, "updates": updates, "source": "mcp"},
+                    triggered_by="eyal",
+                )
+                mcp_auth.log_call("update_decision", {"decision_id": decision_id})
+                return _success({"decision": updated, "action": "decision_updated"})
+
+            except Exception as e:
+                logger.error(f"update_decision error: {e}")
+                mcp_auth.log_call("update_decision", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 20. get_decisions_for_review (read) — Phase 9A
+        # ============================================================
+        @mcp.tool(
+            name="get_decisions_for_review",
+            description=(
+                "[DECISIONS] Get active decisions with upcoming review dates. "
+                "Returns decisions due for review within the next N days."
+            ),
+        )
+        async def get_decisions_for_review(days_ahead: int = 30) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                decisions = _sc.get_decisions_for_review(days_ahead=days_ahead)
+                mcp_auth.log_call("get_decisions_for_review", {"days_ahead": days_ahead})
+                return _success(decisions)
+
+            except Exception as e:
+                logger.error(f"get_decisions_for_review error: {e}")
+                mcp_auth.log_call("get_decisions_for_review", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 21. update_task (write) — Phase 8a
         # ============================================================
         @mcp.tool(
             name="update_task",

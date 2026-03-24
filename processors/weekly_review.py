@@ -200,6 +200,7 @@ async def _compile_attention_needed() -> dict:
         "escalation_items": [],
         "tasks_no_assignee": [],
         "tasks_no_deadline": [],
+        "decisions_for_review": [],
     }
 
     # Proactive alerts
@@ -242,6 +243,13 @@ async def _compile_attention_needed() -> dict:
         result["tasks_no_deadline"] = supabase_client.get_tasks_without_deadline()
     except Exception as e:
         logger.debug(f"Tasks without deadline query failed: {e}")
+
+    # Decisions due for review (Phase 9A)
+    try:
+        from processors.decision_review import get_decisions_due_for_review
+        result["decisions_for_review"] = get_decisions_due_for_review(days_ahead=7)
+    except Exception as e:
+        logger.debug(f"Decision review query failed: {e}")
 
     return result
 

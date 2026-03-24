@@ -559,6 +559,98 @@ class GoogleSheetsService:
 
         return tasks
 
+    async def archive_completed_tasks(self, titles_to_archive: list[str]) -> int:
+        """
+        Move completed tasks from active tab to Archive tab.
+
+        Args:
+            titles_to_archive: List of task titles to archive.
+
+        Returns:
+            Number of tasks archived.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID or not titles_to_archive:
+            return 0
+
+        try:
+            # Ensure Archive tab exists
+            tab_name = settings.TASK_TRACKER_TAB_NAME
+            meta = self.service.spreadsheets().get(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                fields="sheets.properties",
+            ).execute()
+
+            archive_exists = any(
+                s.get("properties", {}).get("title") == "Archive"
+                for s in meta.get("sheets", [])
+            )
+            if not archive_exists:
+                self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
+                ).execute()
+                # Add header row
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range="Archive!A1:I1",
+                    valueInputOption="RAW",
+                    body={"values": [["Task", "Category", "Assignee", "Source", "Deadline", "Status", "Priority", "Created", "Archived"]]},
+                ).execute()
+
+            # Find matching rows in active tab
+            all_tasks = await self.get_all_tasks()
+            titles_lower = {t.lower() for t in titles_to_archive}
+            rows_to_archive = [
+                t for t in all_tasks
+                if t.get("task", "").lower() in titles_lower and t.get("status", "").lower() == "done"
+            ]
+
+            if not rows_to_archive:
+                return 0
+
+            # Copy rows to Archive tab
+            archive_rows = []
+            for t in rows_to_archive:
+                archive_rows.append([
+                    t.get("task", ""), t.get("category", ""), t.get("assignee", ""),
+                    t.get("source_meeting", ""), t.get("deadline", ""), t.get("status", ""),
+                    t.get("priority", ""), t.get("created_date", ""),
+                    datetime.now().strftime("%Y-%m-%d"),
+                ])
+
+            self.service.spreadsheets().values().append(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range="Archive!A:I",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": archive_rows},
+            ).execute()
+
+            # Delete archived rows from active tab (bottom-up to preserve row numbers)
+            row_numbers = sorted([t["row_number"] for t in rows_to_archive], reverse=True)
+            sid = self._get_sheet_id_by_name(
+                settings.TASK_TRACKER_SHEET_ID, tab_name
+            )
+            if sid is not None:
+                requests = [
+                    {"deleteDimension": {
+                        "range": {"sheetId": sid, "dimension": "ROWS",
+                                  "startIndex": r - 1, "endIndex": r}
+                    }}
+                    for r in row_numbers
+                ]
+                self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                ).execute()
+
+            logger.info(f"Archived {len(rows_to_archive)} completed tasks")
+            return len(rows_to_archive)
+
+        except Exception as e:
+            logger.error(f"Error archiving tasks: {e}")
+            return 0
+
     async def find_task_row(self, task_description: str) -> int | None:
         """
         Find the row number for a task by its description.

@@ -484,16 +484,28 @@ class SupabaseClient:
         Returns:
             List of created decision records.
         """
-        data = [
-            {
+        data = []
+        for d in decisions:
+            row = {
                 "meeting_id": meeting_id,
                 "description": d.get("description"),
                 "context": d.get("context"),
                 "participants_involved": d.get("participants_involved"),
                 "transcript_timestamp": d.get("transcript_timestamp"),
             }
-            for d in decisions
-        ]
+            # Phase 9A: decision intelligence fields
+            if d.get("rationale"):
+                row["rationale"] = d["rationale"]
+            if d.get("options_considered"):
+                row["options_considered"] = d["options_considered"]
+            if d.get("confidence"):
+                row["confidence"] = d["confidence"]
+            if d.get("label"):
+                row["label"] = d["label"]
+            # Default review_date: 30 days from meeting
+            if d.get("review_date"):
+                row["review_date"] = d["review_date"]
+            data.append(row)
 
         result = self.client.table("decisions").insert(data).execute()
         logger.info(f"Created {len(result.data)} decisions for meeting {meeting_id}")
@@ -525,6 +537,47 @@ class SupabaseClient:
 
         result = query.order("created_at", desc=True).limit(limit).execute()
         return result.data
+
+    def update_decision(
+        self,
+        decision_id: str,
+        **updates,
+    ) -> dict:
+        """Update a decision's fields (status, review_date, rationale, etc.)."""
+        result = (
+            self.client.table("decisions")
+            .update(updates)
+            .eq("id", decision_id)
+            .execute()
+        )
+        if result.data:
+            logger.info(f"Updated decision {decision_id}: {list(updates.keys())}")
+            return result.data[0]
+        return {}
+
+    def get_decisions_for_review(self, days_ahead: int = 30) -> list[dict]:
+        """Get active decisions with review_date within the next N days."""
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        result = (
+            self.client.table("decisions")
+            .select("*, meetings(title, date)")
+            .eq("decision_status", "active")
+            .not_.is_("review_date", "null")
+            .lte("review_date", cutoff)
+            .order("review_date")
+            .execute()
+        )
+        return result.data or []
+
+    def mark_decision_superseded(self, old_id: str, new_id: str) -> None:
+        """Mark an old decision as superseded by a new one."""
+        self.client.table("decisions").update({
+            "decision_status": "superseded",
+            "superseded_by": new_id,
+        }).eq("id", old_id).execute()
+        logger.info(f"Decision {old_id} superseded by {new_id}")
 
     # =========================================================================
     # Tasks
