@@ -1,14 +1,14 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** March 22, 2026
-**Current Version:** v1.0 (Phases 0-7.5 complete + QA hardening, MCP server live)
-**Status:** Phase 8a in progress (intelligence + write tools). Phases 0-7.5 + QA Hardening complete.
+**Last Updated:** March 25, 2026
+**Current Version:** v1.0 (Phases 0-9 complete, 33 MCP tools, cross-meeting intelligence)
+**Status:** Phase 9 complete. Phase 10 (polish + live testing) next.
 
 ---
 
 ## What Is This Project
 
-Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for a 4-person AgTech founding team. It processes meeting transcripts, tracks tasks/decisions/commitments, maintains institutional memory, and is evolving into a full operational intelligence system that manages the company's operational Gantt chart, email intelligence, and serves as the CEO's private operations dashboard.
+Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for a 4-person AgTech founding team. It processes meeting transcripts, tracks tasks/decisions with cross-meeting topic threading, maintains institutional memory via hybrid RAG + operational snapshots, and serves as the CEO's private operations dashboard via Claude.ai MCP (33 tools).
 
 **CropSight:** Israeli AgTech startup — ML-powered crop yield forecasting. Pre-revenue, PoC stage. Team: Eyal (CEO), Roye (CTO), Paolo (BD, Italy), Prof. Yoram Weiss (Advisor).
 
@@ -71,13 +71,16 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **Phase 7:** MCP Core + Read Tools (SSE server, 16 tools, auth, rate limiting, audit logging)
 - **QA Hardening:** 16 issues fixed (commitments deprecated, extraction improved, alerting, timezone, decisions export, MCP composite tool)
 
-- **Phase 7.5:** Weekly review migration (2 write MCP tools: start_weekly_review + confirm_weekly_review, Telegram redirect, enriched Claude project prompt)
-- **Phase 8a (partial):** Extraction intelligence — task continuity (existing tasks as context), team roles, priority-aware escalation, weekly review hygiene items, Hebrew extraction instruction
+- **Phase 7.5:** Weekly review migration (weekly review via Claude.ai MCP, Telegram redirect)
+- **Phase 8a:** Extraction intelligence (task continuity, team roles, escalation, Hebrew) + MCP write tools (task CRUD, quick inject, Gantt propose)
+- **Phase 8b:** Health monitoring (scheduler heartbeats), cost monitoring, tsvector Hebrew fix, index audit
+- **Phase 9A:** Decision intelligence (rationale, confidence, review triggers, supersession detection), canonical project labels, task archival
+- **Phase 9B:** Cross-meeting memory — meeting-to-meeting continuity, compressed operational snapshots, topic threading (4 MCP tools)
+- **Phase 9C:** Gantt intelligence (velocity, slippage, milestone risk, Now-Next-Later), follow-up tracking
+- **Phase 9D:** Tool grouping (category prefixes on 33 tools), weekly review integration, Word doc labels
 
 ### Remaining Phases
-- **Phase 8a (cont):** MCP write tools (task CRUD, quick inject, Gantt propose) + Sheets sync
-- **Phase 8b:** Health monitoring (scheduler heartbeats), cost monitoring, tsvector Hebrew fix, index audit
-- **Phase 9:** Future expansion
+- **Phase 10:** Claude.ai project prompt comprehensive update, full MCP live testing, Hebrew deep testing, risk register, meeting effectiveness scoring
 
 ### Known MCP Limitation: Personal Data Leakage
 Claude.ai mixes MCP tool results with its own conversation memory. MCP `instructions` are guidance, not a sandbox — Claude.ai can and will use prior conversation context when Gianluigi data is sparse. **Current mitigation:** Use a dedicated Claude Project ("CropSight Ops") to isolate business conversations. **Future:** OAuth integration (Phase 8) may enable stricter session isolation. This is a Claude.ai platform limitation, not a Gianluigi bug.
