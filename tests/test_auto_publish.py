@@ -367,7 +367,10 @@ class TestApprovalMessageCountdown:
 
             bot = TelegramBot()
             bot.eyal_chat_id = "999"
-            bot.send_to_eyal = AsyncMock(return_value=True)
+            # Mock the bot's send_message for the new direct-send pattern
+            mock_send = AsyncMock(return_value=MagicMock(message_id=1))
+            bot._app = MagicMock()
+            bot.app.bot.send_message = mock_send
 
             await bot.send_approval_request(
                 meeting_title="Test Meeting",
@@ -378,8 +381,8 @@ class TestApprovalMessageCountdown:
             )
 
             # Check the message sent to Eyal
-            bot.send_to_eyal.assert_awaited_once()
-            sent_msg = bot.send_to_eyal.call_args[0][0]
+            mock_send.assert_awaited_once()
+            sent_msg = mock_send.call_args.kwargs.get("text", "")
             assert "Auto-publish in 60 minutes" in sent_msg
 
     @pytest.mark.asyncio
@@ -394,7 +397,9 @@ class TestApprovalMessageCountdown:
 
             bot = TelegramBot()
             bot.eyal_chat_id = "999"
-            bot.send_to_eyal = AsyncMock(return_value=True)
+            mock_send = AsyncMock(return_value=MagicMock(message_id=1))
+            bot._app = MagicMock()
+            bot.app.bot.send_message = mock_send
 
             with patch("config.settings.settings") as mock_cfg:
                 mock_cfg.APPROVAL_MODE = "manual"
@@ -405,6 +410,6 @@ class TestApprovalMessageCountdown:
                     meeting_id="meeting-no-countdown",
                 )
 
-            bot.send_to_eyal.assert_awaited_once()
-            sent_msg = bot.send_to_eyal.call_args[0][0]
+            mock_send.assert_awaited_once()
+            sent_msg = mock_send.call_args.kwargs.get("text", "")
             assert "Auto-publish" not in sent_msg
