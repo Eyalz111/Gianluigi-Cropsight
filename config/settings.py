@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     # Google Sheets IDs
     # ==========================================================================
     TASK_TRACKER_SHEET_ID: str = Field(default="", description="Task Tracker Google Sheet ID")
+    TASK_TRACKER_TAB_NAME: str = Field(default="Sheet1", description="Tab name in the Task Tracker spreadsheet")
     STAKEHOLDER_TRACKER_SHEET_ID: str = Field(default="", description="Stakeholder Tracker Sheet ID")
     STAKEHOLDER_TAB_NAME: str = Field(default="Stakeholder Tracker", description="Tab name in the Stakeholder Tracker spreadsheet")
 

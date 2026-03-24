@@ -392,7 +392,7 @@ class GoogleSheetsService:
         return await self._append_row(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
             values=values,
-            tab_name="Tasks",
+            tab_name=settings.TASK_TRACKER_TAB_NAME,
         )
 
     async def update_task_status(
@@ -492,13 +492,13 @@ class GoogleSheetsService:
                 col = column_map.get(field)
                 if col:
                     batch_data.append({
-                        "range": f"'Tasks'!{col}{row_number}",
+                        "range": f"'{settings.TASK_TRACKER_TAB_NAME}'!{col}{row_number}",
                         "values": [[value if value is not None else ""]],
                     })
 
             # Always update the Updated Date column (I)
             batch_data.append({
-                "range": f"'Tasks'!I{row_number}",
+                "range": f"'{settings.TASK_TRACKER_TAB_NAME}'!I{row_number}",
                 "values": [[today]],
             })
 
@@ -744,7 +744,7 @@ class GoogleSheetsService:
         return await self._append_rows(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
             values=values,
-            tab_name="Tasks",
+            tab_name=settings.TASK_TRACKER_TAB_NAME,
         )
 
     async def add_follow_ups_as_tasks(
@@ -801,7 +801,7 @@ class GoogleSheetsService:
         return await self._append_rows(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
             values=values,
-            tab_name="Tasks",
+            tab_name=settings.TASK_TRACKER_TAB_NAME,
         )
 
     async def add_stakeholders_batch(
@@ -1480,12 +1480,12 @@ class GoogleSheetsService:
             num_cols = 9  # A through I
             requests = []
 
-            # --- Rename first sheet to "Tasks" so tab_name references work ---
+            # --- Rename first sheet to configured tab name ---
             requests.append({
                 "updateSheetProperties": {
                     "properties": {
                         "sheetId": sid,
-                        "title": "Tasks",
+                        "title": settings.TASK_TRACKER_TAB_NAME,
                     },
                     "fields": "title",
                 }
