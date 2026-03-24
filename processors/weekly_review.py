@@ -66,6 +66,26 @@ async def compile_weekly_review_data(
     data["next_week_preview"] = await _compile_next_week_preview()
     data["horizon_check"] = await _compile_horizon_check()
 
+    # Phase 9 additions
+    try:
+        from processors.topic_threading import list_active_threads
+        threads = list_active_threads()
+        data["topic_threads"] = [
+            {"name": t.get("topic_name", ""), "meeting_count": t.get("meeting_count", 0),
+             "status": t.get("status", "active"), "last_updated": t.get("last_updated", "")}
+            for t in threads[:10]
+        ]
+    except Exception as e:
+        logger.debug(f"Topic threading for weekly review failed: {e}")
+        data["topic_threads"] = []
+
+    try:
+        from processors.gantt_intelligence import compute_gantt_metrics
+        data["gantt_metrics"] = await compute_gantt_metrics()
+    except Exception as e:
+        logger.debug(f"Gantt metrics for weekly review failed: {e}")
+        data["gantt_metrics"] = {}
+
     logger.info(
         f"Weekly review data compiled for W{week_number}/{year}: "
         f"{data['week_in_review'].get('meetings_count', 0)} meetings, "

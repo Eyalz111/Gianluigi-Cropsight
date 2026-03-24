@@ -318,7 +318,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_last_session_summary",
-            description="Get the most recent MCP session summary for continuity across conversations.",
+            description="[SESSION] Get the most recent MCP session summary for continuity across conversations.",
         )
         async def get_last_session_summary() -> dict:
             try:
@@ -341,7 +341,7 @@ class MCPServer:
         @mcp.tool(
             name="save_session_summary",
             description=(
-                "Save a session summary for continuity. Call at the end of each "
+                "[SESSION] Save a session summary for continuity. Call at the end of each "
                 "Claude.ai session with a summary of what was discussed and decided."
             ),
         )
@@ -373,7 +373,7 @@ class MCPServer:
         @mcp.tool(
             name="search_memory",
             description=(
-                "Search Gianluigi's memory using hybrid RAG (semantic + keyword). "
+                "[MEMORY] Search Gianluigi's memory using hybrid RAG (semantic + keyword). "
                 "Returns relevant context from meetings, decisions, tasks, and documents."
             ),
         )
@@ -419,7 +419,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_tasks",
-            description="Query tasks with optional filters by assignee, status, or category.",
+            description="[TASKS] Query tasks with optional filters by assignee, status, or category.",
         )
         async def get_tasks(
             assignee: str | None = None,
@@ -449,7 +449,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_decisions",
-            description="Query decision history with optional filters by topic or meeting.",
+            description="[DECISIONS] Query decision history with optional filters by topic or meeting.",
         )
         async def get_decisions(
             topic: str | None = None,
@@ -477,7 +477,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_open_questions",
-            description="Get unresolved questions from meetings, optionally filtered by status.",
+            description="[MEMORY] Get unresolved questions from meetings, optionally filtered by status.",
         )
         async def get_open_questions(
             status: str = "open",
@@ -500,7 +500,7 @@ class MCPServer:
         @mcp.tool(
             name="get_commitments",
             description=(
-                "DEPRECATED: Commitments have been merged into tasks. "
+                "[DEPRECATED] Commitments have been merged into tasks. "
                 "Use get_tasks() for all action items. "
                 "This tool still returns legacy commitment records for backward compatibility."
             ),
@@ -534,7 +534,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_stakeholder_info",
-            description="Search the stakeholder tracker for contacts or organizations.",
+            description="[MEMORY] Search the stakeholder tracker for contacts or organizations.",
         )
         async def get_stakeholder_info(
             name: str | None = None,
@@ -560,7 +560,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_meeting_history",
-            description="List recent meetings with optional topic search.",
+            description="[MEMORY] List recent meetings with optional topic search.",
         )
         async def get_meeting_history(
             limit: int = 20,
@@ -595,7 +595,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_pending_approvals",
-            description="Get the current approval queue — items waiting for Eyal's review.",
+            description="[SYSTEM] Get the current approval queue — items waiting for Eyal's review.",
         )
         async def get_pending_approvals() -> dict:
             try:
@@ -647,7 +647,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_gantt_horizon",
-            description="Get upcoming milestones and transitions from the Gantt chart.",
+            description="[GANTT] Get upcoming milestones and transitions from the Gantt chart.",
         )
         async def get_gantt_horizon(
             weeks_ahead: int = 8,
@@ -669,7 +669,7 @@ class MCPServer:
         # ============================================================
         @mcp.tool(
             name="get_upcoming_meetings",
-            description="Get upcoming calendar meetings with prep status.",
+            description="[SYSTEM] Get upcoming calendar meetings with prep status.",
         )
         async def get_upcoming_meetings(
             days: int = 7,
@@ -715,7 +715,7 @@ class MCPServer:
         @mcp.tool(
             name="get_weekly_summary",
             description=(
-                "Compile weekly review data — meetings, decisions, tasks, Gantt proposals, "
+                "[REVIEW] Compile weekly review data — meetings, decisions, tasks, Gantt proposals, "
                 "and attention items. This is the foundation for the weekly CEO review."
             ),
         )
@@ -757,7 +757,7 @@ class MCPServer:
         @mcp.tool(
             name="get_full_status",
             description=(
-                "Get a complete operational status in one call — tasks, Gantt status, "
+                "[SYSTEM] Get a complete operational status in one call — tasks, Gantt status, "
                 "pending approvals, upcoming meetings, and attention items. "
                 "Use this instead of calling 5+ individual tools for status updates."
             ),
@@ -837,7 +837,7 @@ class MCPServer:
         @mcp.tool(
             name="start_weekly_review",
             description=(
-                "Start or resume the weekly CEO review session. Returns all compiled "
+                "[REVIEW] Start or resume the weekly CEO review session. Returns all compiled "
                 "data (week stats, Gantt proposals, attention items, next week preview, "
                 "horizon check) in one payload for conversational presentation. "
                 "Call this when Eyal wants to do the weekly review. "
@@ -963,7 +963,7 @@ class MCPServer:
         @mcp.tool(
             name="confirm_weekly_review",
             description=(
-                "Approve, execute, and distribute the weekly review. "
+                "[REVIEW] Approve, execute, and distribute the weekly review. "
                 "Generates outputs (HTML report, PPTX), executes approved Gantt "
                 "proposals, uploads to Drive, emails team, and notifies Telegram. "
                 "Call when Eyal says 'approve', 'looks good', 'distribute', etc. "
@@ -1328,7 +1328,7 @@ class MCPServer:
         @mcp.tool(
             name="update_task",
             description=(
-                "Update an existing task's assignee, deadline, status, or priority. "
+                "[TASKS] Update an existing task's assignee, deadline, status, or priority. "
                 "Use get_tasks() first to find the task_id. "
                 "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
                 "Always confirm the change with Eyal before calling this tool."
@@ -1435,7 +1435,7 @@ class MCPServer:
         @mcp.tool(
             name="create_task",
             description=(
-                "Create a new task. Assignee should be a team member name "
+                "[TASKS] Create a new task. Assignee should be a team member name "
                 "(Eyal, Roye, Paolo, Yoram) or empty string if unassigned. "
                 "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
                 "Always confirm with Eyal before creating."
@@ -1516,7 +1516,7 @@ class MCPServer:
         @mcp.tool(
             name="quick_inject",
             description=(
-                "Inject information into Gianluigi's memory. Send natural language "
+                "[QUICK] Inject information into Gianluigi's memory. Send natural language "
                 "and Gianluigi extracts tasks, decisions, and information. "
                 "Returns extracted items for Eyal's review before saving. "
                 "NEVER auto-confirm — always present items to Eyal first, then "
@@ -1555,7 +1555,7 @@ class MCPServer:
         @mcp.tool(
             name="confirm_quick_inject",
             description=(
-                "Save previously extracted quick injection items after Eyal approves. "
+                "[QUICK] Save previously extracted quick injection items after Eyal approves. "
                 "Items schema: [{type: 'task'|'decision'|'info'|'gantt_update', "
                 "text: str, assignee?: str, priority?: str, deadline?: str}]. "
                 "Call only after Eyal reviews and approves the items from quick_inject()."
@@ -1603,7 +1603,7 @@ class MCPServer:
         @mcp.tool(
             name="get_system_health",
             description=(
-                "Get system health: scheduler status (last run, stale detection), "
+                "[SYSTEM] Get system health: scheduler status (last run, stale detection), "
                 "component health (Supabase, Google, Telegram), error counts, "
                 "and data freshness. Use when Eyal asks 'is everything working?'"
             ),
@@ -1627,7 +1627,7 @@ class MCPServer:
         @mcp.tool(
             name="get_cost_summary",
             description=(
-                "Get LLM token usage and estimated costs for the past N days. "
+                "[SYSTEM] Get LLM token usage and estimated costs for the past N days. "
                 "Shows total cost, breakdown by model and by feature, and daily trend."
             ),
         )
@@ -1654,7 +1654,7 @@ class MCPServer:
         @mcp.tool(
             name="propose_gantt_update",
             description=(
-                "Propose changes to the operational Gantt chart. Creates a proposal "
+                "[GANTT] Propose changes to the operational Gantt chart. Creates a proposal "
                 "for Eyal's approval — changes are NOT applied until approved via "
                 "approve_gantt_proposal(). "
                 "Changes schema: [{section, subsection, week (int), value, reason?}]. "
@@ -1747,7 +1747,7 @@ class MCPServer:
         @mcp.tool(
             name="approve_gantt_proposal",
             description=(
-                "Execute an approved Gantt proposal. Creates a backup snapshot first, "
+                "[GANTT] Execute an approved Gantt proposal. Creates a backup snapshot first, "
                 "then applies changes to the Gantt chart. Call only after Eyal "
                 "explicitly approves the proposal from propose_gantt_update()."
             ),

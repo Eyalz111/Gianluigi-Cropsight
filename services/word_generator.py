@@ -80,13 +80,12 @@ def generate_summary_docx(
     doc.add_heading("Key Decisions", level=2)
     if decisions:
         for i, d in enumerate(decisions, 1):
+            label = d.get("label", "")
             desc = d.get("description", "")
             who = d.get("participants_involved", ["team"])
             who_str = ", ".join(who) if isinstance(who, list) else str(who)
-            ref = d.get("transcript_timestamp", "")
-            text = f"{desc} — {who_str}"
-            if ref:
-                text += f" (ref: ~{ref})"
+            prefix = f"[{label}] " if label else ""
+            text = f"{prefix}{desc} — {who_str}"
             doc.add_paragraph(text, style="List Number")
     else:
         doc.add_paragraph("No key decisions recorded.", style="No Spacing")
