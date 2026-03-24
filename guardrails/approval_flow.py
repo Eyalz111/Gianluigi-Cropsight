@@ -1421,7 +1421,7 @@ async def distribute_approved_content(
 
     meeting_title = content.get("title", "Untitled")
     summary = content.get("summary", "")
-    exec_summary = content.get("executive_summary", "")
+    exec_summary = content.get("executive_summary", "") or summary.split("\n")[0][:200] if summary else ""
     meeting_date = content.get("date", datetime.now().strftime("%Y-%m-%d"))
     tasks = content.get("tasks", [])
     follow_ups = content.get("follow_ups", [])
@@ -1462,7 +1462,7 @@ async def distribute_approved_content(
             tasks=tasks,
             follow_ups=follow_ups,
             open_questions=open_questions,
-            discussion_summary=content.get("discussion_summary", ""),
+            discussion_summary=content.get("discussion_summary", "") or content.get("summary", ""),
             stakeholders_mentioned=content.get("stakeholders", []),
         )
         docx_result = await drive_service.save_meeting_summary_docx(
