@@ -191,7 +191,19 @@ async def process_transcript(
     except Exception as e:
         logger.error(f"Entity extraction failed (non-fatal): {e}")
 
-    # Step 7d: Post-meeting proactive alerts (v0.3 Tier 2)
+    # Step 7d: Topic threading — link meeting to topic threads (Phase 9B)
+    try:
+        from processors.topic_threading import link_meeting_to_topics
+
+        await link_meeting_to_topics(
+            meeting_id=meeting_id,
+            decisions=extracted.get("decisions", []),
+            tasks=tasks_to_store,
+        )
+    except Exception as e:
+        logger.error(f"Topic threading failed (non-fatal): {e}")
+
+    # Step 7e: Post-meeting proactive alerts (v0.3 Tier 2)
     from processors.proactive_alerts import generate_post_meeting_alerts
 
     post_meeting_alerts = []
@@ -400,6 +412,16 @@ async def extract_structured_data(
     except Exception as e:
         logger.warning(f"Could not fetch existing tasks for extraction context: {e}")
 
+    # Build meeting-to-meeting continuity context (Phase 9B)
+    meeting_history_context = None
+    try:
+        from processors.meeting_continuity import build_meeting_continuity_context
+        meeting_history_context = build_meeting_continuity_context(
+            participants=participants,
+        )
+    except Exception as e:
+        logger.warning(f"Meeting continuity context failed (non-fatal): {e}")
+
     # Build the extraction prompt
     prompt = get_summary_extraction_prompt(
         transcript=transcript,
@@ -409,6 +431,7 @@ async def extract_structured_data(
         duration_minutes=duration_minutes,
         team_roles=team_roles,
         existing_tasks=existing_tasks,
+        meeting_history_context=meeting_history_context,
     )
 
     # Build canonical project names for label normalization

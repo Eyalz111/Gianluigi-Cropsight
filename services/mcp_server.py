@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 28 tools (20 read + 8 write) tools as thin wrappers around existing brain functions.
+Provides 32 tools (22 read + 10 write) tools as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -85,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 28 tools (20 read + 8 write) tools.
+    MCP server with SSE transport, auth middleware, and 32 tools (22 read + 10 write) tools.
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -202,7 +202,7 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (28 tools (20 read + 8 write) tools)
+    # MCP Tools (32 tools (22 read + 10 write) tools)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
@@ -214,11 +214,12 @@ class MCPServer:
         @mcp.tool(
             name="get_system_context",
             description=(
-                "Load CropSight company context, current operational state, "
-                "pending items, and attention flags. Call this FIRST in every session."
+                "[SYSTEM] Load CropSight company context, current operational state, "
+                "pending items, and attention flags. Call this FIRST in every session. "
+                "Set refresh=True to force-regenerate the operational snapshot."
             ),
         )
-        async def get_system_context() -> dict:
+        async def get_system_context(refresh: bool = False) -> dict:
             try:
                 from services.supabase_client import supabase_client
                 from config.team import TEAM_MEMBERS
@@ -287,6 +288,22 @@ class MCPServer:
                         "and never distribute to the team without explicit OK."
                     ),
                 }
+
+                # Operational snapshot (Phase 9B) — compressed CEO brief
+                try:
+                    from processors.operational_snapshot import (
+                        generate_operational_snapshot,
+                        get_latest_snapshot,
+                    )
+                    if refresh:
+                        snapshot_result = await generate_operational_snapshot()
+                        context["operational_context"] = snapshot_result.get("content", "")
+                    else:
+                        snapshot = get_latest_snapshot()
+                        if snapshot:
+                            context["operational_context"] = snapshot.get("content", "")
+                except Exception as snap_err:
+                    logger.debug(f"Operational snapshot unavailable: {snap_err}")
 
                 mcp_auth.log_call("get_system_context", response_size=len(str(context)))
                 return _success(context, source="composite")
@@ -1141,7 +1158,138 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 21. update_task (write) — Phase 8a
+        # ============================================================
+        # 21. get_topic_thread (read) — Phase 9B
+        # ============================================================
+        @mcp.tool(
+            name="get_topic_thread",
+            description=(
+                "[TOPICS] Get the evolution of a topic/project across meetings. "
+                "Returns chronological narrative of how the topic was discussed "
+                "and what decisions were made over time."
+            ),
+        )
+        async def get_topic_thread(topic_name: str) -> dict:
+            try:
+                from processors.topic_threading import (
+                    _find_thread_by_name,
+                    _match_canonical_name,
+                    generate_topic_evolution,
+                    _get_thread_with_mentions,
+                )
+
+                # Try exact match, then canonical
+                thread = _find_thread_by_name(topic_name)
+                if not thread:
+                    canonical = _match_canonical_name(topic_name)
+                    if canonical:
+                        thread = _find_thread_by_name(canonical)
+
+                if not thread:
+                    return _error(f"No topic thread found for '{topic_name}'")
+
+                # Get full details with mentions
+                full = _get_thread_with_mentions(thread["id"])
+
+                # Generate evolution narrative if not cached
+                if not full.get("evolution_summary"):
+                    narrative = await generate_topic_evolution(thread["id"])
+                    full["evolution_summary"] = narrative
+
+                mcp_auth.log_call("get_topic_thread", {"topic": topic_name})
+                return _success(full)
+
+            except Exception as e:
+                logger.error(f"get_topic_thread error: {e}")
+                mcp_auth.log_call("get_topic_thread", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 22. list_topic_threads (read) — Phase 9B
+        # ============================================================
+        @mcp.tool(
+            name="list_topic_threads",
+            description=(
+                "[TOPICS] List all topic threads with meeting counts. "
+                "Shows which projects/topics are being actively discussed."
+            ),
+        )
+        async def list_topic_threads(status: str | None = None) -> dict:
+            try:
+                from processors.topic_threading import list_active_threads
+
+                threads = list_active_threads(status=status)
+                mcp_auth.log_call("list_topic_threads", {"status": status})
+                return _success(threads)
+
+            except Exception as e:
+                logger.error(f"list_topic_threads error: {e}")
+                mcp_auth.log_call("list_topic_threads", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 23. merge_topic_threads (write) — Phase 9B
+        # ============================================================
+        @mcp.tool(
+            name="merge_topic_threads",
+            description=(
+                "[TOPICS] Merge two duplicate topic threads into one. "
+                "Re-links all mentions from source to target, deletes source. "
+                "Use when auto-threading created duplicates."
+            ),
+        )
+        async def merge_topic_threads(source_id: str, target_id: str) -> dict:
+            try:
+                from processors.topic_threading import merge_threads
+                from services.supabase_client import supabase_client as _sc
+
+                result = merge_threads(source_id, target_id)
+
+                _sc.log_action(
+                    action="topic_threads_merged",
+                    details={"source": source_id, "target": target_id, "source": "mcp"},
+                    triggered_by="eyal",
+                )
+                mcp_auth.log_call("merge_topic_threads", {"source": source_id, "target": target_id})
+                return _success({"merged_into": result, "action": "threads_merged"})
+
+            except Exception as e:
+                logger.error(f"merge_topic_threads error: {e}")
+                mcp_auth.log_call("merge_topic_threads", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 24. rename_topic_thread (write) — Phase 9B
+        # ============================================================
+        @mcp.tool(
+            name="rename_topic_thread",
+            description=(
+                "[TOPICS] Rename a topic thread. Use when the auto-generated "
+                "name is wrong or needs normalization."
+            ),
+        )
+        async def rename_topic_thread(topic_id: str, new_name: str) -> dict:
+            try:
+                from processors.topic_threading import rename_thread
+                from services.supabase_client import supabase_client as _sc
+
+                result = rename_thread(topic_id, new_name)
+
+                _sc.log_action(
+                    action="topic_thread_renamed",
+                    details={"topic_id": topic_id, "new_name": new_name, "source": "mcp"},
+                    triggered_by="eyal",
+                )
+                mcp_auth.log_call("rename_topic_thread", {"topic_id": topic_id})
+                return _success({"thread": result, "action": "thread_renamed"})
+
+            except Exception as e:
+                logger.error(f"rename_topic_thread error: {e}")
+                mcp_auth.log_call("rename_topic_thread", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 25. update_task (write) — Phase 8a
         # ============================================================
         @mcp.tool(
             name="update_task",

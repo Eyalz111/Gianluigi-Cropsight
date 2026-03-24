@@ -538,6 +538,50 @@ class SupabaseClient:
         result = query.order("created_at", desc=True).limit(limit).execute()
         return result.data
 
+    def get_meetings_by_participant_overlap(
+        self,
+        participants: list[str],
+        exclude_meeting_id: str | None = None,
+        limit: int = 3,
+    ) -> list[dict]:
+        """
+        Get recent meetings with overlapping participants.
+
+        Uses Postgres array overlap (&&) to find meetings where at least
+        one participant matches.
+
+        Args:
+            participants: List of participant names to match.
+            exclude_meeting_id: Meeting ID to exclude (current meeting).
+            limit: Max results.
+
+        Returns:
+            List of meeting records ordered by date desc.
+        """
+        if not participants:
+            return []
+
+        # Build array literal for Postgres && operator
+        query = (
+            self.client.table("meetings")
+            .select("id, title, date, participants, summary")
+            .eq("approval_status", "approved")
+            .order("date", desc=True)
+            .limit(limit + 1)  # +1 in case we need to exclude current
+        )
+
+        # Use overlap filter: participants && ARRAY[...]
+        query = query.overlaps("participants", participants)
+
+        result = query.execute()
+        meetings = result.data or []
+
+        # Exclude current meeting if specified
+        if exclude_meeting_id:
+            meetings = [m for m in meetings if m.get("id") != exclude_meeting_id]
+
+        return meetings[:limit]
+
     def update_decision(
         self,
         decision_id: str,

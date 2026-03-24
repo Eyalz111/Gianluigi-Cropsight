@@ -315,6 +315,7 @@ def get_summary_extraction_prompt(
     duration_minutes: int | None = None,
     team_roles: str | None = None,
     existing_tasks: list[dict] | None = None,
+    meeting_history_context: str | None = None,
 ) -> str:
     """
     Build the prompt for extracting structured data from a transcript.
@@ -327,6 +328,7 @@ def get_summary_extraction_prompt(
         duration_minutes: Meeting duration in minutes (optional).
         team_roles: Formatted string of team member roles (optional).
         existing_tasks: List of existing open tasks for context (optional).
+        meeting_history_context: Compressed context from recent meetings with same participants (optional).
 
     Returns:
         The extraction prompt to be sent to Claude.
@@ -358,6 +360,16 @@ If a task from this list is discussed, note the update (e.g., "UPDATE: [title] â
 rather than creating a new entry. Only create genuinely new tasks.
 """
 
+    # Meeting-to-meeting continuity context (Phase 9B)
+    history_section = ""
+    if meeting_history_context:
+        history_section = f"""
+PREVIOUS MEETING CONTEXT (recent meetings with these participants):
+{meeting_history_context}
+Reference this context when classifying tasks as UPDATE vs NEW, and when
+detecting decision supersessions or follow-ups from previous discussions.
+"""
+
     return f"""Analyze the following meeting transcript and extract structured information.
 
 MEETING CONTEXT:
@@ -365,7 +377,7 @@ MEETING CONTEXT:
 - Date: {meeting_date}
 - Participants: {participants_str}
 - Duration: {duration_str}
-{team_section}{tasks_section}
+{team_section}{history_section}{tasks_section}
 
 EXTRACTION INSTRUCTIONS:
 1. Extract all KEY DECISIONS made during the meeting
