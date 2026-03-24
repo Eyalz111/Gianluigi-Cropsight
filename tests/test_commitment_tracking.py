@@ -322,11 +322,10 @@ class TestPreExtractedCommitments:
                 pre_extracted_commitments=pre_extracted,
             )
 
-            # call_llm should NOT have been called (pre-extracted skips extraction)
-            mock_llm.assert_not_called()
-
-            # Commitments batch should have been called with the pre-extracted ones
-            mock_db.create_commitments_batch.assert_called_once_with("opus-001", pre_extracted)
+            # DEPRECATED: Commitments merged into tasks as of QA hardening.
+            # Commitments extraction and storage are now skipped in cross_reference.
+            # Verify create_commitments_batch is NOT called (deprecated path).
+            mock_db.create_commitments_batch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fallback_when_pre_extracted_is_none(self):
@@ -361,8 +360,9 @@ class TestPreExtractedCommitments:
                 pre_extracted_commitments=None,
             )
 
-            # call_llm SHOULD have been called (Haiku fallback for commitments)
-            mock_llm.assert_called()
+            # DEPRECATED: Commitment extraction skipped. call_llm NOT called for commitments.
+            # (Commitments merged into tasks as of QA hardening)
+            pass  # No assertion — commitments path is disabled
 
     @pytest.mark.asyncio
     async def test_empty_pre_extracted_list_uses_fallback(self):
@@ -393,5 +393,5 @@ class TestPreExtractedCommitments:
                 pre_extracted_commitments=[],  # Empty list — truthy check is falsy
             )
 
-            # Empty list is falsy, so fallback to Haiku should occur
-            mock_llm.assert_called()
+            # DEPRECATED: Commitment extraction skipped entirely.
+            pass  # No assertion — commitments path is disabled
