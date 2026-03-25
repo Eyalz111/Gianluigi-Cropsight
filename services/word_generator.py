@@ -76,6 +76,19 @@ def generate_summary_docx(
 
     doc.add_paragraph()  # spacing
 
+    # --- Discussion Summary (at the top for quick scanning) ---
+    doc.add_heading("Summary", level=2)
+    if discussion_summary:
+        # Truncate to ~800 chars for concise overview
+        summary_text = discussion_summary[:800]
+        if len(discussion_summary) > 800:
+            summary_text += "..."
+        para = doc.add_paragraph(summary_text)
+        for run in para.runs:
+            run.font.size = Pt(10)
+    else:
+        doc.add_paragraph("No discussion summary available.", style="No Spacing")
+
     # --- Key Decisions ---
     doc.add_heading("Key Decisions", level=2)
     if decisions:
@@ -154,13 +167,6 @@ def generate_summary_docx(
             doc.add_paragraph(text, style="List Bullet")
     else:
         doc.add_paragraph("No open questions.", style="No Spacing")
-
-    # --- Discussion Summary ---
-    doc.add_heading("Discussion Summary", level=2)
-    if discussion_summary:
-        doc.add_paragraph(discussion_summary)
-    else:
-        doc.add_paragraph("No discussion summary available.", style="No Spacing")
 
     # --- Stakeholders ---
     if stakeholders_mentioned:

@@ -1410,6 +1410,9 @@ async def distribute_approved_content(
     """
     logger.info(f"Distributing approved content: {meeting_id}")
 
+    # Word doc bytes for email attachment (stored separately — bytes aren't JSON serializable)
+    _docx_bytes_for_email = None
+
     results = {
         "drive_saved": False,
         "sheets_updated": False,
@@ -1470,7 +1473,8 @@ async def distribute_approved_content(
             filename=f"{meeting_date} - {meeting_title}.docx",
         )
         results["docx_link"] = docx_result.get("webViewLink", "")
-        results["docx_bytes"] = docx_bytes  # For email attachment
+        # Store bytes separately (not in results dict — bytes aren't JSON serializable)
+        _docx_bytes_for_email = docx_bytes
         logger.info(f"Saved .docx to Drive: {docx_result.get('id')}")
     except Exception as e:
         logger.error(f"Error saving Word document: {e}")
@@ -1597,7 +1601,7 @@ async def distribute_approved_content(
                 meeting_date=meeting_date,
                 executive_summary=exec_summary,
                 tasks=tasks,
-                docx_bytes=results.get("docx_bytes"),
+                docx_bytes=_docx_bytes_for_email,
                 discussion_summary=content.get("discussion_summary", ""),
             )
             results["email_sent"] = email_result
