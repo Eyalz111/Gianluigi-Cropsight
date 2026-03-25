@@ -695,19 +695,8 @@ class SupabaseClient:
         Returns:
             List of created task records.
         """
-        # Filter out tasks missing required fields (assignee or title)
-        valid_tasks = []
-        for t in tasks:
-            if not t.get("assignee"):
-                logger.warning(
-                    f"Skipping task with no assignee: {t.get('title', '?')}"
-                )
-                continue
-            if not t.get("title"):
-                logger.warning(f"Skipping task with no title")
-                continue
-            valid_tasks.append(t)
-
+        # Filter out tasks missing title (assignee can be empty — unassigned tasks are valid)
+        valid_tasks = [t for t in tasks if t.get("title")]
         if not valid_tasks:
             logger.info("No valid tasks to insert after filtering")
             return []
@@ -716,12 +705,13 @@ class SupabaseClient:
             {
                 "meeting_id": meeting_id,
                 "title": t.get("title"),
-                "assignee": t.get("assignee"),
+                "assignee": t.get("assignee", ""),
                 "priority": t.get("priority", "M"),
                 "deadline": self._serialize_datetime(t.get("deadline")),
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
                 "category": t.get("category"),
+                "label": t.get("label"),
             }
             for t in valid_tasks
         ]

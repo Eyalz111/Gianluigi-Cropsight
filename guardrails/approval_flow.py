@@ -1484,9 +1484,12 @@ async def distribute_approved_content(
         logger.info(f"Tasks to add to Sheets: {len(tasks)} items")
         if tasks:
             for i, task in enumerate(tasks):
-                logger.info(f"  Adding task {i+1}: '{task.get('title', '?')[:50]}' -> {task.get('assignee', '?')}")
+                label = task.get("label", "") or task.get("category", "")
+                title = task.get("title", "")
+                display_title = f"[{label}] {title}" if label else title
+                logger.info(f"  Adding task {i+1}: '{display_title[:50]}' -> {task.get('assignee', '?')}")
                 await sheets_service.add_task(
-                    task=task.get("title", ""),
+                    task=display_title,
                     assignee=task.get("assignee", "") or "",
                     source_meeting=meeting_title,
                     deadline=task.get("deadline"),
