@@ -1481,11 +1481,13 @@ async def distribute_approved_content(
 
     # 2. Add tasks to Google Sheets Task Tracker
     try:
+        logger.info(f"Tasks to add to Sheets: {len(tasks)} items")
         if tasks:
-            for task in tasks:
+            for i, task in enumerate(tasks):
+                logger.info(f"  Adding task {i+1}: '{task.get('title', '?')[:50]}' -> {task.get('assignee', '?')}")
                 await sheets_service.add_task(
                     task=task.get("title", ""),
-                    assignee=task.get("assignee", "team"),
+                    assignee=task.get("assignee", "") or "",
                     source_meeting=meeting_title,
                     deadline=task.get("deadline"),
                     status=task.get("status", "pending"),
@@ -1496,8 +1498,10 @@ async def distribute_approved_content(
             results["sheets_updated"] = True
             results["tasks_added"] = len(tasks)
             logger.info(f"Added {len(tasks)} tasks to tracker")
+        else:
+            logger.warning("No tasks to add to Sheets (tasks list empty)")
     except Exception as e:
-        logger.error(f"Error adding tasks to Sheets: {e}")
+        logger.error(f"Error adding tasks to Sheets: {e}", exc_info=True)
         from services.alerting import send_system_alert, AlertSeverity
         await send_system_alert(
             AlertSeverity.CRITICAL, "google_sheets",

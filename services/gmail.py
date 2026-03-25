@@ -245,9 +245,17 @@ class GmailService:
             # Strip any leading markdown headers
             lines = excerpt_source.strip().split("\n")
             clean_lines = [l for l in lines if not l.startswith("#") and not l.startswith("---")]
-            excerpt = "\n".join(clean_lines)[:500]
-            if len(excerpt_source) > 500:
-                excerpt += "..."
+            full_text = "\n".join(clean_lines)
+            if len(full_text) > 500:
+                # Truncate at sentence boundary
+                cut = full_text[:500].rfind(".")
+                if cut > 250:
+                    excerpt = full_text[:cut + 1]
+                else:
+                    cut = full_text[:500].rfind(" ")
+                    excerpt = full_text[:cut] + "..." if cut > 0 else full_text[:500] + "..."
+            else:
+                excerpt = full_text
 
         body = f"""Meeting Summary: {meeting_title}
 Date: {clean_date}
