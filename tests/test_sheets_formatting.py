@@ -179,7 +179,7 @@ class TestFormatTaskTracker:
 
     @pytest.mark.asyncio
     async def test_category_conditional_formatting(self):
-        """Category column (B=1) should have 6 rules, one per category."""
+        """Category column (G=6) should have 6 rules, one per category."""
         svc, mock_api = _make_service()
 
         with patch("services.google_sheets.settings") as mock_settings:
@@ -189,7 +189,8 @@ class TestFormatTaskTracker:
 
             requests = _extract_requests(mock_api)
             cond_reqs = _get_cond_rules(requests)
-            category_rules = _get_cond_rules_for_column(cond_reqs, 1)
+            # Phase 10: Category moved to column G (index 6)
+            category_rules = _get_cond_rules_for_column(cond_reqs, 6)
             assert len(category_rules) == 6, "Expected 6 category conditional format rules"
 
             keywords = _get_cond_keywords(category_rules)
@@ -202,7 +203,7 @@ class TestFormatTaskTracker:
 
     @pytest.mark.asyncio
     async def test_priority_conditional_formatting(self):
-        """Priority column (G=6) should have 3 rules: H, M, L."""
+        """Priority column (A=0) should have 3 rules: H, M, L."""
         svc, mock_api = _make_service()
 
         with patch("services.google_sheets.settings") as mock_settings:
@@ -212,7 +213,8 @@ class TestFormatTaskTracker:
 
             requests = _extract_requests(mock_api)
             cond_reqs = _get_cond_rules(requests)
-            priority_rules = _get_cond_rules_for_column(cond_reqs, 6)
+            # Phase 10: Priority moved to column A (index 0)
+            priority_rules = _get_cond_rules_for_column(cond_reqs, 0)
             assert len(priority_rules) == 3, "Expected 3 priority conditional format rules"
 
             keywords = _get_cond_keywords(priority_rules)
@@ -240,16 +242,22 @@ class TestFormatTaskTracker:
             dim_reqs = [r for r in requests if "updateDimensionProperties" in r]
             assert len(dim_reqs) == 9, "Expected 9 column width requests"
 
-            # Verify Task column (A=0) is 300px
+            # Phase 10: Priority column (A=0) is 50px, Task column (C=2) is 350px
             col_a = [
                 r for r in dim_reqs
                 if r["updateDimensionProperties"]["range"]["startIndex"] == 0
             ]
-            assert col_a[0]["updateDimensionProperties"]["properties"]["pixelSize"] == 300
+            assert col_a[0]["updateDimensionProperties"]["properties"]["pixelSize"] == 50
+
+            col_c = [
+                r for r in dim_reqs
+                if r["updateDimensionProperties"]["range"]["startIndex"] == 2
+            ]
+            assert col_c[0]["updateDimensionProperties"]["properties"]["pixelSize"] == 350
 
     @pytest.mark.asyncio
     async def test_text_wrap_on_task_column(self):
-        """Task column (A=0) should have wrapStrategy: WRAP."""
+        """Task column (C=2) should have wrapStrategy: WRAP."""
         svc, mock_api = _make_service()
 
         with patch("services.google_sheets.settings") as mock_settings:
@@ -269,16 +277,16 @@ class TestFormatTaskTracker:
             ]
             assert len(wrap_reqs) >= 1, "Expected at least one text wrap request"
 
-            # Verify it targets column A (index 0)
+            # Phase 10: Task moved to column C (index 2)
             col_indices = [
                 r["repeatCell"]["range"]["startColumnIndex"]
                 for r in wrap_reqs
             ]
-            assert 0 in col_indices, "Text wrap should include column A (index 0)"
+            assert 2 in col_indices, "Text wrap should include column C (index 2)"
 
     @pytest.mark.asyncio
-    async def test_data_validation_dropdowns(self):
-        """Should have setDataValidation for Status (F=5), Priority (G=6), Category (B=1)."""
+    async def test_no_data_validation_dropdowns(self):
+        """Phase 10: Data validation dropdowns removed (cause errors with existing data)."""
         svc, mock_api = _make_service()
 
         with patch("services.google_sheets.settings") as mock_settings:
@@ -288,20 +296,7 @@ class TestFormatTaskTracker:
 
             requests = _extract_requests(mock_api)
             validation_reqs = [r for r in requests if "setDataValidation" in r]
-            assert len(validation_reqs) == 3, "Expected 3 data validation requests"
-
-            # Extract column indices
-            col_indices = [
-                r["setDataValidation"]["range"]["startColumnIndex"]
-                for r in validation_reqs
-            ]
-            assert 5 in col_indices, "Status column (F=5) should have validation"
-            assert 6 in col_indices, "Priority column (G=6) should have validation"
-            assert 1 in col_indices, "Category column (B=1) should have validation"
-
-            # Verify showCustomUi is True on all
-            for vr in validation_reqs:
-                assert vr["setDataValidation"]["rule"]["showCustomUi"] is True
+            assert len(validation_reqs) == 0, "Data validation should be removed from Task Tracker"
 
     @pytest.mark.asyncio
     async def test_alternating_row_banding(self):

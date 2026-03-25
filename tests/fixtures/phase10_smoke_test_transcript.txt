@@ -1,0 +1,62 @@
+CropSight Weekly Sync — March 25, 2026
+
+Participants: Eyal Zror, Roye Tadmor, Paolo Vailetti
+
+Duration: ~10 minutes
+
+---
+
+[00:00] Eyal: Good morning everyone. Let's do a quick sync. Roye, start with the model update.
+
+[00:15] Roye: Sure. So the SatYield accuracy model — we've been running the latest validation round on the Gagauzia wheat data. We're now consistently hitting 89% accuracy on the winter wheat predictions, up from 86% last week. The main improvement came from the temporal feature engineering I added on Thursday.
+
+[00:45] Eyal: That's great progress. Are we confident enough to share these numbers with the Moldova pilot team?
+
+[01:00] Roye: Almost. I want to run one more validation cycle against the March satellite imagery before we put it in the accuracy abstract. Should be done by end of this week.
+
+[01:15] Eyal: OK, so here's what I'd like — Roye, can you write a one-page accuracy abstract documenting the current benchmarks? We'll need it for the investor meeting next week and also for the Moldova delivery documentation.
+
+[01:30] Roye: Sure, I can have that ready by Friday.
+
+[01:40] Eyal: Perfect. Paolo, what's the latest on the Lavazza meeting?
+
+[01:50] Paolo: I had a call with Dr. Rita Ferraro yesterday — she's their head of sustainability at Lavazza. She's very interested in our approach for coffee yield forecasting. She wants to set up a proper technical demo, probably in April. I need to send her our capability deck by Thursday.
+
+[02:20] Eyal: That's exciting. Make sure to highlight the Moldova results in the deck — even if it's wheat, it shows our methodology works at scale. And one thing — before we commit to a demo date, I want to review the scope. Let's not over-promise on coffee when we haven't validated that crop type yet.
+
+[02:45] Paolo: Agreed. I'll draft the scope document first and send it to you before confirming anything with Lavazza.
+
+[03:00] Eyal: Good. Now, on fundraising — I had a long conversation with Avi Berman at Tnufa yesterday. He reviewed our updated business plan and had some concerns about our revenue projections for Q3. He thinks we're being too aggressive on the pilot-to-paying conversion rate. He suggested we model a more conservative scenario — maybe 40% conversion instead of 65%.
+
+[03:30] Eyal: After thinking about it, I actually agree with his feedback. Decision: we're going to revise the business plan with a conservative revenue scenario alongside the base case. Two scenarios instead of one. This replaces our previous decision from the March 18 meeting where we agreed on a single optimistic projection.
+
+[04:00] Eyal: Roye, for the technical section of the business plan, can you provide updated infrastructure cost estimates? I need the AWS projections for running 50, 100, and 200 farm sites.
+
+[04:15] Roye: I'll pull those numbers. When do you need them?
+
+[04:20] Eyal: Before our next meeting with Tnufa, which is April 2nd. So let's say by March 31st.
+
+[04:30] Eyal: One more thing on Moldova — Paolo, did we get the signed data access agreement from the Gagauzia agricultural office?
+
+[04:40] Paolo: Not yet. I followed up with Dmitri Volkov last week but he said they're still running it through their legal review. He estimated another 10 days.
+
+[04:55] Eyal: OK, that's a risk. If we don't have that signed by mid-April, the pilot delivery timeline slips. Can you escalate to their director?
+
+[05:05] Paolo: I'll try, but I want to be diplomatic about it. Let me talk to Dmitri first and see if there's something blocking it internally.
+
+[05:20] Eyal: Fine. But flag it if it goes past April 10th. Decision: if the data access agreement isn't signed by April 10th, we escalate directly to the Gagauzia agricultural director. Confidence level is high on this — we can't let the legal process block our delivery.
+
+[05:45] Eyal: Any open questions before we wrap?
+
+[05:50] Roye: One thing — should we start looking at grape yield models now, or wait until the wheat accuracy abstract is done? I'm wondering about priorities.
+
+[06:00] Eyal: Good question. Let's hold off on grapes until we've nailed the wheat documentation and the Moldova delivery is on track. Wheat first, then grapes. We'll revisit in the April planning session.
+
+[06:15] Paolo: And I have a question about the EU grant application — are we still targeting the Horizon Europe call? The deadline was extended to May 15th.
+
+[06:30] Eyal: Yes, we're still planning to apply. But I want to make sure we have the Moldova pilot results to include in the application. That's another reason why the data access agreement matters. Let's discuss the EU grant strategy in detail at next week's meeting.
+
+[06:45] Eyal: OK, good sync everyone. Let's execute on these action items. Talk soon.
+
+---
+END OF TRANSCRIPT

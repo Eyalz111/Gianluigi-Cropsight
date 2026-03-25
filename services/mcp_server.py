@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 33 tools (23 read + 10 write) tools as thin wrappers around existing brain functions.
+Provides 35 tools (25 read + 10 write) as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -1447,6 +1447,7 @@ class MCPServer:
             deadline: str | None = None,
             priority: str = "M",
             category: str | None = None,
+            label: str = "",
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -1483,6 +1484,7 @@ class MCPServer:
                         priority=priority,
                         created_date=today,
                         category=category or "",
+                        label=label,
                     )
                 except Exception as sheets_err:
                     warnings.append(f"Sheets sync failed: {sheets_err}")
@@ -1803,6 +1805,88 @@ class MCPServer:
                     )
                 except Exception:
                     pass
+                return _error(str(e))
+
+        # ============================================================
+        # 34. list_canonical_projects (read)
+        # ============================================================
+        @mcp.tool(
+            name="list_canonical_projects",
+            description=(
+                "[PROJECTS] List all canonical project names with their aliases. "
+                "Use to see which projects Gianluigi recognizes for label normalization."
+            ),
+        )
+        async def list_canonical_projects(status: str = "active") -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                projects = _sc.get_canonical_projects(status=status)
+                formatted = []
+                for p in projects:
+                    formatted.append({
+                        "name": p["name"],
+                        "description": p.get("description", ""),
+                        "aliases": p.get("aliases", []),
+                        "status": p.get("status", "active"),
+                    })
+
+                mcp_auth.log_call("list_canonical_projects", {"status": status})
+                return _success(formatted, record_count=len(formatted))
+
+            except Exception as e:
+                logger.error(f"list_canonical_projects error: {e}")
+                mcp_auth.log_call("list_canonical_projects", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 35. add_canonical_project (write)
+        # ============================================================
+        @mcp.tool(
+            name="add_canonical_project",
+            description=(
+                "[PROJECTS] Add a new canonical project name for label normalization. "
+                "Include aliases (common variations). Retroactively resolves any "
+                "unmatched labels that match the new name or aliases. "
+                "Use when the weekly review surfaces recurring labels not yet canonical."
+            ),
+        )
+        async def add_canonical_project(
+            name: str,
+            description: str = "",
+            aliases: list[str] | None = None,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                project = _sc.add_canonical_project(
+                    name=name,
+                    description=description,
+                    aliases=aliases or [],
+                )
+
+                if not project:
+                    return _error(f"Failed to create project '{name}' — may already exist.")
+
+                _sc.log_action(
+                    action="canonical_project_added",
+                    details={
+                        "project_name": name,
+                        "aliases": aliases or [],
+                        "source": "mcp",
+                    },
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call("add_canonical_project", {"name": name})
+                return _success({
+                    "project": project,
+                    "message": f"Added '{name}' as a canonical project.",
+                })
+
+            except Exception as e:
+                logger.error(f"add_canonical_project error: {e}")
+                mcp_auth.log_call("add_canonical_project", success=False, error=str(e))
                 return _error(str(e))
 
     # ------------------------------------------------------------------

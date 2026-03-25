@@ -478,11 +478,10 @@ class TestConfirmationAndEditing:
 
     @pytest.mark.asyncio
     async def test_confirm_approve_injects(self):
-        """Approving should inject tasks, decisions, and commitments."""
+        """Approving should inject tasks and decisions."""
         items = [
             {"type": "task", "title": "Call Orit", "assignee": "Eyal", "priority": "M"},
             {"type": "decision", "description": "Go with AWS", "participants_involved": ["Eyal", "Roye"]},
-            {"type": "commitment", "speaker": "Jason", "commitment_text": "Send term sheet"},
         ]
 
         with patch("processors.debrief.supabase_client") as mock_db:
@@ -495,7 +494,6 @@ class TestConfirmationAndEditing:
             mock_db.create_meeting.return_value = {"id": "pseudo-meeting-1"}
             mock_db.create_task.return_value = {"id": "t1"}
             mock_db.create_decision.return_value = {"id": "d1"}
-            mock_db.create_commitment.return_value = {"id": "c1"}
 
             with patch("services.embeddings.embedding_service") as mock_embed:
                 mock_embed.chunk_and_embed_document = AsyncMock(return_value=[])
@@ -514,7 +512,6 @@ class TestConfirmationAndEditing:
                     assert result["action"] == "debrief_approved"
                     mock_db.create_task.assert_called_once()
                     mock_db.create_decision.assert_called_once()
-                    mock_db.create_commitment.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_confirm_reject_cancels(self):

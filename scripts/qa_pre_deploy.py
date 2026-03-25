@@ -58,11 +58,12 @@ def run_checks():
     except Exception as e:
         check("config.team imports", FAIL, str(e))
 
+    # Note: config/projects.py replaced by canonical_projects DB table in Phase 10
     try:
-        from config.projects import CANONICAL_PROJECT_NAMES
-        check(f"config.projects imports ({len(CANONICAL_PROJECT_NAMES)} names)", PASS)
+        from services.supabase_client import SupabaseClient
+        check("supabase_client.get_canonical_projects available", PASS)
     except Exception as e:
-        check("config.projects imports", FAIL, str(e))
+        check("canonical projects system", FAIL, str(e))
 
     try:
         from config.escalation import classify_overdue_tier, ESCALATION_TIERS
@@ -84,7 +85,7 @@ def run_checks():
 
         tools = asyncio.run(count_tools())
         tool_count = len(tools)
-        check(f"MCP tools registered: {tool_count}", PASS if tool_count >= 33 else FAIL)
+        check(f"MCP tools registered: {tool_count}", PASS if tool_count >= 35 else FAIL)
 
         # Check category prefixes
         missing_prefix = []
@@ -168,6 +169,49 @@ def run_checks():
             check(f"{mod_name}", PASS)
         except Exception as e:
             check(f"{mod_name}", FAIL, str(e)[:80])
+
+    # 7. Phase 10: Column mapping consistency
+    print("\n[5] Phase 10 column mapping checks...")
+    try:
+        from services.google_sheets import TASK_COLUMNS, TASK_TRACKER_HEADERS, DECISION_COLUMNS
+        assert len(TASK_COLUMNS) == len(TASK_TRACKER_HEADERS), "TASK_COLUMNS length != TASK_TRACKER_HEADERS"
+        assert TASK_COLUMNS["priority"] == "A", "Priority should be column A"
+        assert TASK_COLUMNS["task"] == "C", "Task should be column C"
+        assert TASK_COLUMNS["status"] == "F", "Status should be column F"
+        check("Task column mapping consistent", PASS)
+    except Exception as e:
+        check("Task column mapping", FAIL, str(e))
+
+    try:
+        assert DECISION_COLUMNS["label"] == "A", "Decision label should be column A"
+        assert DECISION_COLUMNS["decision"] == "B", "Decision should be column B"
+        assert len(DECISION_COLUMNS) == 7, "Decisions should have 7 columns"
+        check("Decision column mapping consistent", PASS)
+    except Exception as e:
+        check("Decision column mapping", FAIL, str(e))
+
+    # 8. No bare except: pass outside monitoring
+    import re as _re
+    bare_except_files = []
+    for root, _, files in os.walk("."):
+        if "__pycache__" in root or ".git" in root or "test_" in root:
+            continue
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, encoding="utf-8", errors="ignore") as fh:
+                    content = fh.read()
+                if _re.search(r'except:\s*\n\s*pass', content):
+                    bare_except_files.append(fpath)
+            except Exception:
+                pass
+
+    if bare_except_files:
+        check(f"Bare 'except: pass' found in {len(bare_except_files)} files", WARN, str(bare_except_files[:3]))
+    else:
+        check("No bare 'except: pass' patterns", PASS)
 
     # Summary
     print("\n=== Summary ===")

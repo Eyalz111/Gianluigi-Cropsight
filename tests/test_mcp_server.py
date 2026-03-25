@@ -79,7 +79,7 @@ class TestServerBuild:
         assert mcp.name == "gianluigi"
 
     @pytest.mark.asyncio
-    async def test_registers_26_tools(self):
+    async def test_registers_35_tools(self):
         server = MCPServer()
         mcp = server._build_mcp()
         tools = await mcp.list_tools()
@@ -119,12 +119,15 @@ class TestServerBuild:
             "merge_topic_threads",
             "rename_topic_thread",
             "get_gantt_metrics",
+            # Phase 10: canonical projects
+            "list_canonical_projects",
+            "add_canonical_project",
         ]
 
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 33
+        assert len(tool_names) == 35
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

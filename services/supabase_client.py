@@ -3111,6 +3111,145 @@ class SupabaseClient:
         return result.data or []
 
 
+    # =========================================================================
+    # Canonical Projects (Phase 10)
+    # =========================================================================
+
+    def get_canonical_projects(self, status: str = "active") -> list[dict]:
+        """Get all canonical projects, optionally filtered by status."""
+        try:
+            query = self.client.table("canonical_projects").select("*")
+            if status:
+                query = query.eq("status", status)
+            result = query.order("name").execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting canonical projects: {e}")
+            return []
+
+    def add_canonical_project(
+        self,
+        name: str,
+        description: str = "",
+        aliases: list[str] | None = None,
+    ) -> dict | None:
+        """Add a new canonical project. Returns the created project or None."""
+        try:
+            result = self.client.table("canonical_projects").insert({
+                "name": name,
+                "description": description,
+                "aliases": aliases or [],
+                "status": "active",
+            }).execute()
+
+            if result.data:
+                project = result.data[0]
+
+                # Retroactively resolve any unmatched_labels that match
+                self._resolve_unmatched_labels(name, aliases or [])
+
+                logger.info(f"Created canonical project: {name}")
+                return project
+            return None
+        except Exception as e:
+            logger.error(f"Error adding canonical project '{name}': {e}")
+            return None
+
+    def _resolve_unmatched_labels(self, name: str, aliases: list[str]) -> int:
+        """
+        Remove unmatched_labels entries that match the new canonical project.
+
+        Returns count of resolved labels.
+        """
+        try:
+            # Fetch all unmatched labels
+            result = self.client.table("unmatched_labels").select("id, label").execute()
+            if not result.data:
+                return 0
+
+            # Check which labels match the new project name or aliases
+            match_terms = {name.lower()} | {a.lower() for a in aliases}
+            to_delete = []
+            for row in result.data:
+                if row.get("label", "").lower() in match_terms:
+                    to_delete.append(row["id"])
+
+            if to_delete:
+                for uid in to_delete:
+                    self.client.table("unmatched_labels").delete().eq("id", uid).execute()
+                logger.info(f"Resolved {len(to_delete)} unmatched labels for '{name}'")
+
+            return len(to_delete)
+        except Exception as e:
+            logger.error(f"Error resolving unmatched labels: {e}")
+            return 0
+
+    def store_unmatched_label(
+        self,
+        label: str,
+        meeting_id: str | None = None,
+        meeting_title: str = "",
+        context: str = "",
+    ) -> None:
+        """Store a label that didn't match any canonical project."""
+        try:
+            data = {
+                "label": label,
+                "meeting_title": meeting_title,
+                "context": context,
+            }
+            if meeting_id:
+                data["meeting_id"] = meeting_id
+            self.client.table("unmatched_labels").insert(data).execute()
+            logger.debug(f"Stored unmatched label: {label}")
+        except Exception as e:
+            logger.error(f"Error storing unmatched label '{label}': {e}")
+
+    def get_unmatched_labels(self, days: int = 7) -> list[dict]:
+        """Get unmatched labels from the past N days."""
+        try:
+            from datetime import datetime, timedelta, timezone
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            result = (
+                self.client.table("unmatched_labels")
+                .select("*")
+                .gte("created_at", cutoff)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting unmatched labels: {e}")
+            return []
+
+    def match_label_to_canonical(self, label: str) -> str | None:
+        """
+        Try to match a label to a canonical project name.
+
+        Returns the canonical name if matched, None otherwise.
+        Checks exact name match first, then alias match.
+        """
+        try:
+            projects = self.get_canonical_projects(status="active")
+            label_lower = label.lower().strip()
+
+            # Exact name match
+            for p in projects:
+                if p["name"].lower() == label_lower:
+                    return p["name"]
+
+            # Alias match
+            for p in projects:
+                for alias in (p.get("aliases") or []):
+                    if alias.lower() == label_lower:
+                        return p["name"]
+
+            return None
+        except Exception as e:
+            logger.error(f"Error matching label '{label}': {e}")
+            return None
+
+
 # Singleton instance for easy import
 db = SupabaseClient()
 

@@ -686,8 +686,6 @@ def _format_part1(agenda_data: dict, week_number: int) -> str:
         lines.append(f"  • Email scans: {email_count}")
     lines.append("")
 
-    # DEPRECATED: Commitment scorecard removed — commitments merged into tasks.
-
     # Attention needed
     attention = agenda_data.get("attention_needed", {})
     stale_tasks = attention.get("stale_tasks", [])

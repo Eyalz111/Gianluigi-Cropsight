@@ -245,20 +245,20 @@ class TestSheetsTaskTrackerColumns:
     """Tests for category in Google Sheets Task Tracker."""
 
     def test_columns_include_category(self):
-        """TASK_TRACKER_COLUMNS should include Category."""
-        from services.google_sheets import TASK_TRACKER_COLUMNS
+        """TASK_TRACKER_HEADERS should include Category."""
+        from services.google_sheets import TASK_TRACKER_HEADERS
 
-        assert "Category" in TASK_TRACKER_COLUMNS
-        # Category should be at position 1 (after Task)
-        assert TASK_TRACKER_COLUMNS[0] == "Task"
-        assert TASK_TRACKER_COLUMNS[1] == "Category"
-        assert TASK_TRACKER_COLUMNS[2] == "Assignee"
+        assert "Category" in TASK_TRACKER_HEADERS
+        # Phase 10 layout: Priority, Label, Task, Owner, Deadline, Status, Category, Source Meeting, Created
+        assert TASK_TRACKER_HEADERS[0] == "Priority"
+        assert TASK_TRACKER_HEADERS[1] == "Label"
+        assert TASK_TRACKER_HEADERS[2] == "Task"
 
     def test_columns_has_nine_entries(self):
-        """Should now have 9 columns (was 8 before category)."""
-        from services.google_sheets import TASK_TRACKER_COLUMNS
+        """Should now have 9 columns."""
+        from services.google_sheets import TASK_TRACKER_HEADERS
 
-        assert len(TASK_TRACKER_COLUMNS) == 9
+        assert len(TASK_TRACKER_HEADERS) == 9
 
 
 # =============================================================================

@@ -1021,7 +1021,7 @@ async def process_response(
 
                 if pending_info and pending_info.get("content"):
                     for key in ("executive_summary", "discussion_summary",
-                                "stakeholders", "cross_reference", "commitments"):
+                                "stakeholders", "cross_reference"):
                         if key in pending_info["content"] and key not in updated_content:
                             updated_content[key] = pending_info["content"][key]
 
@@ -1484,12 +1484,11 @@ async def distribute_approved_content(
         logger.info(f"Tasks to add to Sheets: {len(tasks)} items")
         if tasks:
             for i, task in enumerate(tasks):
-                label = task.get("label", "") or task.get("category", "")
+                label = task.get("label", "")
                 title = task.get("title", "")
-                display_title = f"[{label}] {title}" if label else title
-                logger.info(f"  Adding task {i+1}: '{display_title[:50]}' -> {task.get('assignee', '?')}")
+                logger.info(f"  Adding task {i+1}: '[{label}] {title[:50]}' -> {task.get('assignee', '?')}")
                 await sheets_service.add_task(
-                    task=display_title,
+                    task=title,
                     assignee=task.get("assignee", "") or "",
                     source_meeting=meeting_title,
                     deadline=task.get("deadline"),
@@ -1497,6 +1496,7 @@ async def distribute_approved_content(
                     priority=task.get("priority", "M"),
                     created_date=meeting_date,
                     category=task.get("category", ""),
+                    label=label,
                 )
             results["sheets_updated"] = True
             results["tasks_added"] = len(tasks)
@@ -1511,11 +1511,7 @@ async def distribute_approved_content(
             f"Failed to add tasks to Sheets for '{meeting_title}': {e}", error=e,
         )
 
-    # 2b. DEPRECATED — Commitments merged into tasks (action items).
-    # The Commitments Sheets tab is no longer written to.
-    # Previously: await sheets_service.add_commitments_batch_to_sheet(...)
-
-    # 2c. Add decisions to Decisions tab
+    # 2b. Add decisions to Decisions tab
     try:
         decisions = content.get("decisions", [])
         if decisions:
@@ -2235,7 +2231,6 @@ async def _apply_morning_brief_approval(content: dict) -> dict:
                 mapped = {
                     "task": "task",
                     "decision": "decision",
-                    "commitment": "commitment",
                     "gantt_relevant": "gantt_update",
                     "deadline_change": "information",
                     "stakeholder_mention": "information",
@@ -2249,9 +2244,6 @@ async def _apply_morning_brief_approval(content: dict) -> dict:
                     "speaker": item.get("speaker"),
                     "sensitive": item.get("_sensitive", False),
                 }
-                if item_type == "commitment":
-                    debrief_item["commitment_text"] = item.get("text", "")
-                    debrief_item["speaker"] = item.get("speaker", "Unknown")
                 all_items.append(debrief_item)
 
     if not all_items:

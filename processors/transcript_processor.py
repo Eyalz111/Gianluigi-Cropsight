@@ -158,8 +158,6 @@ async def process_transcript(
         meeting_id=meeting_id,
         transcript=file_content,
         new_tasks=extracted.get("tasks", []),
-        # DEPRECATED: Commitments merged into tasks (action items) as of QA hardening.
-        pre_extracted_commitments=[],
         # Phase 9A: pass decisions for supersession detection
         new_decisions=extracted.get("decisions", []),
     )
@@ -434,9 +432,18 @@ async def extract_structured_data(
         meeting_history_context=meeting_history_context,
     )
 
-    # Build canonical project names for label normalization
-    from config.projects import get_canonical_names_for_prompt
-    canonical_names = get_canonical_names_for_prompt()
+    # Build canonical project names for label normalization (dynamic from DB)
+    from services.supabase_client import supabase_client as _sc
+    try:
+        projects = _sc.get_canonical_projects(status="active")
+        names_with_aliases = []
+        for p in projects:
+            aliases = p.get("aliases") or []
+            alias_str = f" (aliases: {', '.join(aliases)})" if aliases else ""
+            names_with_aliases.append(f'"{p["name"]}"{alias_str}')
+        canonical_names = ", ".join(names_with_aliases) if names_with_aliases else '"No canonical projects defined"'
+    except Exception:
+        canonical_names = '"Moldova Pilot", "Pre-Seed Fundraising", "SatYield Accuracy Model"'
 
     # Use a structured extraction approach with JSON output
     extraction_system = """You are an expert meeting analyst. Extract structured information from meeting transcripts.

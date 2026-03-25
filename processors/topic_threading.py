@@ -241,30 +241,41 @@ def _find_thread_by_name(name: str) -> dict | None:
 
 
 def _match_canonical_name(label: str) -> str | None:
-    """Match a label to a canonical project name."""
-    from config.projects import CANONICAL_PROJECT_NAMES
+    """
+    Match a label to a canonical project name using DB-backed canonical_projects table.
+
+    Falls back to in-memory matching if DB is unavailable.
+    """
+    # Try DB-backed matching first
+    try:
+        matched = supabase_client.match_label_to_canonical(label)
+        if matched:
+            return matched
+    except Exception:
+        pass
+
+    # Fallback: partial match and word overlap against DB projects
+    try:
+        projects = supabase_client.get_canonical_projects(status="active")
+    except Exception:
+        return None
 
     label_lower = label.lower()
 
-    # Exact match
-    for name in CANONICAL_PROJECT_NAMES:
-        if name.lower() == label_lower:
-            return name
-
-    # Partial match (label contains canonical or vice versa)
-    for name in CANONICAL_PROJECT_NAMES:
-        name_lower = name.lower()
+    # Partial match (label contains canonical name or vice versa)
+    for p in projects:
+        name_lower = p["name"].lower()
         if label_lower in name_lower or name_lower in label_lower:
-            return name
+            return p["name"]
 
     # Word overlap (>50% of words match)
     label_words = set(label_lower.split())
-    for name in CANONICAL_PROJECT_NAMES:
-        name_words = set(name.lower().split())
+    for p in projects:
+        name_words = set(p["name"].lower().split())
         if label_words and name_words:
             overlap = len(label_words & name_words)
             if overlap / max(len(label_words), len(name_words)) > 0.5:
-                return name
+                return p["name"]
 
     return None
 

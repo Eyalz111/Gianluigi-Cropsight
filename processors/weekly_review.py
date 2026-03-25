@@ -140,9 +140,6 @@ async def _compile_week_in_review(
     except Exception as e:
         logger.error(f"Week-in-review task summary failed: {e}")
 
-    # DEPRECATED: Commitment scorecard removed — commitments merged into tasks.
-    # Previously: result["commitment_scorecard"] = await get_commitment_scorecard()
-
     # Cross-reference summary
     try:
         from processors.weekly_digest import get_cross_reference_summary

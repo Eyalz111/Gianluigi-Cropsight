@@ -585,7 +585,7 @@ async def _inject_debrief_items(
     Inject debrief items into the system.
 
     Creates a pseudo-meeting record for FK constraints, then processes
-    each item by type: tasks, decisions, commitments, gantt_updates,
+    each item by type: tasks, decisions, gantt_updates,
     and information (embed only).
 
     Args:
@@ -609,7 +609,7 @@ async def _inject_debrief_items(
     )
     meeting_id = pseudo_meeting["id"]
 
-    counts = {"tasks": 0, "decisions": 0, "commitments": 0, "gantt_proposals": 0, "information": 0}
+    counts = {"tasks": 0, "decisions": 0, "gantt_proposals": 0, "information": 0}
     embed_texts = []
 
     for item in items:
@@ -663,16 +663,6 @@ async def _inject_debrief_items(
                 )
                 counts["decisions"] += 1
 
-            elif item_type == "commitment":
-                supabase_client.create_commitment(
-                    meeting_id=meeting_id,
-                    speaker=item.get("speaker", "Eyal"),
-                    commitment_text=item.get("commitment_text", item.get("description", "")),
-                    context=f"From debrief on {source_date}",
-                    implied_deadline=item.get("implied_deadline"),
-                )
-                counts["commitments"] += 1
-
             elif item_type == "gantt_update":
                 try:
                     from services.gantt_manager import gantt_manager
@@ -689,7 +679,7 @@ async def _inject_debrief_items(
                     logger.warning(f"Gantt proposal from debrief failed: {e}")
 
             # All items get embedded as information
-            desc = item.get("description", item.get("title", item.get("commitment_text", "")))
+            desc = item.get("description", item.get("title", ""))
             if desc:
                 embed_texts.append(f"[{item_type}] {desc}")
                 if item_type == "information":
@@ -731,8 +721,6 @@ async def _inject_debrief_items(
         summary_parts.append(f"{counts['tasks']} tasks")
     if counts["decisions"]:
         summary_parts.append(f"{counts['decisions']} decisions")
-    if counts["commitments"]:
-        summary_parts.append(f"{counts['commitments']} commitments")
     if counts["gantt_proposals"]:
         summary_parts.append(f"{counts['gantt_proposals']} Gantt proposals")
     if counts["information"]:
@@ -800,19 +788,6 @@ def _build_debrief_context(
     except Exception:
         pass
 
-    # Open commitments for context
-    try:
-        commitments = supabase_client.get_commitments(status="open")
-        if commitments:
-            parts.append("OPEN COMMITMENTS:")
-            for c in commitments[:10]:
-                speaker = c.get("speaker", "")
-                text = c.get("commitment_text", "")[:60]
-                parts.append(f"  - {speaker}: {text}")
-            parts.append("")
-    except Exception:
-        pass
-
     # Phase 4: Queued email extractions not yet in morning brief
     try:
         today_str = date.today().isoformat()
@@ -853,7 +828,6 @@ def _format_extraction_summary(items: list[dict]) -> str:
     type_labels = {
         "task": "Tasks",
         "decision": "Decisions",
-        "commitment": "Commitments",
         "information": "Information",
         "gantt_update": "Gantt Updates",
     }
@@ -866,7 +840,7 @@ def _format_extraction_summary(items: list[dict]) -> str:
             continue
         lines.append(f"{label} ({len(group)}):")
         for i, item in enumerate(group, 1):
-            title = item.get("title", item.get("description", item.get("commitment_text", "")))
+            title = item.get("title", item.get("description", ""))
             title = title[:80] if title else "Untitled"
             assignee = item.get("assignee", item.get("speaker", ""))
             suffix = f" — {assignee}" if assignee else ""

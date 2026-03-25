@@ -123,9 +123,9 @@ class TestWordGenerator:
         table = doc.tables[0]
         # Header row
         headers = [cell.text for cell in table.rows[0].cells]
-        assert "#" in headers
-        assert "Task" in headers
-        assert "Assignee" in headers
+        assert "Pri" in headers
+        assert "Action Item" in headers
+        assert "Owner" in headers
         # Data rows
         assert len(table.rows) >= 3  # header + 2 tasks
         assert "Roye" in table.rows[1].cells[2].text

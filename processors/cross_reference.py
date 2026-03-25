@@ -352,7 +352,6 @@ async def run_cross_reference(
     meeting_id: str,
     transcript: str,
     new_tasks: list[dict],
-    pre_extracted_commitments: list[dict] | None = None,
     **kwargs,
 ) -> dict:
     """
@@ -365,8 +364,6 @@ async def run_cross_reference(
         meeting_id: UUID of the meeting.
         transcript: Full transcript text.
         new_tasks: Newly extracted tasks from this meeting.
-        pre_extracted_commitments: Commitments already extracted by Opus
-            (avoids 8K truncation). Falls back to Haiku extraction if None.
 
     Returns:
         Dict with:
@@ -394,11 +391,6 @@ async def run_cross_reference(
         meeting_id=meeting_id,
         transcript=transcript,
     )
-
-    # DEPRECATED: Commitments merged into tasks (action items) as of QA hardening.
-    # Previously: extracted and stored commitments separately. Now skipped.
-    new_commitments = []
-    fulfillments = []
 
     # Create task_mention records for duplicates and updates
     mentions_to_create = []
@@ -441,8 +433,6 @@ async def run_cross_reference(
         "dedup": dedup,
         "status_changes": status_changes,
         "resolved_questions": resolved_questions,
-        "new_commitments": new_commitments,
-        "commitment_fulfillments": fulfillments,
     }
 
     # Log summary
@@ -452,9 +442,7 @@ async def run_cross_reference(
         f"{len(dedup.get('duplicates', []))} duplicates, "
         f"{len(dedup.get('updates', []))} updates, "
         f"{len(status_changes)} status changes, "
-        f"{len(resolved_questions)} questions resolved, "
-        f"{len(new_commitments)} commitments, "
-        f"{len(fulfillments)} fulfillments"
+        f"{len(resolved_questions)} questions resolved"
     )
 
     # Phase 9A: Detect decision supersessions
@@ -563,163 +551,6 @@ If no supersessions found, return: {{"supersessions": []}}"""
 
     except Exception as e:
         logger.error(f"Supersession detection LLM call failed: {e}")
-        return []
-
-
-async def extract_commitments(
-    meeting_id: str,
-    transcript: str,
-    participants: list[str],
-) -> list[dict]:
-    """
-    Extract verbal commitments from a meeting transcript.
-
-    Commitments are promises like "I'll send that by Friday" or
-    "Let me check with the lawyers and get back to you". These may
-    or may not overlap with formal tasks.
-
-    Args:
-        meeting_id: UUID of the meeting.
-        transcript: Full transcript text.
-        participants: List of participant names.
-
-    Returns:
-        List of commitment dicts:
-        [{speaker, commitment_text, context, implied_deadline}]
-    """
-    truncated = transcript[:8000] if len(transcript) > 8000 else transcript
-
-    prompt = f"""You are analyzing a startup founding team meeting for verbal commitments — promises or pledges to do something.
-
-Examples of commitments:
-- "I'll send that by Friday"
-- "Let me check with the lawyers and get back to you"
-- "I'll set up a meeting with Jason next week"
-- "We'll have the prototype ready by end of month"
-
-NOT commitments (filter these out):
-- Past-tense statements ("I already sent it")
-- General observations ("We should think about this")
-- Questions ("Can you look into it?")
-
-PARTICIPANTS: {', '.join(participants)}
-
-TRANSCRIPT:
-{truncated}
-
-For each commitment, provide:
-- speaker: Who made the commitment
-- commitment_text: What they committed to (concise)
-- context: Brief surrounding context (1 sentence)
-- implied_deadline: Deadline mentioned or "none"
-
-Return JSON:
-{{"commitments": [{{"speaker": "...", "commitment_text": "...", "context": "...", "implied_deadline": "..."}}]}}
-
-Be conservative — only include clear, actionable commitments. Exclude vague intentions."""
-
-    try:
-        response_text, _ = call_llm(
-            prompt=prompt,
-            model=settings.model_simple,
-            max_tokens=1024,
-            call_site="commitment_extraction",
-            meeting_id=meeting_id,
-        )
-        parsed = _parse_json_response(response_text)
-        commitments = parsed.get("commitments", [])
-        logger.info(f"Extracted {len(commitments)} commitments from meeting {meeting_id}")
-        return commitments
-    except Exception as e:
-        logger.error(f"Error extracting commitments: {e}")
-        return []
-
-
-async def check_commitment_fulfillment(
-    meeting_id: str,
-    transcript: str,
-) -> list[dict]:
-    """
-    Check if any open commitments have been fulfilled in this meeting.
-
-    Compares all open commitments against the transcript to detect
-    explicit or implicit fulfillment.
-
-    Args:
-        meeting_id: UUID of the current meeting.
-        transcript: Full transcript text.
-
-    Returns:
-        List of fulfillment detections:
-        [{commitment_id, evidence, confidence}]
-    """
-    # Fetch all open commitments, excluding ones just created from this meeting
-    all_open = supabase_client.get_commitments(status="open")
-    open_commitments = [
-        c for c in all_open if c.get("meeting_id") != meeting_id
-    ]
-
-    if not open_commitments:
-        return []
-
-    # Build the prompt
-    c_lines = []
-    for i, c in enumerate(open_commitments, 1):
-        cid = c.get("id", "?")
-        speaker = c.get("speaker", "?")
-        text = c.get("commitment_text", "?")
-        deadline = c.get("implied_deadline", "none")
-        c_lines.append(
-            f'{i}. [id: {cid}] {speaker}: "{text}" (deadline: {deadline})'
-        )
-
-    truncated = transcript[:8000] if len(transcript) > 8000 else transcript
-
-    prompt = f"""You are checking if any open commitments have been fulfilled based on a meeting transcript.
-
-OPEN COMMITMENTS:
-{chr(10).join(c_lines)}
-
-MEETING TRANSCRIPT:
-{truncated}
-
-For each commitment that was clearly fulfilled (e.g., someone says "I sent that email" or "the meeting with Jason is set up"), provide:
-- commitment_id: The ID from the list above
-- evidence: Exact quote from transcript showing fulfillment
-- confidence: high (explicitly stated) / medium (strongly implied) / low (partially addressed)
-
-Only include commitments where fulfillment is clearly evidenced. When in doubt, leave it as open.
-
-Return JSON:
-{{"fulfilled": [{{"commitment_id": "...", "evidence": "...", "confidence": "..."}}]}}"""
-
-    try:
-        response_text, _ = call_llm(
-            prompt=prompt,
-            model=settings.model_simple,
-            max_tokens=1024,
-            call_site="commitment_fulfillment",
-            meeting_id=meeting_id,
-        )
-        parsed = _parse_json_response(response_text)
-        fulfilled = parsed.get("fulfilled", [])
-
-        # Validate commitment IDs exist
-        valid_ids = {c["id"] for c in open_commitments}
-        enriched = []
-        for f in fulfilled:
-            if f.get("commitment_id") in valid_ids:
-                enriched.append(f)
-            else:
-                logger.warning(
-                    f"Fulfillment references unknown commitment: {f.get('commitment_id')}"
-                )
-
-        logger.info(f"Found {len(enriched)} commitment fulfillments in meeting {meeting_id}")
-        return enriched
-
-    except Exception as e:
-        logger.error(f"Error checking commitment fulfillment: {e}")
         return []
 
 

@@ -51,7 +51,7 @@ def _hex_color(hex_str: str) -> dict:
 
 
 COLORS = {
-    # Category colors (Task Tracker column B)
+    # Category colors (Task Tracker — column G in Phase 10 layout)
     "product_tech": _hex_color("#BBDEFB"),       # Light Blue
     "business_dev": _hex_color("#C8E6C9"),        # Light Green
     "marketing": _hex_color("#FFE0B2"),           # Light Orange
@@ -238,18 +238,52 @@ def _text_wrap_request(sheet_id: int, col_index: int) -> dict:
     }
 
 
-# Task Tracker column configuration
-TASK_TRACKER_COLUMNS = [
-    "Task",
-    "Category",
-    "Assignee",
-    "Source Meeting",
-    "Deadline",
-    "Status",
-    "Priority",
-    "Created Date",
-    "Updated Date",
+# =========================================================================
+# Column Mapping Constants — single source of truth for column layout
+# =========================================================================
+
+# Task Tracker: new Phase 10 layout (reordered for quick scanning)
+TASK_COLUMNS = {
+    "priority": "A",       # H/M/L — narrow, color-coded
+    "label": "B",          # 2-3 word project label — quick-scan column
+    "task": "C",           # Full task description
+    "owner": "D",          # Assignee
+    "deadline": "E",       # Due date
+    "status": "F",         # pending/in_progress/done/overdue
+    "category": "G",       # Product & Tech, BD & Sales, etc.
+    "source_meeting": "H", # Meeting where task originated
+    "created": "I",        # Creation date
+}
+
+# Column indices (0-based) for formatting operations
+TASK_COL_INDEX = {k: ord(v) - ord("A") for k, v in TASK_COLUMNS.items()}
+
+# Decision Tracker columns
+DECISION_COLUMNS = {
+    "label": "A",
+    "decision": "B",
+    "rationale": "C",
+    "confidence": "D",
+    "source_meeting": "E",
+    "date": "F",
+    "status": "G",
+}
+
+DECISION_COL_INDEX = {k: ord(v) - ord("A") for k, v in DECISION_COLUMNS.items()}
+
+# Header labels for sheet display (order matches column mapping)
+TASK_TRACKER_HEADERS = [
+    "Priority", "Label", "Task", "Owner", "Deadline",
+    "Status", "Category", "Source Meeting", "Created",
 ]
+
+DECISION_TRACKER_HEADERS = [
+    "Label", "Decision", "Rationale", "Confidence",
+    "Source Meeting", "Date", "Status",
+]
+
+# Legacy constant — kept for backward compatibility during transition
+TASK_TRACKER_COLUMNS = TASK_TRACKER_HEADERS
 
 # Stakeholder Tracker column configuration (Eyal's existing sheet)
 STAKEHOLDER_COLUMNS = [
@@ -356,9 +390,13 @@ class GoogleSheetsService:
         priority: str,
         created_date: str,
         category: str = "",
+        label: str = "",
     ) -> bool:
         """
         Add a new task to the Task Tracker sheet.
+
+        Column order follows TASK_COLUMNS: Priority, Label, Task, Owner,
+        Deadline, Status, Category, Source Meeting, Created.
 
         Args:
             task: Task description.
@@ -369,6 +407,7 @@ class GoogleSheetsService:
             priority: 'H', 'M', or 'L'.
             created_date: When the task was created (YYYY-MM-DD).
             category: Task category (e.g., 'Product & Tech').
+            label: Project label (e.g., 'Moldova Pilot').
 
         Returns:
             True if task was added successfully.
@@ -378,15 +417,15 @@ class GoogleSheetsService:
             return False
 
         values = [
+            priority,
+            label,
             task,
-            category,
             assignee,
-            source_meeting,
             deadline or "",
             status,
-            priority,
+            category,
+            source_meeting,
             created_date,
-            created_date,  # Updated date = created date initially
         ]
 
         return await self._append_row(
@@ -399,7 +438,7 @@ class GoogleSheetsService:
         self,
         row_number: int,
         status: str,
-        updated_date: str
+        updated_date: str | None = None,
     ) -> bool:
         """
         Update a task's status in the Task Tracker.
@@ -407,7 +446,7 @@ class GoogleSheetsService:
         Args:
             row_number: The row number of the task (1-indexed, header is row 1).
             status: New status value.
-            updated_date: Current date (YYYY-MM-DD).
+            updated_date: Ignored (kept for backward compat). No Updated column in new layout.
 
         Returns:
             True if update was successful.
@@ -417,16 +456,13 @@ class GoogleSheetsService:
             return False
 
         try:
-            # Update Status (column F) and Updated Date (column I)
-            range_name = f"F{row_number}:I{row_number}"
-            values = [[status, None, None, updated_date]]
-
-            # Use COLUMNS input option to update only specific columns
-            result = self.service.spreadsheets().values().update(
+            col = TASK_COLUMNS["status"]
+            range_name = f"'{settings.TASK_TRACKER_TAB_NAME}'!{col}{row_number}"
+            self.service.spreadsheets().values().update(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
                 range=range_name,
                 valueInputOption="RAW",
-                body={"values": values}
+                body={"values": [[status]]}
             ).execute()
 
             logger.info(f"Updated task row {row_number}: status={status}")
@@ -461,13 +497,12 @@ class GoogleSheetsService:
         """
         Update specific fields of a task row in the Task Tracker.
 
-        Columns: A=Task, B=Category, C=Assignee, D=Source, E=Deadline,
-                 F=Status, G=Priority, H=Created, I=Updated
+        Uses TASK_COLUMNS for column mapping.
 
         Args:
             row_number: The row number to update (1-indexed, header is row 1).
-            **fields: Field names to update. Supported: task, category, assignee,
-                      deadline, status, priority.
+            **fields: Field names to update. Supported: task, label, category,
+                      owner/assignee, deadline, status, priority.
 
         Returns:
             True if update was successful.
@@ -475,17 +510,20 @@ class GoogleSheetsService:
         if not settings.TASK_TRACKER_SHEET_ID:
             return False
 
+        # Map field names to TASK_COLUMNS keys (with aliases)
+        field_aliases = {"assignee": "owner"}
         column_map = {
-            "task": "A",
-            "category": "B",
-            "assignee": "C",
-            "deadline": "E",
-            "status": "F",
-            "priority": "G",
+            "task": TASK_COLUMNS["task"],
+            "label": TASK_COLUMNS["label"],
+            "category": TASK_COLUMNS["category"],
+            "owner": TASK_COLUMNS["owner"],
+            "assignee": TASK_COLUMNS["owner"],
+            "deadline": TASK_COLUMNS["deadline"],
+            "status": TASK_COLUMNS["status"],
+            "priority": TASK_COLUMNS["priority"],
         }
 
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
             batch_data = []
 
             for field, value in fields.items():
@@ -495,12 +533,6 @@ class GoogleSheetsService:
                         "range": f"'{settings.TASK_TRACKER_TAB_NAME}'!{col}{row_number}",
                         "values": [[value if value is not None else ""]],
                     })
-
-            # Always update the Updated Date column (I)
-            batch_data.append({
-                "range": f"'{settings.TASK_TRACKER_TAB_NAME}'!I{row_number}",
-                "values": [[today]],
-            })
 
             if batch_data:
                 self.service.spreadsheets().values().batchUpdate(
@@ -523,7 +555,7 @@ class GoogleSheetsService:
         Get all tasks from the Task Tracker.
 
         Returns:
-            List of task dicts with all columns.
+            List of task dicts with all columns (uses TASK_COLUMNS mapping).
         """
         if not settings.TASK_TRACKER_SHEET_ID:
             logger.warning("TASK_TRACKER_SHEET_ID not configured")
@@ -537,24 +569,25 @@ class GoogleSheetsService:
         if not rows or len(rows) < 2:
             return []
 
+        num_cols = len(TASK_COLUMNS)
         # Skip header row
         tasks = []
         for i, row in enumerate(rows[1:], start=2):
             # Pad row if needed
-            while len(row) < len(TASK_TRACKER_COLUMNS):
+            while len(row) < num_cols:
                 row.append("")
 
             tasks.append({
                 "row_number": i,
-                "task": row[0],
-                "category": row[1],
-                "assignee": row[2],
-                "source_meeting": row[3],
-                "deadline": row[4],
-                "status": row[5],
-                "priority": row[6],
-                "created_date": row[7],
-                "updated_date": row[8] if len(row) > 8 else "",
+                "priority": row[TASK_COL_INDEX["priority"]],
+                "label": row[TASK_COL_INDEX["label"]],
+                "task": row[TASK_COL_INDEX["task"]],
+                "assignee": row[TASK_COL_INDEX["owner"]],
+                "source_meeting": row[TASK_COL_INDEX["source_meeting"]],
+                "deadline": row[TASK_COL_INDEX["deadline"]],
+                "status": row[TASK_COL_INDEX["status"]],
+                "category": row[TASK_COL_INDEX["category"]],
+                "created_date": row[TASK_COL_INDEX["created"]],
             })
 
         return tasks
@@ -589,12 +622,13 @@ class GoogleSheetsService:
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
                     body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
                 ).execute()
-                # Add header row
+                # Add header row (matches TASK_TRACKER_HEADERS + Archived)
+                archive_headers = TASK_TRACKER_HEADERS + ["Archived"]
                 self.service.spreadsheets().values().update(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    range="Archive!A1:I1",
+                    range=f"Archive!A1:{chr(ord('A') + len(archive_headers) - 1)}1",
                     valueInputOption="RAW",
-                    body={"values": [["Task", "Category", "Assignee", "Source", "Deadline", "Status", "Priority", "Created", "Archived"]]},
+                    body={"values": [archive_headers]},
                 ).execute()
 
             # Find matching rows in active tab
@@ -608,19 +642,21 @@ class GoogleSheetsService:
             if not rows_to_archive:
                 return 0
 
-            # Copy rows to Archive tab
+            # Copy rows to Archive tab (matches TASK_TRACKER_HEADERS + Archived)
             archive_rows = []
             for t in rows_to_archive:
                 archive_rows.append([
-                    t.get("task", ""), t.get("category", ""), t.get("assignee", ""),
-                    t.get("source_meeting", ""), t.get("deadline", ""), t.get("status", ""),
-                    t.get("priority", ""), t.get("created_date", ""),
+                    t.get("priority", ""), t.get("label", ""), t.get("task", ""),
+                    t.get("assignee", ""), t.get("deadline", ""), t.get("status", ""),
+                    t.get("category", ""), t.get("source_meeting", ""),
+                    t.get("created_date", ""),
                     datetime.now().strftime("%Y-%m-%d"),
                 ])
 
+            num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
             self.service.spreadsheets().values().append(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range="Archive!A:I",
+                range=f"Archive!A:{chr(ord('A') + num_archive_cols - 1)}",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": archive_rows},
@@ -650,6 +686,147 @@ class GoogleSheetsService:
         except Exception as e:
             logger.error(f"Error archiving tasks: {e}")
             return 0
+
+    async def rebuild_tasks_sheet(self, tasks_from_db: list[dict]) -> bool:
+        """
+        Rebuild the Tasks sheet from Supabase data.
+
+        Clears the sheet completely and writes all tasks with consistent
+        formatting. Tasks are sorted by: Status (pending→in_progress→overdue→done)
+        → Priority (H→M→L) → Created date (newest first).
+
+        Args:
+            tasks_from_db: List of task dicts from Supabase.
+
+        Returns:
+            True if rebuild was successful.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+
+        try:
+            tab_name = settings.TASK_TRACKER_TAB_NAME
+
+            # Sort tasks: active statuses first, then by priority, then newest
+            status_order = {"pending": 0, "in_progress": 1, "overdue": 2, "done": 3}
+            priority_order = {"H": 0, "M": 1, "L": 2}
+
+            def sort_key(t):
+                return (
+                    status_order.get(t.get("status", "pending"), 9),
+                    priority_order.get(t.get("priority", "M"), 9),
+                    t.get("created_at", ""),  # string sort, newest last
+                )
+
+            sorted_tasks = sorted(tasks_from_db, key=sort_key)
+
+            # Build rows in TASK_COLUMNS order
+            rows = [TASK_TRACKER_HEADERS]  # header first
+            for t in sorted_tasks:
+                created = str(t.get("created_at", ""))[:10]
+                rows.append([
+                    t.get("priority", "M"),
+                    t.get("label", ""),
+                    t.get("title", ""),
+                    t.get("assignee", ""),
+                    str(t.get("deadline", "") or ""),
+                    t.get("status", "pending"),
+                    t.get("category", ""),
+                    t.get("source_meeting", ""),
+                    created,
+                ])
+
+            # Clear the tab and write fresh data
+            num_cols = len(TASK_COLUMNS)
+            end_col = chr(ord("A") + num_cols - 1)
+            clear_range = f"'{tab_name}'!A:{end_col}"
+
+            self.service.spreadsheets().values().clear(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range=clear_range,
+            ).execute()
+
+            # Write all data (header + tasks)
+            write_range = f"'{tab_name}'!A1:{end_col}{len(rows)}"
+            self.service.spreadsheets().values().update(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range=write_range,
+                valueInputOption="RAW",
+                body={"values": rows},
+            ).execute()
+
+            logger.info(f"Rebuilt Tasks sheet: {len(sorted_tasks)} tasks written")
+
+            # Apply formatting
+            await self.format_task_tracker()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error rebuilding Tasks sheet: {e}")
+            return False
+
+    async def rebuild_decisions_sheet(self, decisions_from_db: list[dict]) -> bool:
+        """
+        Rebuild the Decisions sheet from Supabase data.
+
+        Args:
+            decisions_from_db: List of decision dicts from Supabase.
+
+        Returns:
+            True if rebuild was successful.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+
+        try:
+            # Ensure tab exists
+            sheet_id = await self.ensure_decisions_tab()
+            if sheet_id is None:
+                return False
+
+            # Sort decisions by date (newest first)
+            sorted_decisions = sorted(
+                decisions_from_db,
+                key=lambda d: d.get("created_at", ""),
+                reverse=True,
+            )
+
+            # Build rows
+            rows = [DECISION_TRACKER_HEADERS]
+            for d in sorted_decisions:
+                rows.append([
+                    d.get("label", ""),
+                    d.get("description", ""),
+                    d.get("rationale", ""),
+                    str(d.get("confidence", 3)),
+                    d.get("source_meeting", ""),
+                    str(d.get("created_at", ""))[:10],
+                    d.get("decision_status", "Active"),
+                ])
+
+            # Clear and rewrite
+            num_cols = len(DECISION_COLUMNS)
+            end_col = chr(ord("A") + num_cols - 1)
+
+            self.service.spreadsheets().values().clear(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range=f"Decisions!A:{end_col}",
+            ).execute()
+
+            self.service.spreadsheets().values().update(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range=f"Decisions!A1:{end_col}{len(rows)}",
+                valueInputOption="RAW",
+                body={"values": rows},
+            ).execute()
+
+            logger.info(f"Rebuilt Decisions sheet: {len(sorted_decisions)} decisions written")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error rebuilding Decisions sheet: {e}")
+            return False
 
     async def find_task_row(self, task_description: str) -> int | None:
         """
@@ -821,16 +998,17 @@ class GoogleSheetsService:
 
         values = []
         for task in tasks:
+            created = task.get("created_date", datetime.now().strftime("%Y-%m-%d"))
             values.append([
+                task.get("priority", "M"),
+                task.get("label", ""),
                 task.get("task", ""),
-                task.get("category", ""),
                 task.get("assignee", ""),
-                task.get("source_meeting", ""),
                 task.get("deadline", ""),
                 task.get("status", "pending"),
-                task.get("priority", "M"),
-                task.get("created_date", datetime.now().strftime("%Y-%m-%d")),
-                task.get("created_date", datetime.now().strftime("%Y-%m-%d")),
+                task.get("category", ""),
+                task.get("source_meeting", ""),
+                created,
             ])
 
         return await self._append_rows(
@@ -879,15 +1057,15 @@ class GoogleSheetsService:
                 task_desc += f" | Prep: {prep}"
 
             values.append([
-                task_desc,
-                "Operations & HR",  # follow-up scheduling is operational
-                led_by,
-                source_meeting,
-                "",  # deadline — follow-ups often don't have a parseable date
-                "pending",
-                "H",
-                created_date,
-                created_date,
+                "H",               # priority
+                "",                # label — follow-ups don't have a project label
+                task_desc,         # task
+                led_by,            # owner
+                "",                # deadline — follow-ups often don't have a parseable date
+                "pending",         # status
+                "Operations & HR", # category
+                source_meeting,    # source meeting
+                created_date,      # created
             ])
 
         return await self._append_rows(
@@ -1294,136 +1472,6 @@ class GoogleSheetsService:
             return False
 
     # =========================================================================
-    # Commitment Dashboard (v0.4.1)
-    # DEPRECATED — Commitments merged into tasks (action items) as of QA hardening.
-    # These methods are kept for backward compatibility but no longer called from
-    # the approval flow. Will be removed in a future cleanup pass.
-    # =========================================================================
-
-    async def ensure_commitments_tab(self) -> int | None:
-        """
-        DEPRECATED: Commitments merged into tasks.
-
-        Ensure a 'Commitments' tab exists in the Task Tracker spreadsheet.
-
-        Creates the tab with a header row if it doesn't exist.
-
-        Returns:
-            The sheetId of the Commitments tab, or None if no spreadsheet configured.
-        """
-        if not settings.TASK_TRACKER_SHEET_ID:
-            logger.warning("TASK_TRACKER_SHEET_ID not configured")
-            return None
-
-        try:
-            # Check existing tabs
-            metadata = self.service.spreadsheets().get(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                fields="sheets.properties",
-            ).execute()
-
-            for sheet in metadata.get("sheets", []):
-                props = sheet.get("properties", {})
-                if props.get("title") == "Commitments":
-                    logger.info(f"Commitments tab already exists (sheetId={props['sheetId']})")
-                    return props["sheetId"]
-
-            # Create the tab
-            result = self.service.spreadsheets().batchUpdate(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                body={
-                    "requests": [
-                        {
-                            "addSheet": {
-                                "properties": {"title": "Commitments"}
-                            }
-                        }
-                    ]
-                },
-            ).execute()
-
-            new_sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
-            logger.info(f"Created Commitments tab (sheetId={new_sheet_id})")
-
-            # Add header row
-            headers = [
-                "Commitment", "Owner", "Deadline", "Status",
-                "Source Meeting", "Created Date",
-            ]
-            self.service.spreadsheets().values().update(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range="Commitments!A1:F1",
-                valueInputOption="RAW",
-                body={"values": [headers]},
-            ).execute()
-
-            return new_sheet_id
-
-        except Exception as e:
-            logger.error(f"Error ensuring Commitments tab: {e}")
-            return None
-
-    async def add_commitments_batch_to_sheet(
-        self,
-        commitments: list[dict],
-        source_meeting: str,
-        created_date: str,
-    ) -> bool:
-        """
-        DEPRECATED: Commitments merged into tasks.
-
-        Add a batch of commitments to the Commitments tab.
-
-        Args:
-            commitments: List of commitment dicts.
-            source_meeting: Meeting title where commitments were extracted.
-            created_date: Date string of the meeting.
-
-        Returns:
-            True if commitments were added successfully.
-        """
-        if not commitments:
-            return True  # no-op
-
-        if not settings.TASK_TRACKER_SHEET_ID:
-            logger.warning("TASK_TRACKER_SHEET_ID not configured")
-            return False
-
-        try:
-            # Ensure tab exists
-            sheet_id = await self.ensure_commitments_tab()
-            if sheet_id is None:
-                return False
-
-            # Build rows
-            rows = []
-            for c in commitments:
-                rows.append([
-                    c.get("commitment_text", ""),
-                    c.get("speaker", ""),
-                    c.get("implied_deadline", ""),
-                    c.get("status", "open"),
-                    source_meeting,
-                    created_date,
-                ])
-
-            # Append to the Commitments tab
-            self.service.spreadsheets().values().append(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range="Commitments!A:F",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": rows},
-            ).execute()
-
-            logger.info(f"Added {len(rows)} commitments to Commitments tab")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error adding commitments to sheet: {e}")
-            return False
-
-    # =========================================================================
     # Decisions Dashboard
     # =========================================================================
 
@@ -1546,16 +1594,17 @@ class GoogleSheetsService:
         """
         Apply professional formatting to the Task Tracker sheet.
 
+        Uses TASK_COLUMNS/TASK_COL_INDEX for column positions.
+        No data validation dropdowns (they cause errors with existing data).
+
         Includes:
         - Dark blue header row with white bold text
         - Frozen header row
-        - Fixed column widths (A=300, B=140, C=100, D=160, E=90, F=90, G=70, H=90, I=90)
-        - Text wrapping on Task column (A)
-        - Conditional formatting on Status (F), Category (B), Priority (G)
-        - Data validation dropdowns on Status, Priority, Category
+        - Fixed column widths: A=50, B=120, C=350, D=90, E=90, F=90, G=120, H=150, I=80
+        - Text wrapping on Task column (C)
+        - Conditional formatting on Status (F), Category (G), Priority (A)
         - Alternating row colors (zebra striping)
         - Light gray borders on all cells
-        - Clears existing conditional format rules first (idempotent)
 
         Returns:
             True if formatting was applied successfully.
@@ -1566,7 +1615,7 @@ class GoogleSheetsService:
 
         try:
             sid = self._get_first_sheet_id(settings.TASK_TRACKER_SHEET_ID)
-            num_cols = 9  # A through I
+            num_cols = len(TASK_COLUMNS)
             requests = []
 
             # --- Rename first sheet to configured tab name ---
@@ -1619,16 +1668,30 @@ class GoogleSheetsService:
                 }
             })
 
-            # --- Fixed column widths (replace autoResize) ---
-            col_widths = [300, 140, 100, 160, 90, 90, 70, 90, 90]
+            # --- Fixed column widths (Phase 10 layout) ---
+            # A=Priority(50), B=Label(120), C=Task(350), D=Owner(90),
+            # E=Deadline(90), F=Status(90), G=Category(120), H=Source(150), I=Created(80)
+            col_widths = [50, 120, 350, 90, 90, 90, 120, 150, 80]
             for i, w in enumerate(col_widths):
                 requests.append(_column_width_request(sid, i, w))
 
-            # --- Text wrapping on Task column (A = index 0) ---
-            requests.append(_text_wrap_request(sid, 0))
+            # --- Text wrapping on Task column (C) ---
+            requests.append(_text_wrap_request(sid, TASK_COL_INDEX["task"]))
 
-            # --- Conditional formatting: Status column (F = index 5) ---
+            # --- Conditional formatting: Priority column (A) ---
             rule_idx = 0
+            priority_rules = [
+                ("H", COLORS["priority_high"]),
+                ("M", COLORS["priority_medium"]),
+                ("L", COLORS["priority_low"]),
+            ]
+            for text, color in priority_rules:
+                requests.append(
+                    _conditional_format_rule(sid, TASK_COL_INDEX["priority"], text, color, rule_idx)
+                )
+                rule_idx += 1
+
+            # --- Conditional formatting: Status column (F) ---
             status_rules = [
                 ("overdue", COLORS["status_overdue"]),
                 ("done", COLORS["status_done"]),
@@ -1637,11 +1700,11 @@ class GoogleSheetsService:
             ]
             for text, color in status_rules:
                 requests.append(
-                    _conditional_format_rule(sid, 5, text, color, rule_idx)
+                    _conditional_format_rule(sid, TASK_COL_INDEX["status"], text, color, rule_idx)
                 )
                 rule_idx += 1
 
-            # --- Conditional formatting: Category column (B = index 1) ---
+            # --- Conditional formatting: Category column (G) ---
             category_rules = [
                 ("Product & Tech", COLORS["product_tech"]),
                 ("BD & Sales", COLORS["business_dev"]),
@@ -1652,26 +1715,11 @@ class GoogleSheetsService:
             ]
             for text, color in category_rules:
                 requests.append(
-                    _conditional_format_rule(sid, 1, text, color, rule_idx)
+                    _conditional_format_rule(sid, TASK_COL_INDEX["category"], text, color, rule_idx)
                 )
                 rule_idx += 1
 
-            # --- Conditional formatting: Priority column (G = index 6) ---
-            priority_rules = [
-                ("H", COLORS["priority_high"]),
-                ("M", COLORS["priority_medium"]),
-                ("L", COLORS["priority_low"]),
-            ]
-            for text, color in priority_rules:
-                requests.append(
-                    _conditional_format_rule(sid, 6, text, color, rule_idx)
-                )
-                rule_idx += 1
-
-            # --- Data validation dropdowns ---
-            requests.append(_data_validation_request(sid, 5, TASK_STATUSES))    # Status (F)
-            requests.append(_data_validation_request(sid, 6, PRIORITIES))       # Priority (G)
-            requests.append(_data_validation_request(sid, 1, TASK_CATEGORIES))  # Category (B)
+            # --- NO data validation dropdowns (removed — they cause errors) ---
 
             # --- Alternating row colors (zebra striping) ---
             requests.append(_banding_request(sid, num_cols))
@@ -1680,7 +1728,6 @@ class GoogleSheetsService:
             requests.append(_border_request(sid, num_cols))
 
             # --- Reset data rows (2-200) to white background + black text ---
-            # Prevents new appended rows from inheriting header styling
             requests.append({
                 "repeatCell": {
                     "range": {
@@ -1873,7 +1920,7 @@ class GoogleSheetsService:
                 await self._write_sheet_range(
                     sheet_id=settings.TASK_TRACKER_SHEET_ID,
                     range_name="A1:I1",
-                    values=[TASK_TRACKER_COLUMNS]
+                    values=[TASK_TRACKER_HEADERS]
                 )
                 logger.info("Created Task Tracker headers")
 
