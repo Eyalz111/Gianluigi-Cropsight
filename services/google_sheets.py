@@ -724,6 +724,12 @@ class GoogleSheetsService:
             rows = [TASK_TRACKER_HEADERS]  # header first
             for t in sorted_tasks:
                 created = str(t.get("created_at", ""))[:10]
+                # source_meeting comes from the joined meetings object or direct field
+                meeting_info = t.get("meetings") or {}
+                source = (
+                    t.get("source_meeting", "")
+                    or (meeting_info.get("title", "") if isinstance(meeting_info, dict) else "")
+                )
                 rows.append([
                     t.get("priority", "M"),
                     t.get("label", ""),
@@ -732,7 +738,7 @@ class GoogleSheetsService:
                     str(t.get("deadline", "") or ""),
                     t.get("status", "pending"),
                     t.get("category", ""),
-                    t.get("source_meeting", ""),
+                    source,
                     created,
                 ])
 
@@ -795,12 +801,17 @@ class GoogleSheetsService:
             # Build rows
             rows = [DECISION_TRACKER_HEADERS]
             for d in sorted_decisions:
+                meeting_info = d.get("meetings") or {}
+                source = (
+                    d.get("source_meeting", "")
+                    or (meeting_info.get("title", "") if isinstance(meeting_info, dict) else "")
+                )
                 rows.append([
                     d.get("label", ""),
                     d.get("description", ""),
                     d.get("rationale", ""),
                     str(d.get("confidence", 3)),
-                    d.get("source_meeting", ""),
+                    source,
                     str(d.get("created_at", ""))[:10],
                     d.get("decision_status", "Active"),
                 ])
@@ -1177,6 +1188,18 @@ class GoogleSheetsService:
             fields="sheets.properties.sheetId",
         ).execute()
         return metadata["sheets"][0]["properties"]["sheetId"]
+
+    def _get_sheet_title(self, spreadsheet_id: str, sheet_id: int) -> str | None:
+        """Get the title of a sheet by its numeric sheetId."""
+        metadata = self.service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets.properties",
+        ).execute()
+        for sheet in metadata.get("sheets", []):
+            props = sheet.get("properties", {})
+            if props.get("sheetId") == sheet_id:
+                return props.get("title")
+        return None
 
     def _get_sheet_id_by_name(self, spreadsheet_id: str, tab_name: str) -> int | None:
         """
@@ -1614,20 +1637,15 @@ class GoogleSheetsService:
             return False
 
         try:
-            sid = self._get_first_sheet_id(settings.TASK_TRACKER_SHEET_ID)
+            # Find the Tasks tab by name (don't assume it's the first tab)
+            sid = self._get_sheet_id_by_name(
+                settings.TASK_TRACKER_SHEET_ID, settings.TASK_TRACKER_TAB_NAME
+            )
+            if sid is None:
+                # Fallback to first sheet if tab not found
+                sid = self._get_first_sheet_id(settings.TASK_TRACKER_SHEET_ID)
             num_cols = len(TASK_COLUMNS)
             requests = []
-
-            # --- Rename first sheet to configured tab name ---
-            requests.append({
-                "updateSheetProperties": {
-                    "properties": {
-                        "sheetId": sid,
-                        "title": settings.TASK_TRACKER_TAB_NAME,
-                    },
-                    "fields": "title",
-                }
-            })
 
             # --- Clear existing conditional format rules (idempotent) ---
             requests.extend(
@@ -1721,7 +1739,19 @@ class GoogleSheetsService:
 
             # --- NO data validation dropdowns (removed — they cause errors) ---
 
-            # --- Alternating row colors (zebra striping) ---
+            # --- Remove existing banding then add fresh (idempotent) ---
+            try:
+                meta = self.service.spreadsheets().get(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    fields="sheets.bandedRanges",
+                ).execute()
+                for sheet in meta.get("sheets", []):
+                    for br in sheet.get("bandedRanges", []):
+                        requests.append({
+                            "deleteBanding": {"bandedRangeId": br["bandedRangeId"]}
+                        })
+            except Exception:
+                pass
             requests.append(_banding_request(sid, num_cols))
 
             # --- Light gray borders on all cells ---

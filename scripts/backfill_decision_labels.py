@@ -32,7 +32,7 @@ def get_unlabeled_decisions() -> list[dict]:
 
     result = (
         supabase_client.client.table("decisions")
-        .select("id, description, source_meeting, meeting_id, created_at, label")
+        .select("id, description, meeting_id, created_at, label")
         .execute()
     )
 
@@ -118,7 +118,7 @@ Rules:
         try:
             response, _ = call_llm(
                 prompt=prompt,
-                model=settings.model_classification,
+                model=settings.model_simple,
                 max_tokens=2000,
                 call_site="backfill_decision_labels",
             )

@@ -187,7 +187,7 @@ async def main():
     # Step 4: Rebuild Decisions sheet
     logger.info("\n=== Step 4: Rebuilding Decisions sheet ===")
     try:
-        decisions = supabase_client.get_decisions()
+        decisions = supabase_client.list_decisions()
         logger.info(f"Fetched {len(decisions)} decisions from Supabase")
         ok = await sheets_service.rebuild_decisions_sheet(decisions)
         if ok:
