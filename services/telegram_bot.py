@@ -228,10 +228,21 @@ def _format_cross_reference_section(cross_ref: dict) -> list[str]:
             lines.append("")
         lines.append(f"<b>Questions Resolved ({len(resolved_qs)})</b>")
         for rq in resolved_qs:
-            question = _escape_html(rq.get("question", "")[:60])
-            answer = _escape_html(rq.get("answer", "")[:60])
-            lines.append(f"  Q: \"{question}\"")
-            lines.append(f"  A: {answer}")
+            q_text = rq.get("question", "")
+            a_text = rq.get("answer", "")
+            # Truncate at sentence boundary, not mid-word
+            if len(q_text) > 100:
+                cut = q_text[:100].rfind("?")
+                if cut < 0:
+                    cut = q_text[:100].rfind(" ")
+                q_text = q_text[:cut + 1] if cut > 30 else q_text[:100] + "..."
+            if len(a_text) > 120:
+                cut = a_text[:120].rfind(".")
+                if cut < 0:
+                    cut = a_text[:120].rfind(" ")
+                a_text = a_text[:cut + 1] if cut > 30 else a_text[:120] + "..."
+            lines.append(f"  Q: \"{_escape_html(q_text)}\"")
+            lines.append(f"  A: {_escape_html(a_text)}")
         lines.append("")
 
     return lines if has_content else []
