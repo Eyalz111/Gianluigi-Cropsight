@@ -20,8 +20,11 @@ async def compute_gantt_metrics() -> dict:
     """
     Compute operational metrics from current Gantt data.
 
+    Uses the parsed items from get_gantt_status() which already have
+    status derived from cell background colors (via _color_to_status).
+
     Returns:
-        Dict with velocity, slippage_ratio, milestone_risk, and summary.
+        Dict with velocity, slippage_ratio, milestone_risks, and summary.
     """
     from services.gantt_manager import gantt_manager
 
@@ -41,26 +44,23 @@ async def compute_gantt_metrics() -> dict:
             metrics["summary"] = f"Gantt unavailable: {current_status['error']}"
             return metrics
 
-        # Compute velocity: count non-empty cells in current week
-        sections = current_status.get("sections", [])
+        # Compute velocity from parsed items (status already derived from colors)
+        items = current_status.get("items", [])
         active_cells = 0
         completed_cells = 0
         blocked_cells = 0
         total_cells = 0
 
-        for section in sections:
-            items = section.get("items", [])
-            for item in items:
-                value = (item.get("value") or "").strip()
-                if value:
-                    total_cells += 1
-                    value_lower = value.lower()
-                    if any(w in value_lower for w in ("done", "completed", "shipped", "delivered")):
-                        completed_cells += 1
-                    elif any(w in value_lower for w in ("blocked", "stalled", "delayed", "risk")):
-                        blocked_cells += 1
-                    else:
-                        active_cells += 1
+        for item in items:
+            total_cells += 1
+            status = item.get("status", "unknown")
+            if status == "completed":
+                completed_cells += 1
+            elif status in ("blocked", "at_risk"):
+                blocked_cells += 1
+            elif status in ("active", "planned"):
+                active_cells += 1
+            # "unknown" and other statuses count toward total only
 
         metrics["velocity"] = {
             "total_cells": total_cells,
@@ -76,12 +76,13 @@ async def compute_gantt_metrics() -> dict:
             metrics["slippage_ratio"] = 0.0
 
         # Milestone risk from horizon
+        current_week = horizon.get("current_week", 0)
         milestones = horizon.get("milestones", [])
         for ms in milestones[:5]:
-            weeks_away = ms.get("weeks_away", 0)
+            weeks_away = ms.get("week", current_week) - current_week
             if weeks_away <= 4:
                 metrics["milestone_risks"].append({
-                    "milestone": ms.get("label", "Unknown"),
+                    "milestone": ms.get("text", ms.get("subsection", "Unknown")),
                     "weeks_away": weeks_away,
                     "section": ms.get("section", ""),
                 })
@@ -92,6 +93,8 @@ async def compute_gantt_metrics() -> dict:
             parts.append(f"{completed_cells} completed")
         if blocked_cells:
             parts.append(f"{blocked_cells} blocked/at risk")
+        if active_cells:
+            parts.append(f"{active_cells} active")
         if metrics["milestone_risks"]:
             parts.append(f"{len(metrics['milestone_risks'])} milestones in next 4 weeks")
         metrics["summary"] = ", ".join(parts)
@@ -107,7 +110,7 @@ async def generate_now_next_later() -> dict:
     """
     Auto-generate a Now-Next-Later view from Gantt data.
 
-    - Now (this week + next): Active items with assigned owners
+    - Now (this week + next 2): Active items with assigned owners
     - Next (weeks 3-6): Upcoming items
     - Later (weeks 7+): Planned items, less detail
 
@@ -124,12 +127,13 @@ async def generate_now_next_later() -> dict:
 
     try:
         horizon = await gantt_manager.get_gantt_horizon(weeks_ahead=12)
+        current_week = horizon.get("current_week", 0)
         milestones = horizon.get("milestones", [])
 
         for ms in milestones:
-            weeks_away = ms.get("weeks_away", 0)
+            weeks_away = ms.get("week", current_week) - current_week
             item = {
-                "label": ms.get("label", ""),
+                "label": ms.get("text", ms.get("subsection", "")),
                 "section": ms.get("section", ""),
                 "weeks_away": weeks_away,
                 "owner": ms.get("owner", ""),

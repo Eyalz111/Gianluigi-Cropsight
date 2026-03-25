@@ -42,6 +42,51 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Sheets API Retry Helper
+# =============================================================================
+
+def _sheets_execute(request, max_retries: int = 3, base_delay: float = 1.0):
+    """
+    Execute a Sheets API request with retry on transient errors.
+
+    Used for direct Sheets API calls in the Gantt manager that bypass
+    the GoogleSheetsService base methods.
+    """
+    import time
+    from google.auth.transport.requests import Request
+
+    for attempt in range(max_retries):
+        try:
+            # Ensure credentials are fresh
+            if sheets_service._credentials and (
+                sheets_service._credentials.expired or not sheets_service._credentials.token
+            ):
+                sheets_service._credentials.refresh(Request())
+            return request.execute()
+        except (ConnectionError, TimeoutError, OSError) as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Gantt Sheets API retry {attempt + 1}/{max_retries}: {e}")
+                time.sleep(delay)
+            else:
+                raise
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(k in error_str for k in (
+                "broken pipe", "connection reset", "transport",
+                "503", "429", "500", "502", "504",
+            )):
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Gantt Sheets API retry {attempt + 1}/{max_retries}: {e}")
+                    time.sleep(delay)
+                else:
+                    raise
+            else:
+                raise
+
+
+# =============================================================================
 # Cell Parser
 # =============================================================================
 
@@ -302,19 +347,21 @@ class GanttManager:
         range_str = f"'{sheet_name}'!{col_letter}1:{col_letter}100"
 
         try:
-            result = sheets_service.service.spreadsheets().get(
+            request = sheets_service.service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 ranges=[range_str],
                 includeGridData=True,
-            ).execute()
+            )
+            result = _sheets_execute(request)
         except Exception as e:
             return {"error": f"Failed to read Gantt: {e}", "week": week}
 
         # Also read columns A-B for section/subsection labels
-        label_result = sheets_service.service.spreadsheets().values().get(
+        label_request = sheets_service.service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
             range=f"'{sheet_name}'!A1:B100",
-        ).execute()
+        )
+        label_result = _sheets_execute(label_request)
         label_rows = label_result.get("values", [])
 
         # Parse grid data
@@ -528,11 +575,12 @@ class GanttManager:
 
             range_str = f"'{sheet_name}'!{col_letter}1:{col_letter}100"
             try:
-                result = sheets_service.service.spreadsheets().get(
+                request = sheets_service.service.spreadsheets().get(
                     spreadsheetId=spreadsheet_id,
                     ranges=[range_str],
                     includeGridData=True,
-                ).execute()
+                )
+                result = _sheets_execute(request)
             except Exception as e:
                 continue
 

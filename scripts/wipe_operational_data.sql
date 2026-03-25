@@ -32,5 +32,14 @@ TRUNCATE TABLE token_usage CASCADE;
 TRUNCATE TABLE audit_log CASCADE;
 TRUNCATE TABLE scheduler_heartbeats CASCADE;
 
+-- Phase 9: topic threading + operational snapshots
+TRUNCATE TABLE topic_threads CASCADE;
+TRUNCATE TABLE topic_thread_entries CASCADE;
+TRUNCATE TABLE operational_snapshots CASCADE;
+
+-- Phase 10: unmatched labels (canonical_projects is config, keep it)
+TRUNCATE TABLE unmatched_labels CASCADE;
+
 -- Keep calendar_classifications (learned knowledge, not test data)
 -- Keep gantt_schema (structural, not operational)
+-- Keep canonical_projects (project config, not operational data)

@@ -325,11 +325,64 @@ class GoogleSheetsService:
         """
         Lazy initialization of Sheets API service.
 
-        Uses OAuth2 credentials from settings.
+        Checks token freshness on each access — long-running Cloud Run
+        instances may have expired tokens between requests.
         """
         if self._service is None:
             self._service = self._build_service()
+        else:
+            self._ensure_fresh_credentials()
         return self._service
+
+    def _ensure_fresh_credentials(self):
+        """Refresh OAuth token if expired. Force rebuild on refresh failure."""
+        if self._credentials and (self._credentials.expired or not self._credentials.token):
+            try:
+                self._credentials.refresh(Request())
+            except Exception as e:
+                logger.warning(f"Token refresh failed, rebuilding service: {e}")
+                self._service = None  # Force full rebuild on next access
+
+    def _execute_with_retry(self, request, max_retries: int = 3, base_delay: float = 1.0):
+        """
+        Execute a Google API request with retry on transient errors.
+
+        Retries on: ConnectionError, TimeoutError, OSError, BrokenPipeError,
+        and HTTP 5xx / rate limit errors from the Sheets API.
+        """
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                self._ensure_fresh_credentials()
+                return request.execute()
+            except (ConnectionError, TimeoutError, OSError) as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Sheets API retry {attempt + 1}/{max_retries}: "
+                        f"{type(e).__name__}: {e}. Retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
+            except Exception as e:
+                error_str = str(e).lower()
+                if any(k in error_str for k in (
+                    "broken pipe", "connection reset", "transport",
+                    "503", "429", "500", "502", "504",
+                )):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            f"Sheets API transient error retry {attempt + 1}/{max_retries}: "
+                            f"{type(e).__name__}: {e}. Retrying in {delay:.1f}s..."
+                        )
+                        time.sleep(delay)
+                    else:
+                        raise
+                else:
+                    raise  # Non-transient (4xx, auth, etc.) — don't retry
 
     def _build_service(self):
         """Build the Google Sheets API service with OAuth2 credentials."""
@@ -1183,18 +1236,20 @@ class GoogleSheetsService:
         Returns:
             The numeric sheetId of the first sheet tab.
         """
-        metadata = self.service.spreadsheets().get(
+        request = self.service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
             fields="sheets.properties.sheetId",
-        ).execute()
+        )
+        metadata = self._execute_with_retry(request)
         return metadata["sheets"][0]["properties"]["sheetId"]
 
     def _get_sheet_title(self, spreadsheet_id: str, sheet_id: int) -> str | None:
         """Get the title of a sheet by its numeric sheetId."""
-        metadata = self.service.spreadsheets().get(
+        request = self.service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
             fields="sheets.properties",
-        ).execute()
+        )
+        metadata = self._execute_with_retry(request)
         for sheet in metadata.get("sheets", []):
             props = sheet.get("properties", {})
             if props.get("sheetId") == sheet_id:
@@ -1212,10 +1267,11 @@ class GoogleSheetsService:
         Returns:
             The numeric sheetId, or None if the tab doesn't exist.
         """
-        metadata = self.service.spreadsheets().get(
+        request = self.service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
             fields="sheets.properties",
-        ).execute()
+        )
+        metadata = self._execute_with_retry(request)
         for sheet in metadata.get("sheets", []):
             props = sheet.get("properties", {})
             if props.get("title") == tab_name:
@@ -1279,11 +1335,11 @@ class GoogleSheetsService:
             2D list of cell values.
         """
         try:
-            result = self.service.spreadsheets().values().get(
+            request = self.service.spreadsheets().values().get(
                 spreadsheetId=sheet_id,
                 range=range_name
-            ).execute()
-
+            )
+            result = self._execute_with_retry(request)
             return result.get("values", [])
 
         except Exception as e:
@@ -1308,12 +1364,13 @@ class GoogleSheetsService:
             True if write was successful.
         """
         try:
-            self.service.spreadsheets().values().update(
+            request = self.service.spreadsheets().values().update(
                 spreadsheetId=sheet_id,
                 range=range_name,
                 valueInputOption="RAW",
                 body={"values": values}
-            ).execute()
+            )
+            self._execute_with_retry(request)
 
             logger.info(f"Wrote {len(values)} rows to {range_name}")
             return True
@@ -1362,13 +1419,14 @@ class GoogleSheetsService:
         """
         try:
             range_name = f"'{tab_name}'!A:I" if tab_name else "A:I"
-            self.service.spreadsheets().values().append(
+            request = self.service.spreadsheets().values().append(
                 spreadsheetId=sheet_id,
                 range=range_name,
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": values}
-            ).execute()
+            )
+            self._execute_with_retry(request)
 
             logger.info(f"Appended {len(values)} rows to sheet")
             return True
