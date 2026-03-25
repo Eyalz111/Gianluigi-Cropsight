@@ -215,14 +215,9 @@ def _format_cross_reference_section(cross_ref: dict) -> list[str]:
                 lines.append(f"    ({reason})")
         lines.append("")
 
-    if updates:
-        has_content = True
-        lines.append(f"<b>Task Updates ({len(updates)})</b>")
-        for upd in updates:
-            task_title = _escape_html(upd.get("task", {}).get("title", ""))
-            new_status = upd.get("new_status", "").upper()
-            lines.append(f"  \"{task_title}\" -> {new_status}")
-        lines.append("")
+    # Task Updates removed — Task Status Changes already covers this info.
+    # The UPDATE: prefix from extraction is consumed by cross_reference dedup,
+    # not displayed separately.
 
     # Resolved questions
     resolved_qs = cross_ref.get("resolved_questions", [])
@@ -628,12 +623,17 @@ class TelegramBot:
                     lines.append(f"    (raised by {raised_by})")
             lines.append("")
 
-        # Discussion summary (brief excerpt)
+        # Discussion summary (brief excerpt, truncated at sentence boundary)
         if summary_preview:
-            # Take just the discussion summary portion, not the full markdown
-            excerpt = summary_preview[:600]
             if len(summary_preview) > 600:
-                excerpt += "..."
+                cut = summary_preview[:600].rfind(".")
+                if cut > 300:
+                    excerpt = summary_preview[:cut + 1]
+                else:
+                    cut = summary_preview[:600].rfind(" ")
+                    excerpt = summary_preview[:cut] + "..." if cut > 0 else summary_preview[:600] + "..."
+            else:
+                excerpt = summary_preview
             lines.append(f"<b>Discussion Summary</b>")
             lines.append(_escape_html(excerpt))
             lines.append("")

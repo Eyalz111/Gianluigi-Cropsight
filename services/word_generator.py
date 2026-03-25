@@ -79,10 +79,18 @@ def generate_summary_docx(
     # --- Discussion Summary (at the top for quick scanning) ---
     doc.add_heading("Summary", level=2)
     if discussion_summary:
-        # Truncate to ~800 chars for concise overview
-        summary_text = discussion_summary[:800]
+        # Truncate to ~800 chars, but end at a sentence boundary
         if len(discussion_summary) > 800:
-            summary_text += "..."
+            # Find last period before 800 chars
+            cut = discussion_summary[:800].rfind(".")
+            if cut > 400:
+                summary_text = discussion_summary[:cut + 1]
+            else:
+                # No good sentence break — cut at last space
+                cut = discussion_summary[:800].rfind(" ")
+                summary_text = discussion_summary[:cut] + "..." if cut > 0 else discussion_summary[:800] + "..."
+        else:
+            summary_text = discussion_summary
         para = doc.add_paragraph(summary_text)
         for run in para.runs:
             run.font.size = Pt(10)
