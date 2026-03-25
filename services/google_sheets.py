@@ -1464,10 +1464,10 @@ class GoogleSheetsService:
             new_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
             logger.info(f"Created Decisions tab (sheetId={new_sheet_id})")
 
-            # Write header row
+            # Write header row (Phase 9A schema with label, rationale, confidence)
             headers = [
-                "Decision", "Context", "Participants",
-                "Source Meeting", "Meeting Date", "Status", "Timestamp",
+                "Label", "Decision", "Rationale", "Confidence",
+                "Source Meeting", "Date", "Status",
             ]
             self.service.spreadsheets().values().update(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
@@ -1513,17 +1513,14 @@ class GoogleSheetsService:
 
             rows = []
             for d in decisions:
-                participants = d.get("participants_involved", [])
-                if isinstance(participants, list):
-                    participants = ", ".join(participants)
                 rows.append([
+                    d.get("label", ""),
                     d.get("description", ""),
-                    d.get("context", ""),
-                    participants,
+                    d.get("rationale", ""),
+                    str(d.get("confidence", 3)),
                     source_meeting,
-                    meeting_date,
-                    "Active",
-                    d.get("transcript_timestamp", ""),
+                    str(meeting_date)[:10],
+                    d.get("decision_status", "Active"),
                 ])
 
             self.service.spreadsheets().values().append(
@@ -1681,6 +1678,31 @@ class GoogleSheetsService:
 
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
+
+            # --- Reset data rows (2-200) to white background + black text ---
+            # Prevents new appended rows from inheriting header styling
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sid,
+                        "startRowIndex": 1,
+                        "endRowIndex": 200,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": num_cols,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+                            "textFormat": {
+                                "bold": False,
+                                "foregroundColor": {"red": 0, "green": 0, "blue": 0},
+                                "fontSize": 10,
+                            },
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
 
             self.service.spreadsheets().batchUpdate(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
