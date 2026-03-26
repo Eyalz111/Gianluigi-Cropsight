@@ -202,11 +202,11 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (33 tools (23 read + 10 write) tools)
+    # MCP Tools (35 tools: 25 read + 10 write)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
-        """Register all 15 MCP tools on the FastMCP instance."""
+        """Register all 35 MCP tools on the FastMCP instance."""
 
         # ============================================================
         # 1. get_system_context — Onboarding tool

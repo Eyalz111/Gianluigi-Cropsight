@@ -626,6 +626,10 @@ async def submit_for_approval(
         # v0.3: Include cross-reference results if available
         cross_ref = content.get("cross_reference")
 
+        # Read sensitivity from meeting record for the toggle button
+        meeting_record = supabase_client.get_meeting(meeting_id)
+        meeting_sensitivity = meeting_record.get("sensitivity", "normal") if meeting_record else "normal"
+
         telegram_sent = await telegram_bot.send_approval_request(
             meeting_title=meeting_title,
             summary_preview=discussion_summary or summary[:600],
@@ -636,6 +640,7 @@ async def submit_for_approval(
             open_questions=open_questions,
             cross_reference=cross_ref,
             executive_summary=executive_summary,
+            sensitivity=meeting_sensitivity,
         )
 
         email_sent = await gmail_service.send_approval_request(

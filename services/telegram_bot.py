@@ -556,6 +556,7 @@ class TelegramBot:
         drive_link: str | None = None,
         cross_reference: dict | None = None,
         executive_summary: str | None = None,
+        sensitivity: str = "normal",
     ) -> bool:
         """
         Send an approval request to Eyal with a clean, structured preview.
@@ -673,7 +674,12 @@ class TelegramBot:
 
         message = "\n".join(lines)
 
-        # Create inline keyboard
+        # Create inline keyboard with sensitivity toggle
+        sens_label = (
+            "\U0001f512 Sensitive \u2014 Eyal only"
+            if sensitivity == "sensitive"
+            else "\U0001f513 Normal \u2014 team will receive"
+        )
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -689,6 +695,12 @@ class TelegramBot:
                 InlineKeyboardButton(
                     "Reject",
                     callback_data=f"reject:{meeting_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    sens_label,
+                    callback_data=f"sens_toggle:{meeting_id}"
                 ),
             ],
         ]
@@ -2685,6 +2697,34 @@ When you receive approval requests, use the buttons to approve, request changes,
             )
             # Store meeting_id in context for edit handling
             context.user_data["pending_edit_meeting_id"] = meeting_id
+
+        elif action == "sens_toggle":
+            # Toggle sensitivity on the meeting record
+            from services.supabase_client import supabase_client as _sc
+            meeting = _sc.get_meeting(meeting_id)
+            current_sens = meeting.get("sensitivity", "normal")
+            new_sens = "normal" if current_sens == "sensitive" else "sensitive"
+            _sc.update_meeting(meeting_id, sensitivity=new_sens)
+
+            # Update button text in-place (no message re-send)
+            new_label = (
+                "\U0001f512 Sensitive \u2014 Eyal only"
+                if new_sens == "sensitive"
+                else "\U0001f513 Normal \u2014 team will receive"
+            )
+            new_keyboard = [
+                [
+                    InlineKeyboardButton("Approve", callback_data=f"approve:{meeting_id}"),
+                    InlineKeyboardButton("Request Changes", callback_data=f"edit:{meeting_id}"),
+                ],
+                [InlineKeyboardButton("Reject", callback_data=f"reject:{meeting_id}")],
+                [InlineKeyboardButton(new_label, callback_data=f"sens_toggle:{meeting_id}")],
+            ]
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(new_keyboard)
+            )
+            await query.answer(f"Sensitivity set to: {new_sens}")
+            logger.info(f"Sensitivity toggled to '{new_sens}' for meeting {meeting_id}")
 
         elif action == "stakeholder_approve":
             org_key = meeting_id  # The part after the colon
