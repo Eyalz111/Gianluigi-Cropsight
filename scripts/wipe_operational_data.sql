@@ -33,8 +33,8 @@ TRUNCATE TABLE audit_log CASCADE;
 TRUNCATE TABLE scheduler_heartbeats CASCADE;
 
 -- Phase 9: topic threading + operational snapshots
+TRUNCATE TABLE topic_thread_mentions CASCADE;
 TRUNCATE TABLE topic_threads CASCADE;
-TRUNCATE TABLE topic_thread_entries CASCADE;
 TRUNCATE TABLE operational_snapshots CASCADE;
 
 -- Phase 10: unmatched labels (canonical_projects is config, keep it)
