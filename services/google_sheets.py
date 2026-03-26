@@ -1705,6 +1705,31 @@ class GoogleSheetsService:
             num_cols = len(TASK_COLUMNS)
             requests = []
 
+            # --- FIRST: Reset ALL rows (1-1000) to white bg + black text ---
+            # Must happen before header formatting to prevent inheritance
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sid,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1000,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": num_cols,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+                            "textFormat": {
+                                "bold": False,
+                                "foregroundColor": {"red": 0, "green": 0, "blue": 0},
+                                "fontSize": 10,
+                            },
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+
             # --- Clear existing conditional format rules (idempotent) ---
             requests.extend(
                 self._clear_conditional_format_rules(settings.TASK_TRACKER_SHEET_ID)
@@ -1814,30 +1839,6 @@ class GoogleSheetsService:
 
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
-
-            # --- Reset data rows (2-200) to white background + black text ---
-            requests.append({
-                "repeatCell": {
-                    "range": {
-                        "sheetId": sid,
-                        "startRowIndex": 1,
-                        "endRowIndex": 200,
-                        "startColumnIndex": 0,
-                        "endColumnIndex": num_cols,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
-                            "textFormat": {
-                                "bold": False,
-                                "foregroundColor": {"red": 0, "green": 0, "blue": 0},
-                                "fontSize": 10,
-                            },
-                        }
-                    },
-                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
-                }
-            })
 
             self.service.spreadsheets().batchUpdate(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
