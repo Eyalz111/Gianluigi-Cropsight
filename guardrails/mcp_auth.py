@@ -5,7 +5,7 @@ Provides:
 - Bearer token validation (single token, single user)
 - In-memory rate limiting (configurable calls/hour)
 - Audit logging of every MCP tool call via supabase_client.log_action()
-- Pure ASGI middleware that protects /sse and /messages/ paths
+- Pure ASGI middleware that protects /mcp path (Streamable HTTP transport)
 
 Usage:
     from guardrails.mcp_auth import mcp_auth, MCPAuthMiddleware
@@ -27,8 +27,8 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Paths that require MCP auth (SSE connection + message posting)
-_PROTECTED_PREFIXES = ("/sse", "/messages")
+# Paths that require MCP auth (Streamable HTTP endpoint)
+_PROTECTED_PREFIXES = ("/mcp",)
 
 
 class MCPAuth:
@@ -112,7 +112,7 @@ class MCPAuth:
 
 class MCPAuthMiddleware:
     """
-    Pure ASGI middleware for MCP auth on /sse and /messages/ paths.
+    Pure ASGI middleware for MCP auth on /mcp path (Streamable HTTP).
 
     Uses raw ASGI protocol instead of BaseHTTPMiddleware to avoid
     breaking SSE streaming responses.

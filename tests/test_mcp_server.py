@@ -140,23 +140,23 @@ class TestServerBuild:
 
 
 # =============================================================================
-# SSE App Structure
+# Streamable HTTP App Structure
 # =============================================================================
 
 
-class TestSSEApp:
-    def test_sse_app_has_routes(self):
+class TestStreamableHTTPApp:
+    def test_streamable_http_app_has_routes(self):
         server = MCPServer()
         server._mcp = server._build_mcp()
-        app = server._mcp.sse_app()
+        app = server._mcp.streamable_http_app()
 
         route_paths = []
         for route in app.routes:
             if hasattr(route, "path"):
                 route_paths.append(route.path)
 
-        # Should have MCP routes
-        assert "/sse" in route_paths
+        # Should have MCP route
+        assert "/mcp" in route_paths
         # Should have custom health routes
         assert "/health" in route_paths
         assert "/ready" in route_paths

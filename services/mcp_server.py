@@ -1907,7 +1907,7 @@ class MCPServer:
         self._mcp = self._build_mcp()
 
         # Get the Starlette SSE app and add auth middleware
-        app = self._mcp.sse_app()
+        app = self._mcp.streamable_http_app()
         app.add_middleware(MCPAuthMiddleware)
 
         port = settings.PORT
@@ -1920,7 +1920,7 @@ class MCPServer:
         )
         self._server = uvicorn.Server(config)
 
-        logger.info(f"MCP server (SSE) listening on port {port}")
+        logger.info(f"MCP server (Streamable HTTP) listening on port {port}")
         await self._server.serve()
 
     async def stop(self) -> None:
