@@ -269,7 +269,7 @@ class Settings(BaseSettings):
         default=18, description="IST hour for scheduled evening debrief prompt (future)"
     )
     DEBRIEF_EVENING_PROMPT_ENABLED: bool = Field(
-        default=False, description="Enable scheduled evening debrief prompt"
+        default=True, description="Enable scheduled evening debrief prompt"
     )
     DEBRIEF_MAX_ITEMS: int = Field(
         default=30, description="Safety cap: max items per debrief session"

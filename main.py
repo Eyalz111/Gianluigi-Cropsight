@@ -327,6 +327,18 @@ async def start_services() -> None:
     else:
         logger.info("  Morning brief scheduler disabled (MORNING_BRIEF_ENABLED=false)")
 
+    # Start evening debrief prompt scheduler (Phase 11 C4)
+    if settings.DEBRIEF_EVENING_PROMPT_ENABLED:
+        from schedulers.debrief_prompt_scheduler import debrief_prompt_scheduler
+        logger.info("  Starting evening debrief prompt scheduler...")
+        debrief_prompt_task = asyncio.create_task(
+            debrief_prompt_scheduler.start(),
+            name="debrief_prompt_scheduler"
+        )
+        tasks.append(debrief_prompt_task)
+    else:
+        logger.info("  Evening debrief prompt disabled (DEBRIEF_EVENING_PROMPT_ENABLED=false)")
+
     logger.info("=" * 50)
     logger.info("  Gianluigi is ready!")
     logger.info("=" * 50)
@@ -443,6 +455,14 @@ async def stop_services() -> None:
         try:
             from schedulers.morning_brief_scheduler import morning_brief_scheduler
             morning_brief_scheduler.stop()
+        except Exception:
+            pass
+
+    # Stop debrief prompt scheduler if started
+    if settings.DEBRIEF_EVENING_PROMPT_ENABLED:
+        try:
+            from schedulers.debrief_prompt_scheduler import debrief_prompt_scheduler
+            debrief_prompt_scheduler.stop()
         except Exception:
             pass
 
