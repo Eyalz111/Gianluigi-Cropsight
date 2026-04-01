@@ -464,6 +464,16 @@ class MCPServer:
                     topic=topic,
                     limit=limit,
                 )
+
+                # Phase 12 A4: Touch queried decisions (freshness tracking)
+                for d in decisions[:10]:
+                    did = d.get("id")
+                    if did:
+                        try:
+                            supabase_client.touch_decision(did)
+                        except Exception:
+                            pass
+
                 mcp_auth.log_call("get_decisions", {"topic": topic})
                 return _success(decisions)
 
@@ -1168,6 +1178,51 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
+        # 20b. get_decision_chain (read) — Phase 12 A6
+        # ============================================================
+        @mcp.tool(
+            name="get_decision_chain",
+            description=(
+                "[DECISIONS] Trace the evolution of a decision over time. "
+                "Given a decision ID, returns the full chain of related decisions "
+                "(predecessors and successors) showing how the decision evolved."
+            ),
+        )
+        async def get_decision_chain(decision_id: str) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                chain = _sc.get_decision_chain(decision_id)
+                mcp_auth.log_call("get_decision_chain", {"decision_id": decision_id})
+
+                if not chain:
+                    return _success(
+                        {"chain": [], "message": "No chain found — this decision has no linked predecessors or successors."},
+                        warnings=["Decision may not have parent/child links yet."],
+                    )
+
+                # Format for readability
+                formatted = []
+                for d in chain:
+                    meeting = d.get("meetings") or {}
+                    formatted.append({
+                        "id": d.get("id"),
+                        "description": d.get("description"),
+                        "status": d.get("decision_status"),
+                        "meeting_title": meeting.get("title", ""),
+                        "meeting_date": str(meeting.get("date", ""))[:10],
+                        "parent_id": d.get("parent_decision_id"),
+                        "superseded_by": d.get("superseded_by"),
+                        "last_referenced_at": d.get("last_referenced_at"),
+                    })
+
+                return _success({"chain": formatted, "count": len(formatted)})
+
+            except Exception as e:
+                logger.error(f"get_decision_chain error: {e}")
+                mcp_auth.log_call("get_decision_chain", success=False, error=str(e))
+                return _error(str(e))
+
         # ============================================================
         # 21. get_topic_thread (read) — Phase 9B
         # ============================================================

@@ -615,6 +615,58 @@ class SupabaseClient:
         )
         return result.data or []
 
+    def touch_decision(self, decision_id: str) -> None:
+        """Update last_referenced_at timestamp on a decision (Phase 12 A4)."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self.client.table("decisions").update(
+                {"last_referenced_at": now}
+            ).eq("id", decision_id).execute()
+        except Exception as e:
+            logger.warning(f"Could not touch decision {decision_id}: {e}")
+
+    def get_stale_decisions(self, days: int = 28) -> list[dict]:
+        """
+        Get active decisions not referenced in the last N days (Phase 12 A4).
+
+        Returns decisions that either:
+        - Have last_referenced_at older than N days ago
+        - Have never been referenced (last_referenced_at is null) AND were
+          created more than N days ago
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        # Decisions referenced but stale
+        stale_referenced = (
+            self.client.table("decisions")
+            .select("*, meetings(title, date)")
+            .eq("decision_status", "active")
+            .not_.is_("last_referenced_at", "null")
+            .lt("last_referenced_at", cutoff)
+            .order("last_referenced_at")
+            .limit(20)
+            .execute()
+        )
+
+        # Decisions never referenced and old enough
+        never_referenced = (
+            self.client.table("decisions")
+            .select("*, meetings(title, date)")
+            .eq("decision_status", "active")
+            .is_("last_referenced_at", "null")
+            .lt("created_at", cutoff)
+            .order("created_at")
+            .limit(20)
+            .execute()
+        )
+
+        results = (stale_referenced.data or []) + (never_referenced.data or [])
+        return results[:20]
+
     def mark_decision_superseded(self, old_id: str, new_id: str) -> None:
         """Mark an old decision as superseded by a new one."""
         self.client.table("decisions").update({
@@ -622,6 +674,82 @@ class SupabaseClient:
             "superseded_by": new_id,
         }).eq("id", old_id).execute()
         logger.info(f"Decision {old_id} superseded by {new_id}")
+
+    def set_decision_parent(self, decision_id: str, parent_id: str) -> None:
+        """Set parent_decision_id for decision chain traversal (Phase 12 A6)."""
+        try:
+            self.client.table("decisions").update(
+                {"parent_decision_id": parent_id}
+            ).eq("id", decision_id).execute()
+        except Exception as e:
+            logger.warning(f"Could not set parent for decision {decision_id}: {e}")
+
+    def get_decision_chain(self, decision_id: str) -> list[dict]:
+        """
+        Traverse the decision chain — ancestors and descendants (Phase 12 A6).
+
+        Walks up via parent_decision_id and down via superseded_by to build
+        the full evolution chain of a decision.
+
+        Args:
+            decision_id: Starting decision UUID.
+
+        Returns:
+            List of decisions in chronological order (oldest first).
+        """
+        visited = set()
+        chain = []
+
+        # Walk up (ancestors via parent_decision_id)
+        current_id = decision_id
+        ancestors = []
+        for _ in range(10):  # Max depth guard
+            if not current_id or current_id in visited:
+                break
+            visited.add(current_id)
+            try:
+                result = self.client.table("decisions").select(
+                    "*, meetings(title, date)"
+                ).eq("id", current_id).execute()
+                if not result.data:
+                    break
+                record = result.data[0]
+                ancestors.append(record)
+                current_id = record.get("parent_decision_id")
+            except Exception as e:
+                logger.warning(f"Decision chain walk-up failed at {current_id}: {e}")
+                break
+
+        # Ancestors are collected child→parent, reverse for chrono order
+        ancestors.reverse()
+        chain.extend(ancestors)
+
+        # Walk down (descendants via superseded_by)
+        current_id = decision_id
+        for _ in range(10):  # Max depth guard
+            if not current_id:
+                break
+            try:
+                # Find decisions that have this as parent
+                result = self.client.table("decisions").select(
+                    "*, meetings(title, date)"
+                ).eq("parent_decision_id", current_id).execute()
+                if not result.data:
+                    break
+                for child in result.data:
+                    child_id = child.get("id")
+                    if child_id and child_id not in visited:
+                        visited.add(child_id)
+                        chain.append(child)
+                        current_id = child_id
+                        break
+                else:
+                    break
+            except Exception as e:
+                logger.warning(f"Decision chain walk-down failed at {current_id}: {e}")
+                break
+
+        return chain
 
     # =========================================================================
     # Tasks
@@ -1413,6 +1541,82 @@ class SupabaseClient:
 
         result = query.order("created_at", desc=True).limit(limit).execute()
         return result.data
+
+    # =========================================================================
+    # Task Signals (Phase 12 A5)
+    # =========================================================================
+
+    def create_task_signal(
+        self,
+        task_id: str,
+        signal_type: str,
+        signal_source: str | None = None,
+        confidence: str = "medium",
+        details: dict | None = None,
+    ) -> dict:
+        """
+        Record a task completion/progress signal from an external source.
+
+        Args:
+            task_id: UUID of the related task.
+            signal_type: Type of signal (e.g., 'completion', 'progress',
+                        'impediment', 'deadline_change').
+            signal_source: Source system (e.g., 'email', 'gantt', 'calendar').
+            confidence: Signal confidence ('high', 'medium', 'low').
+            details: Additional context as JSON.
+
+        Returns:
+            Created task_signal record.
+        """
+        record = {
+            "task_id": task_id,
+            "signal_type": signal_type,
+            "signal_source": signal_source,
+            "confidence": confidence,
+            "details": details or {},
+        }
+        try:
+            result = self.client.table("task_signals").insert(record).execute()
+            if result.data:
+                logger.info(
+                    f"Created task signal: {signal_type} for task {task_id} "
+                    f"(source={signal_source}, confidence={confidence})"
+                )
+                return result.data[0]
+        except Exception as e:
+            logger.warning(f"Could not create task signal for {task_id}: {e}")
+        return {}
+
+    def get_task_signals(
+        self,
+        task_id: str | None = None,
+        signal_type: str | None = None,
+        signal_source: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Query task signals with optional filters.
+
+        Args:
+            task_id: Filter by task UUID.
+            signal_type: Filter by signal type.
+            signal_source: Filter by source system.
+            limit: Maximum results.
+
+        Returns:
+            List of task_signal records.
+        """
+        query = self.client.table("task_signals").select("*")
+
+        if task_id:
+            query = query.eq("task_id", task_id)
+        if signal_type:
+            query = query.eq("signal_type", signal_type)
+        if signal_source:
+            query = query.eq("signal_source", signal_source)
+
+        result = query.order("detected_at", desc=True).limit(limit).execute()
+        return result.data or []
 
     # =========================================================================
     # Entity Registry (v0.3 Tier 2)

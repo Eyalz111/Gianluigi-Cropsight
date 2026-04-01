@@ -218,6 +218,7 @@ async def _compile_attention_needed() -> dict:
         "tasks_no_assignee": [],
         "tasks_no_deadline": [],
         "decisions_for_review": [],
+        "stale_decisions": [],
     }
 
     # Proactive alerts
@@ -267,6 +268,12 @@ async def _compile_attention_needed() -> dict:
         result["decisions_for_review"] = get_decisions_due_for_review(days_ahead=7)
     except Exception as e:
         logger.debug(f"Decision review query failed: {e}")
+
+    # Stale decisions — not referenced in 4+ weeks (Phase 12 A4)
+    try:
+        result["stale_decisions"] = supabase_client.get_stale_decisions(days=28)
+    except Exception as e:
+        logger.debug(f"Stale decisions query failed: {e}")
 
     return result
 

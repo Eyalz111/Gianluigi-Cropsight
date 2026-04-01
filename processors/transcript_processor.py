@@ -159,7 +159,12 @@ async def process_transcript(
 
     logger.info(f"Created meeting record: {meeting_id}")
 
-    # Step 7b: Cross-reference analysis (v0.3)
+    # Step 7b: Extract task match annotations (Phase 12 A2)
+    task_match_annotations = extract_task_match_annotations(extracted.get("tasks", []))
+    if task_match_annotations:
+        logger.info(f"Found {len(task_match_annotations)} existing_task_match annotations")
+
+    # Step 7c: Cross-reference analysis (v0.3)
     # Run before storing tasks so we can deduplicate them
     from processors.cross_reference import run_cross_reference
 
@@ -169,6 +174,8 @@ async def process_transcript(
         new_tasks=extracted.get("tasks", []),
         # Phase 9A: pass decisions for supersession detection
         new_decisions=extracted.get("decisions", []),
+        # Phase 12 A2: pass LLM-generated match annotations
+        task_match_annotations=task_match_annotations,
     )
 
     # Use deduplicated tasks — only insert genuinely new ones
@@ -184,7 +191,15 @@ async def process_transcript(
         open_questions=extracted.get("open_questions", []),
     )
 
-    # Step 7b2: Propagate meeting sensitivity to extracted items
+    # Step 7b2: Link decision chains for supersessions (Phase 12 A6)
+    try:
+        supersessions = cross_ref_results.get("supersessions", [])
+        if supersessions:
+            _link_decision_chains(meeting_id, supersessions)
+    except Exception as e:
+        logger.error(f"Decision chain linking failed (non-fatal): {e}")
+
+    # Step 7b3: Propagate meeting sensitivity to extracted items
     propagate_meeting_sensitivity(meeting_id, sensitivity)
 
     # Step 7c: Entity extraction and linking (v0.3 Tier 2)
@@ -483,7 +498,8 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "deadline": "YYYY-MM-DD or null",
             "priority": "H/M/L",
             "category": "Product & Tech / BD & Sales / Legal & Compliance / Finance & Fundraising / Operations & HR / Strategy & Research",
-            "transcript_timestamp": "MM:SS"
+            "transcript_timestamp": "MM:SS",
+            "existing_task_match": {"task_id": "uuid or null", "confidence": "high/medium/low", "evolution": "status_update/scope_change/completion/null"}
         }
     ],
     "follow_ups": [
@@ -529,7 +545,16 @@ ACTION ITEM EXTRACTION RULES:
 - DEADLINE: Only set a deadline if the transcript explicitly mentions a specific date, day of the week, or relative timeframe (e.g., "by Friday", "next week", "March 30"). "ASAP", "soon", "as early as possible" are NOT deadlines — set to null. Do NOT infer deadlines from context or urgency.
 - DEDUPLICATION: Never extract the same action as two separate items. If someone says "I'll do X" and is later formally assigned X, extract only once.
 - ASSIGNEE: Only assign to a specific person if the transcript makes it clear who is responsible. If unclear, set "assignee" to "" (empty string). Do NOT use "team", "everyone", or "TBD".
-- EXISTING TASK AWARENESS: If the prompt includes an EXISTING OPEN TASKS section, reference it. When the discussion clearly refers to an existing task, do NOT extract it as new. If the discussion reveals a status change (completed, blocked, in progress), prefix the title with "UPDATE:" so post-processing can match it. The "UPDATE:" prefix is a hint for deduplication — it is not machine-parsed.
+- EXISTING TASK AWARENESS: If the prompt includes an EXISTING OPEN TASKS section, reference it. When the discussion clearly refers to an existing task, do NOT extract it as new. Instead, use the "existing_task_match" field to link it:
+  - Set "existing_task_match.task_id" to the existing task's ID
+  - Set "confidence": "high" (explicit reference), "medium" (strong implication), "low" (possible match)
+  - Set "evolution": "status_update" (status changed), "scope_change" (scope modified), "completion" (task done), or null (just mentioned)
+  - If the discussion reveals a status change, prefix the title with "UPDATE:" as a hint for deduplication.
+  TASK EVOLUTION EXAMPLES:
+  - Existing: "Write accuracy abstract" → Transcript: "I finished the abstract" → existing_task_match: {task_id: "...", confidence: "high", evolution: "completion"}
+  - Existing: "Send capability deck to Lavazza" → Transcript: "I'm updating the deck with Moldova results" → existing_task_match: {task_id: "...", confidence: "high", evolution: "scope_change"}
+  - Existing: "Review budget projections" → Transcript: "We discussed the budget but haven't finished" → existing_task_match: {task_id: "...", confidence: "medium", evolution: "status_update"}
+  - If NO match: set "existing_task_match" to null (genuinely new task).
 - PERSONAL FILTER: EXCLUDE personal academic commitments, thesis work, university courses, degree programs, or other non-CropSight activities. Only extract items directly related to CropSight business. If a team member mentions personal academic work, do NOT create a task or decision for it.
 
 LABEL RULES:
@@ -677,6 +702,81 @@ def _parse_extraction_response(response_text: str) -> dict:
         "stakeholders": [],
         "discussion_summary": response_text[:500] if response_text else "",
     }
+
+
+def _link_decision_chains(meeting_id: str, supersessions: list[dict]) -> None:
+    """
+    Link superseded decisions with parent_decision_id (Phase 12 A6).
+
+    After decisions are stored, find the newly created decisions for this meeting
+    and set parent_decision_id on them to link the chain.
+
+    Args:
+        meeting_id: UUID of the current meeting.
+        supersessions: List of supersession dicts from cross_reference.
+    """
+    if not supersessions:
+        return
+
+    # Get decisions just stored for this meeting
+    new_decisions = supabase_client.list_decisions(meeting_id=meeting_id)
+    if not new_decisions:
+        return
+
+    for s in supersessions:
+        old_id = s.get("old_id")
+        new_index = s.get("new_index")
+
+        if not old_id or new_index is None:
+            continue
+
+        # new_index is 1-based from the LLM
+        idx = new_index - 1
+        if 0 <= idx < len(new_decisions):
+            new_decision = new_decisions[idx]
+            new_id = new_decision.get("id")
+            if new_id:
+                try:
+                    supabase_client.set_decision_parent(new_id, old_id)
+                    logger.info(f"Linked decision chain: {new_id} → parent {old_id}")
+                except Exception as e:
+                    logger.debug(f"Failed to link decision chain: {e}")
+
+
+def extract_task_match_annotations(tasks: list[dict]) -> list[dict]:
+    """
+    Extract existing_task_match annotations from LLM-extracted tasks (Phase 12 A2).
+
+    Pulls out the structured match annotations that the extraction LLM generates
+    when it recognizes a task as related to an existing one.
+
+    Args:
+        tasks: List of task dicts from extraction, potentially containing
+               existing_task_match fields.
+
+    Returns:
+        List of annotation dicts: [{task_index, task_id, confidence, evolution, title}]
+        Only includes tasks where existing_task_match is non-null with a task_id.
+    """
+    annotations = []
+    for i, task in enumerate(tasks):
+        match = task.get("existing_task_match")
+        if not match or not isinstance(match, dict):
+            continue
+
+        task_id = match.get("task_id")
+        if not task_id:
+            continue
+
+        annotations.append({
+            "task_index": i,
+            "task_id": task_id,
+            "confidence": match.get("confidence", "low"),
+            "evolution": match.get("evolution"),
+            "title": task.get("title", ""),
+        })
+
+    return annotations
 
 
 async def store_meeting_data(

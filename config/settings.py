@@ -427,6 +427,12 @@ class Settings(BaseSettings):
         description="Archive completed tasks older than this many days"
     )
 
+    # Phase 12 A2: Continuity-aware extraction
+    CONTINUITY_AUTO_APPLY_ENABLED: bool = Field(
+        default=False,
+        description="Auto-apply high-confidence task matches from continuity extraction (requires A3 gate)"
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""

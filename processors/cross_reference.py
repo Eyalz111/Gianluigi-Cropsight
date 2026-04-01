@@ -364,14 +364,29 @@ async def run_cross_reference(
         meeting_id: UUID of the meeting.
         transcript: Full transcript text.
         new_tasks: Newly extracted tasks from this meeting.
+        **kwargs:
+            new_decisions: Decisions for supersession detection.
+            task_match_annotations: LLM-generated match annotations (Phase 12 A2).
 
     Returns:
         Dict with:
         - dedup: {new_tasks, duplicates, updates} from deduplicate_tasks
         - status_changes: list from infer_task_status_changes
         - resolved_questions: list from resolve_open_questions
+        - task_match_annotations: raw annotations from extraction (Phase 12 A2)
     """
     logger.info(f"Running cross-reference analysis for meeting {meeting_id}")
+
+    # Phase 12 A2: Process LLM-generated task match annotations
+    task_match_annotations = kwargs.get("task_match_annotations", [])
+    if task_match_annotations:
+        logger.info(
+            f"Received {len(task_match_annotations)} task match annotations from extraction"
+        )
+        _process_task_match_annotations(
+            annotations=task_match_annotations,
+            meeting_id=meeting_id,
+        )
 
     # Run deduplication
     dedup = await deduplicate_tasks(
@@ -433,6 +448,7 @@ async def run_cross_reference(
         "dedup": dedup,
         "status_changes": status_changes,
         "resolved_questions": resolved_questions,
+        "task_match_annotations": task_match_annotations,
     }
 
     # Log summary
@@ -442,7 +458,8 @@ async def run_cross_reference(
         f"{len(dedup.get('duplicates', []))} duplicates, "
         f"{len(dedup.get('updates', []))} updates, "
         f"{len(status_changes)} status changes, "
-        f"{len(resolved_questions)} questions resolved"
+        f"{len(resolved_questions)} questions resolved, "
+        f"{len(task_match_annotations)} match annotations"
     )
 
     # Phase 9A: Detect decision supersessions
@@ -451,6 +468,15 @@ async def run_cross_reference(
         if new_decisions:
             supersessions = await detect_supersessions(meeting_id, new_decisions)
             result["supersessions"] = supersessions
+
+            # Phase 12 A4: Touch referenced decisions (freshness tracking)
+            for s in supersessions:
+                old_id = s.get("old_id")
+                if old_id:
+                    try:
+                        supabase_client.touch_decision(old_id)
+                    except Exception:
+                        pass  # Non-fatal
         else:
             result["supersessions"] = []
     except Exception as e:
@@ -552,6 +578,74 @@ If no supersessions found, return: {{"supersessions": []}}"""
     except Exception as e:
         logger.error(f"Supersession detection LLM call failed: {e}")
         return []
+
+
+def _process_task_match_annotations(
+    annotations: list[dict],
+    meeting_id: str,
+) -> None:
+    """
+    Process LLM-generated task match annotations (Phase 12 A2).
+
+    Creates task_mention records for annotations and, when auto-apply is enabled,
+    applies high-confidence status changes directly.
+
+    Args:
+        annotations: List of annotation dicts from extract_task_match_annotations().
+        meeting_id: UUID of the current meeting.
+    """
+    if not annotations:
+        return
+
+    # Create task_mention records for all annotations (always, regardless of auto-apply)
+    mentions = []
+    for ann in annotations:
+        evolution = ann.get("evolution")
+        implied_status = None
+        if evolution == "completion":
+            implied_status = "done"
+        elif evolution == "status_update":
+            implied_status = "in_progress"
+
+        mentions.append({
+            "task_id": ann["task_id"],
+            "meeting_id": meeting_id,
+            "mention_text": ann.get("title", ""),
+            "implied_status": implied_status,
+            "confidence": ann.get("confidence", "low"),
+            "evidence": f"LLM extraction match (evolution: {evolution})",
+        })
+
+    if mentions:
+        try:
+            supabase_client.create_task_mentions_batch(mentions)
+            logger.info(
+                f"Created {len(mentions)} task mentions from extraction annotations"
+            )
+        except Exception as e:
+            logger.error(f"Error creating task mentions from annotations: {e}")
+
+    # Feature-gated auto-apply: only when explicitly enabled
+    if not settings.CONTINUITY_AUTO_APPLY_ENABLED:
+        return
+
+    # Auto-apply high-confidence changes
+    for ann in annotations:
+        if ann.get("confidence") != "high":
+            continue
+
+        task_id = ann["task_id"]
+        evolution = ann.get("evolution")
+
+        try:
+            if evolution == "completion":
+                supabase_client.update_task(task_id, status="done")
+                logger.info(f"Auto-applied completion for task {task_id}")
+            elif evolution == "status_update":
+                supabase_client.update_task(task_id, status="in_progress")
+                logger.info(f"Auto-applied status_update for task {task_id}")
+        except Exception as e:
+            logger.error(f"Auto-apply failed for task {task_id}: {e}")
 
 
 def _parse_json_response(response_text: str) -> dict:
