@@ -1889,6 +1889,70 @@ class MCPServer:
                 mcp_auth.log_call("add_canonical_project", success=False, error=str(e))
                 return _error(str(e))
 
+        # ============================================================
+        # 36. sync_from_sheets (read + write)
+        # ============================================================
+        @mcp.tool(
+            name="sync_from_sheets",
+            description=(
+                "[SHEETS] Compare Google Sheets edits against the DB and optionally apply. "
+                "Call with apply=False first to preview changes. "
+                "Call with apply=True to apply (Sheets wins for conflicts). "
+                "Use when Eyal has manually edited the Tasks or Decisions sheet."
+            ),
+        )
+        async def sync_from_sheets(apply: bool = False) -> dict:
+            try:
+                from processors.sheets_sync import (
+                    compute_sheets_diff,
+                    format_diff_preview,
+                    apply_sheets_to_db,
+                )
+
+                diff = await compute_sheets_diff()
+
+                if not diff.get("has_changes"):
+                    mcp_auth.log_call("sync_from_sheets", {"apply": apply})
+                    return _success({
+                        "status": "in_sync",
+                        "message": "Sheets and DB are in sync. No changes needed.",
+                    })
+
+                if not apply:
+                    # Preview mode
+                    preview = format_diff_preview(diff)
+                    summary = {
+                        "tasks_modified": len(diff["tasks"]["modified"]),
+                        "tasks_sheets_only": len(diff["tasks"]["sheets_only"]),
+                        "tasks_db_only": len(diff["tasks"]["db_only"]),
+                        "tasks_in_sync": diff["tasks"]["in_sync"],
+                        "decisions_modified": len(diff["decisions"]["modified"]),
+                        "decisions_sheets_only": len(diff["decisions"]["sheets_only"]),
+                        "decisions_db_only": len(diff["decisions"]["db_only"]),
+                        "decisions_in_sync": diff["decisions"]["in_sync"],
+                    }
+                    mcp_auth.log_call("sync_from_sheets", {"apply": False})
+                    return _success({
+                        "status": "changes_detected",
+                        "preview": preview,
+                        "summary": summary,
+                        "message": "Call sync_from_sheets(apply=True) to apply these changes.",
+                    })
+
+                # Apply mode
+                result = apply_sheets_to_db(diff)
+                mcp_auth.log_call("sync_from_sheets", {"apply": True, "result": result})
+                return _success({
+                    "status": "applied",
+                    "result": result,
+                    "message": f"Sync applied: {sum(result.values())} changes.",
+                })
+
+            except Exception as e:
+                logger.error(f"sync_from_sheets error: {e}")
+                mcp_auth.log_call("sync_from_sheets", success=False, error=str(e))
+                return _error(str(e))
+
     # ------------------------------------------------------------------
     # Server lifecycle
     # ------------------------------------------------------------------

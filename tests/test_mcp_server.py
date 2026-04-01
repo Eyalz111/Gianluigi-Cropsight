@@ -127,7 +127,7 @@ class TestServerBuild:
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 35
+        assert len(tool_names) == 36
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

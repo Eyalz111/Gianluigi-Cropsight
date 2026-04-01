@@ -354,6 +354,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("cancel", self._handle_cancel_debrief))
         self.app.add_handler(CommandHandler("emailscan", self._handle_email_scan))
         self.app.add_handler(CommandHandler("review", self._handle_review))
+        self.app.add_handler(CommandHandler("sync", self._handle_sync))
 
         # Add callback handler for inline buttons (approval flow, debrief)
         self.app.add_handler(
@@ -1778,6 +1779,56 @@ When you receive approval requests, use the buttons to approve, request changes,
     # Weekly Review Handlers
     # =========================================================================
 
+    async def _handle_sync(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle /sync command — compare Sheets edits against DB and apply."""
+        user = update.effective_user
+        is_eyal = str(user.id) == str(self.eyal_chat_id)
+
+        if not is_eyal:
+            await self.send_message(
+                update.effective_chat.id,
+                "Only Eyal can sync Sheets.",
+            )
+            return
+
+        await self.send_message(
+            update.effective_chat.id, "Computing Sheets diff..."
+        )
+
+        try:
+            from processors.sheets_sync import (
+                compute_sheets_diff,
+                format_diff_preview,
+                apply_sheets_to_db,
+            )
+
+            diff = await compute_sheets_diff()
+
+            if not diff.get("has_changes"):
+                await self.send_to_eyal("Sheets and DB are in sync. No changes needed.")
+                return
+
+            # Store diff for approval callback
+            context.user_data["pending_sync_diff"] = diff
+
+            preview = format_diff_preview(diff)
+            keyboard = [
+                [
+                    InlineKeyboardButton("Apply changes", callback_data="sync_apply:confirm"),
+                    InlineKeyboardButton("Cancel", callback_data="sync_apply:cancel"),
+                ],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await self.send_to_eyal(preview, reply_markup=reply_markup, parse_mode="HTML")
+
+        except Exception as e:
+            logger.error(f"Sheets sync failed: {e}")
+            await self.send_to_eyal(f"Sheets sync error: {e}")
+
     async def _handle_review(
         self,
         update: Update,
@@ -2641,6 +2692,31 @@ When you receive approval requests, use the buttons to approve, request changes,
         )
         if action in review_actions:
             await self._handle_review_callback(query, context, action, meeting_id)
+            return
+
+        # ---- Sheets sync callbacks (Phase 11 C7) ----
+        if action == "sync_apply":
+            if meeting_id == "confirm":
+                diff = context.user_data.pop("pending_sync_diff", None)
+                if not diff:
+                    await query.edit_message_text("Sync session expired. Run /sync again.")
+                    return
+                from processors.sheets_sync import apply_sheets_to_db
+                result = apply_sheets_to_db(diff)
+                total = sum(result.values())
+                lines = [f"Sync applied — {total} changes:"]
+                if result.get("tasks_updated"):
+                    lines.append(f"  • {result['tasks_updated']} tasks updated")
+                if result.get("tasks_created"):
+                    lines.append(f"  • {result['tasks_created']} tasks added")
+                if result.get("decisions_updated"):
+                    lines.append(f"  • {result['decisions_updated']} decisions updated")
+                if result.get("decisions_created"):
+                    lines.append(f"  • {result['decisions_created']} decisions added")
+                await query.edit_message_text("\n".join(lines))
+            else:
+                context.user_data.pop("pending_sync_diff", None)
+                await query.edit_message_text("Sync cancelled.")
             return
 
         # ---- Debrief callbacks ----

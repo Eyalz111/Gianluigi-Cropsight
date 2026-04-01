@@ -249,6 +249,20 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"Calendar review check failed: {e}")
 
+    # 8. Sheets sync status — detect if Sheets edits are out of sync with DB
+    try:
+        from processors.sheets_sync import compute_sheets_diff, format_sync_summary
+        sync_diff = await compute_sheets_diff()
+        sync_summary = format_sync_summary(sync_diff)
+        if sync_summary:
+            sections.append({
+                "type": "sheets_sync",
+                "title": "Sheets Sync Status",
+                "summary": sync_summary,
+            })
+    except Exception as e:
+        logger.debug(f"Sheets sync check for morning brief failed: {e}")
+
     return {
         "sections": sections,
         "stats": stats,
@@ -359,6 +373,13 @@ def format_morning_brief(brief: dict) -> str:
             }.get(status, status)
             lines.append(f"<b>Weekly Review W{week_num}:</b> {status_label}")
             lines.append("")
+
+        elif section_type == "sheets_sync":
+            summary = section.get("summary", "")
+            if summary:
+                lines.append(f"<b>{section.get('title', 'Sheets Sync')}:</b>")
+                lines.append(summary)
+                lines.append("")
 
     # Stats footer
     stats = brief.get("stats", {})
