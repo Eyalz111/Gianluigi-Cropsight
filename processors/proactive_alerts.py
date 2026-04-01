@@ -26,6 +26,21 @@ from services.supabase_client import supabase_client
 logger = logging.getLogger(__name__)
 
 
+def _within_lookback(record: dict, days: int, date_field: str = "created_at") -> bool:
+    """Check if a record's date field is within the lookback window."""
+    date_str = record.get(date_field, "")
+    if not date_str:
+        return False
+    try:
+        record_date = datetime.fromisoformat(
+            str(date_str).replace("Z", "+00:00")
+        ).replace(tzinfo=None)
+        cutoff = datetime.now() - timedelta(days=days)
+        return record_date >= cutoff
+    except (ValueError, TypeError):
+        return False
+
+
 def generate_alerts() -> list[dict]:
     """
     Run all alert pattern detectors and return combined alerts.
@@ -181,13 +196,14 @@ def format_alerts_message(alerts: list[dict]) -> str:
 
 def _check_overdue_clusters() -> list[dict]:
     """
-    Detect assignees with 3+ overdue tasks.
+    Detect assignees with 3+ overdue tasks (within lookback window).
 
     Returns:
         List of alerts for overdue task clusters.
     """
     alerts = []
     overdue_tasks = supabase_client.get_tasks(status="overdue")
+    overdue_tasks = [t for t in overdue_tasks if _within_lookback(t, settings.ALERT_LOOKBACK_DAYS)]
 
     if not overdue_tasks:
         return alerts
@@ -234,6 +250,7 @@ def _check_overdue_escalation() -> list[dict]:
 
     alerts = []
     overdue_tasks = supabase_client.get_tasks(status="overdue")
+    overdue_tasks = [t for t in overdue_tasks if _within_lookback(t, settings.ALERT_LOOKBACK_DAYS)]
 
     if not overdue_tasks:
         return alerts
@@ -403,7 +420,13 @@ def _check_recurring_discussions() -> list[dict]:
 
         try:
             mentions = supabase_client.get_entity_mentions(entity_id=eid)
-            meeting_ids = set(m.get("meeting_id") for m in mentions if m.get("meeting_id"))
+            # Only count mentions within the entity lookback window
+            recent_mentions = [
+                m for m in mentions
+                if _within_lookback(m, settings.ALERT_ENTITY_LOOKBACK_DAYS, date_field="detected_at")
+                or _within_lookback(m, settings.ALERT_ENTITY_LOOKBACK_DAYS, date_field="created_at")
+            ]
+            meeting_ids = set(m.get("meeting_id") for m in recent_mentions if m.get("meeting_id"))
 
             if len(meeting_ids) >= settings.ALERT_RECURRING_DISCUSSION_MEETINGS:
                 name = entity.get("canonical_name", "Unknown")
@@ -433,6 +456,7 @@ def _check_question_pileup() -> list[dict]:
     """
     alerts = []
     open_questions = supabase_client.get_open_questions(status="open")
+    open_questions = [q for q in open_questions if _within_lookback(q, settings.ALERT_LOOKBACK_DAYS)]
 
     if len(open_questions) >= settings.ALERT_QUESTION_PILEUP_MIN:
         q_summaries = []

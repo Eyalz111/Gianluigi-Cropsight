@@ -292,7 +292,8 @@ class TestOverdueEscalationAlerts:
         with patch("processors.proactive_alerts.supabase_client") as mock_sc:
             mock_sc.get_tasks.return_value = [
                 {"id": "t1", "title": "Old task", "assignee": "Roye",
-                 "priority": "H", "status": "overdue", "deadline": overdue_20d},
+                 "priority": "H", "status": "overdue", "deadline": overdue_20d,
+                 "created_at": datetime.now().isoformat()},
             ]
 
             from processors.proactive_alerts import _check_overdue_escalation
@@ -310,7 +311,8 @@ class TestOverdueEscalationAlerts:
         with patch("processors.proactive_alerts.supabase_client") as mock_sc:
             mock_sc.get_tasks.return_value = [
                 {"id": "t1", "title": "Recent task", "assignee": "Roye",
-                 "priority": "M", "status": "overdue", "deadline": overdue_2d},
+                 "priority": "M", "status": "overdue", "deadline": overdue_2d,
+                 "created_at": datetime.now().isoformat()},
             ]
 
             from processors.proactive_alerts import _check_overdue_escalation

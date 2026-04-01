@@ -190,6 +190,12 @@ class Settings(BaseSettings):
     ALERT_QUESTION_PILEUP_MIN: int = Field(
         default=5, description="Minimum open questions to trigger pileup alert"
     )
+    ALERT_LOOKBACK_DAYS: int = Field(
+        default=90, description="Only alert on items created within this many days"
+    )
+    ALERT_ENTITY_LOOKBACK_DAYS: int = Field(
+        default=180, description="Only count entity mentions within this many days"
+    )
 
     # ==========================================================================
     # Conversation Memory

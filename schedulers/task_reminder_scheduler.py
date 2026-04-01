@@ -135,6 +135,7 @@ class TaskReminderScheduler:
             return {"reminders_sent": 0}
 
         today = datetime.now(_ISRAEL_TZ).date()
+        lookback_cutoff = today - timedelta(days=settings.ALERT_LOOKBACK_DAYS)
         summary = {
             "overdue": [],
             "due_today": [],
@@ -146,6 +147,16 @@ class TaskReminderScheduler:
             # Skip completed tasks
             if task.get("status") == "done":
                 continue
+
+            # Skip tasks created before the lookback window
+            created_str = task.get("created_date", "")
+            if created_str:
+                try:
+                    created_date = datetime.strptime(created_str, "%Y-%m-%d").date()
+                    if created_date < lookback_cutoff:
+                        continue
+                except ValueError:
+                    pass
 
             deadline_str = task.get("deadline", "")
             if not deadline_str:

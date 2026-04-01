@@ -40,8 +40,7 @@ class TestSubmitForApprovalRouting:
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-1"})
-            mock_db.delete_pending_approval = MagicMock(return_value=False)
-            mock_db.create_pending_approval = MagicMock(return_value={"approval_id": "prep-001"})
+            mock_db.upsert_pending_approval = MagicMock(return_value={"approval_id": "prep-001"})
             mock_settings.APPROVAL_MODE = "manual"
             mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
             mock_settings.EYAL_EMAIL = "eyal@test.com"
@@ -62,8 +61,8 @@ class TestSubmitForApprovalRouting:
             )
 
             # Should persist to Supabase with correct type
-            mock_db.create_pending_approval.assert_called_once()
-            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            mock_db.upsert_pending_approval.assert_called_once()
+            call_kwargs = mock_db.upsert_pending_approval.call_args.kwargs
             assert call_kwargs["approval_id"] == "prep-001"
             assert call_kwargs["content_type"] == "meeting_prep"
             assert call_kwargs["content"] is content
@@ -100,8 +99,7 @@ class TestSubmitForApprovalRouting:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-2"})
-            mock_db.delete_pending_approval = MagicMock(return_value=False)
-            mock_db.create_pending_approval = MagicMock(return_value={"approval_id": "digest-001"})
+            mock_db.upsert_pending_approval = MagicMock(return_value={"approval_id": "digest-001"})
             mock_settings.APPROVAL_MODE = "manual"
             mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
             mock_settings.EYAL_EMAIL = "eyal@test.com"
@@ -126,7 +124,7 @@ class TestSubmitForApprovalRouting:
             )
 
             # Should persist to Supabase with correct type
-            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            call_kwargs = mock_db.upsert_pending_approval.call_args.kwargs
             assert call_kwargs["content_type"] == "weekly_digest"
             assert call_kwargs["content"] is content
 
@@ -157,8 +155,7 @@ class TestSubmitForApprovalRouting:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-3"})
-            mock_db.delete_pending_approval = MagicMock(return_value=False)
-            mock_db.create_pending_approval = MagicMock(return_value={"approval_id": "summary-001"})
+            mock_db.upsert_pending_approval = MagicMock(return_value={"approval_id": "summary-001"})
             mock_settings.APPROVAL_MODE = "manual"
             mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
             mock_settings.EYAL_EMAIL = "eyal@test.com"
@@ -182,7 +179,7 @@ class TestSubmitForApprovalRouting:
             )
 
             # Should persist to Supabase
-            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            call_kwargs = mock_db.upsert_pending_approval.call_args.kwargs
             assert call_kwargs["content_type"] == "meeting_summary"
 
             # Default branch sends decisions, tasks, follow_ups, open_questions
@@ -210,8 +207,7 @@ class TestSubmitForApprovalRouting:
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
-            mock_db.delete_pending_approval = MagicMock()
-            mock_db.create_pending_approval = MagicMock(return_value={})
+            mock_db.upsert_pending_approval = MagicMock(return_value={})
             mock_settings.APPROVAL_MODE = "manual"
             mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
             mock_settings.EYAL_EMAIL = "eyal@test.com"
@@ -250,8 +246,7 @@ class TestSubmitForApprovalRouting:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
-            mock_db.delete_pending_approval = MagicMock()
-            mock_db.create_pending_approval = MagicMock(return_value={})
+            mock_db.upsert_pending_approval = MagicMock(return_value={})
             mock_settings.APPROVAL_MODE = "manual"
             mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
             mock_settings.EYAL_EMAIL = "eyal@test.com"

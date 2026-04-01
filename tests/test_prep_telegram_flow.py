@@ -318,8 +318,7 @@ class TestGenerateMeetingPrepFromOutline:
             mock_db.log_action.return_value = None
 
             mock_af_db.get_pending_approvals_by_status.return_value = []
-            mock_af_db.delete_pending_approval.return_value = True
-            mock_af_db.create_pending_approval.return_value = {}
+            mock_af_db.upsert_pending_approval.return_value = {}
             mock_af_db.log_action.return_value = None
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_tg.send_to_eyal = AsyncMock(return_value=True)

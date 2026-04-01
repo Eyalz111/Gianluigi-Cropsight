@@ -41,11 +41,12 @@ class TestOverdueClusters:
 
     def test_three_or_more_triggers_alert(self):
         """3+ overdue tasks for one assignee should trigger alert."""
+        recent = datetime.now().isoformat()
         with patch("processors.proactive_alerts.supabase_client") as mock_db:
             mock_db.get_tasks.return_value = [
-                {"assignee": "Eyal", "title": "Task 1", "status": "overdue"},
-                {"assignee": "Eyal", "title": "Task 2", "status": "overdue"},
-                {"assignee": "Eyal", "title": "Task 3", "status": "overdue"},
+                {"assignee": "Eyal", "title": "Task 1", "status": "overdue", "created_at": recent},
+                {"assignee": "Eyal", "title": "Task 2", "status": "overdue", "created_at": recent},
+                {"assignee": "Eyal", "title": "Task 3", "status": "overdue", "created_at": recent},
             ]
             result = _check_overdue_clusters()
             assert len(result) == 1
@@ -55,24 +56,26 @@ class TestOverdueClusters:
 
     def test_two_does_not_trigger(self):
         """2 overdue tasks should not trigger alert."""
+        recent = datetime.now().isoformat()
         with patch("processors.proactive_alerts.supabase_client") as mock_db:
             mock_db.get_tasks.return_value = [
-                {"assignee": "Eyal", "title": "Task 1", "status": "overdue"},
-                {"assignee": "Eyal", "title": "Task 2", "status": "overdue"},
+                {"assignee": "Eyal", "title": "Task 1", "status": "overdue", "created_at": recent},
+                {"assignee": "Eyal", "title": "Task 2", "status": "overdue", "created_at": recent},
             ]
             result = _check_overdue_clusters()
             assert result == []
 
     def test_groups_by_assignee(self):
         """Should alert separately for each assignee with 3+."""
+        recent = datetime.now().isoformat()
         with patch("processors.proactive_alerts.supabase_client") as mock_db:
             mock_db.get_tasks.return_value = [
-                {"assignee": "Eyal", "title": "T1", "status": "overdue"},
-                {"assignee": "Eyal", "title": "T2", "status": "overdue"},
-                {"assignee": "Eyal", "title": "T3", "status": "overdue"},
-                {"assignee": "Paolo", "title": "T4", "status": "overdue"},
-                {"assignee": "Paolo", "title": "T5", "status": "overdue"},
-                {"assignee": "Paolo", "title": "T6", "status": "overdue"},
+                {"assignee": "Eyal", "title": "T1", "status": "overdue", "created_at": recent},
+                {"assignee": "Eyal", "title": "T2", "status": "overdue", "created_at": recent},
+                {"assignee": "Eyal", "title": "T3", "status": "overdue", "created_at": recent},
+                {"assignee": "Paolo", "title": "T4", "status": "overdue", "created_at": recent},
+                {"assignee": "Paolo", "title": "T5", "status": "overdue", "created_at": recent},
+                {"assignee": "Paolo", "title": "T6", "status": "overdue", "created_at": recent},
             ]
             result = _check_overdue_clusters()
             assert len(result) == 2
@@ -130,10 +133,11 @@ class TestRecurringDiscussions:
             mock_db.list_entities.return_value = [
                 {"id": "e1", "canonical_name": "Lavazza", "entity_type": "organization"},
             ]
+            recent = datetime.now().isoformat()
             mock_db.get_entity_mentions.return_value = [
-                {"entity_id": "e1", "meeting_id": "m1", "entities": {"canonical_name": "Lavazza"}},
-                {"entity_id": "e1", "meeting_id": "m2", "entities": {"canonical_name": "Lavazza"}},
-                {"entity_id": "e1", "meeting_id": "m3", "entities": {"canonical_name": "Lavazza"}},
+                {"entity_id": "e1", "meeting_id": "m1", "entities": {"canonical_name": "Lavazza"}, "created_at": recent},
+                {"entity_id": "e1", "meeting_id": "m2", "entities": {"canonical_name": "Lavazza"}, "created_at": recent},
+                {"entity_id": "e1", "meeting_id": "m3", "entities": {"canonical_name": "Lavazza"}, "created_at": recent},
             ]
             result = _check_recurring_discussions()
             assert len(result) == 1
@@ -163,9 +167,10 @@ class TestQuestionPileup:
 
     def test_five_or_more_triggers(self):
         """5+ open questions should trigger alert."""
+        recent = datetime.now().isoformat()
         with patch("processors.proactive_alerts.supabase_client") as mock_db:
             mock_db.get_open_questions.return_value = [
-                {"question": f"Question {i}", "raised_by": "Eyal"} for i in range(6)
+                {"question": f"Question {i}", "raised_by": "Eyal", "created_at": recent} for i in range(6)
             ]
             result = _check_question_pileup()
             assert len(result) == 1
@@ -174,10 +179,11 @@ class TestQuestionPileup:
 
     def test_few_questions_does_not_trigger(self):
         """Fewer than 5 questions should not trigger."""
+        recent = datetime.now().isoformat()
         with patch("processors.proactive_alerts.supabase_client") as mock_db:
             mock_db.get_open_questions.return_value = [
-                {"question": "Q1", "raised_by": "Eyal"},
-                {"question": "Q2", "raised_by": "Roye"},
+                {"question": "Q1", "raised_by": "Eyal", "created_at": recent},
+                {"question": "Q2", "raised_by": "Roye", "created_at": recent},
             ]
             result = _check_question_pileup()
             assert result == []

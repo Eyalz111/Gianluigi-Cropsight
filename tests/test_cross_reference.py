@@ -442,8 +442,7 @@ class TestApprovalFlowCrossReference:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-1"})
-            mock_db.delete_pending_approval = MagicMock(return_value=False)
-            mock_db.create_pending_approval = MagicMock(return_value={})
+            mock_db.upsert_pending_approval = MagicMock(return_value={})
             mock_settings.APPROVAL_MODE = "manual"
             mock_settings.TELEGRAM_EYAL_CHAT_ID = None
             mock_settings.EYAL_EMAIL = None

@@ -429,10 +429,7 @@ async def submit_for_approval(
         )
 
     # Persist approval state to Supabase (survives restarts)
-    # Delete any stale row first (upsert pattern for edit re-submissions)
-    supabase_client.delete_pending_approval(meeting_id)
-
-    # Calculate auto_publish_at if in auto_review mode
+    # Uses atomic upsert to avoid race condition between delete + create
     auto_publish_at = None
     if settings.APPROVAL_MODE == "auto_review":
         auto_publish_at = (
@@ -455,7 +452,7 @@ async def submit_for_approval(
         outline_lead = content.get("outline_lead_hours", 24)
         expires_at = (datetime.now() + timedelta(hours=outline_lead)).isoformat()
 
-    supabase_client.create_pending_approval(
+    supabase_client.upsert_pending_approval(
         approval_id=meeting_id,
         content_type=content_type,
         content=content,
@@ -903,14 +900,11 @@ async def process_response(
                 "distribution": distribution_result,
             }
 
-        # Default: meeting_summary — gather all related data.
-        # Prefer edited content from pending_approvals (has edits applied)
-        # over raw DB tables (which may still have pre-edit data).
+        # Default: meeting_summary — ALWAYS read from pending_approvals.
+        # The pending_approvals record contains the authoritative content
+        # (whether original submission or post-edit). This eliminates the
+        # bug where edited structured data wasn't propagated to distribution.
         pending_content = (pending_info or {}).get("content", {})
-        has_edited_data = any(
-            key in pending_content
-            for key in ("tasks", "decisions", "follow_ups", "open_questions")
-        )
 
         content = {
             "title": pending_content.get("title") or meeting.get("title"),
@@ -921,15 +915,21 @@ async def process_response(
             "stakeholders": pending_content.get("stakeholders", []),
         }
 
-        if has_edited_data:
-            # Use edited data from pending_approvals (post-edit version)
+        # Always use pending_approvals as source of truth for structured data.
+        # Falls back to DB only if pending_approvals has no structured data at all
+        # (shouldn't happen — submit_for_approval always stores full content).
+        if any(key in pending_content for key in ("tasks", "decisions", "follow_ups", "open_questions")):
             content["decisions"] = pending_content.get("decisions", [])
             content["tasks"] = pending_content.get("tasks", [])
             content["follow_ups"] = pending_content.get("follow_ups", [])
             content["open_questions"] = pending_content.get("open_questions", [])
-            logger.info("Using edited content from pending_approvals for distribution")
+            logger.info("Using content from pending_approvals for distribution")
         else:
-            # No edits — read fresh from DB tables
+            # Safety fallback — should not normally be reached
+            logger.warning(
+                f"pending_approvals for {meeting_id} has no structured data — "
+                f"falling back to DB tables. This may indicate a bug in submit_for_approval."
+            )
             decisions = supabase_client.list_decisions(meeting_id=meeting_id)
             tasks = supabase_client.get_tasks(status=None)
             tasks = [t for t in tasks if t.get("meeting_id") == meeting_id]
@@ -1029,6 +1029,26 @@ async def process_response(
                                 "stakeholders", "cross_reference"):
                         if key in pending_info["content"] and key not in updated_content:
                             updated_content[key] = pending_info["content"][key]
+
+            # Validate apply_edits() succeeded — don't resubmit error dicts
+            if "error" in updated_content:
+                logger.error(
+                    f"apply_edits failed for {meeting_id}: {updated_content['error']}"
+                )
+                return {
+                    "action": "edit_requested",
+                    "edits": edits,
+                    "next_step": f"Edit failed: {updated_content['error']}. Please try again.",
+                }
+
+            # Track edit version for audit trail
+            prev_version = 0
+            if pending_info and pending_info.get("content"):
+                prev_version = pending_info["content"].get("edit_version", 0)
+            updated_content["edit_version"] = prev_version + 1
+            logger.info(
+                f"Edit applied to {meeting_id}, version {prev_version + 1}"
+            )
 
             # Resubmit for approval with edited content
             await submit_for_approval(

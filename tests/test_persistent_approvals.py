@@ -193,7 +193,7 @@ class TestSubmitForApprovalPersistence:
 
     @pytest.mark.asyncio
     async def test_submit_creates_supabase_record(self):
-        """submit_for_approval should call create_pending_approval."""
+        """submit_for_approval should call upsert_pending_approval."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.telegram_bot") as mock_tg,
@@ -204,8 +204,7 @@ class TestSubmitForApprovalPersistence:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock(return_value={"id": "log-1"})
-            mock_db.delete_pending_approval = MagicMock(return_value=False)
-            mock_db.create_pending_approval = MagicMock(return_value={
+            mock_db.upsert_pending_approval = MagicMock(return_value={
                 "approval_id": "test-001", "status": "pending"
             })
             mock_settings.APPROVAL_MODE = "manual"
@@ -222,11 +221,9 @@ class TestSubmitForApprovalPersistence:
                 meeting_id="test-001",
             )
 
-            # Should have deleted any stale row first
-            mock_db.delete_pending_approval.assert_called_once_with("test-001")
-            # Should have created a new persistent record
-            mock_db.create_pending_approval.assert_called_once()
-            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            # Should have created/upserted a persistent record
+            mock_db.upsert_pending_approval.assert_called_once()
+            call_kwargs = mock_db.upsert_pending_approval.call_args.kwargs
             assert call_kwargs["approval_id"] == "test-001"
             assert call_kwargs["content_type"] == "meeting_summary"
             assert call_kwargs["content"] is content
@@ -247,8 +244,7 @@ class TestSubmitForApprovalPersistence:
             mock_tg.send_approval_request = AsyncMock(return_value=True)
             mock_gmail.send_approval_request = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
-            mock_db.delete_pending_approval = MagicMock()
-            mock_db.create_pending_approval = MagicMock(return_value={
+            mock_db.upsert_pending_approval = MagicMock(return_value={
                 "approval_id": "auto-001", "status": "pending"
             })
             mock_settings.APPROVAL_MODE = "auto_review"
@@ -266,7 +262,7 @@ class TestSubmitForApprovalPersistence:
                 meeting_id="auto-001",
             )
 
-            call_kwargs = mock_db.create_pending_approval.call_args.kwargs
+            call_kwargs = mock_db.upsert_pending_approval.call_args.kwargs
             assert call_kwargs["auto_publish_at"] is not None
             # auto_publish_at should be ~60 minutes from now
             ts = datetime.fromisoformat(call_kwargs["auto_publish_at"])

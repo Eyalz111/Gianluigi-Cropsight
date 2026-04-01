@@ -23,8 +23,7 @@ def mock_settings():
 def mock_supabase():
     with patch("guardrails.approval_flow.supabase_client") as mock:
         mock.get_pending_approvals_by_status.return_value = []
-        mock.delete_pending_approval.return_value = True
-        mock.create_pending_approval.return_value = {"approval_id": "test-id"}
+        mock.upsert_pending_approval.return_value = {"approval_id": "test-id"}
         mock.get_pending_approval.return_value = None
         mock.log_action.return_value = None
         mock.expire_pending_approvals.return_value = []
@@ -175,8 +174,8 @@ class TestExpiryCalculation:
             meeting_id="brief-id",
         )
 
-        # Check that create_pending_approval was called with expires_at set
-        call_kwargs = mock_supabase.create_pending_approval.call_args
+        # Check that upsert_pending_approval was called with expires_at set
+        call_kwargs = mock_supabase.upsert_pending_approval.call_args
         expires_at = call_kwargs.kwargs.get("expires_at") or call_kwargs[1].get("expires_at")
         assert expires_at is not None
 
@@ -190,7 +189,7 @@ class TestExpiryCalculation:
             meeting_id="summary-id",
         )
 
-        call_kwargs = mock_supabase.create_pending_approval.call_args
+        call_kwargs = mock_supabase.upsert_pending_approval.call_args
         expires_at = call_kwargs.kwargs.get("expires_at") or call_kwargs[1].get("expires_at")
         assert expires_at is None
 

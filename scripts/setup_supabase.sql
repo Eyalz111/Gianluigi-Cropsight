@@ -189,15 +189,18 @@ CREATE TRIGGER update_tasks_updated_at
 -- Row Level Security (RLS) - Optional
 -- =============================================================================
 
--- Enable RLS on all tables (uncomment when ready to implement auth)
--- ALTER TABLE meetings ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE decisions ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE follow_up_meetings ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE open_questions ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE embeddings ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
+-- Enable RLS on all tables — service_role key bypasses RLS automatically
+ALTER TABLE meetings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE decisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE follow_up_meetings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE open_questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE embeddings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commitments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE entities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE entity_mentions ENABLE ROW LEVEL SECURITY;
 
 
 -- =============================================================================

@@ -1892,6 +1892,49 @@ class SupabaseClient:
             logger.info(f"Deleted pending approval: {approval_id}")
         return deleted
 
+    def upsert_pending_approval(
+        self,
+        approval_id: str,
+        content_type: str,
+        content: dict,
+        auto_publish_at: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict:
+        """
+        Atomically create or update a pending approval record.
+
+        Uses Supabase upsert (ON CONFLICT approval_id DO UPDATE) to avoid
+        the race condition window between delete + create.
+
+        Args:
+            approval_id: Meeting UUID or prefixed ID.
+            content_type: 'meeting_summary', 'meeting_prep', etc.
+            content: Full content dict (stored as JSONB).
+            auto_publish_at: ISO timestamp for auto-publish, or None.
+            expires_at: ISO timestamp for expiry, or None.
+
+        Returns:
+            Upserted pending approval record.
+        """
+        data = {
+            "approval_id": approval_id,
+            "content_type": content_type,
+            "content": content,
+            "status": "pending",
+        }
+        if auto_publish_at:
+            data["auto_publish_at"] = auto_publish_at
+        if expires_at:
+            data["expires_at"] = expires_at
+
+        result = (
+            self.client.table("pending_approvals")
+            .upsert(data, on_conflict="approval_id")
+            .execute()
+        )
+        logger.info(f"Upserted pending approval: {approval_id} ({content_type})")
+        return result.data[0] if result.data else {}
+
     def get_pending_approvals_by_status(self, status: str = "pending") -> list[dict]:
         """
         Get all pending approvals with a given status, newest first.
