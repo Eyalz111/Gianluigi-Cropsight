@@ -1,14 +1,13 @@
-# Known Issues — Gianluigi v1.0 (Post Phase 10)
+# Known Issues — Gianluigi v2.0 (Post Phase 13)
 
-Current as of April 1, 2026.
+Current as of April 2, 2026.
 
 ---
 
 ## Open Issues
 
 ### Critical Bugs
-- **Distribution sends PRE-EDIT version:** When Eyal edits a summary before approving, structured data (tasks, decisions) in the DB is NOT updated — only the summary text changes. Team receives stale data. (Found March 24 QA)
-- **Telegram multi-part orphans:** On edit, only the last message part (with buttons) is modified. Earlier parts become stale orphans. (Found March 24 QA)
+- None currently open (distribution pre-edit and Telegram orphans fixed in Phase 11)
 
 ### Google Sheets API
 - **Intermittent "broken pipe":** Cloud Run idle connections to Sheets API occasionally break. **Mitigated** in Phase 10 with `_execute_with_retry()` (3 retries, exponential backoff). Monitor — should be rare now.
@@ -31,8 +30,7 @@ Current as of April 1, 2026.
 ### Document Ingestion
 - **No OCR:** Scanned PDFs produce empty text extraction.
 - **No image processing:** Charts/diagrams in PPTX/DOCX are ignored.
-- **Basic chunking:** Fixed-size character chunking doesn't respect document structure.
-- **No document versioning:** Updated documents create duplicates, no diff tracking.
+- **Basic chunking:** Fixed-size character chunking doesn't respect document structure (structure-aware hints added in B2 metadata, but chunking logic is still paragraph-based).
 
 ### MCP / Claude.ai
 - **Personal data leakage:** Claude.ai mixes Gianluigi tool results with its own conversation history. **Mitigation:** Dedicated Claude Project ("CropSight Ops") isolates business from personal context.
@@ -42,16 +40,25 @@ Current as of April 1, 2026.
 
 ### Disabled Schedulers
 These are implemented but disabled by default:
-- `TRANSCRIPT_WATCHER_ENABLED=true` — Google Drive transcript watcher
-- `MORNING_BRIEF_ENABLED=true` — Daily morning brief (planned to enable)
-- `EMAIL_DAILY_SCAN_ENABLED=true` — Personal Gmail scan
-- `DEBRIEF_EVENING_PROMPT_ENABLED=true` — Evening debrief prompt (planned to enable)
-- `WEEKLY_REVIEW_ENABLED=true` — Weekly review scheduler
-- `TASK_ARCHIVAL_ENABLED=true` — Archive completed tasks
-- Task reminder scheduler — disabled, needs time-window filters
-- Alert scheduler — disabled, needs time-window filters
+- `TRANSCRIPT_WATCHER_ENABLED=false` — Google Drive transcript watcher
+- `TASK_ARCHIVAL_ENABLED=false` — Archive completed tasks
+- `DROPBOX_SYNC_ENABLED=false` — Dropbox → Drive sync (needs SDK + credentials)
+- `CONTINUITY_AUTO_APPLY_ENABLED=false` — Auto-apply task matches from extraction (needs A3 production gate)
+
+Note: Morning brief, email scan, debrief prompt, alert scheduler, and task reminders were enabled in Phase 11.
 
 ---
+
+## Fixed in Phases 11-13 + X1 (April 1-2, 2026)
+
+- **Distribution pre-edit bug:** Fixed — atomic upsert, always read from pending_approvals.content (Phase 11 C1)
+- **Telegram multi-part orphans:** Fixed — delete all non-last parts on approve/reject (Phase 11 C8)
+- **Disabled schedulers spam:** Fixed — time-window filters on alerts + task reminders (Phase 11 C2)
+- **Morning brief needed approval:** Fixed — sends directly to Eyal, no approval gate (Phase 11 C3)
+- **No sensitivity propagation:** Fixed — LLM classification + propagation to child items + distribution filtering (Phase 11 C6)
+- **No document versioning:** Fixed — title+source versioning + content hash dedup (Phase 13 B2)
+- **No email body storage:** Fixed — body stored for relevant/borderline emails (Phase 13 B4)
+- **No email attachment persistence:** Fixed — uploaded to Drive before processing (Phase 13 B3)
 
 ## Fixed Post-Phase 10 (April 2026)
 

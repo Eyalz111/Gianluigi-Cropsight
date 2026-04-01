@@ -1,27 +1,28 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** March 25, 2026
-**Current Version:** v1.0 (Phases 0-10 complete, 35 MCP tools, cross-meeting intelligence)
-**Status:** Phase 10 complete. Production ready for daily CEO use.
+**Last Updated:** April 2, 2026
+**Current Version:** v2.0 (Phases 0-13 + X1/X2 complete, 38 MCP tools, meeting continuity engine)
+**Status:** Phase 13 + cross-cutting complete. Production ready for daily CEO use.
 
 ---
 
 ## What Is This Project
 
-Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for a 4-person AgTech founding team. It processes meeting transcripts, tracks tasks/decisions with cross-meeting topic threading, maintains institutional memory via hybrid RAG + operational snapshots, and serves as the CEO's private operations dashboard via Claude.ai MCP (35 tools).
+Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for a 4-person AgTech founding team. It processes meeting transcripts, tracks tasks/decisions with cross-meeting topic threading and continuity intelligence, maintains institutional memory via hybrid RAG + operational snapshots, and serves as the CEO's private operations dashboard via Claude.ai MCP (38 tools).
 
 **CropSight:** Israeli AgTech startup — ML-powered crop yield forecasting. Pre-revenue, PoC stage. Team: Eyal (CEO), Roye (CTO), Paolo (BD, Italy), Prof. Yoram Weiss (Advisor).
 
 ---
 
-## Current State (Post Phase 7)
+## Current State (Post Phase 13)
 
-- 1350+ tests, all passing
-- Deployed to Cloud Run (europe-west1, 1Gi, min-instances=1, no-cpu-throttling) — revision 15, Mar 22
-- MCP server live on Cloud Run, connected to Claude.ai via CropSight Ops project
+- 1450+ tests, all passing
+- MCP server with 38 tools, connected to Claude.ai via CropSight Ops project
 - Full cycle verified: transcript → extraction → approval → distribution → MCP query
-- QA Hardening applied: 16 issues fixed, commitments deprecated, extraction improved
-- DB wiped and rebuilt Mar 22, 2026 (QA hardening migration applied)
+- Meeting continuity engine: cross-meeting context, task match annotations, decision chains
+- Daily QA agent: extraction quality, distribution completeness, scheduler health, data integrity
+- Document versioning with content hash dedup, Dropbox sync ready (disabled, needs credentials)
+- Phase 11-13 migrations applied (sensitivity, email body, decision freshness, task signals, doc versioning)
 
 ### What Works
 - Full transcript pipeline: Tactiq → Drive → Claude extraction → Supabase → approval → distribution
@@ -43,21 +44,27 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **v1.0 Phase 6:** Weekly review + outputs — interactive 3-part session (stats → decisions → outputs), HTML report with per-report tokens, Gantt proposal distribution, session corrections with Haiku/Sonnet fallback, digest/review scheduler coexistence, 48h session expiry, debrief interruption support
 - **v1.0 Phase 7:** MCP Core + Read Tools — FastMCP SSE server on port 8080, 16 tools (15 read + `get_full_status()` composite), bearer token auth, rate limiting (100/hr), audit logging, `get_system_context()` onboarding tool, session save/load, health/ready/report routes on same port
 - **QA Hardening:** 16 issues fixed — commitments deprecated (unified into action items), extraction prompt improved (deadline-only-if-explicit, consolidation 3-7 items), decisions exported to Sheets, summary teaser distribution, all schedulers Israel timezone, system failure alerts (`services/alerting.py`), MCP `_success(warnings=...)` pattern, stakeholder tab fix, silent logging fixes
+- **v2 Phase 11 (Operational Maturity):** Distribution pre-edit fix, time-window filters, morning brief direct send, evening debrief prompt, sensitivity LLM + propagation, Sheets on-demand sync, Telegram multi-part fix
+- **v2 Phase 12 (Meeting Continuity):** Enhanced context gatherer, continuity-aware extraction (existing_task_match), decision freshness, task signal detection, decision chain traversal
+- **v2 Phase 13 (Data Ingestion):** Email body storage, attachment Drive persistence, document versioning + content hash dedup, Dropbox sync (disabled), CropSight document types
+- **X1:** Daily QA Agent (extraction quality, distribution, scheduler health, data integrity)
+- **X2:** Skills manifest (17 capabilities documented in docs/SKILLS.md)
 
 ### Known Issues
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
-- Some schedulers disabled by default (morning brief, email scan, debrief prompt)
-- Transcript watcher disabled by default (TRANSCRIPT_WATCHER_ENABLED=false) — enable for live testing
+- Transcript watcher disabled by default (TRANSCRIPT_WATCHER_ENABLED=false)
+- Dropbox sync needs SDK + credentials before enabling
 - See KNOWN_ISSUES.md for full list
 
 ---
 
 ## v1.0 — "The AI Office Manager" (Complete)
 
-**Design document:** `V1_DESIGN.md` (comprehensive spec, READ THIS FIRST for any v1.0 work)
-**Architecture review:** `docs/qa/ARCHITECTURE_REVIEW_ISSUES.md` (12 issues identified, most addressed)
-**Phase 5 architecture:** `docs/system_architecture_v1_phase5.md` (post-Phase 5 system visualization)
-**Phase 6 architecture:** `docs/system_architecture_v1_phase6.md` (post-Phase 6 system visualization)
+**Design document:** `V1_DESIGN.md` (comprehensive spec for v1.0 phases)
+**v2 implementation plan:** `.claude/plans/keen-strolling-pnueli.md` (Phases 11-13 + X1/X2)
+**Architecture review:** `docs/qa/gianluigi_v2_architecture_review.md` (v2 concerns, addressed)
+**Skills manifest:** `docs/SKILLS.md` (17 capabilities with triggers, inputs, outputs, costs)
+**Phase 6 architecture:** `docs/system_architecture_v1_phase6.md` (visual, pre-v2 — needs update)
 
 ### Completed Phases
 - **Phase 0:** Database migration, new models
@@ -81,7 +88,13 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 - **Phase 10:** Polish & Ship — Sheets redesign (TASK_COLUMNS/DECISION_COLUMNS constants, column reorder, rebuild functions), dynamic canonical projects (DB table + 2 MCP tools), Claude.ai project prompt (35 tools documented), deprecated commitment code removed, data validation removed, smoke test transcript
 
-### Deferred (Beyond v1.0)
+- **Phase 11 (v2 Workstream C — Operational Maturity):** Distribution pre-edit fix, time-window filters (enabled alert+reminder schedulers), morning brief direct send, evening debrief prompt, watcher intervals, sensitivity LLM classification + propagation, Sheets on-demand sync, Telegram multi-part fix
+- **Phase 12 (v2 Workstream A — Meeting Continuity):** Enhanced context gatherer (daily + pre-meeting), continuity-aware extraction with existing_task_match annotations, decision freshness tracking (touch + stale surfacing), task signal detection (email/Gantt/calendar), decision chain traversal + MCP tool
+- **Phase 13 (v2 Workstream B — Data Ingestion):** Full email body storage, email attachment Drive persistence, document versioning (title+source + content hash dedup), CropSight document types, Dropbox → Drive sync (disabled, needs credentials)
+- **X1:** Daily QA Agent — extraction quality, distribution completeness, scheduler health, data integrity checks. Runs 06:00 IST, feeds morning brief, on-demand MCP tool
+- **X2:** Skills manifest (`docs/SKILLS.md`) — 17 capabilities documented
+
+### Deferred (Beyond v2.0)
 - Risk register, meeting effectiveness scoring, OKR layer, competitor monitoring, full Sheets bidirectional sync
 
 ### Known MCP Limitation: Personal Data Leakage
@@ -125,8 +138,8 @@ Claude.ai mixes MCP tool results with its own conversation memory. MCP `instruct
 | Calendar | Google Calendar API (read-only, authenticated as Eyal via per-user OAuth token) |
 | Hosting | Google Cloud Run (europe-west1) |
 | Transcription | Tactiq (Chrome extension) |
-| CEO Interface | Claude.ai via MCP server (SSE transport, FastMCP SDK) |
-| MCP Server | `mcp` Python SDK + uvicorn, SSE on port 8080 |
+| CEO Interface | Claude.ai via MCP server (Streamable HTTP, FastMCP SDK) |
+| MCP Server | `mcp` Python SDK + uvicorn, 38 tools on port 8080 |
 | Language | Python 3.11+, async |
 
 ---
@@ -169,5 +182,8 @@ Claude.ai mixes MCP tool results with its own conversation memory. MCP `instruct
 8. `docs/system_architecture_v1_phase5.md` — Post-Phase 5 system architecture
 9. `docs/system_architecture_v1_phase6.md` — Post-Phase 6 system architecture
 10. `config/meeting_prep_templates.py` — Meeting prep template definitions
-11. `services/mcp_server.py` — MCP server with 15 read-only tools
+11. `services/mcp_server.py` — MCP server with 38 tools (read + write)
 12. `guardrails/mcp_auth.py` — MCP bearer token auth, rate limiting, audit logging
+13. `docs/SKILLS.md` — All 17 system capabilities documented
+14. `processors/meeting_continuity.py` — Cross-meeting context (Phase 12)
+15. `schedulers/qa_scheduler.py` — Daily QA agent (X1)
