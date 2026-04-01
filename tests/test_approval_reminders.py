@@ -266,7 +266,7 @@ class TestSettingsProperties:
             SUPABASE_KEY="test",
             TELEGRAM_BOT_TOKEN="test",
         )
-        assert s.DOCUMENT_POLL_INTERVAL == 900
+        assert s.DOCUMENT_POLL_INTERVAL == 7200
 
     def test_health_report_enabled_default(self):
         from config.settings import Settings

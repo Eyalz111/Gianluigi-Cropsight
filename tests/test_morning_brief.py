@@ -248,7 +248,8 @@ class TestTriggerMorningBrief:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_submits_for_approval(self):
+    async def test_sends_directly_to_eyal(self):
+        """Morning brief should send directly to Eyal via Telegram (no approval)."""
         brief = {
             "sections": [{"type": "email_scan", "title": "t",
                           "items": [{"type": "info", "text": "x",
@@ -257,18 +258,22 @@ class TestTriggerMorningBrief:
             "stats": {"email_scans": 1},
             "scan_ids": ["s1"],
         }
-        mock_submit = AsyncMock()
+        mock_tg = MagicMock()
+        mock_tg.send_to_eyal = AsyncMock(return_value=True)
         with patch("schedulers.personal_email_scanner.personal_email_scanner") as mock_scanner, \
              patch("processors.morning_brief.compile_morning_brief",
                    new_callable=AsyncMock, return_value=brief), \
-             patch("guardrails.approval_flow.submit_for_approval", mock_submit):
+             patch("processors.morning_brief.supabase_client") as mock_db, \
+             patch("services.telegram_bot.telegram_bot", mock_tg):
             mock_scanner.run_daily_scan = AsyncMock(return_value={})
+            mock_db.log_action = MagicMock()
+            mock_db.client.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
             from processors.morning_brief import trigger_morning_brief
             result = await trigger_morning_brief()
         assert result is not None
-        mock_submit.assert_called_once()
-        call_kwargs = mock_submit.call_args
-        assert call_kwargs.kwargs.get("content_type") == "morning_brief"
+        mock_tg.send_to_eyal.assert_called_once()
+        mock_db.log_action.assert_called_once()
+        assert mock_db.log_action.call_args.kwargs["action"] == "morning_brief_sent"
 
 
 # =========================================================================

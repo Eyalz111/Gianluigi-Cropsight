@@ -211,16 +211,16 @@ class Settings(BaseSettings):
     # Scheduler Intervals (seconds)
     # ==========================================================================
     EMAIL_CHECK_INTERVAL: int = Field(
-        default=300, description="Email watcher check interval (seconds)"
+        default=7200, description="Email watcher check interval (seconds) — 2 hours"
     )
     TRANSCRIPT_WATCHER_ENABLED: bool = Field(
         default=False, description="Enable transcript watcher (disabled during dev to save Opus costs)"
     )
     TRANSCRIPT_POLL_INTERVAL: int = Field(
-        default=300, description="Transcript watcher poll interval (seconds)"
+        default=3600, description="Transcript watcher poll interval (seconds) — 1 hour"
     )
     DOCUMENT_POLL_INTERVAL: int = Field(
-        default=900, description="Document watcher poll interval (seconds)"
+        default=7200, description="Document watcher poll interval (seconds) — 2 hours"
     )
     MEETING_PREP_CHECK_INTERVAL: int = Field(
         default=14400, description="Meeting prep scheduler check interval (seconds)"
@@ -301,9 +301,9 @@ class Settings(BaseSettings):
     PERSONAL_CONTACTS_BLOCKLIST: str = Field(default="", description="Comma-separated blocklist for personal email scan")
     EYAL_GMAIL_REFRESH_TOKEN: str = Field(default="", description="OAuth refresh token for Eyal's personal Gmail")
     EMAIL_DAILY_SCAN_HOUR: int = Field(default=7, description="IST hour for morning email scan")
-    EMAIL_DAILY_SCAN_ENABLED: bool = Field(default=False, description="Enable daily scan of Eyal's personal Gmail")
+    EMAIL_DAILY_SCAN_ENABLED: bool = Field(default=True, description="Enable daily scan of Eyal's personal Gmail")
     EMAIL_MAX_SCAN_RESULTS: int = Field(default=50, description="Max emails per daily scan")
-    MORNING_BRIEF_ENABLED: bool = Field(default=False, description="Enable morning brief (daily consolidated touchpoint)")
+    MORNING_BRIEF_ENABLED: bool = Field(default=True, description="Enable morning brief (daily consolidated touchpoint)")
     MORNING_BRIEF_HOUR: int = Field(default=7, description="IST hour for morning brief")
     THREAD_TRACKING_EXPIRY_DAYS: int = Field(default=30, description="Tracked email threads expire after N days")
 

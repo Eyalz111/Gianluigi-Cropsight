@@ -383,7 +383,7 @@ async def trigger_morning_brief() -> dict | None:
 
     1. Run personal email scan (if enabled)
     2. Compile morning brief (includes scan results)
-    3. If any items, send via submit_for_approval(content_type='morning_brief')
+    3. If any items, send directly to Eyal via Telegram (no approval needed)
     4. If NO items, stay silent (no "Nothing new" message)
 
     Returns:
@@ -407,25 +407,40 @@ async def trigger_morning_brief() -> dict | None:
         logger.info("Morning brief: nothing to report")
         return None
 
-    # 4. Submit for approval
+    # 4. Send directly to Eyal (internal, no approval gate)
     try:
-        from guardrails.approval_flow import submit_for_approval
-        brief_id = f"brief-{date.today().isoformat()}"
+        from services.telegram_bot import telegram_bot
 
-        await submit_for_approval(
-            content_type="morning_brief",
-            content={
-                "brief": brief,
-                "formatted": format_morning_brief(brief),
-                "scan_ids": brief.get("scan_ids", []),
+        formatted = format_morning_brief(brief)
+        await telegram_bot.send_to_eyal(formatted, parse_mode="HTML")
+
+        # Audit log for traceability (no approval needed, but keep record)
+        brief_id = f"brief-{date.today().isoformat()}"
+        supabase_client.log_action(
+            action="morning_brief_sent",
+            details={
+                "brief_id": brief_id,
                 "stats": brief.get("stats", {}),
+                "scan_ids": brief.get("scan_ids", []),
+                "section_count": len(sections),
             },
-            meeting_id=brief_id,
+            triggered_by="scheduler",
         )
 
-        logger.info(f"Morning brief submitted for approval: {brief.get('stats', {})}")
+        # Mark email scans as processed
+        scan_ids = brief.get("scan_ids", [])
+        if scan_ids:
+            for scan_id in scan_ids:
+                try:
+                    supabase_client.client.table("email_scans").update(
+                        {"approved": True}
+                    ).eq("id", scan_id).execute()
+                except Exception:
+                    pass
+
+        logger.info(f"Morning brief sent directly: {brief.get('stats', {})}")
         return brief
 
     except Exception as e:
-        logger.error(f"Failed to submit morning brief: {e}")
+        logger.error(f"Failed to send morning brief: {e}")
         return None
