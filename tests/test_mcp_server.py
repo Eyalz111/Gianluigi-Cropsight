@@ -124,12 +124,14 @@ class TestServerBuild:
             "add_canonical_project",
             # Phase 12: decision chain
             "get_decision_chain",
+            # Cross-cutting: QA check
+            "run_qa_check",
         ]
 
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 37
+        assert len(tool_names) == 38
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

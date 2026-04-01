@@ -1679,6 +1679,34 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
+        # 23b. run_qa_check (read) — Cross-cutting X1
+        # ============================================================
+        @mcp.tool(
+            name="run_qa_check",
+            description=(
+                "[SYSTEM] Run on-demand QA quality check. Checks extraction quality, "
+                "distribution completeness, scheduler health, and data integrity. "
+                "Returns issues found and overall health score."
+            ),
+        )
+        async def run_qa_check_tool() -> dict:
+            try:
+                from schedulers.qa_scheduler import run_qa_check, format_qa_report
+
+                report = run_qa_check()
+                formatted = format_qa_report(report)
+                mcp_auth.log_call("run_qa_check")
+                return _success({
+                    "report": report,
+                    "formatted": formatted,
+                })
+
+            except Exception as e:
+                logger.error(f"run_qa_check error: {e}")
+                mcp_auth.log_call("run_qa_check", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
         # 24. get_cost_summary (read)
         # ============================================================
         @mcp.tool(

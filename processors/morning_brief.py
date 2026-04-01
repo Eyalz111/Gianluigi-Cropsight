@@ -263,6 +263,24 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"Sheets sync check for morning brief failed: {e}")
 
+    # 9. QA system health — inline summary from daily QA check (X1)
+    try:
+        from schedulers.qa_scheduler import qa_scheduler
+        qa_report = qa_scheduler.last_report
+        if qa_report:
+            score = qa_report.get("score", "unknown")
+            issue_count = len(qa_report.get("issues", []))
+            if score != "healthy" or issue_count > 0:
+                sections.append({
+                    "type": "qa_health",
+                    "title": "System Health",
+                    "score": score,
+                    "issue_count": issue_count,
+                    "issues": qa_report.get("issues", [])[:3],
+                })
+    except Exception as e:
+        logger.debug(f"QA health for morning brief failed: {e}")
+
     return {
         "sections": sections,
         "stats": stats,
