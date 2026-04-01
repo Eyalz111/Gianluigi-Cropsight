@@ -480,6 +480,30 @@ class TelegramBot:
             return False
         return await self.send_message(self.group_chat_id, text)
 
+    async def _cleanup_approval_parts(
+        self, meeting_id: str, keep_message_id: int | None = None
+    ) -> None:
+        """Delete orphan multi-part approval messages for a meeting.
+
+        When a long approval preview is split into multiple Telegram messages,
+        only the last one (with buttons) gets updated on approve/reject.
+        This deletes the earlier parts to avoid stale orphan messages.
+
+        Args:
+            meeting_id: The meeting/approval ID to clean up.
+            keep_message_id: Message ID to NOT delete (the one being edited).
+        """
+        msg_ids = self._approval_message_ids.pop(meeting_id, [])
+        for msg_id in msg_ids:
+            if msg_id == keep_message_id:
+                continue
+            try:
+                await self.app.bot.delete_message(
+                    chat_id=self.eyal_chat_id, message_id=msg_id,
+                )
+            except Exception:
+                pass  # Message may already be deleted or too old
+
     async def send_to_eyal(
         self,
         text: str,
@@ -2634,6 +2658,8 @@ When you receive approval requests, use the buttons to approve, request changes,
         )
 
         if action == "approve":
+            # Delete orphan multi-part messages (all except the button message)
+            await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
             await query.edit_message_text("Approved! Distributing to team...")
             conversation_memory.clear(str(self.eyal_chat_id))
 
@@ -2671,6 +2697,8 @@ When you receive approval requests, use the buttons to approve, request changes,
                 )
 
         elif action == "reject":
+            # Delete orphan multi-part messages (all except the button message)
+            await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
             supabase_client.update_meeting(
                 meeting_id,
                 approval_status="rejected"
