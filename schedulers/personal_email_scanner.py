@@ -224,6 +224,7 @@ class PersonalEmailScanner:
 
                 # 7. For relevant/borderline: fetch full body, extract
                 extracted_items = []
+                full_body = None
                 if classification in ("relevant", "borderline"):
                     try:
                         full_body = self._get_full_body_sync(msg_id)
@@ -255,6 +256,7 @@ class PersonalEmailScanner:
                     approved=False,
                     direction="inbound",
                     attachments_processed=attachments_noted if attachments_noted else None,
+                    body_text=full_body if classification in ("relevant", "borderline") else None,
                 )
 
             logger.info(f"Daily email scan complete: {stats}")

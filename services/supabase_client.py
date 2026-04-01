@@ -1177,6 +1177,8 @@ class SupabaseClient:
         summary: str | None = None,
         drive_path: str | None = None,
         document_type: str | None = None,
+        content_hash: str | None = None,
+        version: int = 1,
     ) -> dict:
         """
         Create a document record.
@@ -1187,7 +1189,9 @@ class SupabaseClient:
             file_type: File extension (pdf, docx, etc.).
             summary: Document summary.
             drive_path: Google Drive path.
-            document_type: Classification (strategy, legal, technical, pitch, client, other).
+            document_type: Classification category.
+            content_hash: SHA-256 hash for dedup (Phase 13 B2).
+            version: Document version number (Phase 13 B2).
 
         Returns:
             Created document record.
@@ -1199,7 +1203,10 @@ class SupabaseClient:
             "summary": summary,
             "drive_path": drive_path,
             "document_type": document_type,
+            "version": version,
         }
+        if content_hash:
+            data["content_hash"] = content_hash
 
         result = self.client.table("documents").insert(data).execute()
         logger.info(f"Created document: {title}")
@@ -2960,8 +2967,9 @@ class SupabaseClient:
         direction: str = "inbound",
         approved: bool | None = None,
         attachments_processed: list | None = None,
+        body_text: str | None = None,
     ) -> dict:
-        """Record a scanned email with all Phase 4 fields."""
+        """Record a scanned email with all Phase 4 fields + body (Phase 13 B4)."""
         row = {
             "scan_type": scan_type,
             "email_id": email_id,
@@ -2984,6 +2992,8 @@ class SupabaseClient:
             row["approved"] = approved
         if attachments_processed is not None:
             row["attachments_processed"] = attachments_processed
+        if body_text:
+            row["body_text"] = body_text[:50000]  # Truncate to 50K chars
         result = self.client.table("email_scans").insert(row).execute()
         return result.data[0] if result.data else {}
 

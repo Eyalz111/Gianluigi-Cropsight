@@ -303,6 +303,17 @@ class Settings(BaseSettings):
     EMAIL_DAILY_SCAN_HOUR: int = Field(default=7, description="IST hour for morning email scan")
     EMAIL_DAILY_SCAN_ENABLED: bool = Field(default=True, description="Enable daily scan of Eyal's personal Gmail")
     EMAIL_MAX_SCAN_RESULTS: int = Field(default=50, description="Max emails per daily scan")
+    EMAIL_ATTACHMENTS_FOLDER_ID: str = Field(
+        default="", description="Google Drive folder ID for persisting email attachments (Phase 13 B3)"
+    )
+
+    # Phase 13 B1: Dropbox sync
+    DROPBOX_APP_KEY: str = Field(default="", description="Dropbox app key for OAuth")
+    DROPBOX_REFRESH_TOKEN: str = Field(default="", description="Dropbox OAuth refresh token")
+    DROPBOX_SYNC_FOLDER: str = Field(default="", description="Dropbox folder path to sync (e.g., /CropSight BD)")
+    DROPBOX_MIRROR_DRIVE_FOLDER_ID: str = Field(default="", description="Drive folder ID for Dropbox mirror")
+    DROPBOX_SYNC_ENABLED: bool = Field(default=False, description="Enable Dropbox → Drive sync scheduler")
+    DROPBOX_SYNC_INTERVAL: int = Field(default=7200, description="Dropbox sync poll interval (seconds) — 2 hours")
     MORNING_BRIEF_ENABLED: bool = Field(default=True, description="Enable morning brief (daily consolidated touchpoint)")
     MORNING_BRIEF_HOUR: int = Field(default=7, description="IST hour for morning brief")
     THREAD_TRACKING_EXPIRY_DAYS: int = Field(default=30, description="Tracked email threads expire after N days")

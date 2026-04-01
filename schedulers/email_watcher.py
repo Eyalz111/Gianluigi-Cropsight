@@ -202,6 +202,7 @@ class EmailWatcher:
                 thread_id=thread_id,
                 approved=False,
                 direction="inbound",
+                body_text=body if classification in ("relevant", "borderline") else None,
             )
 
             if extracted_items:
@@ -324,6 +325,26 @@ class EmailWatcher:
 
                 if not content_bytes:
                     continue
+
+                # Phase 13 B3: Persist attachment to Drive before processing
+                drive_file_id = None
+                try:
+                    from config.settings import settings as _settings
+                    folder_id = _settings.EMAIL_ATTACHMENTS_FOLDER_ID
+                    if folder_id:
+                        from services.google_drive import drive_service
+                        import mimetypes
+                        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                        drive_result = await drive_service._upload_bytes_file(
+                            data=content_bytes,
+                            filename=f"email_{msg_id}_{filename}",
+                            folder_id=folder_id,
+                            mime_type=mime,
+                        )
+                        drive_file_id = drive_result.get("id")
+                        logger.info(f"Persisted attachment to Drive: {filename} ({drive_file_id})")
+                except Exception as e:
+                    logger.warning(f"Drive persistence failed for {filename} (non-fatal): {e}")
 
                 # Try to decode as text for ingestion
                 try:

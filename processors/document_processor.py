@@ -37,8 +37,12 @@ from core.llm import call_llm
 from services.supabase_client import supabase_client
 from services.embeddings import embedding_service
 
-# Valid document types for classification
-DOCUMENT_TYPES = ["strategy", "legal", "technical", "pitch", "client", "other"]
+# Valid document types for classification (Phase 13 B2: expanded with CropSight-specific types)
+DOCUMENT_TYPES = [
+    "strategy", "legal", "technical", "pitch", "client",
+    "grant_proposal", "research_paper", "investor_deck", "partnership_agreement",
+    "other",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,33 @@ async def process_document(
 
     logger.info(f"Processing document: {title} ({len(content)} chars)")
 
+    # Phase 13 B2: Content hash for dedup
+    import hashlib
+    content_hash = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+
+    # Phase 13 B2: Check for existing document with same content hash
+    existing_by_hash = _find_existing_by_hash(content_hash)
+    if existing_by_hash:
+        logger.info(
+            f"Document '{title}' has identical content to existing "
+            f"'{existing_by_hash.get('title')}' (hash match) — skipping"
+        )
+        return {
+            "document_id": existing_by_hash["id"],
+            "title": existing_by_hash.get("title", title),
+            "summary": existing_by_hash.get("summary", ""),
+            "document_type": existing_by_hash.get("document_type", "other"),
+            "chunk_count": 0,
+            "deduplicated": True,
+        }
+
+    # Phase 13 B2: Check for existing document with same title+source (versioning)
+    version = 1
+    existing_by_title = _find_existing_by_title_source(title, source)
+    if existing_by_title:
+        version = (existing_by_title.get("version") or 1) + 1
+        logger.info(f"Document '{title}' version {version} (previous: {existing_by_title['id']})")
+
     # Step 1: Generate summary using Claude
     summary = await generate_document_summary(content, title)
 
@@ -99,6 +130,8 @@ async def process_document(
         summary=summary,
         drive_path=drive_path,
         document_type=document_type,
+        content_hash=content_hash,
+        version=version,
     )
     document_id = document["id"]
 
@@ -106,7 +139,7 @@ async def process_document(
     chunk_count = await store_document_embeddings(document_id, content)
 
     logger.info(
-        f"Document processed: {title} — "
+        f"Document processed: {title} v{version} — "
         f"ID={document_id}, type={document_type}, chunks={chunk_count}"
     )
 
@@ -116,7 +149,38 @@ async def process_document(
         "summary": summary,
         "document_type": document_type,
         "chunk_count": chunk_count,
+        "version": version,
     }
+
+
+def _find_existing_by_hash(content_hash: str) -> dict | None:
+    """Find an existing document with the same content hash (Phase 13 B2)."""
+    try:
+        result = supabase_client.client.table("documents").select("*").eq(
+            "content_hash", content_hash
+        ).limit(1).execute()
+        data = result.data
+        if data and isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            return data[0]
+    except Exception as e:
+        logger.debug(f"Content hash lookup failed: {e}")
+    return None
+
+
+def _find_existing_by_title_source(title: str, source: str) -> dict | None:
+    """Find the latest version of a document with same title+source (Phase 13 B2)."""
+    try:
+        result = supabase_client.client.table("documents").select("*").eq(
+            "title", title
+        ).eq("source", source).order(
+            "version", desc=True
+        ).limit(1).execute()
+        data = result.data
+        if data and isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            return data[0]
+    except Exception as e:
+        logger.debug(f"Title+source lookup failed: {e}")
+    return None
 
 
 async def generate_document_summary(
@@ -189,7 +253,7 @@ async def classify_document_type(content: str, title: str) -> str:
     # Use just the first 2000 chars + title for classification (cheap)
     snippet = content[:2000]
 
-    prompt = f"""Classify this document into exactly one category.
+    prompt = f"""Classify this document into exactly one category. This is for CropSight, an AgTech startup doing ML-powered crop yield forecasting.
 
 Title: {title}
 
@@ -202,9 +266,13 @@ Categories:
 - technical: research papers, technical specs, API docs, architecture docs
 - pitch: pitch decks, investor materials, fundraising docs
 - client: client-facing proposals, reports, presentations for external partners
+- grant_proposal: grant applications, EU Horizon, research funding proposals
+- research_paper: academic papers, scientific publications, crop/agriculture research
+- investor_deck: fundraising presentations, financial projections, investor updates
+- partnership_agreement: partnership MOUs, joint venture docs, collaboration frameworks
 - other: anything that doesn't fit the above
 
-Reply with ONLY the category name (one word, lowercase). Nothing else."""
+Reply with ONLY the category name (lowercase, use underscore for multi-word). Nothing else."""
 
     try:
         response_text, _ = call_llm(
