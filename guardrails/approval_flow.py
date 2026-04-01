@@ -1584,6 +1584,23 @@ async def distribute_approved_content(
     team_emails = settings.team_emails
     distribution_emails = get_distribution_list(sensitivity, team_emails)
 
+    # 5b. Filter sensitive items from team distribution content
+    # Even if the meeting is "normal", individual items may be sensitive.
+    # Team gets a filtered copy; Eyal always gets everything.
+    team_content = content
+    if sensitivity == "normal":
+        filtered_decisions = [d for d in content.get("decisions", []) if d.get("sensitivity") != "sensitive"]
+        filtered_tasks = [t for t in content.get("tasks", []) if t.get("sensitivity") != "sensitive"]
+        filtered_questions = [q for q in content.get("open_questions", []) if q.get("sensitivity") != "sensitive"]
+        has_filtered = (
+            len(filtered_decisions) != len(content.get("decisions", []))
+            or len(filtered_tasks) != len(content.get("tasks", []))
+            or len(filtered_questions) != len(content.get("open_questions", []))
+        )
+        if has_filtered:
+            team_content = {**content, "decisions": filtered_decisions, "tasks": filtered_tasks, "open_questions": filtered_questions}
+            logger.info(f"Filtered sensitive items from team distribution for {meeting_id}")
+
     # 6. Send Telegram notification
     try:
         drive_link = results.get("drive_link", "")
@@ -1605,7 +1622,7 @@ async def distribute_approved_content(
                 title=meeting_title,
                 date=meeting_date,
                 participants=participants,
-                content=content,
+                content=team_content,
                 drive_link=drive_link,
             )
             if settings.ENVIRONMENT != "production":
@@ -1628,9 +1645,9 @@ async def distribute_approved_content(
                 drive_link=results.get("drive_link", ""),
                 meeting_date=meeting_date,
                 executive_summary=exec_summary,
-                tasks=tasks,
+                tasks=team_content.get("tasks", []),
                 docx_bytes=_docx_bytes_for_email,
-                discussion_summary=content.get("discussion_summary", ""),
+                discussion_summary=team_content.get("discussion_summary", ""),
             )
             results["email_sent"] = email_result
             results["emails_to"] = distribution_emails

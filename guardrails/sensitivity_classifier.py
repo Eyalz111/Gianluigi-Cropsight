@@ -2,8 +2,8 @@
 Meeting sensitivity classification.
 
 This module classifies meetings as 'normal' or 'sensitive' based on
-keywords in the title. Sensitive meetings get restricted distribution
-(Eyal-only).
+keywords in the title, content analysis, and optional LLM classification.
+Sensitive meetings get restricted distribution (Eyal-only).
 
 Sensitive categories (from Section 7):
 - Legal: lawyer, legal, fischer, fbc, zohar
@@ -18,7 +18,11 @@ Usage:
     # Returns: 'normal' or 'sensitive'
 """
 
+import logging
+
 from config.team import SENSITIVE_KEYWORDS
+
+logger = logging.getLogger(__name__)
 
 
 def classify_sensitivity(event: dict) -> str:
@@ -224,3 +228,115 @@ def get_combined_sensitivity(
 
     sensitivity = "sensitive" if reasons else "normal"
     return sensitivity, reasons
+
+
+def classify_sensitivity_llm(content: str) -> str:
+    """
+    Use Haiku for nuanced sensitivity classification beyond keywords.
+
+    Runs as a fallback when keyword matching returns 'normal' but content
+    is substantial (>500 chars). Catches things like "give him a bigger share"
+    or "competitor X's pricing" that keywords miss.
+
+    Args:
+        content: Text content to classify.
+
+    Returns:
+        'normal' or 'sensitive'
+    """
+    if len(content) < 500:
+        return "normal"
+
+    from core.llm import call_llm
+    from config.settings import settings
+
+    # Use first 3000 chars to keep cost low
+    excerpt = content[:3000]
+
+    prompt = (
+        "Classify this meeting content as 'sensitive' or 'normal'.\n\n"
+        "SENSITIVE means it discusses ANY of:\n"
+        "- Investor terms, fundraising, valuations, term sheets\n"
+        "- Equity, vesting, compensation, salary\n"
+        "- Legal disputes, contracts, NDAs, compliance\n"
+        "- Competitive intelligence, competitor pricing/strategy\n"
+        "- HR issues, hiring negotiations, personnel conflicts\n"
+        "- Confidential partnerships not yet announced\n\n"
+        "NORMAL means standard operational discussion.\n\n"
+        f"CONTENT:\n{excerpt}\n\n"
+        "Respond with exactly one word: sensitive or normal"
+    )
+
+    try:
+        response, _ = call_llm(
+            prompt=prompt,
+            model=settings.model_simple,  # Haiku
+            max_tokens=10,
+            call_site="sensitivity_llm",
+        )
+        result = response.strip().lower()
+        if result in ("sensitive", "normal"):
+            return result
+        return "normal"
+    except Exception as e:
+        logger.warning(f"LLM sensitivity classification failed: {e}")
+        return "normal"
+
+
+def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
+    """
+    Propagate meeting-level sensitivity to all child items.
+
+    Sets the sensitivity field on tasks, decisions, and open questions
+    belonging to this meeting. Called after extraction and on manual toggle.
+
+    Args:
+        meeting_id: UUID of the meeting.
+        sensitivity: 'normal' or 'sensitive'.
+
+    Returns:
+        Dict with counts of updated items.
+    """
+    from services.supabase_client import supabase_client
+
+    counts = {"tasks": 0, "decisions": 0, "open_questions": 0}
+
+    try:
+        result = (
+            supabase_client.client.table("tasks")
+            .update({"sensitivity": sensitivity})
+            .eq("meeting_id", meeting_id)
+            .execute()
+        )
+        counts["tasks"] = len(result.data) if result.data else 0
+    except Exception as e:
+        logger.error(f"Failed to propagate sensitivity to tasks: {e}")
+
+    try:
+        result = (
+            supabase_client.client.table("decisions")
+            .update({"sensitivity": sensitivity})
+            .eq("meeting_id", meeting_id)
+            .execute()
+        )
+        counts["decisions"] = len(result.data) if result.data else 0
+    except Exception as e:
+        logger.error(f"Failed to propagate sensitivity to decisions: {e}")
+
+    try:
+        result = (
+            supabase_client.client.table("open_questions")
+            .update({"sensitivity": sensitivity})
+            .eq("meeting_id", meeting_id)
+            .execute()
+        )
+        counts["open_questions"] = len(result.data) if result.data else 0
+    except Exception as e:
+        logger.error(f"Failed to propagate sensitivity to open_questions: {e}")
+
+    total = sum(counts.values())
+    if total > 0:
+        logger.info(
+            f"Propagated sensitivity={sensitivity} to {total} items for meeting {meeting_id}: {counts}"
+        )
+    return counts

@@ -44,6 +44,8 @@ from services.embeddings import embedding_service
 from guardrails.sensitivity_classifier import (
     classify_sensitivity,
     classify_sensitivity_from_content,
+    classify_sensitivity_llm,
+    propagate_meeting_sensitivity,
 )
 from guardrails.content_filter import (
     filter_personal_content,
@@ -108,6 +110,13 @@ async def process_transcript(
     content_sensitivity = classify_sensitivity_from_content(file_content)
     if content_sensitivity == "sensitive":
         sensitivity = "sensitive"
+
+    # Step 4b: LLM fallback classification (Haiku) — catches nuanced cases
+    if sensitivity == "normal":
+        llm_sensitivity = classify_sensitivity_llm(file_content)
+        if llm_sensitivity == "sensitive":
+            sensitivity = "sensitive"
+            logger.info("LLM classified meeting as sensitive (keywords missed)")
 
     # Step 5: Validate tone of discussion summary
     tone_issues = validate_summary_tone(extracted.get("discussion_summary", ""))
@@ -174,6 +183,9 @@ async def process_transcript(
         follow_ups=extracted.get("follow_ups", []),
         open_questions=extracted.get("open_questions", []),
     )
+
+    # Step 7b2: Propagate meeting sensitivity to extracted items
+    propagate_meeting_sensitivity(meeting_id, sensitivity)
 
     # Step 7c: Entity extraction and linking (v0.3 Tier 2)
     from processors.entity_extraction import extract_and_link_entities

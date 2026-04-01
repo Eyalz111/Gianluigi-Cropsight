@@ -103,6 +103,7 @@ class Decision(BaseModel):
     context: str | None = None
     participants_involved: list[str] | None = None
     transcript_timestamp: str | None = None  # e.g., "43:28"
+    sensitivity: Sensitivity = Sensitivity.NORMAL
     created_at: datetime | None = None
 
 
@@ -117,6 +118,7 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
     transcript_timestamp: str | None = None
+    sensitivity: Sensitivity = Sensitivity.NORMAL
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -142,6 +144,7 @@ class OpenQuestion(BaseModel):
     raised_by: str | None = None
     status: QuestionStatus = QuestionStatus.OPEN
     resolved_in_meeting_id: UUID | None = None
+    sensitivity: Sensitivity = Sensitivity.NORMAL
     created_at: datetime | None = None
 
 

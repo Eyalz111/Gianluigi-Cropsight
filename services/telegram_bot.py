@@ -2727,12 +2727,14 @@ When you receive approval requests, use the buttons to approve, request changes,
             context.user_data["pending_edit_meeting_id"] = meeting_id
 
         elif action == "sens_toggle":
-            # Toggle sensitivity on the meeting record
+            # Toggle sensitivity on the meeting record + propagate to items
             from services.supabase_client import supabase_client as _sc
+            from guardrails.sensitivity_classifier import propagate_meeting_sensitivity
             meeting = _sc.get_meeting(meeting_id)
             current_sens = meeting.get("sensitivity", "normal")
             new_sens = "normal" if current_sens == "sensitive" else "sensitive"
             _sc.update_meeting(meeting_id, sensitivity=new_sens)
+            propagate_meeting_sensitivity(meeting_id, new_sens)
 
             # Update button text in-place (no message re-send)
             new_label = (
