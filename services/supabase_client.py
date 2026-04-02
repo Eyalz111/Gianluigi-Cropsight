@@ -3507,6 +3507,174 @@ class SupabaseClient:
             return None
 
 
+    # =========================================================================
+    # Intelligence Signal Methods
+    # =========================================================================
+
+    def create_intelligence_signal(self, data: dict) -> dict:
+        """
+        Create a new intelligence signal record.
+
+        Args:
+            data: Dict with signal_id, week_number, year, and optional fields.
+
+        Returns:
+            Created record.
+        """
+        result = self.client.table("intelligence_signals").insert(data).execute()
+        logger.info(f"Created intelligence signal: {data.get('signal_id')}")
+        return result.data[0]
+
+    def update_intelligence_signal(self, signal_id: str, updates: dict) -> dict:
+        """
+        Update an intelligence signal by signal_id.
+
+        Args:
+            signal_id: e.g. "signal-w14-2026"
+            updates: Fields to update.
+
+        Returns:
+            Updated record.
+        """
+        result = (
+            self.client.table("intelligence_signals")
+            .update(updates)
+            .eq("signal_id", signal_id)
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
+    def get_intelligence_signal(self, signal_id: str) -> dict | None:
+        """
+        Get an intelligence signal by signal_id.
+
+        Args:
+            signal_id: e.g. "signal-w14-2026"
+
+        Returns:
+            Signal record or None.
+        """
+        result = (
+            self.client.table("intelligence_signals")
+            .select("*")
+            .eq("signal_id", signal_id)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def get_latest_intelligence_signal(self) -> dict | None:
+        """
+        Get the most recent intelligence signal.
+
+        Returns:
+            Latest signal record or None.
+        """
+        result = (
+            self.client.table("intelligence_signals")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def get_intelligence_signals(self, limit: int = 4) -> list[dict]:
+        """
+        Get recent intelligence signals.
+
+        Args:
+            limit: Max records to return.
+
+        Returns:
+            List of signal records, newest first.
+        """
+        result = (
+            self.client.table("intelligence_signals")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+
+    def get_competitor_watchlist(
+        self, include_deactivated: bool = False
+    ) -> list[dict]:
+        """
+        Get the competitor watchlist.
+
+        Args:
+            include_deactivated: If True, include deactivated entries.
+
+        Returns:
+            List of competitor records.
+        """
+        query = self.client.table("competitor_watchlist").select("*")
+        if not include_deactivated:
+            query = query.eq("is_active", True)
+        result = query.order("category").execute()
+        return result.data or []
+
+    def upsert_competitor(self, data: dict) -> dict:
+        """
+        Insert or update a competitor (upsert on name).
+
+        Args:
+            data: Competitor data dict with 'name' required.
+
+        Returns:
+            Upserted record.
+        """
+        result = (
+            self.client.table("competitor_watchlist")
+            .upsert(data, on_conflict="name")
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+
+    def deactivate_stale_competitors(self, weeks_threshold: int = 4) -> int:
+        """
+        Deactivate competitors not seen for N+ weeks.
+
+        Args:
+            weeks_threshold: Weeks of silence before deactivation.
+
+        Returns:
+            Count of deactivated competitors.
+        """
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        iso_cal = now.isocalendar()
+        current_week = iso_cal[1]
+        current_year = iso_cal[0]
+
+        # Fetch active competitors with last_seen data
+        result = (
+            self.client.table("competitor_watchlist")
+            .select("id, name, last_seen_week, last_seen_year")
+            .eq("is_active", True)
+            .not_.is_("last_seen_week", "null")
+            .execute()
+        )
+
+        deactivated = 0
+        for comp in (result.data or []):
+            last_week = comp.get("last_seen_week", 0)
+            last_year = comp.get("last_seen_year", 0)
+
+            # Calculate weeks since last seen
+            weeks_since = (current_year - last_year) * 52 + (current_week - last_week)
+            if weeks_since >= weeks_threshold:
+                self.client.table("competitor_watchlist").update(
+                    {"is_active": False}
+                ).eq("id", comp["id"]).execute()
+                logger.info(f"Deactivated stale competitor: {comp['name']}")
+                deactivated += 1
+
+        return deactivated
+
+
 # Singleton instance for easy import
 db = SupabaseClient()
 

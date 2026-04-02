@@ -128,10 +128,19 @@ class TestServerBuild:
             "run_qa_check",
         ]
 
+        # Intelligence Signal tools
+        expected_tools.extend([
+            "get_intelligence_signal_status",
+            "approve_intelligence_signal",
+            "trigger_intelligence_signal",
+            "get_competitor_watchlist",
+            "add_competitor",
+        ])
+
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 38
+        assert len(tool_names) == 43
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

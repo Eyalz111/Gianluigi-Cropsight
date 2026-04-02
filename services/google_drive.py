@@ -642,6 +642,95 @@ class GoogleDriveService:
         return metadata.get("webViewLink", "")
 
     # =========================================================================
+    # Intelligence Signal Methods
+    # =========================================================================
+
+    async def create_subfolder(
+        self,
+        name: str,
+        parent_folder_id: str,
+    ) -> dict:
+        """
+        Create a subfolder in a parent folder.
+
+        Args:
+            name: Folder name.
+            parent_folder_id: Parent folder ID.
+
+        Returns:
+            File metadata dict with id, name, webViewLink.
+        """
+        try:
+            folder_metadata = {
+                "name": name,
+                "parents": [parent_folder_id],
+                "mimeType": "application/vnd.google-apps.folder",
+            }
+            folder = self.service.files().create(
+                body=folder_metadata,
+                fields="id, name, webViewLink",
+            ).execute()
+            logger.info(f"Created subfolder: {name}")
+            return folder
+        except Exception as e:
+            logger.error(f"Error creating subfolder {name}: {e}")
+            return {}
+
+    async def save_intelligence_signal(
+        self,
+        content: str,
+        filename: str,
+    ) -> dict:
+        """
+        Save intelligence signal as a Google Doc.
+
+        Args:
+            content: Signal content (markdown text).
+            filename: Document name (e.g. "Intelligence Signal W14-2026").
+
+        Returns:
+            File metadata dict with id, name, webViewLink.
+        """
+        if not settings.INTELLIGENCE_SIGNAL_FOLDER_ID:
+            logger.warning("INTELLIGENCE_SIGNAL_FOLDER_ID not configured")
+            return {}
+
+        if filename.endswith(".md"):
+            filename = filename[:-3]
+
+        return await self._upload_as_google_doc(
+            content=content,
+            filename=filename,
+            folder_id=settings.INTELLIGENCE_SIGNAL_FOLDER_ID,
+        )
+
+    async def save_intelligence_signal_video(
+        self,
+        data: bytes,
+        filename: str,
+    ) -> dict:
+        """
+        Upload intelligence signal video to Drive.
+
+        Args:
+            data: MP4 video bytes.
+            filename: Video filename.
+
+        Returns:
+            File metadata dict with id, name, webViewLink.
+        """
+        if not settings.INTELLIGENCE_SIGNAL_FOLDER_ID:
+            logger.warning("INTELLIGENCE_SIGNAL_FOLDER_ID not configured")
+            return {}
+
+        return await self._upload_bytes_file(
+            data=data,
+            filename=filename,
+            folder_id=settings.INTELLIGENCE_SIGNAL_FOLDER_ID,
+            mime_type="video/mp4",
+        )
+
+    # =========================================================================
     # Watcher Methods
     # =========================================================================
 

@@ -444,6 +444,46 @@ class Settings(BaseSettings):
         description="Auto-apply high-confidence task matches from continuity extraction (requires A3 gate)"
     )
 
+    # ==========================================================================
+    # Intelligence Signal
+    # ==========================================================================
+    INTELLIGENCE_SIGNAL_ENABLED: bool = Field(
+        default=False, description="Enable weekly intelligence signal scheduler"
+    )
+    INTELLIGENCE_SIGNAL_DAY: int = Field(
+        default=3, description="Day of week for intelligence signal (0=Mon, 3=Thu)"
+    )
+    INTELLIGENCE_SIGNAL_HOUR: int = Field(
+        default=18, description="IST hour for intelligence signal generation"
+    )
+    INTELLIGENCE_SIGNAL_RECIPIENTS: str = Field(
+        default="",
+        description="Comma-separated email recipients for signal distribution (empty = Eyal only)"
+    )
+    INTELLIGENCE_SIGNAL_AUTO_DISTRIBUTE: bool = Field(
+        default=False,
+        description="Skip approval gate and auto-distribute (keep False until quality proven)"
+    )
+    INTELLIGENCE_SIGNAL_VIDEO_ENABLED: bool = Field(
+        default=False, description="Enable video generation (requires ffmpeg + Pillow + ElevenLabs)"
+    )
+    INTELLIGENCE_SIGNAL_FOLDER_ID: str = Field(
+        default="", description="Google Drive folder ID for Intelligence Signal outputs"
+    )
+    PERPLEXITY_API_KEY: str = Field(
+        default="", description="Perplexity API key for intelligence research"
+    )
+    PERPLEXITY_MODEL: str = Field(
+        default="sonar-pro", description="Perplexity model for research queries"
+    )
+    ELEVENLABS_API_KEY: str = Field(
+        default="", description="ElevenLabs API key for voice narration"
+    )
+    ELEVENLABS_VOICE_ID: str = Field(
+        default="21m00Tcm4TlvDq8ikWAM",
+        description="ElevenLabs voice ID for signal narration (default: Rachel)"
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""
@@ -544,6 +584,13 @@ class Settings(BaseSettings):
         if not self.MORNING_BRIEF_SKIP_DAYS:
             return []
         return [d.strip() for d in self.MORNING_BRIEF_SKIP_DAYS.split(",") if d.strip()]
+
+    @property
+    def intelligence_signal_recipients_list(self) -> list[str]:
+        """Parse intelligence signal recipients. Empty = Eyal only."""
+        if not self.INTELLIGENCE_SIGNAL_RECIPIENTS:
+            return [self.EYAL_EMAIL] if self.EYAL_EMAIL else []
+        return [e.strip() for e in self.INTELLIGENCE_SIGNAL_RECIPIENTS.split(",") if e.strip()]
 
     @property
     def is_production(self) -> bool:

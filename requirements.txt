@@ -67,3 +67,6 @@ pytest-cov>=4.1.0              # Coverage reporting
 # black>=24.8.0                # Code formatting (optional)
 # ruff>=0.6.0                  # Linting (optional)
 # mypy>=1.11.0                 # Type checking (optional)
+
+# Intelligence Signal — video pipeline
+Pillow>=10.4.0                   # Slide image generation for video

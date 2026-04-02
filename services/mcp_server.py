@@ -2037,6 +2037,259 @@ class MCPServer:
                 return _error(str(e))
 
     # ------------------------------------------------------------------
+    # Intelligence Signal Tools (39-43)
+    # ------------------------------------------------------------------
+
+        # 39. get_intelligence_signal_status (read)
+        @mcp.tool(
+            name="get_intelligence_signal_status",
+            description=(
+                "[INTELLIGENCE] Get the latest intelligence signal status, flags, "
+                "Drive links, and next scheduled generation time."
+            ),
+        )
+        async def get_intelligence_signal_status(
+            signal_id: str | None = None,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                if signal_id:
+                    signal = _sc.get_intelligence_signal(signal_id)
+                else:
+                    signal = _sc.get_latest_intelligence_signal()
+
+                if not signal:
+                    return _success({"message": "No intelligence signals found."})
+
+                # Build response
+                result = {
+                    "signal_id": signal.get("signal_id"),
+                    "week_number": signal.get("week_number"),
+                    "year": signal.get("year"),
+                    "status": signal.get("status"),
+                    "flags": signal.get("flags") or [],
+                    "research_source": signal.get("research_source"),
+                    "drive_doc_url": signal.get("drive_doc_url"),
+                    "drive_video_url": signal.get("drive_video_url"),
+                    "created_at": signal.get("created_at"),
+                    "distributed_at": signal.get("distributed_at"),
+                    "recipients": signal.get("recipients"),
+                }
+
+                # Recent signals summary
+                recent = _sc.get_intelligence_signals(limit=4)
+                result["recent_signals"] = [
+                    {
+                        "signal_id": s.get("signal_id"),
+                        "status": s.get("status"),
+                        "week_number": s.get("week_number"),
+                    }
+                    for s in recent
+                ]
+
+                mcp_auth.log_call(
+                    "get_intelligence_signal_status",
+                    {"signal_id": signal_id},
+                )
+                return _success(result)
+
+            except Exception as e:
+                logger.error(f"get_intelligence_signal_status error: {e}")
+                mcp_auth.log_call(
+                    "get_intelligence_signal_status",
+                    success=False,
+                    error=str(e),
+                )
+                return _error(str(e))
+
+        # 40. approve_intelligence_signal (write)
+        @mcp.tool(
+            name="approve_intelligence_signal",
+            description=(
+                "[INTELLIGENCE] Approve and distribute the intelligence signal to "
+                "the team, or cancel it. Use get_intelligence_signal_status() first "
+                "to review the signal. Pass cancel=True to reject."
+            ),
+        )
+        async def approve_intelligence_signal(
+            signal_id: str,
+            cancel: bool = False,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                signal = _sc.get_intelligence_signal(signal_id)
+                if not signal:
+                    return _error(f"Signal {signal_id} not found")
+
+                if cancel:
+                    _sc.update_intelligence_signal(signal_id, {"status": "cancelled"})
+                    _sc.update_pending_approval(signal_id, status="rejected")
+                    _sc.log_action(
+                        action="intelligence_signal_cancelled",
+                        details={"signal_id": signal_id},
+                        triggered_by="eyal",
+                    )
+                    mcp_auth.log_call(
+                        "approve_intelligence_signal",
+                        {"signal_id": signal_id, "cancel": True},
+                    )
+                    return _success({"signal_id": signal_id, "status": "cancelled"})
+
+                # Approve and distribute
+                _sc.update_pending_approval(signal_id, status="approved")
+                _sc.update_intelligence_signal(signal_id, {"status": "approved"})
+
+                from processors.intelligence_signal_agent import (
+                    distribute_intelligence_signal,
+                )
+
+                result = await distribute_intelligence_signal(signal_id)
+
+                mcp_auth.log_call(
+                    "approve_intelligence_signal",
+                    {"signal_id": signal_id},
+                )
+                return _success(result)
+
+            except Exception as e:
+                logger.error(f"approve_intelligence_signal error: {e}")
+                mcp_auth.log_call(
+                    "approve_intelligence_signal",
+                    success=False,
+                    error=str(e),
+                )
+                return _error(str(e))
+
+        # 41. trigger_intelligence_signal (write)
+        @mcp.tool(
+            name="trigger_intelligence_signal",
+            description=(
+                "[INTELLIGENCE] Manually trigger an ad-hoc intelligence signal "
+                "generation. Use this to generate a signal outside the regular "
+                "Thursday schedule. The signal will go through the normal "
+                "approval flow."
+            ),
+        )
+        async def trigger_intelligence_signal() -> dict:
+            try:
+                from processors.intelligence_signal_agent import (
+                    generate_intelligence_signal,
+                )
+
+                result = await generate_intelligence_signal()
+
+                from services.supabase_client import supabase_client as _sc
+
+                _sc.log_action(
+                    action="intelligence_signal_triggered",
+                    details={"signal_id": result.get("signal_id"), "source": "mcp"},
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call("trigger_intelligence_signal", {})
+                return _success(result)
+
+            except Exception as e:
+                logger.error(f"trigger_intelligence_signal error: {e}")
+                mcp_auth.log_call(
+                    "trigger_intelligence_signal",
+                    success=False,
+                    error=str(e),
+                )
+                return _error(str(e))
+
+        # 42. get_competitor_watchlist (read)
+        @mcp.tool(
+            name="get_competitor_watchlist",
+            description=(
+                "[INTELLIGENCE] Get the auto-curated competitor watchlist with "
+                "categories (known, discovered, watching), appearance counts, "
+                "and last seen dates."
+            ),
+        )
+        async def get_competitor_watchlist(
+            include_deactivated: bool = False,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                watchlist = _sc.get_competitor_watchlist(
+                    include_deactivated=include_deactivated
+                )
+
+                mcp_auth.log_call(
+                    "get_competitor_watchlist",
+                    {"include_deactivated": include_deactivated},
+                )
+                return _success(watchlist)
+
+            except Exception as e:
+                logger.error(f"get_competitor_watchlist error: {e}")
+                mcp_auth.log_call(
+                    "get_competitor_watchlist",
+                    success=False,
+                    error=str(e),
+                )
+                return _error(str(e))
+
+        # 43. add_competitor (write)
+        @mcp.tool(
+            name="add_competitor",
+            description=(
+                "[INTELLIGENCE] Manually add a competitor to the watchlist. "
+                "Provide at minimum a name. Optional: category (known/watching), "
+                "funding, target_customer, key_limitation, notes."
+            ),
+        )
+        async def add_competitor(
+            name: str,
+            category: str = "known",
+            funding: str | None = None,
+            target_customer: str | None = None,
+            key_limitation: str | None = None,
+            notes: str | None = None,
+        ) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                data: dict = {
+                    "name": name,
+                    "category": category,
+                    "added_by": "eyal",
+                    "is_active": True,
+                }
+                if funding:
+                    data["funding"] = funding
+                if target_customer:
+                    data["target_customer"] = target_customer
+                if key_limitation:
+                    data["key_limitation"] = key_limitation
+                if notes:
+                    data["notes"] = notes
+
+                result = _sc.upsert_competitor(data)
+
+                _sc.log_action(
+                    action="competitor_added",
+                    details={"name": name, "category": category},
+                    triggered_by="eyal",
+                )
+
+                mcp_auth.log_call("add_competitor", {"name": name})
+                return _success(result)
+
+            except Exception as e:
+                logger.error(f"add_competitor error: {e}")
+                mcp_auth.log_call(
+                    "add_competitor",
+                    success=False,
+                    error=str(e),
+                )
+                return _error(str(e))
+
+    # ------------------------------------------------------------------
     # Server lifecycle
     # ------------------------------------------------------------------
 

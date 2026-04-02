@@ -339,6 +339,18 @@ async def start_services() -> None:
     else:
         logger.info("  Evening debrief prompt disabled (DEBRIEF_EVENING_PROMPT_ENABLED=false)")
 
+    # Start intelligence signal scheduler
+    if settings.INTELLIGENCE_SIGNAL_ENABLED:
+        from schedulers.intelligence_signal_scheduler import intelligence_signal_scheduler
+        logger.info("  Starting intelligence signal scheduler...")
+        signal_task = asyncio.create_task(
+            intelligence_signal_scheduler.start(),
+            name="intelligence_signal_scheduler"
+        )
+        tasks.append(signal_task)
+    else:
+        logger.info("  Intelligence signal scheduler disabled (INTELLIGENCE_SIGNAL_ENABLED=false)")
+
     logger.info("=" * 50)
     logger.info("  Gianluigi is ready!")
     logger.info("=" * 50)
@@ -463,6 +475,14 @@ async def stop_services() -> None:
         try:
             from schedulers.debrief_prompt_scheduler import debrief_prompt_scheduler
             debrief_prompt_scheduler.stop()
+        except Exception:
+            pass
+
+    # Stop intelligence signal scheduler if started
+    if settings.INTELLIGENCE_SIGNAL_ENABLED:
+        try:
+            from schedulers.intelligence_signal_scheduler import intelligence_signal_scheduler
+            intelligence_signal_scheduler.stop()
         except Exception:
             pass
 
