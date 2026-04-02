@@ -36,7 +36,7 @@ def collect_health_data() -> dict:
 
     # 1. Supabase connectivity
     try:
-        result = supabase_client.client.table("action_log").select("id").limit(1).execute()
+        result = supabase_client.client.table("audit_log").select("id").limit(1).execute()
         data["components"]["supabase"] = "healthy"
     except Exception as e:
         data["components"]["supabase"] = f"error: {str(e)[:100]}"
@@ -52,7 +52,7 @@ def collect_health_data() -> dict:
     try:
         cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
         result = (
-            supabase_client.client.table("action_log")
+            supabase_client.client.table("audit_log")
             .select("id", count="exact")
             .eq("action", "critical_error")
             .gte("created_at", cutoff)

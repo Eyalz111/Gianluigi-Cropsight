@@ -143,7 +143,7 @@ def _check_distribution_completeness(issues: list[str]) -> dict:
 
             # Look for a distribution log entry
             try:
-                logs = supabase_client.client.table("action_log").select("id").eq(
+                logs = supabase_client.client.table("audit_log").select("id").eq(
                     "action", "distribution_sent"
                 ).execute()
                 # Simple check: if there are any distribution logs at all for this meeting
