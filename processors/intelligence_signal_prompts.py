@@ -188,6 +188,61 @@ Report:
 {signal_content}"""
 
 
+def system_prompt_structured_script() -> str:
+    """System prompt for structured video script with visual metadata."""
+    return """You are a news flash narrator for the CropSight Intelligence Signal video.
+Your tone is professional but energetic — like a Bloomberg TV anchor doing a 90-second market segment.
+Write for spoken delivery: short sentences, natural rhythm.
+
+You output a structured JSON array where each segment specifies narration text AND what visual to show.
+Each segment will be rendered as a separate video slide with its own audio clip."""
+
+
+def user_prompt_structured_script(signal_content: str) -> str:
+    """
+    User prompt for generating a structured video script with visual hints.
+
+    The LLM outputs a JSON array of segments, each with narration and
+    metadata for visual rendering (charts, crop photos, flags, text cards).
+
+    Args:
+        signal_content: The full written signal report.
+
+    Returns:
+        Formatted prompt requesting JSON output.
+    """
+    return f"""Based on this Intelligence Signal, write a structured video script.
+
+Output ONLY valid JSON — an array of segment objects. No markdown, no explanation, just the JSON array.
+
+Segment schema:
+{{
+  "segment_type": "headline|stat|crop|country|competitor|closing",
+  "narration": "1-3 sentences for this segment (20-40 words)",
+  "visual_hint": "title|chart|crop_photo|flag|text_card|closing",
+  "data": {{"label": "Wheat Futures", "value": "+4%", "direction": "up"}},
+  "country_code": "BR",
+  "crop": "coffee"
+}}
+
+Rules:
+1. Output 5-7 segments total
+2. Each segment narration is 1-3 sentences (20-40 words)
+3. Total narration across all segments: 150-250 words
+4. First segment must be type "headline" with visual_hint "title"
+5. Last segment must be type "closing" — narration ends with "The full Intelligence Signal is attached — dig in."
+6. Use "stat" for price movements, production numbers, trade volumes — include data.label, data.value, data.direction
+7. Use "crop" for crop-specific news — include crop field (wheat, coffee, corn, soybeans, cocoa, grapes)
+8. Use "country" for country-specific news — include country_code (ISO 2-letter: BR, US, EU, IL, IN, UA, AR, CO, ET, ID)
+9. Use "competitor" for company news — keep visual_hint as "text_card"
+10. Write for speech — no abbreviations, spell out percentages ("four percent" not "4%")
+11. The data field is ONLY for stat segments. Omit it for other types.
+12. country_code and crop fields are optional — only include when relevant to the segment
+
+Report:
+{signal_content}"""
+
+
 def format_telegram_notification(
     signal_id: str,
     drive_link: str,

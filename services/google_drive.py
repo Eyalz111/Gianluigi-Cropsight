@@ -704,6 +704,58 @@ class GoogleDriveService:
             folder_id=settings.INTELLIGENCE_SIGNAL_FOLDER_ID,
         )
 
+    async def save_intelligence_signal_docx(
+        self,
+        data: bytes,
+        filename: str,
+    ) -> dict:
+        """
+        Upload intelligence signal .docx to Drive.
+
+        Args:
+            data: .docx file bytes.
+            filename: Document filename.
+
+        Returns:
+            File metadata dict with id, name, webViewLink.
+        """
+        if not settings.INTELLIGENCE_SIGNAL_FOLDER_ID:
+            logger.warning("INTELLIGENCE_SIGNAL_FOLDER_ID not configured")
+            return {}
+
+        return await self._upload_bytes_file(
+            data=data,
+            filename=filename,
+            folder_id=settings.INTELLIGENCE_SIGNAL_FOLDER_ID,
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    async def save_intelligence_signal_audio(
+        self,
+        data: bytes,
+        filename: str,
+    ) -> dict:
+        """
+        Upload intelligence signal audio (podcast MP3) to Drive.
+
+        Args:
+            data: MP3 audio bytes.
+            filename: Audio filename.
+
+        Returns:
+            File metadata dict with id, name, webViewLink.
+        """
+        if not settings.INTELLIGENCE_SIGNAL_FOLDER_ID:
+            logger.warning("INTELLIGENCE_SIGNAL_FOLDER_ID not configured")
+            return {}
+
+        return await self._upload_bytes_file(
+            data=data,
+            filename=filename,
+            folder_id=settings.INTELLIGENCE_SIGNAL_FOLDER_ID,
+            mime_type="audio/mpeg",
+        )
+
     async def save_intelligence_signal_video(
         self,
         data: bytes,

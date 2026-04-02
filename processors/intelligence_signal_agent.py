@@ -131,21 +131,29 @@ async def generate_intelligence_signal(signal_id: str | None = None) -> dict:
     })
     logger.info(f"Signal content saved to DB: {signal_id}")
 
-    # 8. Upload as Google Doc to Drive
+    # 8. Generate .docx and upload to Drive
     drive_result = {}
     try:
         from services.google_drive import drive_service
+        from services.word_generator import generate_signal_docx
 
-        filename = f"CropSight Intelligence Signal W{context['week_number']}-{context['year']}"
-        drive_result = await drive_service.save_intelligence_signal(
-            content=signal_content, filename=filename
+        docx_bytes = generate_signal_docx(
+            signal_content=signal_content,
+            week_number=context["week_number"],
+            year=context["year"],
+            flags=flags,
+            research_source=research_source,
+        )
+        filename = f"CropSight Intelligence Signal W{context['week_number']}-{context['year']}.docx"
+        drive_result = await drive_service.save_intelligence_signal_docx(
+            data=docx_bytes, filename=filename
         )
         if drive_result and drive_result.get("id"):
             supabase_client.update_intelligence_signal(signal_id, {
                 "drive_doc_id": drive_result["id"],
                 "drive_doc_url": drive_result.get("webViewLink", ""),
             })
-            logger.info(f"Signal uploaded to Drive: {drive_result.get('webViewLink')}")
+            logger.info(f"Signal .docx uploaded to Drive: {drive_result.get('webViewLink')}")
     except Exception as e:
         logger.error(f"Drive upload failed for {signal_id}: {e}")
         # Non-fatal — content is safe in DB
@@ -662,12 +670,66 @@ async def _generate_video(
     context: dict,
     drive_result: dict,
 ) -> None:
-    """Generate video for the signal (when INTELLIGENCE_SIGNAL_VIDEO_ENABLED=True)."""
+    """
+    Generate enhanced video for the signal.
+
+    Attempts structured script (JSON segments) with per-segment TTS.
+    Falls back to plain-text script + old assemble_video() if JSON fails.
+    """
+    from services.elevenlabs_client import elevenlabs_client
+    from services.video_assembler import video_assembler
+
     try:
-        # Generate narration script
+        week = context["week_number"]
+        year = context["year"]
+
+        # 1. Try structured script (JSON segments)
+        segments = await _generate_structured_script(signal_content)
+
+        if segments:
+            # 2. Per-segment TTS
+            audio_clips = []
+            for seg in segments:
+                clip = await elevenlabs_client.text_to_speech(seg["narration"])
+                if clip:
+                    audio_clips.append(clip)
+                else:
+                    logger.warning(
+                        f"TTS failed for segment '{seg.get('segment_type')}', "
+                        f"falling back to plain script"
+                    )
+                    audio_clips = []
+                    break
+
+            if audio_clips:
+                # 3. Assemble with per-segment timing
+                video_bytes = await video_assembler.assemble_video_segments(
+                    segments=segments,
+                    audio_clips=audio_clips,
+                )
+
+                if video_bytes:
+                    await _upload_video_outputs(
+                        signal_id, video_bytes, audio_clips,
+                        segments, week, year,
+                    )
+                    return
+
+        # Fallback: plain-text script + old assemble_video()
+        logger.info(f"Using fallback video pipeline for {signal_id}")
+        await _generate_video_fallback(signal_id, signal_content, context)
+
+    except Exception as e:
+        logger.error(f"Video generation failed for {signal_id}: {e}")
+        # Non-fatal — signal generation continues
+
+
+async def _generate_structured_script(signal_content: str) -> list[dict] | None:
+    """Generate structured JSON script via LLM, return parsed segments or None."""
+    try:
         from processors.intelligence_signal_prompts import (
-            system_prompt_script,
-            user_prompt_script,
+            system_prompt_structured_script,
+            user_prompt_structured_script,
         )
 
         loop = asyncio.get_running_loop()
@@ -675,25 +737,146 @@ async def _generate_video(
             future = loop.run_in_executor(
                 executor,
                 lambda: call_llm(
-                    prompt=user_prompt_script(signal_content),
+                    prompt=user_prompt_structured_script(signal_content),
                     model=settings.model_agent,
-                    max_tokens=1024,
-                    call_site="intelligence_signal_script",
-                    system=system_prompt_script(),
+                    max_tokens=2048,
+                    call_site="intelligence_signal_structured_script",
+                    system=system_prompt_structured_script(),
                 ),
             )
-            script_text, _ = await asyncio.wait_for(future, timeout=60)
+            script_json, _ = await asyncio.wait_for(future, timeout=60)
 
-        supabase_client.update_intelligence_signal(signal_id, {
-            "script_text": script_text,
-        })
+        segments = _parse_script_segments(script_json)
+        if segments:
+            logger.info(f"Structured script: {len(segments)} segments parsed")
+            return segments
 
-        # TTS + video assembly (placeholder — services built disabled)
-        logger.info(f"Video pipeline placeholder for {signal_id}")
+        logger.warning("Structured script parsing returned no valid segments")
+        return None
 
     except Exception as e:
-        logger.error(f"Video generation failed for {signal_id}: {e}")
-        # Non-fatal
+        logger.warning(f"Structured script generation failed: {e}")
+        return None
+
+
+async def _generate_video_fallback(
+    signal_id: str, signal_content: str, context: dict
+) -> None:
+    """Fallback: plain-text script + old assemble_video() method."""
+    from processors.intelligence_signal_prompts import (
+        system_prompt_script,
+        user_prompt_script,
+    )
+    from services.elevenlabs_client import elevenlabs_client
+    from services.video_assembler import video_assembler
+
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = loop.run_in_executor(
+            executor,
+            lambda: call_llm(
+                prompt=user_prompt_script(signal_content),
+                model=settings.model_agent,
+                max_tokens=1024,
+                call_site="intelligence_signal_script",
+                system=system_prompt_script(),
+            ),
+        )
+        script_text, _ = await asyncio.wait_for(future, timeout=60)
+
+    supabase_client.update_intelligence_signal(signal_id, {
+        "script_text": script_text,
+    })
+
+    audio = await elevenlabs_client.text_to_speech(script_text)
+    if not audio:
+        logger.error(f"Fallback TTS failed for {signal_id}")
+        return
+
+    sections = video_assembler.parse_script_to_sections(script_text)
+    slides = video_assembler.create_slides(sections)
+    video_bytes = await video_assembler.assemble_video(slides, audio)
+
+    if video_bytes:
+        week = context["week_number"]
+        year = context["year"]
+        await _upload_video_outputs(
+            signal_id, video_bytes, [audio], None, week, year
+        )
+
+
+async def _upload_video_outputs(
+    signal_id: str,
+    video_bytes: bytes,
+    audio_clips: list[bytes],
+    segments: list[dict] | None,
+    week: int,
+    year: int,
+) -> None:
+    """Upload video + audio podcast to Drive, update DB."""
+    from services.google_drive import drive_service
+
+    # Upload video
+    video_filename = f"CropSight Signal W{week}-{year}.mp4"
+    video_result = await drive_service.save_intelligence_signal_video(
+        data=video_bytes, filename=video_filename
+    )
+
+    updates: dict = {}
+    if video_result and video_result.get("id"):
+        updates["drive_video_id"] = video_result["id"]
+        updates["drive_video_url"] = video_result.get("webViewLink", "")
+        logger.info(f"Video uploaded: {video_result.get('webViewLink')}")
+
+    # Save script text
+    if segments:
+        import json
+        updates["script_text"] = json.dumps(segments, ensure_ascii=False)
+
+    if updates:
+        supabase_client.update_intelligence_signal(signal_id, updates)
+
+    # Upload audio-only podcast version
+    try:
+        combined_audio = b"".join(audio_clips)
+        audio_filename = f"CropSight Signal W{week}-{year} (Audio).mp3"
+        audio_result = await drive_service.save_intelligence_signal_audio(
+            data=combined_audio, filename=audio_filename
+        )
+        if audio_result and audio_result.get("id"):
+            logger.info(f"Audio podcast uploaded: {audio_result.get('webViewLink')}")
+    except Exception as e:
+        logger.warning(f"Audio podcast upload failed: {e}")
+
+
+def _parse_script_segments(script_json: str) -> list[dict]:
+    """
+    Parse JSON segment array from LLM output.
+
+    Handles code-fence stripping and validation.
+    Returns empty list on failure (caller falls back to plain script).
+    """
+    import json
+
+    # Strip markdown code fences if present
+    cleaned = re.sub(r'^```(?:json)?\s*\n?', '', script_json.strip())
+    cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+
+    try:
+        segments = json.loads(cleaned)
+        if not isinstance(segments, list):
+            return []
+
+        valid = []
+        for s in segments:
+            if isinstance(s, dict) and "narration" in s and "segment_type" in s:
+                valid.append(s)
+
+        return valid
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse structured script JSON: {e}")
+        return []
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -755,10 +938,18 @@ async def _resume_from_drive_upload(signal_id: str, existing: dict) -> dict:
     if not drive_link:
         try:
             from services.google_drive import drive_service
+            from services.word_generator import generate_signal_docx
 
-            filename = f"CropSight Intelligence Signal W{week_number}-{year}"
-            drive_result = await drive_service.save_intelligence_signal(
-                content=content, filename=filename
+            docx_bytes = generate_signal_docx(
+                signal_content=content,
+                week_number=week_number,
+                year=year,
+                flags=flags,
+                research_source=existing.get("research_source", "unknown"),
+            )
+            filename = f"CropSight Intelligence Signal W{week_number}-{year}.docx"
+            drive_result = await drive_service.save_intelligence_signal_docx(
+                data=docx_bytes, filename=filename
             )
             if drive_result and drive_result.get("id"):
                 drive_link = drive_result.get("webViewLink", "")
