@@ -366,7 +366,7 @@ def _extract_active_crops() -> list[str]:
         # Check recent task titles and decisions for crop mentions
         recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         result = (
-            supabase_client.client.table("action_items")
+            supabase_client.client.table("tasks")
             .select("title")
             .gte("created_at", recent_cutoff)
             .limit(50)
@@ -399,7 +399,7 @@ def _extract_active_regions() -> list[str]:
     try:
         recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         result = (
-            supabase_client.client.table("action_items")
+            supabase_client.client.table("tasks")
             .select("title")
             .gte("created_at", recent_cutoff)
             .limit(50)

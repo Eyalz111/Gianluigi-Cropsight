@@ -480,8 +480,8 @@ class Settings(BaseSettings):
         default="", description="ElevenLabs API key for voice narration"
     )
     ELEVENLABS_VOICE_ID: str = Field(
-        default="21m00Tcm4TlvDq8ikWAM",
-        description="ElevenLabs voice ID for signal narration (default: Rachel)"
+        default="EXAVITQu4vr4xnSDxMaL",
+        description="ElevenLabs voice ID for signal narration (default: Sarah)"
     )
 
     @property
