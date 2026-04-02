@@ -263,7 +263,25 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"Sheets sync check for morning brief failed: {e}")
 
-    # 9. QA system health — inline summary from daily QA check (X1)
+    # 9. Operational continuity context (Phase 12 A1) — always include baseline
+    try:
+        from processors.meeting_continuity import (
+            build_daily_continuity_context,
+            format_daily_continuity_for_brief,
+        )
+        continuity = build_daily_continuity_context()
+        if continuity:
+            formatted_continuity = format_daily_continuity_for_brief(continuity)
+            if formatted_continuity:
+                sections.append({
+                    "type": "continuity",
+                    "title": "Operations Snapshot",
+                    "summary": formatted_continuity,
+                })
+    except Exception as e:
+        logger.debug(f"Continuity context for morning brief failed: {e}")
+
+    # 10. QA system health — inline summary from daily QA check (X1)
     try:
         from schedulers.qa_scheduler import qa_scheduler
         qa_report = qa_scheduler.last_report
@@ -390,6 +408,22 @@ def format_morning_brief(brief: dict) -> str:
                 "confirming": "awaiting final confirmation",
             }.get(status, status)
             lines.append(f"<b>Weekly Review W{week_num}:</b> {status_label}")
+            lines.append("")
+
+        elif section_type == "continuity":
+            summary = section.get("summary", "")
+            if summary:
+                lines.append(f"<b>{section.get('title', 'Operations Snapshot')}:</b>")
+                lines.append(summary)
+                lines.append("")
+
+        elif section_type == "qa_health":
+            score = section.get("score", "unknown")
+            issue_count = section.get("issue_count", 0)
+            score_label = {"healthy": "All systems OK", "warning": "Issues detected", "critical": "Action needed"}.get(score, score)
+            lines.append(f"<b>System Health:</b> {score_label}")
+            for issue in section.get("issues", [])[:3]:
+                lines.append(f"  - {issue[:80]}")
             lines.append("")
 
         elif section_type == "sheets_sync":

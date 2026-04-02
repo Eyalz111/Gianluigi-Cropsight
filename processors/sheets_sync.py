@@ -163,13 +163,74 @@ async def compute_sheets_diff() -> dict:
         else:
             result["decisions"]["db_only"].append(db_dec_by_key[key])
 
+    # --- Duplicate detection (Phase 13) ---
+    result["tasks"]["potential_duplicates"] = _detect_duplicate_tasks(db_tasks)
+
     # Check if any changes exist
     for table in ("tasks", "decisions"):
         if result[table]["modified"] or result[table]["sheets_only"] or result[table]["db_only"]:
             result["has_changes"] = True
             break
 
+    if result["tasks"]["potential_duplicates"]:
+        result["has_changes"] = True
+
     return result
+
+
+def _detect_duplicate_tasks(tasks: list[dict]) -> list[dict]:
+    """
+    Detect potential duplicate tasks by fuzzy title matching.
+
+    Compares all open tasks against each other. Two tasks are flagged as
+    potential duplicates if they share 60%+ of significant words.
+
+    Returns:
+        List of duplicate pairs: [{"task_a": {...}, "task_b": {...}, "overlap": [...]}]
+    """
+    open_tasks = [t for t in tasks if t.get("status") in ("pending", "in_progress", "overdue")]
+    if len(open_tasks) < 2:
+        return []
+
+    stop_words = {"the", "a", "an", "to", "for", "and", "or", "of", "in", "on", "is", "it", "we", "with", "from"}
+    duplicates = []
+    seen_pairs = set()
+
+    for i, a in enumerate(open_tasks):
+        title_a = (a.get("title") or "").lower()
+        words_a = set(title_a.split()) - stop_words
+        if len(words_a) < 3:
+            continue
+
+        for b in open_tasks[i + 1:]:
+            title_b = (b.get("title") or "").lower()
+            words_b = set(title_b.split()) - stop_words
+            if len(words_b) < 3:
+                continue
+
+            overlap = words_a & words_b
+            min_len = min(len(words_a), len(words_b))
+            if min_len > 0 and len(overlap) / min_len >= 0.6:
+                pair_key = tuple(sorted([a.get("id", ""), b.get("id", "")]))
+                if pair_key not in seen_pairs:
+                    seen_pairs.add(pair_key)
+                    duplicates.append({
+                        "task_a": {
+                            "id": a.get("id"),
+                            "title": a.get("title", "")[:80],
+                            "assignee": a.get("assignee", ""),
+                            "status": a.get("status", ""),
+                        },
+                        "task_b": {
+                            "id": b.get("id"),
+                            "title": b.get("title", "")[:80],
+                            "assignee": b.get("assignee", ""),
+                            "status": b.get("status", ""),
+                        },
+                        "overlap": list(overlap)[:5],
+                    })
+
+    return duplicates[:10]  # Cap at 10 pairs
 
 
 def _compare_task(sheets_task: dict, db_task: dict) -> dict:
@@ -292,6 +353,17 @@ def format_diff_preview(diff: dict) -> str:
             lines.append(f"  • {desc}")
         lines.append("")
 
+    # Potential duplicates
+    dupes = t.get("potential_duplicates", [])
+    if dupes:
+        lines.append(f"<b>Potential Duplicate Tasks ({len(dupes)}):</b>")
+        for dup in dupes[:5]:
+            a = dup["task_a"]
+            b = dup["task_b"]
+            lines.append(f"  • {a['title'][:40]} ({a['assignee']})")
+            lines.append(f"    ↔ {b['title'][:40]} ({b['assignee']})")
+        lines.append("")
+
     # Summary
     total_changes = (
         len(t["modified"]) + len(t["sheets_only"]) + len(t["db_only"])
@@ -410,6 +482,11 @@ def format_sync_summary(diff: dict) -> str:
         if d["sheets_only"]:
             details.append(f"{len(d['sheets_only'])} new")
         parts.append(f"Decisions: {', '.join(details)}")
+
+    # Duplicate detection
+    dupes = t.get("potential_duplicates", [])
+    if dupes:
+        parts.append(f"Potential duplicates: {len(dupes)} task pairs")
 
     if not parts:
         return ""
