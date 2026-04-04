@@ -389,13 +389,15 @@ class VideoAssembler:
                     audio_bitrate="192k",
                     preset="medium",
                     ffmpeg_params=[
-                        "-profile:v", "main",
+                        "-profile:v", "high",
                         "-level", "4.0",
                         "-pix_fmt", "yuv420p",
                         "-movflags", "+faststart",
-                        "-minrate", "500k",
+                        "-b:v", "1M",
                         "-maxrate", "2M",
-                        "-bufsize", "1M",
+                        "-bufsize", "2M",
+                        "-ar", "48000",
+                        "-ac", "2",
                     ],
                     logger=None,
                 ),
@@ -469,7 +471,8 @@ class VideoAssembler:
                 "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
                 "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
-                "-minrate", "500k", "-maxrate", "2M", "-bufsize", "1M",
+                "-b:v", "1M", "-maxrate", "2M", "-bufsize", "2M",
+                "-ar", "48000", "-ac", "2",
                 "-shortest", "-movflags", "+faststart", output_path,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -642,7 +645,9 @@ class VideoAssembler:
                 img_array = np.array(slide_img.convert("RGB"))
 
                 # Create video clip with matching audio duration
-                video_clip = ImageClip(img_array, duration=duration)
+                # Add 1s buffer to last clip so crossfade doesn't cut it short
+                clip_duration = duration + 1.0 if i == total_segments - 1 else duration
+                video_clip = ImageClip(img_array, duration=clip_duration)
                 video_clip = video_clip.with_audio(audio_clip)
 
                 # Crossfade: clips 2..N get CrossFadeIn.
@@ -672,13 +677,15 @@ class VideoAssembler:
                     audio_bitrate="192k",
                     preset="medium",
                     ffmpeg_params=[
-                        "-profile:v", "main",
+                        "-profile:v", "high",
                         "-level", "4.0",
                         "-pix_fmt", "yuv420p",
                         "-movflags", "+faststart",
-                        "-minrate", "500k",
+                        "-b:v", "1M",
                         "-maxrate", "2M",
-                        "-bufsize", "1M",
+                        "-bufsize", "2M",
+                        "-ar", "48000",
+                        "-ac", "2",
                     ],
                     logger=None,  # Suppress MoviePy progress bar
                 ),
@@ -779,7 +786,8 @@ class VideoAssembler:
                 "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
                 "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
-                "-minrate", "500k", "-maxrate", "2M", "-bufsize", "1M",
+                "-b:v", "1M", "-maxrate", "2M", "-bufsize", "2M",
+                "-ar", "48000", "-ac", "2",
                 "-shortest", "-movflags", "+faststart", output_path,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )

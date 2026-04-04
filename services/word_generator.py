@@ -372,7 +372,13 @@ def generate_signal_docx(
     sections = _parse_signal_sections(signal_content)
 
     for section_name, section_body in sections:
-        if section_name.upper().startswith("FLAG"):
+        # Skip FLAGS section and title/header sections
+        name_upper = section_name.upper().strip()
+        if (
+            name_upper.startswith("FLAG")
+            or name_upper.startswith("CROPSIGHT")
+            or name_upper.startswith("INTELLIGENCE SIGNAL")
+        ):
             continue
 
         doc.add_heading(section_name, level=2)
@@ -448,7 +454,7 @@ def _parse_signal_sections(content: str) -> list[tuple[str, str]]:
     """Parse markdown signal content into (section_name, section_body) tuples."""
     import re
 
-    parts = re.split(r'^(#{2,3})\s+(.+)$', content, flags=re.MULTILINE)
+    parts = re.split(r'^(#{1,3})\s+(.+)$', content, flags=re.MULTILINE)
 
     sections = []
     i = 0
