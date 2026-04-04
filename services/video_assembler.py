@@ -325,17 +325,19 @@ class VideoAssembler:
         self,
         slide_images: list[bytes],
         audio_bytes: bytes,
-        fps: int = 1,
+        fps: int = 24,
     ) -> Optional[bytes]:
         """
-        Assemble slides and audio into an MP4 video via ffmpeg.
+        Assemble slides and audio into an MP4 video.
 
+        Uses MoviePy for proper framerate and audio muxing.
+        Falls back to ffmpeg concat if MoviePy is unavailable.
         Each slide is shown for audio_duration / num_slides seconds.
 
         Args:
             slide_images: List of PNG image bytes.
             audio_bytes: MP3 audio narration.
-            fps: Frames per second (1 = static slides).
+            fps: Frames per second.
 
         Returns:
             MP4 video bytes, or None on failure.
@@ -344,89 +346,141 @@ class VideoAssembler:
             logger.warning("Cannot assemble video: missing slides or audio")
             return None
 
+        try:
+            from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+            import numpy as np
+        except ImportError:
+            logger.warning("MoviePy not available, using ffmpeg concat fallback")
+            return await self._assemble_video_ffmpeg_legacy(slide_images, audio_bytes)
+
         tmp_dir = tempfile.mkdtemp(prefix="gianluigi_video_")
+        audio_clip = None
+        video_clips = []
 
         try:
-            # Write audio file
+            # Write audio
             audio_path = os.path.join(tmp_dir, "narration.mp3")
             with open(audio_path, "wb") as f:
                 f.write(audio_bytes)
 
-            # Get audio duration using ffprobe
-            duration = await self._get_audio_duration(audio_path)
-            if not duration or duration <= 0:
-                duration = len(slide_images) * 8  # Fallback: 8s per slide
+            audio_clip = AudioFileClip(audio_path)
+            slide_duration = audio_clip.duration / len(slide_images)
 
-            slide_duration = duration / len(slide_images)
+            # Create video clips from slide images
+            from PIL import Image
 
-            # Write slide images as numbered PNGs
-            for i, img_bytes in enumerate(slide_images):
-                slide_path = os.path.join(tmp_dir, f"slide_{i:03d}.png")
-                with open(slide_path, "wb") as f:
-                    f.write(img_bytes)
+            for img_bytes in slide_images:
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                clip = ImageClip(np.array(img), duration=slide_duration)
+                video_clips.append(clip)
 
-            # Build ffmpeg concat file
-            concat_path = os.path.join(tmp_dir, "concat.txt")
-            with open(concat_path, "w") as f:
-                for i in range(len(slide_images)):
-                    f.write(f"file 'slide_{i:03d}.png'\n")
-                    f.write(f"duration {slide_duration:.2f}\n")
-                # Repeat last frame (ffmpeg concat quirk)
-                f.write(f"file 'slide_{len(slide_images) - 1:03d}.png'\n")
+            final = concatenate_videoclips(video_clips)
+            final = final.with_audio(audio_clip)
 
-            # Assemble video
             output_path = os.path.join(tmp_dir, "output.mp4")
-            cmd = [
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0", "-i", concat_path,
-                "-i", audio_path,
-                "-c:v", "libx264",
-                "-profile:v", "baseline",
-                "-level", "3.1",
-                "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                "-shortest",
-                "-movflags", "+faststart",
-                output_path,
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: final.write_videofile(
+                    output_path,
+                    fps=fps,
+                    codec="libx264",
+                    audio_codec="aac",
+                    audio_bitrate="192k",
+                    preset="medium",
+                    ffmpeg_params=[
+                        "-profile:v", "main",
+                        "-level", "4.0",
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                    ],
+                    logger=None,
+                ),
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=120
-            )
-
-            if process.returncode != 0:
-                logger.error(f"ffmpeg failed: {stderr.decode()[:500]}")
-                return None
 
             with open(output_path, "rb") as f:
                 video_bytes = f.read()
 
             logger.info(
-                f"Video assembled: {len(slide_images)} slides, "
-                f"{duration:.1f}s, {len(video_bytes)} bytes"
+                f"Video assembled (MoviePy): {len(slide_images)} slides, "
+                f"{audio_clip.duration:.1f}s, {len(video_bytes)} bytes"
             )
             return video_bytes
 
-        except asyncio.TimeoutError:
-            logger.error("ffmpeg timed out after 120s")
-            return None
-        except FileNotFoundError:
-            logger.error(
-                "ffmpeg not found. Install ffmpeg or disable video generation."
-            )
-            return None
         except Exception as e:
             logger.error(f"Video assembly failed: {e}")
             return None
         finally:
-            # Cleanup temp files
+            for clip in video_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            if audio_clip:
+                try:
+                    audio_clip.close()
+                except Exception:
+                    pass
+            try:
+                if "final" in dir():
+                    final.close()
+            except Exception:
+                pass
+            try:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    async def _assemble_video_ffmpeg_legacy(
+        self, slide_images: list[bytes], audio_bytes: bytes
+    ) -> Optional[bytes]:
+        """Fallback: legacy ffmpeg concat assembly (no MoviePy)."""
+        tmp_dir = tempfile.mkdtemp(prefix="gianluigi_video_legacy_")
+        try:
+            audio_path = os.path.join(tmp_dir, "narration.mp3")
+            with open(audio_path, "wb") as f:
+                f.write(audio_bytes)
+
+            duration = await self._get_audio_duration(audio_path)
+            if not duration or duration <= 0:
+                duration = len(slide_images) * 8
+            slide_duration = duration / len(slide_images)
+
+            for i, img_bytes in enumerate(slide_images):
+                with open(os.path.join(tmp_dir, f"slide_{i:03d}.png"), "wb") as f:
+                    f.write(img_bytes)
+
+            concat_path = os.path.join(tmp_dir, "concat.txt")
+            with open(concat_path, "w") as f:
+                for i in range(len(slide_images)):
+                    f.write(f"file 'slide_{i:03d}.png'\n")
+                    f.write(f"duration {slide_duration:.2f}\n")
+                f.write(f"file 'slide_{len(slide_images) - 1:03d}.png'\n")
+
+            output_path = os.path.join(tmp_dir, "output.mp4")
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", concat_path,
+                "-i", audio_path,
+                "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
+                "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest", "-movflags", "+faststart", output_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+
+            if process.returncode != 0:
+                logger.error(f"ffmpeg legacy failed: {stderr.decode()[:500]}")
+                return None
+
+            with open(output_path, "rb") as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Legacy video assembly failed: {e}")
+            return None
+        finally:
             try:
                 import shutil
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -527,8 +581,9 @@ class VideoAssembler:
         """
         Assemble video from structured segments with per-segment audio.
 
-        Each segment has its own audio clip, slide image, and timing.
-        This produces much better sync than the old equal-time approach.
+        Uses MoviePy to create proper 24fps video with muxed audio per clip
+        and crossfade transitions. Falls back to ffmpeg concat if MoviePy
+        is not available.
 
         Args:
             segments: List of structured segment dicts from LLM.
@@ -548,20 +603,136 @@ class VideoAssembler:
             )
             return None
 
+        # Try MoviePy; fall back to ffmpeg concat if unavailable
+        try:
+            from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+            import moviepy.video.fx as vfx
+            import numpy as np
+        except ImportError:
+            logger.warning("MoviePy not available, falling back to ffmpeg concat")
+            return await self._assemble_video_segments_ffmpeg(segments, audio_clips)
+
         tmp_dir = tempfile.mkdtemp(prefix="gianluigi_video_")
+        compositor = SlideCompositor(self)
+        audio_file_clips = []  # Track for cleanup
+        video_clips = []
+
+        try:
+            total_segments = len(segments)
+
+            for i, (segment, audio_bytes) in enumerate(zip(segments, audio_clips)):
+                # Write audio to temp file
+                audio_path = os.path.join(tmp_dir, f"audio_{i:03d}.mp3")
+                with open(audio_path, "wb") as f:
+                    f.write(audio_bytes)
+
+                # Create AudioFileClip and get duration
+                audio_clip = AudioFileClip(audio_path)
+                audio_file_clips.append(audio_clip)
+                duration = audio_clip.duration
+
+                # Render slide as PIL Image → numpy array
+                segment["_index"] = i + 1
+                segment["_total"] = total_segments
+                slide_img = compositor.render_segment_image(segment)
+                img_array = np.array(slide_img.convert("RGB"))
+
+                # Create video clip with matching audio duration
+                video_clip = ImageClip(img_array, duration=duration)
+                video_clip = video_clip.with_audio(audio_clip)
+
+                # Crossfade: clips 2..N get CrossFadeIn.
+                # First clip: no fade-in effect.
+                if i > 0:
+                    video_clip = video_clip.with_effects([vfx.CrossFadeIn(0.3)])
+
+                video_clips.append(video_clip)
+
+            # Concatenate with crossfade overlap
+            # padding=-0.3 creates 0.3s overlap for the crossfade
+            # Total duration = sum(durations) - 0.3*(N-1)
+            final = concatenate_videoclips(
+                video_clips, method="compose", padding=-0.3
+            )
+
+            # Write video file (CPU-intensive — run in executor)
+            output_path = os.path.join(tmp_dir, "output.mp4")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: final.write_videofile(
+                    output_path,
+                    fps=24,
+                    codec="libx264",
+                    audio_codec="aac",
+                    audio_bitrate="192k",
+                    preset="medium",
+                    ffmpeg_params=[
+                        "-profile:v", "main",
+                        "-level", "4.0",
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                    ],
+                    logger=None,  # Suppress MoviePy progress bar
+                ),
+            )
+
+            final_duration = final.duration
+
+            with open(output_path, "rb") as f:
+                video_bytes = f.read()
+
+            logger.info(
+                f"MoviePy video assembled: {len(segments)} segments, "
+                f"{final_duration:.1f}s, {len(video_bytes) / 1024 / 1024:.1f} MB"
+            )
+            return video_bytes
+
+        except Exception as e:
+            logger.error(f"MoviePy segment assembly failed: {e}")
+            return None
+        finally:
+            # Close all MoviePy clips before deleting temp files
+            # (MoviePy holds file handles on audio files)
+            for clip in video_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            for clip in audio_file_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            try:
+                if "final" in dir():
+                    final.close()
+            except Exception:
+                pass
+            try:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    async def _assemble_video_segments_ffmpeg(
+        self,
+        segments: list[dict],
+        audio_clips: list[bytes],
+    ) -> Optional[bytes]:
+        """Fallback: assemble segments with ffmpeg concat (no MoviePy)."""
+        tmp_dir = tempfile.mkdtemp(prefix="gianluigi_video_fb_")
         compositor = SlideCompositor(self)
 
         try:
-            # Write audio clips and get durations
             durations = []
             for i, clip in enumerate(audio_clips):
                 audio_path = os.path.join(tmp_dir, f"audio_{i:03d}.mp3")
                 with open(audio_path, "wb") as f:
                     f.write(clip)
                 dur = await self._get_audio_duration(audio_path)
-                durations.append(dur or 5.0)  # fallback 5s
+                durations.append(dur or 5.0)
 
-            # Render slides
             total_segments = len(segments)
             for i, segment in enumerate(segments):
                 segment["_index"] = i + 1
@@ -571,85 +742,50 @@ class VideoAssembler:
                 with open(slide_path, "wb") as f:
                     f.write(slide_png)
 
-            # Concatenate audio clips into single file
+            # Concatenate audio
             audio_list_path = os.path.join(tmp_dir, "audio_list.txt")
             with open(audio_list_path, "w") as f:
                 for i in range(len(audio_clips)):
                     f.write(f"file 'audio_{i:03d}.mp3'\n")
 
             combined_audio_path = os.path.join(tmp_dir, "combined.mp3")
-            concat_cmd = [
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", audio_list_path,
-                "-c", "copy",
-                combined_audio_path,
-            ]
             proc = await asyncio.create_subprocess_exec(
-                *concat_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", audio_list_path, "-c", "copy", combined_audio_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             await asyncio.wait_for(proc.communicate(), timeout=30)
 
-            # Build video concat file with per-segment durations
+            # Build video concat
             concat_path = os.path.join(tmp_dir, "video_concat.txt")
             with open(concat_path, "w") as f:
                 for i, dur in enumerate(durations):
                     f.write(f"file 'slide_{i:03d}.png'\n")
                     f.write(f"duration {dur:.2f}\n")
-                # Repeat last frame (ffmpeg concat quirk)
                 f.write(f"file 'slide_{len(durations) - 1:03d}.png'\n")
 
-            # Assemble final video
             output_path = os.path.join(tmp_dir, "output.mp4")
-            cmd = [
+            process = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", concat_path,
                 "-i", combined_audio_path,
-                "-c:v", "libx264",
-                "-profile:v", "baseline",
-                "-level", "3.1",
-                "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                "-shortest",
-                "-movflags", "+faststart",
-                output_path,
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
+                "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest", "-movflags", "+faststart", output_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=120
-            )
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
 
             if process.returncode != 0:
-                logger.error(f"ffmpeg segments failed: {stderr.decode()[:500]}")
+                logger.error(f"ffmpeg fallback failed: {stderr.decode()[:500]}")
                 return None
 
             with open(output_path, "rb") as f:
-                video_bytes = f.read()
+                return f.read()
 
-            total_dur = sum(durations)
-            logger.info(
-                f"Segment video assembled: {len(segments)} segments, "
-                f"{total_dur:.1f}s, {len(video_bytes) / 1024 / 1024:.1f} MB"
-            )
-            return video_bytes
-
-        except asyncio.TimeoutError:
-            logger.error("ffmpeg segment assembly timed out")
-            return None
-        except FileNotFoundError:
-            logger.error("ffmpeg not found")
-            return None
         except Exception as e:
-            logger.error(f"Segment video assembly failed: {e}")
+            logger.error(f"ffmpeg fallback assembly failed: {e}")
             return None
         finally:
             try:
@@ -676,9 +812,20 @@ class SlideCompositor:
         self.assembler = assembler
 
     def render_segment(self, segment: dict) -> bytes:
-        """Render a segment into a PNG image based on its type."""
+        """Render a segment into PNG bytes."""
+        img = self.render_segment_image(segment)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def render_segment_image(self, segment: dict):
+        """
+        Render a segment into a PIL Image (no PNG encoding).
+
+        Used by MoviePy pipeline to avoid encode/decode roundtrip.
+        Returns PIL Image object ready for numpy conversion.
+        """
         segment_type = segment.get("segment_type", "headline")
-        narration = segment.get("narration", "")
 
         renderer = {
             "headline": self._render_headline,
@@ -689,20 +836,35 @@ class SlideCompositor:
             "closing": self._render_closing,
         }.get(segment_type, self._render_default)
 
-        from PIL import Image
-
         img = renderer(segment)
         self._add_overlays(img, segment)
+        return img
 
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
+    def _draw_gradient_bg(self, img, top_color=BG_COLOR, bottom_color=(20, 35, 60)):
+        """Draw a vertical gradient background for visual depth."""
+        from PIL import ImageDraw
+
+        draw = ImageDraw.Draw(img)
+        for y in range(SLIDE_HEIGHT):
+            r = int(top_color[0] + (bottom_color[0] - top_color[0]) * y / SLIDE_HEIGHT)
+            g = int(top_color[1] + (bottom_color[1] - top_color[1]) * y / SLIDE_HEIGHT)
+            b = int(top_color[2] + (bottom_color[2] - top_color[2]) * y / SLIDE_HEIGHT)
+            draw.line([(0, y), (SLIDE_WIDTH, y)], fill=(r, g, b))
+
+    def _draw_text_with_shadow(
+        self, draw, pos, text, fill, font, shadow_color=(0, 0, 0), shadow_offset=2
+    ):
+        """Draw text with a drop shadow for depth."""
+        x, y = pos
+        draw.text((x + shadow_offset, y + shadow_offset), text, fill=shadow_color, font=font)
+        draw.text((x, y), text, fill=fill, font=font)
 
     def _render_headline(self, segment: dict):
         """Title card with CropSight branding."""
         from PIL import Image, ImageDraw
 
         img = Image.new("RGB", (SLIDE_WIDTH, SLIDE_HEIGHT), BG_COLOR)
+        self._draw_gradient_bg(img)
         draw = ImageDraw.Draw(img)
 
         # Week label
@@ -713,19 +875,19 @@ class SlideCompositor:
             font=self.assembler._get_font("label"),
         )
 
-        # Narration as title text (first sentence)
+        # Accent bar
+        draw.rectangle([(120, 350), (500, 354)], fill=ACCENT_COLOR)
+
+        # Narration as title text
         narration = segment.get("narration", "")
         lines = self.assembler._wrap_text(narration, max_chars=50)
         y = 370
         for line in lines[:3]:
-            draw.text(
-                (120, y), line, fill=TEXT_COLOR,
+            self._draw_text_with_shadow(
+                draw, (120, y), line, TEXT_COLOR,
                 font=self.assembler._get_font("headline"),
             )
             y += 65
-
-        # Accent bar
-        draw.rectangle([(120, 350), (500, 354)], fill=ACCENT_COLOR)
 
         return img
 
@@ -734,6 +896,7 @@ class SlideCompositor:
         from PIL import Image, ImageDraw
 
         img = Image.new("RGB", (SLIDE_WIDTH, SLIDE_HEIGHT), BG_COLOR)
+        self._draw_gradient_bg(img)
         draw = ImageDraw.Draw(img)
 
         data = segment.get("data", {})
@@ -851,6 +1014,7 @@ class SlideCompositor:
         from PIL import Image, ImageDraw
 
         img = Image.new("RGB", (SLIDE_WIDTH, SLIDE_HEIGHT), BG_COLOR)
+        self._draw_gradient_bg(img)
         draw = ImageDraw.Draw(img)
 
         country_code = segment.get("country_code", "")
@@ -889,6 +1053,7 @@ class SlideCompositor:
         from PIL import Image, ImageDraw
 
         img = Image.new("RGB", (SLIDE_WIDTH, SLIDE_HEIGHT), BG_COLOR)
+        self._draw_gradient_bg(img)
         draw = ImageDraw.Draw(img)
 
         entity = segment.get("entity", "")
@@ -931,6 +1096,7 @@ class SlideCompositor:
         from PIL import Image, ImageDraw
 
         img = Image.new("RGB", (SLIDE_WIDTH, SLIDE_HEIGHT), BG_COLOR)
+        self._draw_gradient_bg(img)
         draw = ImageDraw.Draw(img)
 
         draw.text(
