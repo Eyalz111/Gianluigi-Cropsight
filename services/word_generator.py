@@ -368,41 +368,6 @@ def generate_signal_docx(
 
     doc.add_paragraph()  # spacing
 
-    # --- Flags section ---
-    if flags:
-        doc.add_heading("Flags", level=2)
-        table = doc.add_table(rows=0, cols=2)
-        table.style = "Light Grid Accent 1"
-
-        for f in flags:
-            if not isinstance(f, dict):
-                continue
-            row = table.add_row()
-            urgency = f.get("urgency", "medium")
-
-            urgency_cell = row.cells[0]
-            urgency_cell.text = urgency.upper()
-            for paragraph in urgency_cell.paragraphs:
-                for r in paragraph.runs:
-                    r.bold = True
-                    r.font.size = Pt(9)
-                    if urgency == "high":
-                        r.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)
-                    else:
-                        r.font.color.rgb = RGBColor(0xFF, 0xC1, 0x07)
-
-            flag_cell = row.cells[1]
-            flag_cell.text = f.get("flag", "")
-            for paragraph in flag_cell.paragraphs:
-                for r in paragraph.runs:
-                    r.font.size = Pt(10)
-
-        for row in table.rows:
-            row.cells[0].width = Inches(0.8)
-            row.cells[1].width = Inches(5.5)
-
-        doc.add_paragraph()
-
     # --- Parse markdown content into sections ---
     sections = _parse_signal_sections(signal_content)
 

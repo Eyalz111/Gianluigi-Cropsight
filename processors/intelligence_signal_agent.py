@@ -239,18 +239,31 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
     if not recipients:
         return {"status": "error", "error": "No recipients configured"}
 
-    # Generate .docx for attachment
-    from services.word_generator import generate_signal_docx
+    # Download existing .docx from Drive for attachment (don't regenerate)
+    docx_bytes = None
+    if signal.get("drive_doc_id"):
+        try:
+            from services.google_drive import drive_service
 
-    docx_bytes = generate_signal_docx(
-        signal_content=content,
-        week_number=week_number,
-        year=year,
-        flags=flags,
-        research_source=signal.get("research_source", "perplexity"),
-    )
+            docx_bytes = await drive_service.download_file_bytes(
+                signal["drive_doc_id"]
+            )
+        except Exception as e:
+            logger.warning(f"Could not download .docx from Drive: {e}")
 
-    # Build attachments list
+    # Fallback: regenerate .docx if download failed
+    if not docx_bytes:
+        from services.word_generator import generate_signal_docx
+
+        docx_bytes = generate_signal_docx(
+            signal_content=content,
+            week_number=week_number,
+            year=year,
+            flags=flags,
+            research_source=signal.get("research_source", "perplexity"),
+        )
+
+    # Attachments: .docx only (video doesn't play inline in email clients)
     attachments = [
         {
             "filename": f"CropSight Intelligence Signal W{week_number}-{year}.docx",
@@ -258,25 +271,6 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
             "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }
     ]
-
-    # Attach video if available and < 20MB (Gmail 25MB limit, leave headroom)
-    video_bytes = None
-    if signal.get("drive_video_id"):
-        try:
-            from services.google_drive import drive_service
-
-            video_bytes = await drive_service.download_file_bytes(
-                signal["drive_video_id"]
-            )
-        except Exception as e:
-            logger.warning(f"Could not download video for email attachment: {e}")
-
-    if video_bytes and len(video_bytes) < 20 * 1024 * 1024:
-        attachments.append({
-            "filename": f"CropSight Signal W{week_number}-{year}.mp4",
-            "data": video_bytes,
-            "mimetype": "video/mp4",
-        })
 
     # Format email with video/audio links
     from services.gmail import gmail_service
@@ -328,7 +322,6 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
             "signal_id": signal_id,
             "recipients": recipients,
             "recipient_count": len(recipients),
-            "has_video_attachment": video_bytes is not None,
         },
         triggered_by="eyal",
     )

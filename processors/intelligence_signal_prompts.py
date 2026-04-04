@@ -313,6 +313,42 @@ def format_telegram_notification(
     return "\n".join(lines)
 
 
+def _extract_teaser(signal_content: str) -> str:
+    """
+    Extract a 2-3 sentence teaser from the signal content.
+
+    Grabs everything before the first ## heading (the intro/flags area),
+    strips markdown formatting, and returns clean text.
+    """
+    import re
+
+    # Get text before the first ## heading
+    parts = re.split(r'^##\s+', signal_content, maxsplit=1, flags=re.MULTILINE)
+    intro = parts[0].strip() if parts else signal_content[:500]
+
+    # Strip markdown formatting
+    intro = re.sub(r'\*\*\[FLAG\]\*\*\s*', '', intro)  # Remove flag markers
+    intro = re.sub(r'\(urgency:\s*\w+\)', '', intro)    # Remove urgency tags
+    intro = re.sub(r'\*\*(.+?)\*\*', r'\1', intro)      # Bold → plain
+    intro = re.sub(r'#{1,3}\s+.*$', '', intro, flags=re.MULTILINE)  # Remove any headers
+    intro = re.sub(r'\n{2,}', '\n', intro).strip()
+
+    # If too long, truncate at sentence boundary
+    if len(intro) > 400:
+        cut = intro[:400].rfind(".")
+        if cut > 100:
+            intro = intro[:cut + 1]
+        else:
+            cut = intro[:400].rfind(" ")
+            intro = intro[:cut] + "..." if cut > 0 else intro[:400] + "..."
+
+    # If empty (flags-only intro), use a generic teaser
+    if len(intro) < 20:
+        intro = "This week's intelligence signal is ready for your review."
+
+    return intro
+
+
 def format_email_html(
     signal_content: str,
     drive_link: str,
@@ -323,42 +359,39 @@ def format_email_html(
     audio_link: str | None = None,
 ) -> str:
     """
-    Format HTML email body for the intelligence signal.
+    Format HTML email body — concise teaser with links.
 
-    Inline CSS for email client compatibility. Clean, professional styling.
-
-    Args:
-        signal_content: Full markdown signal content.
-        drive_link: Google Doc link.
-        week_number: ISO week number.
-        year: Year.
-        flags: Structured flags list.
-
-    Returns:
-        HTML string ready for gmail_service.send_email(html_body=...).
+    Follows the meeting summary email pattern: short preview paragraph,
+    not the full report. Full report is in the attached .docx.
     """
-    # Convert markdown-style content to basic HTML
-    html_content = _markdown_to_html(signal_content)
+    teaser = _extract_teaser(signal_content)
 
-    # Build flags section
+    # Build links section
+    links_html = f'<a href="{drive_link}" style="color:#00D4AA;">View full report in Drive</a>'
+    if video_link:
+        links_html += f' | <a href="{video_link}" style="color:#00D4AA;">Watch video</a>'
+    if audio_link:
+        links_html += f' | <a href="{audio_link}" style="color:#00D4AA;">Listen to podcast</a>'
+
+    # Flags preview (compact, inline)
     flags_html = ""
     if flags:
-        flag_items = ""
-        for f in flags:
+        flag_lines = []
+        for f in flags[:3]:
             if isinstance(f, dict):
                 urgency = f.get("urgency", "medium")
                 color = "#dc3545" if urgency == "high" else "#ffc107"
-                flag_items += (
-                    f'<li style="margin-bottom:8px;">'
+                flag_lines.append(
                     f'<span style="color:{color};font-weight:bold;">'
-                    f'[{urgency.upper()}]</span> {f.get("flag", "")}</li>'
+                    f'[{urgency.upper()}]</span> {f.get("flag", "")}'
                 )
-        if flag_items:
-            flags_html = f"""
-            <div style="background:#f8f9fa;border-left:4px solid #0A1628;padding:12px 16px;margin:16px 0;">
-                <h3 style="margin:0 0 8px 0;color:#0A1628;">Flags</h3>
-                <ul style="margin:0;padding-left:20px;">{flag_items}</ul>
-            </div>"""
+        if flag_lines:
+            flags_html = (
+                '<div style="margin:16px 0;padding:12px 16px;'
+                'background:#f8f9fa;border-left:4px solid #0A1628;">'
+                + "<br>".join(flag_lines)
+                + "</div>"
+            )
 
     return f"""<!DOCTYPE html>
 <html>
@@ -375,18 +408,18 @@ def format_email_html(
 
     {flags_html}
 
-    <div style="font-size:16px;">
-        {html_content}
-    </div>
+    <p style="font-size:16px;">{teaser}</p>
 
-    <div style="margin-top:32px;padding-top:16px;border-top:1px solid #ddd;font-size:13px;color:#666;">
-        <p>
-            <a href="{drive_link}" style="color:#00D4AA;">View full signal in Google Docs</a>
-            {f' | <a href="{video_link}" style="color:#00D4AA;">Watch video</a>' if video_link else ''}
-            {f' | <a href="{audio_link}" style="color:#00D4AA;">Listen to podcast</a>' if audio_link else ''}
-        </p>
-        <p>CropSight Intelligence Signal is generated weekly by Gianluigi, CropSight's AI operations assistant.</p>
-    </div>
+    <p style="font-size:14px;color:#444;">
+        <strong>Full report attached as Word document.</strong>
+    </p>
+
+    <p style="font-size:13px;">{links_html}</p>
+
+    <hr style="border:none;border-top:1px solid #ddd;margin:24px 0;">
+    <p style="font-size:12px;color:#999;">
+        CropSight Intelligence Signal is generated weekly by Gianluigi.
+    </p>
 </body>
 </html>"""
 
@@ -398,26 +431,22 @@ def format_email_plain(
     audio_link: str | None = None,
 ) -> str:
     """
-    Format plain text email body (fallback for non-HTML clients).
-
-    Args:
-        signal_content: Full signal content in markdown.
-        drive_link: Google Doc link.
-
-    Returns:
-        Plain text email body.
+    Format plain text email body — concise teaser with links.
     """
-    links = [f"View full signal: {drive_link}"]
+    teaser = _extract_teaser(signal_content)
+
+    links = [f"Full report: {drive_link}"]
     if video_link:
         links.append(f"Watch video: {video_link}")
     if audio_link:
         links.append(f"Listen to podcast: {audio_link}")
 
     return (
-        f"{signal_content}\n\n"
+        f"{teaser}\n\n"
+        f"Full report attached as Word document.\n\n"
         f"---\n"
-        f"{chr(10).join(links)}\n"
-        f"Generated by Gianluigi, CropSight's AI operations assistant."
+        + "\n".join(links)
+        + "\n\nGenerated by Gianluigi, CropSight's AI operations assistant."
     )
 
 
