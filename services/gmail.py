@@ -234,16 +234,16 @@ class GmailService:
 
             # File attachments
             for att in (attachments or []):
-                part = MIMEBase("application", "octet-stream")
+                mimetype = att.get("mimetype", "application/octet-stream")
+                main_type, sub_type = mimetype.split("/", 1)
+                part = MIMEBase(main_type, sub_type)
                 part.set_payload(att["data"])
                 encoders.encode_base64(part)
                 part.add_header(
                     "Content-Disposition",
-                    f'attachment; filename="{att["filename"]}"',
+                    "attachment",
+                    filename=att["filename"],
                 )
-                if att.get("mimetype"):
-                    main_type, sub_type = att["mimetype"].split("/", 1)
-                    part.set_type(att["mimetype"])
                 msg.attach(part)
 
             raw_message = base64.urlsafe_b64encode(

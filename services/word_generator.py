@@ -382,11 +382,40 @@ def generate_signal_docx(
             continue
 
         lines = section_body.strip().split("\n")
+        table_rows = []
+        in_table = False
+
         for line in lines:
             stripped = line.strip()
             if not stripped:
+                # Flush any pending table
+                if table_rows:
+                    _add_markdown_table(doc, table_rows)
+                    table_rows = []
+                    in_table = False
                 continue
 
+            # Skip horizontal rules and metadata lines
+            if stripped.startswith("---") or stripped.startswith("*Week ending"):
+                continue
+
+            # Detect markdown table rows
+            if stripped.startswith("|") and stripped.endswith("|"):
+                # Skip separator rows (|---|---|)
+                if re.match(r'^\|[\s\-:|]+\|$', stripped):
+                    continue
+                cells = [c.strip() for c in stripped.split("|")[1:-1]]
+                table_rows.append(cells)
+                in_table = True
+                continue
+
+            # Flush table if we were in one
+            if table_rows:
+                _add_markdown_table(doc, table_rows)
+                table_rows = []
+                in_table = False
+
+            # Bullet points
             if stripped.startswith("- ") or stripped.startswith("* "):
                 para = doc.add_paragraph(style="List Bullet")
                 _add_formatted_runs(para, stripped[2:])
@@ -395,6 +424,10 @@ def generate_signal_docx(
                 _add_formatted_runs(para, stripped)
                 for r in para.runs:
                     r.font.size = Pt(10)
+
+        # Flush final table
+        if table_rows:
+            _add_markdown_table(doc, table_rows)
 
     # --- Footer ---
     doc.add_paragraph()
@@ -429,6 +462,38 @@ def _parse_signal_sections(content: str) -> list[tuple[str, str]]:
             i += 1
 
     return sections
+
+
+def _add_markdown_table(doc, rows: list[list[str]]) -> None:
+    """Render a markdown table as a Word table."""
+    if not rows:
+        return
+
+    num_cols = len(rows[0])
+    table = doc.add_table(rows=1, cols=num_cols)
+    table.style = "Light Grid Accent 1"
+
+    # First row as header
+    for j, cell_text in enumerate(rows[0][:num_cols]):
+        cell = table.rows[0].cells[j]
+        cell.text = cell_text
+        for paragraph in cell.paragraphs:
+            for run in paragraph.runs:
+                run.bold = True
+                run.font.size = Pt(9)
+
+    # Data rows
+    for row_data in rows[1:]:
+        row = table.add_row()
+        for j, cell_text in enumerate(row_data[:num_cols]):
+            row.cells[j].text = cell_text
+            for paragraph in row.cells[j].paragraphs:
+                paragraph.paragraph_format.space_before = Pt(1)
+                paragraph.paragraph_format.space_after = Pt(1)
+                for run in paragraph.runs:
+                    run.font.size = Pt(9)
+
+    doc.add_paragraph()  # Spacing after table
 
 
 def _add_formatted_runs(paragraph, text: str) -> None:

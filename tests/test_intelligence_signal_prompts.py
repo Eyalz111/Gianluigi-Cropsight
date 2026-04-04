@@ -209,37 +209,42 @@ class TestFormatEmailHtml:
         assert "Week 14" in html
         assert "https://example.com" in html
 
-    def test_includes_flags_in_html(self):
+    def test_uses_teaser_not_full_content(self):
         html = format_email_html(
-            signal_content="Content.",
+            signal_content="## FLAGS\nSome flag\n\n## The Problem\nFirst sentence. Second sentence. Third sentence.\n\n## More\nOther content.",
             drive_link="https://example.com",
             week_number=14,
             year=2026,
-            flags=[{"flag": "Important flag", "urgency": "high"}],
         )
 
-        assert "Important flag" in html
-        assert "HIGH" in html
+        assert "Full report attached" in html
+        assert "First sentence" in html
+        # Should NOT have the full report inline
+        assert "Other content" not in html
 
-    def test_handles_no_flags(self):
+    def test_includes_drive_links(self):
         html = format_email_html(
-            signal_content="Content.",
+            signal_content="## Topic\nContent here.",
             drive_link="https://example.com",
             week_number=14,
             year=2026,
-            flags=[],
+            video_link="https://video.example.com",
+            audio_link="https://audio.example.com",
         )
 
-        assert "<!DOCTYPE html>" in html
+        assert "https://example.com" in html
+        assert "https://video.example.com" in html
+        assert "https://audio.example.com" in html
 
 
 class TestFormatEmailPlain:
-    def test_includes_content_and_link(self):
+    def test_includes_teaser_and_link(self):
         plain = format_email_plain(
-            signal_content="The market moved 5%.",
+            signal_content="## Topic\nThe market moved 5%. Second sentence here.",
             drive_link="https://example.com/doc",
         )
 
-        assert "The market moved 5%" in plain
+        assert "market moved 5%" in plain
         assert "https://example.com/doc" in plain
+        assert "Full report attached" in plain
         assert "Gianluigi" in plain

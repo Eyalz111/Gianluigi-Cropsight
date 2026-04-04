@@ -315,38 +315,51 @@ def format_telegram_notification(
 
 def _extract_teaser(signal_content: str) -> str:
     """
-    Extract a 2-3 sentence teaser from the signal content.
+    Extract a 2-3 sentence teaser from the first real content section.
 
-    Grabs everything before the first ## heading (the intro/flags area),
-    strips markdown formatting, and returns clean text.
+    Skips the title, metadata, and FLAGS section. Grabs the first
+    paragraph of actual content (typically "The Problem, This Week").
     """
     import re
 
-    # Get text before the first ## heading
-    parts = re.split(r'^##\s+', signal_content, maxsplit=1, flags=re.MULTILINE)
-    intro = parts[0].strip() if parts else signal_content[:500]
+    # Split into sections on ## headers
+    sections = re.split(r'^##\s+(.+)$', signal_content, flags=re.MULTILINE)
 
-    # Strip markdown formatting
-    intro = re.sub(r'\*\*\[FLAG\]\*\*\s*', '', intro)  # Remove flag markers
-    intro = re.sub(r'\(urgency:\s*\w+\)', '', intro)    # Remove urgency tags
-    intro = re.sub(r'\*\*(.+?)\*\*', r'\1', intro)      # Bold → plain
-    intro = re.sub(r'#{1,3}\s+.*$', '', intro, flags=re.MULTILINE)  # Remove any headers
-    intro = re.sub(r'\n{2,}', '\n', intro).strip()
+    # sections alternates: [preamble, header1, body1, header2, body2, ...]
+    # Find the first non-FLAGS section body
+    teaser = ""
+    i = 1  # Skip preamble (index 0)
+    while i + 1 < len(sections):
+        header = sections[i].strip()
+        body = sections[i + 1].strip()
+        i += 2
 
-    # If too long, truncate at sentence boundary
-    if len(intro) > 400:
-        cut = intro[:400].rfind(".")
-        if cut > 100:
-            intro = intro[:cut + 1]
-        else:
-            cut = intro[:400].rfind(" ")
-            intro = intro[:cut] + "..." if cut > 0 else intro[:400] + "..."
+        # Skip FLAGS section
+        if header.upper().startswith("FLAG"):
+            continue
 
-    # If empty (flags-only intro), use a generic teaser
-    if len(intro) < 20:
-        intro = "This week's intelligence signal is ready for your review."
+        # Found real content — grab first 2-3 sentences
+        # Strip markdown formatting
+        body = re.sub(r'\*\*(.+?)\*\*', r'\1', body)  # Bold → plain
+        body = re.sub(r'#{1,3}\s+.*$', '', body, flags=re.MULTILINE)
+        body = re.sub(r'---+', '', body)
+        body = body.strip()
 
-    return intro
+        # Get first 2-3 sentences
+        sentences = re.split(r'(?<=[.!?])\s+', body)
+        teaser = " ".join(sentences[:3])
+
+        if len(teaser) > 400:
+            cut = teaser[:400].rfind(".")
+            if cut > 100:
+                teaser = teaser[:cut + 1]
+
+        break
+
+    if len(teaser) < 20:
+        teaser = "This week's intelligence signal is ready for your review."
+
+    return teaser
 
 
 def format_email_html(
@@ -367,31 +380,12 @@ def format_email_html(
     teaser = _extract_teaser(signal_content)
 
     # Build links section
-    links_html = f'<a href="{drive_link}" style="color:#00D4AA;">View full report in Drive</a>'
+    links_parts = [f'<a href="{drive_link}" style="color:#00D4AA;">View full report</a>']
     if video_link:
-        links_html += f' | <a href="{video_link}" style="color:#00D4AA;">Watch video</a>'
+        links_parts.append(f'<a href="{video_link}" style="color:#00D4AA;">Watch video</a>')
     if audio_link:
-        links_html += f' | <a href="{audio_link}" style="color:#00D4AA;">Listen to podcast</a>'
-
-    # Flags preview (compact, inline)
-    flags_html = ""
-    if flags:
-        flag_lines = []
-        for f in flags[:3]:
-            if isinstance(f, dict):
-                urgency = f.get("urgency", "medium")
-                color = "#dc3545" if urgency == "high" else "#ffc107"
-                flag_lines.append(
-                    f'<span style="color:{color};font-weight:bold;">'
-                    f'[{urgency.upper()}]</span> {f.get("flag", "")}'
-                )
-        if flag_lines:
-            flags_html = (
-                '<div style="margin:16px 0;padding:12px 16px;'
-                'background:#f8f9fa;border-left:4px solid #0A1628;">'
-                + "<br>".join(flag_lines)
-                + "</div>"
-            )
+        links_parts.append(f'<a href="{audio_link}" style="color:#00D4AA;">Listen to podcast</a>')
+    links_html = " &middot; ".join(links_parts)
 
     return f"""<!DOCTYPE html>
 <html>
@@ -406,9 +400,7 @@ def format_email_html(
         </p>
     </div>
 
-    {flags_html}
-
-    <p style="font-size:16px;">{teaser}</p>
+    <p style="font-size:16px;line-height:1.7;">{teaser}</p>
 
     <p style="font-size:14px;color:#444;">
         <strong>Full report attached as Word document.</strong>
