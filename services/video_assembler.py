@@ -377,38 +377,53 @@ class VideoAssembler:
             final = concatenate_videoclips(video_clips)
             final = final.with_audio(audio_clip)
 
-            output_path = os.path.join(tmp_dir, "output.mp4")
+            # Pass 1: MoviePy compositing
+            moviepy_output = os.path.join(tmp_dir, "moviepy_raw.mp4")
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
                 lambda: final.write_videofile(
-                    output_path,
-                    fps=fps,
-                    codec="libx264",
-                    audio_codec="aac",
-                    audio_bitrate="192k",
-                    preset="medium",
-                    ffmpeg_params=[
-                        "-profile:v", "high",
-                        "-level", "4.0",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                        "-b:v", "1M",
-                        "-maxrate", "2M",
-                        "-bufsize", "2M",
-                        "-ar", "48000",
-                        "-ac", "2",
-                    ],
-                    logger=None,
+                    moviepy_output, fps=fps, codec="libx264",
+                    audio_codec="aac", logger=None,
                 ),
             )
+
+            dur = audio_clip.duration
+
+            # Close clips before pass 2
+            for clip in video_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            try:
+                audio_clip.close()
+                final.close()
+            except Exception:
+                pass
+
+            # Pass 2: ffmpeg re-encode for universal playback
+            output_path = os.path.join(tmp_dir, "output.mp4")
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", moviepy_output,
+                "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
+                "-pix_fmt", "yuv420p", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                "-movflags", "+faststart", output_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+
+            if proc.returncode != 0:
+                logger.error(f"ffmpeg re-encode failed: {stderr.decode()[:500]}")
+                output_path = moviepy_output
 
             with open(output_path, "rb") as f:
                 video_bytes = f.read()
 
             logger.info(
-                f"Video assembled (MoviePy): {len(slide_images)} slides, "
-                f"{audio_clip.duration:.1f}s, {len(video_bytes)} bytes"
+                f"Video assembled (2-pass): {len(slide_images)} slides, "
+                f"{dur:.1f}s, {len(video_bytes)} bytes"
             )
             return video_bytes
 
@@ -664,50 +679,23 @@ class VideoAssembler:
                 video_clips, method="compose", padding=-0.3
             )
 
-            # Write video file (CPU-intensive — run in executor)
-            output_path = os.path.join(tmp_dir, "output.mp4")
+            # Pass 1: MoviePy compositing (let it use its own defaults)
+            moviepy_output = os.path.join(tmp_dir, "moviepy_raw.mp4")
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
                 lambda: final.write_videofile(
-                    output_path,
+                    moviepy_output,
                     fps=24,
                     codec="libx264",
                     audio_codec="aac",
-                    audio_bitrate="192k",
-                    preset="medium",
-                    ffmpeg_params=[
-                        "-profile:v", "high",
-                        "-level", "4.0",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                        "-b:v", "1M",
-                        "-maxrate", "2M",
-                        "-bufsize", "2M",
-                        "-ar", "48000",
-                        "-ac", "2",
-                    ],
-                    logger=None,  # Suppress MoviePy progress bar
+                    logger=None,
                 ),
             )
 
             final_duration = final.duration
 
-            with open(output_path, "rb") as f:
-                video_bytes = f.read()
-
-            logger.info(
-                f"MoviePy video assembled: {len(segments)} segments, "
-                f"{final_duration:.1f}s, {len(video_bytes) / 1024 / 1024:.1f} MB"
-            )
-            return video_bytes
-
-        except Exception as e:
-            logger.error(f"MoviePy segment assembly failed: {e}")
-            return None
-        finally:
-            # Close all MoviePy clips before deleting temp files
-            # (MoviePy holds file handles on audio files)
+            # Close MoviePy clips before pass 2 (release file handles)
             for clip in video_clips:
                 try:
                     clip.close()
@@ -719,10 +707,65 @@ class VideoAssembler:
                 except Exception:
                     pass
             try:
-                if "final" in dir():
-                    final.close()
+                final.close()
             except Exception:
                 pass
+
+            # Pass 2: ffmpeg re-encode for universal playback
+            output_path = os.path.join(tmp_dir, "output.mp4")
+            reencode_cmd = [
+                "ffmpeg", "-y", "-i", moviepy_output,
+                "-c:v", "libx264",
+                "-profile:v", "high",
+                "-level", "4.0",
+                "-pix_fmt", "yuv420p",
+                "-crf", "18",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", "48000",
+                "-ac", "2",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+
+            proc = await asyncio.create_subprocess_exec(
+                *reencode_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=180
+            )
+
+            if proc.returncode != 0:
+                logger.error(f"ffmpeg re-encode failed: {stderr.decode()[:500]}")
+                # Fallback: use MoviePy output as-is
+                output_path = moviepy_output
+
+            with open(output_path, "rb") as f:
+                video_bytes = f.read()
+
+            logger.info(
+                f"Video assembled (2-pass): {len(segments)} segments, "
+                f"{final_duration:.1f}s, {len(video_bytes) / 1024 / 1024:.1f} MB"
+            )
+            return video_bytes
+
+        except Exception as e:
+            logger.error(f"MoviePy segment assembly failed: {e}")
+            return None
+        finally:
+            # Clips already closed before pass 2, but ensure cleanup on error
+            for clip in video_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            for clip in audio_file_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
             try:
                 import shutil
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1108,32 +1151,30 @@ class SlideCompositor:
         return img
 
     def _render_closing(self, segment: dict):
-        """Closing slide with CropSight branding."""
+        """Closing slide with summary narration + CropSight branding."""
         from PIL import Image, ImageDraw
 
         img = Image.new("RGB", (SLIDE_WIDTH, SLIDE_HEIGHT), BG_COLOR)
         self._draw_gradient_bg(img)
         draw = ImageDraw.Draw(img)
 
+        # Show actual closing narration (the summary/conclusion)
+        narration = segment.get("narration", "")
+        if narration:
+            lines = self.assembler._wrap_text(narration, max_chars=55)
+            y = 250
+            for line in lines[:5]:
+                self._draw_text_with_shadow(
+                    draw, (120, y), line, TEXT_COLOR,
+                    font=self.assembler._get_font("body"),
+                )
+                y += 55
+
+        draw.rectangle([(120, y + 20), (700, y + 24)], fill=ACCENT_COLOR)
+
         draw.text(
-            (120, 350),
+            (120, y + 40),
             "CropSight Intelligence Signal",
-            fill=TEXT_COLOR,
-            font=self.assembler._get_font("headline"),
-        )
-
-        draw.text(
-            (120, 430),
-            "Read the full report.",
-            fill=MUTED_COLOR,
-            font=self.assembler._get_font("subtitle"),
-        )
-
-        draw.rectangle([(120, 500), (700, 504)], fill=ACCENT_COLOR)
-
-        draw.text(
-            (120, 540),
-            "cropsight.com",
             fill=ACCENT_COLOR,
             font=self.assembler._get_font("small"),
         )

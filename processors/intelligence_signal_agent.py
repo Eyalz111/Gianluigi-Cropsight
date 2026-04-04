@@ -132,10 +132,21 @@ async def generate_intelligence_signal(signal_id: str | None = None) -> dict:
     logger.info(f"Signal content saved to DB: {signal_id}")
 
     # 8. Generate .docx and upload to Drive
+    #    Delete old file first if re-running the same signal (prevents duplicates)
     drive_result = {}
     try:
         from services.google_drive import drive_service
         from services.word_generator import generate_signal_docx
+
+        existing_doc_id = supabase_client.get_intelligence_signal(signal_id)
+        if existing_doc_id and existing_doc_id.get("drive_doc_id"):
+            try:
+                drive_service.service.files().delete(
+                    fileId=existing_doc_id["drive_doc_id"]
+                ).execute()
+                logger.info(f"Deleted old Drive doc: {existing_doc_id['drive_doc_id']}")
+            except Exception:
+                pass  # File may already be deleted
 
         docx_bytes = generate_signal_docx(
             signal_content=signal_content,
