@@ -393,6 +393,9 @@ class VideoAssembler:
                         "-level", "4.0",
                         "-pix_fmt", "yuv420p",
                         "-movflags", "+faststart",
+                        "-minrate", "500k",
+                        "-maxrate", "2M",
+                        "-bufsize", "1M",
                     ],
                     logger=None,
                 ),
@@ -466,6 +469,7 @@ class VideoAssembler:
                 "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
                 "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
+                "-minrate", "500k", "-maxrate", "2M", "-bufsize", "1M",
                 "-shortest", "-movflags", "+faststart", output_path,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -672,6 +676,9 @@ class VideoAssembler:
                         "-level", "4.0",
                         "-pix_fmt", "yuv420p",
                         "-movflags", "+faststart",
+                        "-minrate", "500k",
+                        "-maxrate", "2M",
+                        "-bufsize", "1M",
                     ],
                     logger=None,  # Suppress MoviePy progress bar
                 ),
@@ -772,6 +779,7 @@ class VideoAssembler:
                 "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
                 "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
+                "-minrate", "500k", "-maxrate", "2M", "-bufsize", "1M",
                 "-shortest", "-movflags", "+faststart", output_path,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -1144,10 +1152,34 @@ class SlideCompositor:
         return img
 
     def _add_overlays(self, img, segment: dict):
-        """Add watermark, progress indicator, and source citation."""
+        """Add watermark, progress indicator, segment label, and source citation."""
         from PIL import ImageDraw
 
         draw = ImageDraw.Draw(img)
+
+        # Segment type label (top-left) — e.g. "COMMODITY PULSE", "COMPETITIVE LANDSCAPE"
+        seg_type = segment.get("segment_type", "")
+        label_map = {
+            "headline": "",  # No label on title slide
+            "stat": "MARKET DATA",
+            "crop": "CROP WATCH",
+            "country": "REGIONAL",
+            "competitor": "COMPETITIVE LANDSCAPE",
+            "closing": "",
+        }
+        label = label_map.get(seg_type, "")
+        if label:
+            # Background pill for the label
+            draw.rectangle(
+                [(110, 25), (110 + len(label) * 13 + 20, 55)],
+                fill=ACCENT_COLOR,
+            )
+            draw.text(
+                (120, 28),
+                label,
+                fill=BG_COLOR,
+                font=self.assembler._get_font("small"),
+            )
 
         # CropSight watermark (top-right)
         draw.text(
@@ -1175,7 +1207,6 @@ class SlideCompositor:
         )
 
         # Source citation for stat/country slides
-        seg_type = segment.get("segment_type", "")
         if seg_type in ("stat", "country"):
             draw.text(
                 (120, SLIDE_HEIGHT - 50),

@@ -209,7 +209,10 @@ async def generate_intelligence_signal(signal_id: str | None = None) -> dict:
 
 async def distribute_intelligence_signal(signal_id: str) -> dict:
     """
-    Distribute an approved intelligence signal via email.
+    Distribute an approved intelligence signal via email with attachments.
+
+    Sends email with .docx attachment + video attachment (if < 20MB),
+    and includes Drive links for video and audio podcast in the body.
 
     Args:
         signal_id: The signal to distribute.
@@ -226,6 +229,8 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
         return {"status": "error", "error": "Signal has no content"}
 
     drive_link = signal.get("drive_doc_url", "")
+    video_link = signal.get("drive_video_url", "") or ""
+    audio_link = signal.get("drive_audio_url", "") or ""
     flags = signal.get("flags") or []
     week_number = signal.get("week_number", 0)
     year = signal.get("year", 0)
@@ -234,29 +239,79 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
     if not recipients:
         return {"status": "error", "error": "No recipients configured"}
 
-    # Send email
+    # Generate .docx for attachment
+    from services.word_generator import generate_signal_docx
+
+    docx_bytes = generate_signal_docx(
+        signal_content=content,
+        week_number=week_number,
+        year=year,
+        flags=flags,
+        research_source=signal.get("research_source", "perplexity"),
+    )
+
+    # Build attachments list
+    attachments = [
+        {
+            "filename": f"CropSight Intelligence Signal W{week_number}-{year}.docx",
+            "data": docx_bytes,
+            "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+    ]
+
+    # Attach video if available and < 20MB (Gmail 25MB limit, leave headroom)
+    video_bytes = None
+    if signal.get("drive_video_id"):
+        try:
+            from services.google_drive import drive_service
+
+            video_bytes = await drive_service.download_file_bytes(
+                signal["drive_video_id"]
+            )
+        except Exception as e:
+            logger.warning(f"Could not download video for email attachment: {e}")
+
+    if video_bytes and len(video_bytes) < 20 * 1024 * 1024:
+        attachments.append({
+            "filename": f"CropSight Signal W{week_number}-{year}.mp4",
+            "data": video_bytes,
+            "mimetype": "video/mp4",
+        })
+
+    # Format email with video/audio links
     from services.gmail import gmail_service
 
     subject = f"CropSight Intelligence Signal — W{week_number}/{year}"
-    plain_body = format_email_plain(content, drive_link)
-    html_body = format_email_html(content, drive_link, week_number, year, flags)
+    plain_body = format_email_plain(
+        content, drive_link, video_link=video_link, audio_link=audio_link
+    )
+    html_body = format_email_html(
+        content, drive_link, week_number, year, flags,
+        video_link=video_link, audio_link=audio_link,
+    )
 
-    email_sent = await gmail_service.send_email(
+    email_sent = await gmail_service.send_email_with_attachments(
         to=recipients,
         subject=subject,
         body=plain_body,
         html_body=html_body,
+        attachments=attachments,
     )
 
     if not email_sent:
         logger.error(f"Failed to send signal email for {signal_id}")
         return {"status": "error", "error": "Email send failed"}
 
-    # Send Telegram confirmation
+    # Telegram confirmation
     from services.telegram_bot import telegram_bot
 
-    await telegram_bot.send_to_eyal(
+    confirm_parts = [
         f"Intelligence Signal W{week_number} distributed to {len(recipients)} recipients.",
+    ]
+    if video_link:
+        confirm_parts.append("Video + audio podcast available in Drive.")
+    await telegram_bot.send_to_eyal(
+        "\n".join(confirm_parts),
         parse_mode="HTML",
     )
 
@@ -273,6 +328,7 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
             "signal_id": signal_id,
             "recipients": recipients,
             "recipient_count": len(recipients),
+            "has_video_attachment": video_bytes is not None,
         },
         triggered_by="eyal",
     )
@@ -618,8 +674,9 @@ def _extract_company_names(
     """
     Extract company names from research text.
 
-    Uses existing competitor names as anchors, plus simple heuristics
-    for discovering new names (capitalized multi-word patterns).
+    Uses existing competitor names as anchors, plus context-aware heuristics
+    for discovering new names. Requires either a known company suffix or
+    proximity to competitor-relevant words.
     """
     found = []
 
@@ -629,27 +686,69 @@ def _extract_company_names(
         if name.lower() in text.lower():
             found.append(name)
 
-    # Simple heuristic for new names: look for capitalized words
-    # that might be company names (very conservative)
-    # This is intentionally conservative — false negatives are better
-    # than false positives for auto-discovery
-    known_agtech_patterns = [
-        r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)*(?:\s(?:AI|ML|Tech|Ag|Bio))?)\b"
-    ]
-    for pattern in known_agtech_patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if (
-                len(match) > 3
-                and match.lower() not in {c["name"].lower() for c in existing_competitors}
-                and match.lower() not in found
-                and match not in [
-                    "The", "This", "What", "How", "New", "Recent",
-                    "According", "However", "Additionally", "Furthermore",
-                ]
-            ):
-                # Only add if it looks like it could be a company
+    # Context-aware discovery: only consider capitalized names that
+    # appear near competitor-relevant words
+    _CONTEXT_WORDS = {
+        "competitor", "rival", "launched", "raised", "funding",
+        "platform", "solution", "startup", "company", "acquired",
+        "partnership", "series", "seed", "round", "valuation",
+        "agtech", "agritech", "precision agriculture",
+    }
+
+    # Known company suffixes that signal a real entity
+    _COMPANY_SUFFIXES = {"AI", "ML", "Tech", "Ag", "Bio", "Labs", "Inc", "Ltd"}
+
+    # Stopwords that should never be company names
+    _STOPWORDS = {
+        "the", "this", "that", "what", "how", "new", "recent", "note",
+        "according", "however", "additionally", "furthermore", "also",
+        "market", "global", "report", "data", "week", "month", "year",
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+        "monday", "tuesday", "wednesday", "thursday", "friday",
+        "saturday", "sunday", "past", "future", "none", "unknown",
+        "verified", "unconfirmed", "active", "central", "capital",
+        "funding", "partnership", "expansion", "companies", "search",
+        "reporting", "period", "news", "impact", "investments",
+        "basel", "chile", "switzerland", "context",
+    }
+
+    # Find multi-word capitalized patterns (minimum 2 words or known suffix)
+    pattern = r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)\b"
+    matches = re.findall(pattern, text)
+
+    # Also find single words with company suffixes
+    suffix_pattern = r"\b([A-Z][a-z]+(?:\s(?:" + "|".join(_COMPANY_SUFFIXES) + r")))\b"
+    matches.extend(re.findall(suffix_pattern, text))
+
+    existing_lower = {c["name"].lower() for c in existing_competitors}
+    found_lower = {f.lower() for f in found}
+
+    for match in matches:
+        match_lower = match.lower()
+
+        # Skip if already found or known
+        if match_lower in existing_lower or match_lower in found_lower:
+            continue
+
+        # Skip stopwords
+        words = match_lower.split()
+        if any(w in _STOPWORDS for w in words):
+            continue
+
+        # Must be at least 2 words, or have a company suffix
+        has_suffix = any(w in _COMPANY_SUFFIXES for w in match.split())
+        if len(words) < 2 and not has_suffix:
+            continue
+
+        # Context check: must appear within 100 chars of a context word
+        match_pos = text.lower().find(match_lower)
+        if match_pos >= 0:
+            window = text[max(0, match_pos - 100):match_pos + len(match) + 100].lower()
+            has_context = any(cw in window for cw in _CONTEXT_WORDS)
+            if has_context:
                 found.append(match)
+                found_lower.add(match_lower)
 
     return list(set(found))
 
@@ -844,6 +943,10 @@ async def _upload_video_outputs(
             data=combined_audio, filename=audio_filename
         )
         if audio_result and audio_result.get("id"):
+            supabase_client.update_intelligence_signal(signal_id, {
+                "drive_audio_id": audio_result["id"],
+                "drive_audio_url": audio_result.get("webViewLink", ""),
+            })
             logger.info(f"Audio podcast uploaded: {audio_result.get('webViewLink')}")
     except Exception as e:
         logger.warning(f"Audio podcast upload failed: {e}")

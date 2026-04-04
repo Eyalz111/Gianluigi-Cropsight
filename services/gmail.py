@@ -195,6 +195,72 @@ class GmailService:
             logger.error(f"Error sending email: {e}")
             return False
 
+    async def send_email_with_attachments(
+        self,
+        to: list[str],
+        subject: str,
+        body: str,
+        html_body: str | None = None,
+        attachments: list[dict] | None = None,
+    ) -> bool:
+        """
+        Send an email with file attachments.
+
+        Args:
+            to: List of recipient email addresses.
+            subject: Email subject line.
+            body: Plain text email body.
+            html_body: Optional HTML version of the body.
+            attachments: List of dicts with filename, data (bytes), mimetype.
+
+        Returns:
+            True if email was sent successfully.
+        """
+        try:
+            from email.mime.base import MIMEBase
+            from email import encoders
+
+            msg = MIMEMultipart("mixed")
+            msg["From"] = self.sender_email
+            msg["To"] = ", ".join(to)
+            msg["Subject"] = subject
+
+            # Body as alternative part (plain + HTML)
+            body_part = MIMEMultipart("alternative")
+            body_part.attach(MIMEText(body, "plain"))
+            if html_body:
+                body_part.attach(MIMEText(html_body, "html"))
+            msg.attach(body_part)
+
+            # File attachments
+            for att in (attachments or []):
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(att["data"])
+                encoders.encode_base64(part)
+                part.add_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{att["filename"]}"',
+                )
+                if att.get("mimetype"):
+                    main_type, sub_type = att["mimetype"].split("/", 1)
+                    part.set_type(att["mimetype"])
+                msg.attach(part)
+
+            raw_message = base64.urlsafe_b64encode(
+                msg.as_bytes()
+            ).decode("utf-8")
+
+            self.service.users().messages().send(
+                userId="me", body={"raw": raw_message},
+            ).execute()
+
+            logger.info(f"Email with attachments sent: {subject} to {to}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error sending email with attachments: {e}")
+            return False
+
     async def send_meeting_summary(
         self,
         recipients: list[str],
