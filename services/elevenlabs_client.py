@@ -44,7 +44,7 @@ class ElevenLabsClient:
         self,
         text: str,
         voice_id: str | None = None,
-        model_id: str = "eleven_multilingual_v2",
+        model_id: str = "eleven_v3",
         stability: float = 0.5,
         similarity_boost: float = 0.75,
     ) -> Optional[bytes]:
