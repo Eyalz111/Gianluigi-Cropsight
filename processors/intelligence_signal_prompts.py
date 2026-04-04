@@ -235,7 +235,7 @@ Rules:
 7. Use "crop" for crop-specific news — include crop field (wheat, coffee, corn, soybeans, cocoa, grapes)
 8. Use "country" for country-specific news — include country_code (ISO 2-letter: BR, US, EU, IL, IN, UA, AR, CO, ET, ID)
 9. Use "competitor" for company news — keep visual_hint as "text_card"
-10. Write for speech — spell out percentages ("four percent" not "4%") and single-digit numbers ("three regions" not "3 regions"). Keep years, dollar amounts, and multi-digit quantities as digits ("2024", "$23M", "8.7 million tonnes", "23 countries")
+10. Number formatting (APPLY TO EVERY SEGMENT): Spell out percentages ("four percent" not "4%") and single-digit numbers ("three regions"). NEVER spell out years ("2024" not "twenty twenty-four"), dollar amounts ("$23M" not "twenty-three million dollars"), or multi-digit quantities ("23 countries", "8.7 million tonnes"). This rule applies to ALL segments including closing.
 11. The data field is ONLY for stat segments. Omit it for other types.
 12. country_code and crop fields are optional — only include when relevant to the segment
 

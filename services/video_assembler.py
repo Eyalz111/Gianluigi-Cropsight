@@ -407,7 +407,8 @@ class VideoAssembler:
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y", "-i", moviepy_output,
                 "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
-                "-pix_fmt", "yuv420p", "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-b:v", "2M", "-minrate", "1M", "-maxrate", "4M", "-bufsize", "4M",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
                 "-movflags", "+faststart", output_path,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

@@ -295,6 +295,12 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
         video_link=video_link, audio_link=audio_link,
     )
 
+    # Wait for Drive to process the video before sending email
+    # (Drive needs time to transcode for web/mobile streaming)
+    if video_link:
+        logger.info("Waiting 10 minutes for Drive video processing...")
+        await asyncio.sleep(600)
+
     email_sent = await gmail_service.send_email_with_attachments(
         to=recipients,
         subject=subject,

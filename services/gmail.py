@@ -225,12 +225,12 @@ class GmailService:
             msg["To"] = ", ".join(to)
             msg["Subject"] = subject
 
-            # Body as alternative part (plain + HTML)
-            body_part = MIMEMultipart("alternative")
-            body_part.attach(MIMEText(body, "plain"))
+            # Body — use HTML directly to avoid Gmail showing
+            # the plain text alternative as a separate attachment
             if html_body:
-                body_part.attach(MIMEText(html_body, "html"))
-            msg.attach(body_part)
+                msg.attach(MIMEText(html_body, "html"))
+            else:
+                msg.attach(MIMEText(body, "plain"))
 
             # File attachments
             for att in (attachments or []):
