@@ -380,7 +380,9 @@ def format_email_html(
     teaser = _extract_teaser(signal_content)
 
     # Build links section
-    links_parts = [f'<a href="{drive_link}" style="color:#00D4AA;">View full report</a>']
+    # Don't link to Drive doc — it's already attached as .docx
+    # (Gmail auto-detects Drive URLs and shows them as duplicate "attachments")
+    links_parts = []
     if video_link:
         links_parts.append(f'<a href="{video_link}" style="color:#00D4AA;">Watch video</a>')
     if audio_link:
@@ -427,7 +429,7 @@ def format_email_plain(
     """
     teaser = _extract_teaser(signal_content)
 
-    links = [f"Full report: {drive_link}"]
+    links = []
     if video_link:
         links.append(f"Watch video: {video_link}")
     if audio_link:
