@@ -220,19 +220,21 @@ class GmailService:
             from email.mime.base import MIMEBase
             from email import encoders
 
+            # Match exact MIME structure from send_meeting_summary()
+            # (proven to produce single attachment in Gmail)
             msg = MIMEMultipart("mixed")
             msg["From"] = self.sender_email
             msg["To"] = ", ".join(to)
             msg["Subject"] = subject
 
-            # Body — use HTML directly to avoid Gmail showing
-            # the plain text alternative as a separate attachment
+            # Body as alternative part (plain + HTML)
+            body_part = MIMEMultipart("alternative")
+            body_part.attach(MIMEText(body, "plain"))
             if html_body:
-                msg.attach(MIMEText(html_body, "html"))
-            else:
-                msg.attach(MIMEText(body, "plain"))
+                body_part.attach(MIMEText(html_body, "html"))
+            msg.attach(body_part)
 
-            # File attachments
+            # File attachments — match send_meeting_summary() format exactly
             for att in (attachments or []):
                 mimetype = att.get("mimetype", "application/octet-stream")
                 main_type, sub_type = mimetype.split("/", 1)
@@ -241,8 +243,7 @@ class GmailService:
                 encoders.encode_base64(part)
                 part.add_header(
                     "Content-Disposition",
-                    "attachment",
-                    filename=att["filename"],
+                    f'attachment; filename="{att["filename"]}"',
                 )
                 msg.attach(part)
 
