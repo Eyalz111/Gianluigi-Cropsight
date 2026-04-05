@@ -1,14 +1,14 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** April 2, 2026
-**Current Version:** v2.0 (Phases 0-13 + X1/X2 complete, 38 MCP tools, meeting continuity engine)
-**Status:** Phase 13 + cross-cutting complete. Production ready for daily CEO use.
+**Last Updated:** April 5, 2026
+**Current Version:** v2.1 (Phases 0-13 + X1/X2 + Intelligence Signal, 43 MCP tools)
+**Status:** Intelligence Signal feature complete. Weekly market intelligence with video.
 
 ---
 
 ## What Is This Project
 
-Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for a 4-person AgTech founding team. It processes meeting transcripts, tracks tasks/decisions with cross-meeting topic threading and continuity intelligence, maintains institutional memory via hybrid RAG + operational snapshots, and serves as the CEO's private operations dashboard via Claude.ai MCP (38 tools).
+Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for a 4-person AgTech founding team. It processes meeting transcripts, tracks tasks/decisions with cross-meeting topic threading and continuity intelligence, maintains institutional memory via hybrid RAG + operational snapshots, generates weekly market intelligence (Intelligence Signal), and serves as the CEO's private operations dashboard via Claude.ai MCP (43 tools).
 
 **CropSight:** Israeli AgTech startup — ML-powered crop yield forecasting. Pre-revenue, PoC stage. Team: Eyal (CEO), Roye (CTO), Paolo (BD, Italy), Prof. Yoram Weiss (Advisor).
 
@@ -49,6 +49,7 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **v2 Phase 13 (Data Ingestion):** Email body storage, attachment Drive persistence, document versioning + content hash dedup, Dropbox sync (disabled), CropSight document types
 - **X1:** Daily QA Agent (extraction quality, distribution, scheduler health, data integrity)
 - **X2:** Skills manifest (17 capabilities documented in docs/SKILLS.md)
+- **Intelligence Signal (v2.1):** Weekly market intelligence — Perplexity research → Opus synthesis → .docx report → video (MoviePy + ElevenLabs v3 TTS) → email distribution with attachments. 5 new MCP tools (38→43), competitor watchlist auto-curation, Thursday 18:00 IST scheduler.
 
 ### Known Issues
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
@@ -139,7 +140,10 @@ Claude.ai mixes MCP tool results with its own conversation memory. MCP `instruct
 | Hosting | Google Cloud Run (europe-west1) |
 | Transcription | Tactiq (Chrome extension) |
 | CEO Interface | Claude.ai via MCP server (Streamable HTTP, FastMCP SDK) |
-| MCP Server | `mcp` Python SDK + uvicorn, 38 tools on port 8080 |
+| MCP Server | `mcp` Python SDK + uvicorn, 43 tools on port 8080 |
+| Video | MoviePy + PIL + matplotlib + ffmpeg (2-pass encoding) |
+| TTS | ElevenLabs v3 API (per-segment narration) |
+| Research | Perplexity Sonar Pro API (web search with citations) |
 | Language | Python 3.11+, async |
 
 ---
