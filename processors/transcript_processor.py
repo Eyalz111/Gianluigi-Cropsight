@@ -108,15 +108,15 @@ async def process_transcript(
 
     # Step 4: Secondary sensitivity check (from content)
     content_sensitivity = classify_sensitivity_from_content(file_content)
-    if content_sensitivity == "sensitive":
-        sensitivity = "sensitive"
+    if content_sensitivity == "ceo":
+        sensitivity = "ceo"
 
     # Step 4b: LLM fallback classification (Haiku) — catches nuanced cases
-    if sensitivity == "normal":
+    if sensitivity == "founders":
         llm_sensitivity = classify_sensitivity_llm(file_content)
-        if llm_sensitivity == "sensitive":
-            sensitivity = "sensitive"
-            logger.info("LLM classified meeting as sensitive (keywords missed)")
+        if llm_sensitivity == "ceo":
+            sensitivity = "ceo"
+            logger.info("LLM classified meeting as ceo (keywords missed)")
 
     # Step 5: Validate tone of discussion summary
     tone_issues = validate_summary_tone(extracted.get("discussion_summary", ""))
@@ -243,7 +243,7 @@ async def process_transcript(
         logger.error(f"Post-meeting alerts failed (non-fatal): {e}")
 
     # Step 8: Generate and store embeddings
-    await generate_and_store_embeddings(meeting_id, file_content)
+    await generate_and_store_embeddings(meeting_id, file_content, sensitivity=sensitivity)
 
     # Step 9: Log the action
     supabase_client.log_action(
@@ -819,7 +819,8 @@ async def store_meeting_data(
 
 async def generate_and_store_embeddings(
     meeting_id: str,
-    transcript: str
+    transcript: str,
+    sensitivity: str = "founders",
 ) -> None:
     """
     Chunk transcript and store embeddings in Supabase.
@@ -878,6 +879,7 @@ async def generate_and_store_embeddings(
                 "timestamp_range": chunk.get("timestamp_range"),
                 "embedding": chunk["embedding"],
                 "metadata": chunk.get("metadata", {}),
+                "sensitivity": sensitivity,
             }
             for chunk in embedded_chunks
         ]

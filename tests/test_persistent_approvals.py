@@ -284,7 +284,7 @@ class TestProcessResponsePersistence:
             "title": "Persistent Meeting",
             "summary": "Notes.",
             "date": "2026-03-01",
-            "sensitivity": "normal",
+            "sensitivity": "founders",
             "approval_status": "pending",
         }
         pending_row = {

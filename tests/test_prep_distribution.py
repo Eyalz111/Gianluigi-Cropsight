@@ -158,7 +158,7 @@ class TestDistributeApprovedPrep:
                 meeting_id="prep-evt1",
                 content={
                     "title": "Sensitive Board Meeting",
-                    "sensitivity": "sensitive",
+                    "sensitivity": "ceo",
                     "summary": "Prep doc content here.",
                     "start_time": "2026-03-17T10:00:00",
                 },
@@ -194,7 +194,7 @@ class TestDistributeApprovedPrep:
                 meeting_id="prep-evt1",
                 content={
                     "title": "Tech Review",
-                    "sensitivity": "normal",
+                    "sensitivity": "founders",
                     "summary": "Prep doc content here.",
                     "start_time": "2026-03-17T10:00:00",
                     "attendees": [
@@ -230,7 +230,7 @@ class TestDistributeApprovedPrep:
                 meeting_id="prep-evt1",
                 content={
                     "title": "Tech Review",
-                    "sensitivity": "normal",
+                    "sensitivity": "founders",
                     "summary": "Prep doc content here.",
                     "start_time": "2026-03-17T10:00:00",
                 },
@@ -262,7 +262,7 @@ class TestDistributeApprovedPrep:
                 meeting_id="prep-evt1",
                 content={
                     "title": "Tech Review",
-                    "sensitivity": "normal",
+                    "sensitivity": "founders",
                     "summary": "Prep doc content here.",
                     "start_time": "2026-03-17T10:00:00",
                 },

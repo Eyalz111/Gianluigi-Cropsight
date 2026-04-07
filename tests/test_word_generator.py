@@ -71,7 +71,7 @@ def _generate_sample_docx(**overrides):
         "meeting_date": "2026-03-01",
         "participants": ["Eyal", "Roye", "Paolo"],
         "duration_minutes": 60,
-        "sensitivity": "normal",
+        "sensitivity": "founders",
         "decisions": SAMPLE_DECISIONS,
         "tasks": SAMPLE_TASKS,
         "follow_ups": SAMPLE_FOLLOW_UPS,

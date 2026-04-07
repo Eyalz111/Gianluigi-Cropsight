@@ -773,6 +773,8 @@ class MCPServer:
             ),
         )
         async def get_full_status() -> dict:
+            # NOTE: MCP is CEO-only interface — no sensitivity filtering applied.
+            # All data returned unfiltered (max_sensitivity_level=4).
             import asyncio
 
             warnings: list[str] = []
@@ -1685,21 +1687,33 @@ class MCPServer:
             name="run_qa_check",
             description=(
                 "[SYSTEM] Run on-demand QA quality check. Checks extraction quality, "
-                "distribution completeness, scheduler health, and data integrity. "
-                "Returns issues found and overall health score."
+                "distribution completeness, scheduler health, data integrity, and prompt health. "
+                "Returns issues found and overall health score. "
+                "Set reload_prompts=true to hot-reload YAML prompt files from disk."
             ),
         )
-        async def run_qa_check_tool() -> dict:
+        async def run_qa_check_tool(reload_prompts: bool = False) -> dict:
             try:
                 from schedulers.qa_scheduler import run_qa_check, format_qa_report
 
+                # Optional: reload prompts from YAML files
+                reload_result = None
+                if reload_prompts:
+                    from config.prompt_registry import prompt_registry
+                    reload_result = prompt_registry.reload()
+                    logger.info(f"Prompts reloaded: {reload_result}")
+
                 report = run_qa_check()
                 formatted = format_qa_report(report)
-                mcp_auth.log_call("run_qa_check")
-                return _success({
+                mcp_auth.log_call("run_qa_check", {"reload_prompts": reload_prompts})
+
+                result = _success({
                     "report": report,
                     "formatted": formatted,
                 })
+                if reload_result:
+                    result["data"]["prompt_reload"] = reload_result
+                return result
 
             except Exception as e:
                 logger.error(f"run_qa_check error: {e}")

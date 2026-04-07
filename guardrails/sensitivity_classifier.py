@@ -1,9 +1,11 @@
 """
-Meeting sensitivity classification.
+Meeting sensitivity classification — 4-tier audience-aware system.
 
-This module classifies meetings as 'normal' or 'sensitive' based on
-keywords in the title, content analysis, and optional LLM classification.
-Sensitive meetings get restricted distribution (Eyal-only).
+Hierarchy: CEO(4) > FOUNDERS(3) > TEAM(2) > PUBLIC(1)
+- PUBLIC — safe for anyone
+- TEAM — future all-employees tier (reserved)
+- FOUNDERS — OK for full founding team (default)
+- CEO — Eyal only (investor, legal, interpersonal, confidential)
 
 Sensitive categories (from Section 7):
 - Legal: lawyer, legal, fischer, fbc, zohar
@@ -15,7 +17,7 @@ Usage:
     from guardrails.sensitivity_classifier import classify_sensitivity
 
     sensitivity = classify_sensitivity(calendar_event)
-    # Returns: 'normal' or 'sensitive'
+    # Returns: 'founders' or 'ceo'
 """
 
 import logging
@@ -27,41 +29,38 @@ logger = logging.getLogger(__name__)
 
 def classify_sensitivity(event: dict) -> str:
     """
-    Classify a meeting's sensitivity level.
+    Classify a meeting's sensitivity tier from title keywords.
 
     Args:
         event: Calendar event dict with 'title' key.
 
     Returns:
-        'normal' for team-wide distribution
-        'sensitive' for Eyal-only distribution
+        'founders' for founding-team distribution (default)
+        'ceo' for Eyal-only distribution
     """
     title = event.get("title", "") or ""
     title_lower = title.lower()
 
     if _contains_sensitive_keyword(title_lower):
-        return "sensitive"
+        return "ceo"
 
-    return "normal"
+    return "founders"
 
 
 def classify_sensitivity_from_content(content: str) -> str:
     """
-    Classify sensitivity based on transcript/document content.
+    Classify sensitivity tier based on transcript/document content.
 
-    This is a secondary check applied to content after initial
-    processing, in case sensitive topics arise during the meeting
-    but weren't in the title.
+    Secondary check applied after initial title-based classification.
 
     Args:
         content: Text content to analyze.
 
     Returns:
-        'normal' or 'sensitive'
+        'founders' or 'ceo'
     """
     content_lower = content.lower()
 
-    # Check for explicit mentions of sensitive topics in content
     sensitive_content_patterns = [
         "founders agreement",
         "equity split",
@@ -75,9 +74,9 @@ def classify_sensitivity_from_content(content: str) -> str:
 
     for pattern in sensitive_content_patterns:
         if pattern in content_lower:
-            return "sensitive"
+            return "ceo"
 
-    return "normal"
+    return "founders"
 
 
 def _contains_sensitive_keyword(title_lower: str) -> bool:
@@ -118,13 +117,17 @@ def get_sensitivity_reason(event: dict) -> str | None:
 
 def get_distribution_list(sensitivity: str, team_emails: list[str]) -> list[str]:
     """
-    Get the email distribution list based on sensitivity and environment.
+    Get the email distribution list based on sensitivity tier and environment.
 
-    In development mode (ENVIRONMENT != 'production'), all emails go to
-    Eyal only — no team members are contacted.
+    In development mode, all emails go to Eyal only.
+
+    Tier logic:
+    - PUBLIC, TEAM, FOUNDERS → full team
+    - CEO → Eyal only
 
     Args:
-        sensitivity: 'normal' or 'sensitive'
+        sensitivity: Tier string ('public', 'team', 'founders', 'ceo')
+            Also accepts legacy values ('normal' → founders, 'sensitive'/'ceo_only' → ceo)
         team_emails: Full list of team member emails.
 
     Returns:
@@ -136,11 +139,17 @@ def get_distribution_list(sensitivity: str, team_emails: list[str]) -> list[str]
     if settings.ENVIRONMENT != "production":
         return [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
 
-    if sensitivity == "sensitive":
-        # Eyal only
+    # Normalize legacy values
+    tier = sensitivity.lower()
+    if tier in ("normal", "team"):
+        tier = "founders"
+    elif tier in ("sensitive", "ceo_only", "restricted", "legal"):
+        tier = "ceo"
+
+    if tier == "ceo":
         return [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
     else:
-        # Full team
+        # PUBLIC, TEAM, FOUNDERS → full team
         return [e for e in team_emails if e]
 
 
@@ -149,13 +158,13 @@ def classify_attendees_sensitivity(attendees: list[dict]) -> str:
     Check if any attendees indicate a sensitive meeting.
 
     External lawyers, investors, or NDA-covered contacts
-    trigger sensitive classification.
+    trigger ceo_only classification.
 
     Args:
         attendees: List of attendee dicts with 'email' and optional 'displayName'.
 
     Returns:
-        'normal' or 'sensitive'
+        'team' or 'ceo_only'
     """
     from config.team import CROPSIGHT_TEAM_EMAILS
 
@@ -176,15 +185,15 @@ def classify_attendees_sensitivity(attendees: list[dict]) -> str:
         domain = email.split("@")[-1] if "@" in email else ""
         for sensitive_domain in sensitive_domains:
             if sensitive_domain in domain:
-                return "sensitive"
+                return "ceo"
 
         # Check display name
         display_name = attendee.get("displayName", "").lower()
         for keyword in ["lawyer", "attorney", "investor", "partner"]:
             if keyword in display_name:
-                return "sensitive"
+                return "ceo"
 
-    return "normal"
+    return "founders"
 
 
 def get_combined_sensitivity(
@@ -217,16 +226,16 @@ def get_combined_sensitivity(
     attendees = event.get("attendees", [])
     if attendees:
         attendee_sensitivity = classify_attendees_sensitivity(attendees)
-        if attendee_sensitivity == "sensitive":
+        if attendee_sensitivity == "ceo":
             reasons.append("Attendees include potentially sensitive contacts")
 
     # Check content
     if content:
         content_sensitivity = classify_sensitivity_from_content(content)
-        if content_sensitivity == "sensitive":
+        if content_sensitivity == "ceo":
             reasons.append("Content contains sensitive topics")
 
-    sensitivity = "sensitive" if reasons else "normal"
+    sensitivity = "ceo" if reasons else "founders"
     return sensitivity, reasons
 
 
@@ -234,18 +243,21 @@ def classify_sensitivity_llm(content: str) -> str:
     """
     Use Haiku for nuanced sensitivity classification beyond keywords.
 
-    Runs as a fallback when keyword matching returns 'normal' but content
+    Runs as a fallback when keyword matching returns 'team' but content
     is substantial (>500 chars). Catches things like "give him a bigger share"
     or "competitor X's pricing" that keywords miss.
+
+    When INTERPERSONAL_SIGNAL_DETECTION is enabled, also detects interpersonal
+    dynamics and team tensions for CEO classification.
 
     Args:
         content: Text content to classify.
 
     Returns:
-        'normal' or 'sensitive'
+        'founders' or 'ceo'
     """
     if len(content) < 500:
-        return "normal"
+        return "founders"
 
     from core.llm import call_llm
     from config.settings import settings
@@ -253,18 +265,28 @@ def classify_sensitivity_llm(content: str) -> str:
     # Use first 3000 chars to keep cost low
     excerpt = content[:3000]
 
+    # Build interpersonal detection clause (behind feature flag)
+    interpersonal_clause = ""
+    if settings.INTERPERSONAL_SIGNAL_DETECTION:
+        interpersonal_clause = (
+            "- Interpersonal tension, discomfort, or disagreements between team members\n"
+            "- Political dynamics, someone being sidelined or overruled\n"
+            "- Confidential asides about team member performance or attitude\n"
+        )
+
     prompt = (
-        "Classify this meeting content as 'sensitive' or 'normal'.\n\n"
-        "SENSITIVE means it discusses ANY of:\n"
+        "Classify this meeting content as 'ceo' or 'founders'.\n\n"
+        "CEO means it discusses ANY of:\n"
         "- Investor terms, fundraising, valuations, term sheets\n"
         "- Equity, vesting, compensation, salary\n"
         "- Legal disputes, contracts, NDAs, compliance\n"
         "- Competitive intelligence, competitor pricing/strategy\n"
         "- HR issues, hiring negotiations, personnel conflicts\n"
-        "- Confidential partnerships not yet announced\n\n"
-        "NORMAL means standard operational discussion.\n\n"
+        "- Confidential partnerships not yet announced\n"
+        f"{interpersonal_clause}\n"
+        "FOUNDERS means standard operational discussion safe for all founding team members.\n\n"
         f"CONTENT:\n{excerpt}\n\n"
-        "Respond with exactly one word: sensitive or normal"
+        "Respond with exactly one word: ceo or founders"
     )
 
     try:
@@ -275,12 +297,17 @@ def classify_sensitivity_llm(content: str) -> str:
             call_site="sensitivity_llm",
         )
         result = response.strip().lower()
-        if result in ("sensitive", "normal"):
+        if result in ("ceo", "founders"):
             return result
-        return "normal"
+        # Handle legacy responses
+        if result in ("sensitive", "ceo_only"):
+            return "ceo"
+        if result in ("normal", "team"):
+            return "founders"
+        return "founders"
     except Exception as e:
         logger.warning(f"LLM sensitivity classification failed: {e}")
-        return "normal"
+        return "founders"
 
 
 def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
@@ -292,7 +319,7 @@ def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
 
     Args:
         meeting_id: UUID of the meeting.
-        sensitivity: 'normal' or 'sensitive'.
+        sensitivity: Tier string ('founders', 'ceo', etc.).
 
     Returns:
         Dict with counts of updated items.

@@ -50,7 +50,7 @@ class TestSubmitForApprovalRouting:
             content = {
                 "title": "Investor Call",
                 "summary": "Prep for investor meeting with slides.",
-                "sensitivity": "normal",
+                "sensitivity": "founders",
                 "start_time": "2026-02-27 10:00",
             }
 
@@ -217,7 +217,7 @@ class TestSubmitForApprovalRouting:
             content = {
                 "title": "Board Meeting",
                 "summary": "Important board meeting prep.",
-                "sensitivity": "sensitive",
+                "sensitivity": "ceo",
                 "start_time": "2026-03-01 14:00",
             }
 
@@ -230,7 +230,7 @@ class TestSubmitForApprovalRouting:
             # Meeting prep now uses send_to_eyal directly (minimal card with HTML)
             mock_tg.send_to_eyal.assert_awaited_once()
             card = mock_tg.send_to_eyal.call_args[0][0]
-            assert "sensitive" in card.lower()
+            assert "ceo" in card.lower()
             assert "Board Meeting" in card
 
     @pytest.mark.asyncio
@@ -291,7 +291,7 @@ class TestProcessResponseRouting:
         prep_content = {
             "title": "Investor Call",
             "summary": "Prep notes for investor call.",
-            "sensitivity": "normal",
+            "sensitivity": "founders",
             "meeting_type": "generic",
             "start_time": "2026-02-28 09:00",
         }
@@ -408,7 +408,7 @@ class TestProcessResponseRouting:
             "title": "Sprint Retro",
             "summary": "Retrospective notes.",
             "date": "2026-02-25",
-            "sensitivity": "normal",
+            "sensitivity": "founders",
             "approval_status": "pending",
         }
 
@@ -445,7 +445,7 @@ class TestProcessResponseRouting:
             mock_distribute_content.assert_awaited_once()
             call_kwargs = mock_distribute_content.call_args.kwargs
             assert call_kwargs["meeting_id"] == "summary-approve-1"
-            assert call_kwargs["sensitivity"] == "normal"
+            assert call_kwargs["sensitivity"] == "founders"
 
     @pytest.mark.asyncio
     async def test_approve_with_no_pending_entry_defaults_to_meeting_summary(self):
@@ -455,7 +455,7 @@ class TestProcessResponseRouting:
             "title": "Orphan Meeting",
             "summary": "Some notes.",
             "date": "2026-02-24",
-            "sensitivity": "normal",
+            "sensitivity": "founders",
             "approval_status": "pending",
         }
 
@@ -569,7 +569,7 @@ class TestDistributeApprovedPrep:
 
             content = {
                 "title": "Sprint Planning",
-                "sensitivity": "normal",
+                "sensitivity": "founders",
                 "summary": "Prep doc content here.",
                 "start_time": "2026-02-27 09:00",
             }
@@ -609,7 +609,7 @@ class TestDistributeApprovedPrep:
 
             content = {
                 "title": "Board Compensation",
-                "sensitivity": "sensitive",
+                "sensitivity": "ceo",
                 "summary": "Sensitive prep content.",
                 "start_time": "2026-03-01 14:00",
             }
@@ -643,7 +643,7 @@ class TestDistributeApprovedPrep:
 
             content = {
                 "title": "Team Sync",
-                "sensitivity": "normal",
+                "sensitivity": "founders",
                 "summary": "Sync prep content.",
                 "start_time": "2026-02-28 11:00",
             }
@@ -659,7 +659,7 @@ class TestDistributeApprovedPrep:
             assert log_kwargs["action"] == "meeting_prep_distributed"
             assert log_kwargs["details"]["meeting_id"] == "prep-dist-3"
             assert log_kwargs["details"]["title"] == "Team Sync"
-            assert log_kwargs["details"]["sensitivity"] == "normal"
+            assert log_kwargs["details"]["sensitivity"] == "founders"
             assert log_kwargs["triggered_by"] == "eyal"
 
     @pytest.mark.asyncio
@@ -680,7 +680,7 @@ class TestDistributeApprovedPrep:
 
             content = {
                 "title": "Broken Meeting",
-                "sensitivity": "normal",
+                "sensitivity": "founders",
                 "summary": "Content here.",
                 "start_time": "2026-02-28 12:00",
             }

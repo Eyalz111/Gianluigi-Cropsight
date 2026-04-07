@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from config.settings import settings
 from core.llm import call_llm
+from models.schemas import filter_by_sensitivity
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ def _format_task_stats(tasks: list[dict]) -> dict:
 def build_meeting_continuity_context(
     participants: list[str],
     current_meeting_id: str | None = None,
+    max_sensitivity_level: int = 4,
 ) -> str | None:
     """
     Build a compressed context block from recent meetings with overlapping participants.
@@ -96,6 +98,11 @@ def build_meeting_continuity_context(
     if not recent_meetings:
         return None
 
+    # Filter meetings by sensitivity level
+    recent_meetings = filter_by_sensitivity(recent_meetings, max_sensitivity_level)
+    if not recent_meetings:
+        return None
+
     context_parts = []
 
     for meeting in recent_meetings:
@@ -106,10 +113,13 @@ def build_meeting_continuity_context(
         # Get decisions, tasks, and questions from this meeting
         try:
             decisions = supabase_client.list_decisions(meeting_id=meeting_id)
+            decisions = filter_by_sensitivity(decisions, max_sensitivity_level)
             tasks_all = supabase_client.get_tasks(status=None)
             tasks = [t for t in tasks_all if t.get("meeting_id") == meeting_id]
+            tasks = filter_by_sensitivity(tasks, max_sensitivity_level)
             open_tasks = [t for t in tasks if t.get("status") in ("pending", "in_progress")]
             questions = supabase_client.get_open_questions(meeting_id=meeting_id)
+            questions = filter_by_sensitivity(questions, max_sensitivity_level)
             open_qs = [q for q in questions if q.get("status") == "open"]
         except Exception as e:
             logger.debug(f"Could not fetch details for meeting {meeting_id}: {e}")
@@ -194,32 +204,36 @@ def _days_until_review(review_date_str: str | None) -> int | None:
         return None
 
 
-def build_daily_continuity_context() -> dict | None:
+def build_daily_continuity_context(max_sensitivity_level: int = 4) -> dict | None:
     """
     Build continuity context for the morning brief.
 
     Aggregates overnight changes, pending items, and today's focus areas.
     Designed for quick consumption — returns structured data, not LLM prose.
+    Default CEO level (morning brief is Eyal-only).
+
+    Args:
+        max_sensitivity_level: Max tier level (default 4=CEO, morning brief is Eyal-only).
 
     Returns:
         Dict with sections for morning brief integration, or None if no data.
         Keys: task_summary, approaching_reviews, aging_questions, recent_completions
     """
     try:
-        return _build_daily_context_inner()
+        return _build_daily_context_inner(max_sensitivity_level=max_sensitivity_level)
     except Exception as e:
         logger.warning(f"Daily continuity context failed: {e}")
         return None
 
 
-def _build_daily_context_inner() -> dict | None:
+def _build_daily_context_inner(max_sensitivity_level: int = 4) -> dict | None:
     """Inner implementation of daily context (non-catching, for testability)."""
     sections = {}
 
     # 1. Overall task summary: open, overdue, recently completed
-    pending = supabase_client.get_tasks(status="pending", limit=100)
-    in_progress = supabase_client.get_tasks(status="in_progress", limit=100)
-    done_recent = supabase_client.get_tasks(status="done", limit=50)
+    pending = filter_by_sensitivity(supabase_client.get_tasks(status="pending", limit=100), max_sensitivity_level)
+    in_progress = filter_by_sensitivity(supabase_client.get_tasks(status="in_progress", limit=100), max_sensitivity_level)
+    done_recent = filter_by_sensitivity(supabase_client.get_tasks(status="done", limit=50), max_sensitivity_level)
 
     # Filter recently completed (last 24h)
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
@@ -248,7 +262,9 @@ def _build_daily_context_inner() -> dict | None:
 
     # 2. Decisions approaching review
     try:
-        approaching_decisions = supabase_client.get_decisions_for_review(days_ahead=14)
+        approaching_decisions = filter_by_sensitivity(
+            supabase_client.get_decisions_for_review(days_ahead=14), max_sensitivity_level
+        )
         if approaching_decisions:
             sections["approaching_reviews"] = [
                 {
@@ -264,7 +280,9 @@ def _build_daily_context_inner() -> dict | None:
 
     # 3. Aging open questions (open > 7 days)
     try:
-        open_questions = supabase_client.get_open_questions(status="open", limit=50)
+        open_questions = filter_by_sensitivity(
+            supabase_client.get_open_questions(status="open", limit=50), max_sensitivity_level
+        )
         aging = []
         for q in open_questions:
             age = _days_ago(q.get("created_at"))
@@ -338,16 +356,19 @@ def format_daily_continuity_for_brief(context: dict) -> str:
 async def build_pre_meeting_continuity_context(
     participants: list[str],
     meeting_title: str,
+    max_sensitivity_level: int = 3,
 ) -> dict | None:
     """
     Build rich continuity context for meeting prep.
 
     Uses Sonnet for synthesis — produces a narrative analysis of what
     matters for this specific meeting given the participants and topic.
+    Default FOUNDERS level — prep docs go to team, so CEO items must be excluded.
 
     Args:
         participants: Expected meeting participants.
         meeting_title: Title of the upcoming meeting.
+        max_sensitivity_level: Max tier level (default 3=FOUNDERS for team-visible prep).
 
     Returns:
         Dict with raw data and synthesized narrative, or None if no data.
@@ -357,7 +378,7 @@ async def build_pre_meeting_continuity_context(
         return None
 
     try:
-        return await _build_pre_meeting_context_inner(participants, meeting_title)
+        return await _build_pre_meeting_context_inner(participants, meeting_title, max_sensitivity_level)
     except Exception as e:
         logger.warning(f"Pre-meeting continuity context failed: {e}")
         return None
@@ -366,6 +387,7 @@ async def build_pre_meeting_continuity_context(
 async def _build_pre_meeting_context_inner(
     participants: list[str],
     meeting_title: str,
+    max_sensitivity_level: int = 3,
 ) -> dict | None:
     """Inner implementation (non-catching, for testability)."""
     context = {}
@@ -377,6 +399,7 @@ async def _build_pre_meeting_context_inner(
                 participants=participants,
                 limit=5,
             )
+            recent_meetings = filter_by_sensitivity(recent_meetings, max_sensitivity_level)
             if recent_meetings:
                 meeting_summaries = []
                 for m in recent_meetings[:5]:
@@ -403,7 +426,9 @@ async def _build_pre_meeting_context_inner(
         participant_tasks = {}
         for p in participants:
             try:
-                tasks = supabase_client.get_tasks(assignee=p, status=None, limit=20)
+                tasks = filter_by_sensitivity(
+                    supabase_client.get_tasks(assignee=p, status=None, limit=20), max_sensitivity_level
+                )
                 open_tasks = [t for t in tasks if t.get("status") in ("pending", "in_progress", "overdue")]
                 if open_tasks:
                     participant_tasks[p] = [
@@ -422,7 +447,7 @@ async def _build_pre_meeting_context_inner(
 
     # 3. Relevant decisions (active, from meetings with these participants)
     try:
-        decisions = supabase_client.list_decisions(limit=50)
+        decisions = filter_by_sensitivity(supabase_client.list_decisions(limit=50), max_sensitivity_level)
         active_decisions = [d for d in decisions if d.get("decision_status") == "active"]
 
         # Filter to decisions involving these participants
@@ -460,7 +485,9 @@ async def _build_pre_meeting_context_inner(
 
     # 4. Open questions from recent meetings with these participants
     try:
-        questions = supabase_client.get_open_questions(status="open", limit=50)
+        questions = filter_by_sensitivity(
+            supabase_client.get_open_questions(status="open", limit=50), max_sensitivity_level
+        )
         relevant_qs = []
         for q in questions:
             raised_by = (q.get("raised_by") or "").lower()

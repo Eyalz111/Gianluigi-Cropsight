@@ -581,7 +581,7 @@ class TelegramBot:
         drive_link: str | None = None,
         cross_reference: dict | None = None,
         executive_summary: str | None = None,
-        sensitivity: str = "normal",
+        sensitivity: str = "founders",
     ) -> bool:
         """
         Send an approval request to Eyal with a clean, structured preview.
@@ -699,12 +699,20 @@ class TelegramBot:
 
         message = "\n".join(lines)
 
-        # Create inline keyboard with sensitivity toggle
-        sens_label = (
-            "\U0001f512 Sensitive \u2014 Eyal only"
-            if sensitivity == "sensitive"
-            else "\U0001f513 Normal \u2014 team will receive"
-        )
+        # Create inline keyboard with sensitivity tier button
+        tier_labels = {
+            "public": "\U0001f30d PUBLIC \u2014 safe for anyone",
+            "team": "\U0001f465 TEAM \u2014 all employees",
+            "founders": "\U0001f465 FOUNDERS \u2014 founding team",
+            "ceo": "\U0001f512 CEO \u2014 Eyal only",
+        }
+        # Normalize legacy values
+        tier = sensitivity.lower()
+        if tier in ("normal", "team"):
+            tier = "founders"
+        elif tier in ("sensitive", "ceo_only", "restricted", "legal"):
+            tier = "ceo"
+        sens_label = tier_labels.get(tier, tier_labels["founders"])
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -2417,6 +2425,12 @@ When you receive approval requests, use the buttons to approve, request changes,
             if handled:
                 return
 
+        # Phase 3 (v2.2): Check if this is a reply to a task reminder message
+        if is_eyal and update.message.reply_to_message:
+            handled = await self._handle_task_reply(update, context)
+            if handled:
+                return
+
         # Phase 6: Check for active weekly review correction mode
         if is_eyal and context.user_data.get("review_correcting"):
             from processors.weekly_review_session import process_correction
@@ -2803,21 +2817,32 @@ When you receive approval requests, use the buttons to approve, request changes,
             context.user_data["pending_edit_meeting_id"] = meeting_id
 
         elif action == "sens_toggle":
-            # Toggle sensitivity on the meeting record + propagate to items
+            # Cycle sensitivity tier: founders → ceo → team → public → founders
             from services.supabase_client import supabase_client as _sc
             from guardrails.sensitivity_classifier import propagate_meeting_sensitivity
             meeting = _sc.get_meeting(meeting_id)
-            current_sens = meeting.get("sensitivity", "normal")
-            new_sens = "normal" if current_sens == "sensitive" else "sensitive"
+            current_sens = meeting.get("sensitivity", "founders")
+            # Normalize legacy values
+            if current_sens in ("normal", "team"):
+                current_sens = "founders"
+            elif current_sens in ("sensitive", "ceo_only", "restricted", "legal"):
+                current_sens = "ceo"
+
+            tier_cycle = ["founders", "ceo", "team", "public"]
+            current_idx = tier_cycle.index(current_sens) if current_sens in tier_cycle else 0
+            new_sens = tier_cycle[(current_idx + 1) % len(tier_cycle)]
+
             _sc.update_meeting(meeting_id, sensitivity=new_sens)
             propagate_meeting_sensitivity(meeting_id, new_sens)
 
-            # Update button text in-place (no message re-send)
-            new_label = (
-                "\U0001f512 Sensitive \u2014 Eyal only"
-                if new_sens == "sensitive"
-                else "\U0001f513 Normal \u2014 team will receive"
-            )
+            # Update button text in-place
+            tier_labels = {
+                "public": "\U0001f30d PUBLIC \u2014 safe for anyone",
+                "team": "\U0001f465 TEAM \u2014 all employees",
+                "founders": "\U0001f465 FOUNDERS \u2014 founding team",
+                "ceo": "\U0001f512 CEO \u2014 Eyal only",
+            }
+            new_label = tier_labels.get(new_sens, tier_labels["founders"])
             new_keyboard = [
                 [
                     InlineKeyboardButton("Approve", callback_data=f"approve:{meeting_id}"),
@@ -2829,8 +2854,8 @@ When you receive approval requests, use the buttons to approve, request changes,
             await query.edit_message_reply_markup(
                 reply_markup=InlineKeyboardMarkup(new_keyboard)
             )
-            await query.answer(f"Sensitivity set to: {new_sens}")
-            logger.info(f"Sensitivity toggled to '{new_sens}' for meeting {meeting_id}")
+            await query.answer(f"Sensitivity set to: {new_sens.upper()}")
+            logger.info(f"Sensitivity cycled to '{new_sens}' for meeting {meeting_id}")
 
         elif action == "stakeholder_approve":
             org_key = meeting_id  # The part after the colon
@@ -2858,6 +2883,223 @@ When you receive approval requests, use the buttons to approve, request changes,
                 triggered_by="eyal",
             )
             logger.info(f"Stakeholder update rejected: {org_key}")
+
+        # ── Phase 3: Task reminder inline actions ──────────────────
+        elif action in ("taskdone", "taskdelay", "taskdiscuss"):
+            await self._handle_task_action(query, action, meeting_id)
+
+    async def _handle_task_action(
+        self,
+        query,
+        action: str,
+        short_id: str,
+    ) -> None:
+        """
+        Handle inline button press on an overdue task reminder.
+
+        Actions: taskdone, taskdelay, taskdiscuss.
+        """
+        from schedulers.task_reminder_scheduler import task_reminder_scheduler
+
+        task_info = task_reminder_scheduler.task_action_map.get(short_id)
+        if not task_info:
+            await query.answer("Task action expired. Please use MCP or Sheets.")
+            return
+
+        task_text = task_info.get("task_text", "Unknown task")
+
+        if action == "taskdone":
+            await self._execute_task_update_from_reminder(task_info, status="done")
+            await query.edit_message_text(
+                f"Done: {task_text[:60]}\n\nTask marked as complete. DB + Sheets updated."
+            )
+            await query.answer("Marked as done")
+            logger.info(f"Task marked done via Telegram button: {task_text[:50]}")
+
+        elif action == "taskdelay":
+            new_deadline = await self._execute_task_update_from_reminder(
+                task_info, delay_days=7
+            )
+            await query.edit_message_text(
+                f"Delayed: {task_text[:60]}\n\nNew deadline: {new_deadline}. DB + Sheets updated."
+            )
+            await query.answer("Delayed by 1 week")
+            logger.info(f"Task delayed +7 days via Telegram button: {task_text[:50]}")
+
+        elif action == "taskdiscuss":
+            await query.edit_message_text(
+                f"Discuss: {task_text[:60]}\n\nAdded to next meeting agenda."
+            )
+            await query.answer("Will discuss in next meeting")
+            # Create an open question for the next meeting prep
+            try:
+                supabase_client.create_open_question(
+                    question=f"Discuss overdue task: {task_text}",
+                    raised_by="Eyal",
+                )
+            except Exception as e:
+                logger.error(f"Failed to create discussion item: {e}")
+
+    async def _execute_task_update_from_reminder(
+        self,
+        task_info: dict,
+        status: str | None = None,
+        delay_days: int | None = None,
+    ) -> str | None:
+        """
+        Execute a task update from a reminder button or free-text reply.
+
+        Updates both Supabase (by title match) and Google Sheets (by row number).
+
+        Returns:
+            New deadline string if delay was applied, None otherwise.
+        """
+        task_text = task_info.get("task_text", "")
+        assignee = task_info.get("assignee", "")
+        row_number = task_info.get("row_number")
+
+        new_deadline = None
+
+        # Calculate new deadline if delaying
+        if delay_days:
+            from datetime import datetime, timedelta
+            old_deadline_str = task_info.get("deadline", "")
+            try:
+                old_date = datetime.strptime(old_deadline_str, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                old_date = datetime.now().date()
+            new_date = old_date + timedelta(days=delay_days)
+            new_deadline = new_date.isoformat()
+
+        # Update Supabase — find task by title + assignee
+        try:
+            tasks = supabase_client.get_tasks(assignee=assignee, status="pending")
+            tasks += supabase_client.get_tasks(assignee=assignee, status="overdue")
+            db_task = None
+            for t in tasks:
+                if t.get("title", "").strip().lower() == task_text.strip().lower():
+                    db_task = t
+                    break
+
+            if db_task:
+                updates = {}
+                if status:
+                    updates["status"] = status
+                if new_deadline:
+                    updates["deadline"] = new_deadline
+                if updates:
+                    supabase_client.update_task(db_task["id"], **updates)
+                    logger.info(f"Updated task in DB: {db_task['id']} → {updates}")
+        except Exception as e:
+            logger.error(f"Failed to update task in Supabase: {e}")
+
+        # Update Google Sheets
+        try:
+            if row_number:
+                updates = {}
+                if status:
+                    updates["status"] = "done" if status == "done" else status
+                if new_deadline:
+                    updates["deadline"] = new_deadline
+                if updates:
+                    from services.google_sheets import sheets_service
+                    await sheets_service.update_task_row(row_number, updates)
+                    logger.info(f"Updated task in Sheets row {row_number} → {updates}")
+        except Exception as e:
+            logger.error(f"Failed to update task in Sheets: {e}")
+
+        return new_deadline
+
+    async def _handle_task_reply(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        """
+        Handle free-text reply to a task reminder message.
+
+        Detects if the replied-to message was a task reminder,
+        classifies the intent with Haiku, and executes the action.
+
+        Returns:
+            True if handled, False if not a task reply.
+        """
+        from schedulers.task_reminder_scheduler import task_reminder_scheduler
+
+        reply_msg_id = update.message.reply_to_message.message_id
+        short_id = task_reminder_scheduler.message_task_map.get(reply_msg_id)
+        if not short_id:
+            return False  # Not a reply to a task reminder
+
+        task_info = task_reminder_scheduler.task_action_map.get(short_id)
+        if not task_info:
+            await self.send_message(
+                update.effective_chat.id,
+                "Task action expired. Please use MCP or update the Sheets directly."
+            )
+            return True
+
+        user_text = update.message.text.strip()
+        task_text = task_info.get("task_text", "Unknown task")
+
+        # Classify intent with Haiku
+        try:
+            from core.llm import call_llm
+            from config.settings import settings
+
+            response, _ = call_llm(
+                prompt=(
+                    f"The user replied to an overdue task reminder for: \"{task_text}\"\n"
+                    f"Their reply: \"{user_text}\"\n\n"
+                    "Classify the intent as exactly one of: done, delay, discuss, other\n"
+                    "- done: task is completed (\"done\", \"finished\", \"handled\", \"completed\")\n"
+                    "- delay: push to later (\"next week\", \"delay\", \"push\", \"postpone\")\n"
+                    "- discuss: needs discussion (\"discuss\", \"let's talk\", \"meeting\")\n"
+                    "- other: anything else\n\n"
+                    "Respond with exactly one word."
+                ),
+                model=settings.model_simple,
+                max_tokens=10,
+                call_site="task_reply_classify",
+            )
+            intent = response.strip().lower()
+        except Exception as e:
+            logger.error(f"Task reply classification failed: {e}")
+            intent = "other"
+
+        if intent == "done":
+            await self._execute_task_update_from_reminder(task_info, status="done")
+            await self.send_message(
+                update.effective_chat.id,
+                f"Got it \u2014 marked *{task_text[:50]}* as done. Sheets updated."
+            )
+        elif intent == "delay":
+            new_deadline = await self._execute_task_update_from_reminder(
+                task_info, delay_days=7
+            )
+            await self.send_message(
+                update.effective_chat.id,
+                f"Pushed *{task_text[:50]}* to {new_deadline}. Sheets updated."
+            )
+        elif intent == "discuss":
+            try:
+                supabase_client.create_open_question(
+                    question=f"Discuss overdue task: {task_text}",
+                    raised_by="Eyal",
+                )
+            except Exception:
+                pass
+            await self.send_message(
+                update.effective_chat.id,
+                f"Added *{task_text[:50]}* to next meeting agenda."
+            )
+        else:
+            await self.send_message(
+                update.effective_chat.id,
+                f"Noted your reply about *{task_text[:50]}*. Use the buttons or MCP for specific actions."
+            )
+
+        return True
 
     async def _handle_review_mode_message(
         self,

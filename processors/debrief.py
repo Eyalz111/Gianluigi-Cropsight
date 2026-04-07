@@ -605,7 +605,7 @@ async def _inject_debrief_items(
         title=title,
         participants=["Eyal"],
         source_file_path="debrief",
-        sensitivity="normal",
+        sensitivity="founders",
     )
     meeting_id = pseudo_meeting["id"]
 

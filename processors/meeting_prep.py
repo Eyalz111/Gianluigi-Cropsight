@@ -28,12 +28,13 @@ from core.llm import call_llm
 from services.google_calendar import calendar_service
 from services.google_sheets import sheets_service
 from services.supabase_client import supabase_client
+from models.schemas import filter_by_sensitivity
 from services.embeddings import embedding_service
 
 logger = logging.getLogger(__name__)
 
 
-async def generate_meeting_prep(calendar_event_id: str) -> dict:
+async def generate_meeting_prep(calendar_event_id: str, max_sensitivity_level: int = 3) -> dict:
     """
     Generate a meeting preparation document for an upcoming meeting.
 
@@ -67,20 +68,20 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
         for a in attendees
     ]
 
-    # 3. Search for related past meetings
-    related_meetings = await find_related_meetings(topic, participant_names)
+    # 3. Search for related past meetings (filtered by sensitivity)
+    related_meetings = await find_related_meetings(topic, participant_names, max_sensitivity_level=max_sensitivity_level)
 
-    # 4. Find relevant decisions (hybrid: semantic + keyword)
-    relevant_decisions = await find_relevant_decisions(topic)
+    # 4. Find relevant decisions (hybrid: semantic + keyword, filtered)
+    relevant_decisions = await find_relevant_decisions(topic, max_sensitivity_level=max_sensitivity_level)
 
-    # 5. Get open questions from Supabase
-    open_questions = _find_open_questions(topic)
+    # 5. Get open questions from Supabase (filtered)
+    open_questions = _find_open_questions(topic, max_sensitivity_level=max_sensitivity_level)
 
     # 6. Get stakeholder context for external participants
     stakeholder_info = await get_stakeholder_context(participant_names, topic)
 
     # 7. Find open tasks for each participant
-    participant_tasks = await find_participant_tasks(participant_names)
+    participant_tasks = await find_participant_tasks(participant_names, max_sensitivity_level=max_sensitivity_level)
 
     # 7b. Find related documents
     from processors.document_processor import find_related_documents
@@ -124,7 +125,8 @@ async def generate_meeting_prep(calendar_event_id: str) -> dict:
 async def find_related_meetings(
     topic: str,
     participants: list[str],
-    limit: int = 5
+    limit: int = 5,
+    max_sensitivity_level: int = 3,
 ) -> list[dict]:
     """
     Find past meetings related to an upcoming meeting topic.
@@ -167,6 +169,10 @@ async def find_related_meetings(
             if not meeting:
                 continue
 
+            # Skip meetings above the sensitivity threshold
+            if not filter_by_sensitivity([meeting], max_sensitivity_level):
+                continue
+
             # Build a summary snippet (first 200 chars)
             summary = meeting.get("summary", "") or ""
             snippet = (summary[:200] + "...") if len(summary) > 200 else summary
@@ -191,7 +197,8 @@ async def find_related_meetings(
 
 async def find_relevant_decisions(
     topic: str,
-    limit: int = 10
+    limit: int = 10,
+    max_sensitivity_level: int = 3,
 ) -> list[dict]:
     """
     Find past decisions relevant to a meeting topic.
@@ -238,7 +245,9 @@ async def find_relevant_decisions(
 
     # --- Strategy 2: Keyword ILIKE search ---
     try:
-        keyword_decisions = supabase_client.list_decisions(topic=topic, limit=limit)
+        keyword_decisions = filter_by_sensitivity(
+            supabase_client.list_decisions(topic=topic, limit=limit), max_sensitivity_level
+        )
 
         for d in keyword_decisions:
             decision_id = d.get("id", "")
@@ -262,7 +271,8 @@ async def find_relevant_decisions(
 
 
 async def find_participant_tasks(
-    participants: list[str]
+    participants: list[str],
+    max_sensitivity_level: int = 3,
 ) -> dict[str, list[dict]]:
     """
     Find open and overdue tasks for meeting participants.
@@ -279,9 +289,9 @@ async def find_participant_tasks(
 
     for participant in participants:
         try:
-            tasks = supabase_client.get_tasks(
-                assignee=participant,
-                status="pending",
+            tasks = filter_by_sensitivity(
+                supabase_client.get_tasks(assignee=participant, status="pending"),
+                max_sensitivity_level,
             )
             if tasks:
                 tasks_by_participant[participant] = tasks
@@ -600,7 +610,7 @@ def format_prep_document(
     return "\n".join(lines)
 
 
-def _find_open_questions(topic: str, limit: int = 5) -> list[dict]:
+def _find_open_questions(topic: str, limit: int = 5, max_sensitivity_level: int = 3) -> list[dict]:
     """
     Find unresolved questions that might be relevant to the meeting topic.
 
@@ -615,7 +625,9 @@ def _find_open_questions(topic: str, limit: int = 5) -> list[dict]:
     """
     try:
         # Get open questions from Supabase (sync call)
-        questions = supabase_client.get_open_questions(limit=limit * 2)
+        questions = filter_by_sensitivity(
+            supabase_client.get_open_questions(limit=limit * 2), max_sensitivity_level
+        )
 
         # Filter by keyword overlap with the topic
         topic_words = set(topic.lower().split())
@@ -1009,7 +1021,7 @@ def format_prep_approval_card(
     title: str,
     start_time: str,
     sections: list[str] | None = None,
-    sensitivity: str = "normal",
+    sensitivity: str = "founders",
 ) -> str:
     """
     Format a minimal approval message for a generated prep doc (HTML).
@@ -1033,7 +1045,7 @@ def format_prep_approval_card(
     if sections:
         lines.append(f"Sections: {', '.join(sections)}")
 
-    if sensitivity != "normal":
+    if sensitivity not in ("founders", "normal"):
         lines.append(f"Sensitivity: {_html_escape(sensitivity)}")
 
     return "\n".join(lines)

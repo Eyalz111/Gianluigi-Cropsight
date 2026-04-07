@@ -217,7 +217,7 @@ class Settings(BaseSettings):
         default=False, description="Enable transcript watcher (disabled during dev to save Opus costs)"
     )
     TRANSCRIPT_POLL_INTERVAL: int = Field(
-        default=3600, description="Transcript watcher poll interval (seconds) — 1 hour"
+        default=900, description="Transcript watcher poll interval (seconds) — 15 minutes"
     )
     DOCUMENT_POLL_INTERVAL: int = Field(
         default=7200, description="Document watcher poll interval (seconds) — 2 hours"
@@ -442,6 +442,10 @@ class Settings(BaseSettings):
     CONTINUITY_AUTO_APPLY_ENABLED: bool = Field(
         default=False,
         description="Auto-apply high-confidence task matches from continuity extraction (requires A3 gate)"
+    )
+    INTERPERSONAL_SIGNAL_DETECTION: bool = Field(
+        default=False,
+        description="Enable interpersonal signal detection in extraction (CEO tier). Default OFF — enable when ready to test."
     )
 
     # ==========================================================================

@@ -46,10 +46,57 @@ class TaskPriority(str, Enum):
 
 
 class Sensitivity(str, Enum):
-    """Sensitivity classification of a meeting."""
-    NORMAL = "normal"
-    SENSITIVE = "sensitive"
-    LEGAL = "legal"
+    """Audience-aware sensitivity tier for meetings and items.
+
+    Hierarchy: CEO(4) > FOUNDERS(3) > TEAM(2) > PUBLIC(1)
+    - PUBLIC — safe for anyone (press-released decisions)
+    - TEAM — future all-employees tier (reserved)
+    - FOUNDERS — OK for full founding team (default for operational discussions)
+    - CEO — Eyal only (investor, legal, interpersonal, confidential)
+    """
+    PUBLIC = "public"
+    TEAM = "team"
+    FOUNDERS = "founders"
+    CEO = "ceo"
+
+    # Backward-compatible aliases for migration period
+    @classmethod
+    def from_legacy(cls, value: str) -> "Sensitivity":
+        """Convert legacy sensitivity values to new tiers."""
+        legacy_map = {
+            "normal": cls.FOUNDERS,
+            "sensitive": cls.CEO,
+            "legal": cls.CEO,
+            "team": cls.FOUNDERS,
+            "ceo_only": cls.CEO,
+            "restricted": cls.CEO,
+        }
+        return legacy_map.get(value, cls.FOUNDERS)
+
+
+# Numeric tier levels for comparison and filtering
+TIER_LEVELS = {"public": 1, "team": 2, "founders": 3, "ceo": 4}
+
+
+def filter_by_sensitivity(items: list[dict], max_level: int) -> list[dict]:
+    """Filter items to include only those at or below the given sensitivity level.
+
+    Items without a sensitivity field default to 'founders' (level 3).
+    Legacy values ('ceo_only', 'restricted') map to CEO level (4).
+
+    Args:
+        items: List of dicts with optional 'sensitivity' key.
+        max_level: Maximum tier level to include (1=public, 2=team, 3=founders, 4=ceo).
+
+    Returns:
+        Filtered list containing only items at or below max_level.
+    """
+    # Include legacy mappings for safety
+    level_map = {**TIER_LEVELS, "ceo_only": 4, "restricted": 4, "sensitive": 4, "normal": 3}
+    return [
+        item for item in items
+        if level_map.get(item.get("sensitivity", "founders"), 3) <= max_level
+    ]
 
 
 class ApprovalStatus(str, Enum):
@@ -88,7 +135,7 @@ class Meeting(BaseModel):
     duration_minutes: int | None = None
     raw_transcript: str | None = None
     summary: str | None = None
-    sensitivity: Sensitivity = Sensitivity.NORMAL
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
     source_file_path: str | None = None
     approval_status: ApprovalStatus = ApprovalStatus.PENDING
     approved_at: datetime | None = None
@@ -103,7 +150,7 @@ class Decision(BaseModel):
     context: str | None = None
     participants_involved: list[str] | None = None
     transcript_timestamp: str | None = None  # e.g., "43:28"
-    sensitivity: Sensitivity = Sensitivity.NORMAL
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
     created_at: datetime | None = None
 
 
@@ -118,7 +165,7 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
     transcript_timestamp: str | None = None
-    sensitivity: Sensitivity = Sensitivity.NORMAL
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -144,7 +191,7 @@ class OpenQuestion(BaseModel):
     raised_by: str | None = None
     status: QuestionStatus = QuestionStatus.OPEN
     resolved_in_meeting_id: UUID | None = None
-    sensitivity: Sensitivity = Sensitivity.NORMAL
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
     created_at: datetime | None = None
 
 

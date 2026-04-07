@@ -301,7 +301,7 @@ class TestGenerateMeetingPrepFromOutline:
              patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
              patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("guardrails.approval_flow.conversation_memory"), \
-             patch("guardrails.sensitivity_classifier.classify_sensitivity", return_value="normal"):
+             patch("guardrails.sensitivity_classifier.classify_sensitivity", return_value="founders"):
 
             mock_db.get_pending_approval.return_value = {
                 "approval_id": "outline-123",

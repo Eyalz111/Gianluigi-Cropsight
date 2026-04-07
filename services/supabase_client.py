@@ -177,7 +177,7 @@ class SupabaseClient:
         participants: list[str],
         raw_transcript: str | None = None,
         summary: str | None = None,
-        sensitivity: str = "normal",
+        sensitivity: str = "founders",
         source_file_path: str | None = None,
         duration_minutes: int | None = None,
     ) -> dict:

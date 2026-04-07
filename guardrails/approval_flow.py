@@ -478,7 +478,7 @@ async def submit_for_approval(
         from processors.meeting_prep import format_prep_approval_card
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        sensitivity = content.get("sensitivity", "normal")
+        sensitivity = content.get("sensitivity", "founders")
         section_names = None
         if content.get("meeting_type"):
             from config.meeting_prep_templates import get_template
@@ -625,7 +625,7 @@ async def submit_for_approval(
 
         # Read sensitivity from meeting record for the toggle button
         meeting_record = supabase_client.get_meeting(meeting_id)
-        meeting_sensitivity = meeting_record.get("sensitivity", "normal") if meeting_record else "normal"
+        meeting_sensitivity = meeting_record.get("sensitivity", "founders") if meeting_record else "founders"
 
         telegram_sent = await telegram_bot.send_approval_request(
             meeting_title=meeting_title,
@@ -948,7 +948,7 @@ async def process_response(
         if pending_info and pending_info.get("content", {}).get("cross_reference"):
             content["cross_reference"] = pending_info["content"]["cross_reference"]
 
-        sensitivity = meeting.get("sensitivity", "normal")
+        sensitivity = meeting.get("sensitivity", "founders")
 
         distribution_result = await distribute_approved_content(
             meeting_id=meeting_id,
@@ -1414,7 +1414,7 @@ Return ONLY the JSON object, no other text."""
 async def distribute_approved_content(
     meeting_id: str,
     content: dict,
-    sensitivity: str = "normal"
+    sensitivity: str = "founders"
 ) -> dict:
     """
     Distribute approved content to the team.
@@ -1584,14 +1584,15 @@ async def distribute_approved_content(
     team_emails = settings.team_emails
     distribution_emails = get_distribution_list(sensitivity, team_emails)
 
-    # 5b. Filter sensitive items from team distribution content
-    # Even if the meeting is "normal", individual items may be sensitive.
+    # 5b. Filter CEO items from team distribution content
+    # Even if the meeting is FOUNDERS/PUBLIC tier, individual items may be CEO.
     # Team gets a filtered copy; Eyal always gets everything.
     team_content = content
-    if sensitivity == "normal":
-        filtered_decisions = [d for d in content.get("decisions", []) if d.get("sensitivity") != "sensitive"]
-        filtered_tasks = [t for t in content.get("tasks", []) if t.get("sensitivity") != "sensitive"]
-        filtered_questions = [q for q in content.get("open_questions", []) if q.get("sensitivity") != "sensitive"]
+    ceo_tiers = ("ceo", "ceo_only", "restricted", "sensitive")  # Include legacy values
+    if sensitivity not in ceo_tiers:
+        filtered_decisions = [d for d in content.get("decisions", []) if d.get("sensitivity") not in ceo_tiers]
+        filtered_tasks = [t for t in content.get("tasks", []) if t.get("sensitivity") not in ceo_tiers]
+        filtered_questions = [q for q in content.get("open_questions", []) if q.get("sensitivity") not in ceo_tiers]
         has_filtered = (
             len(filtered_decisions) != len(content.get("decisions", []))
             or len(filtered_tasks) != len(content.get("tasks", []))
@@ -1599,15 +1600,15 @@ async def distribute_approved_content(
         )
         if has_filtered:
             team_content = {**content, "decisions": filtered_decisions, "tasks": filtered_tasks, "open_questions": filtered_questions}
-            logger.info(f"Filtered sensitive items from team distribution for {meeting_id}")
+            logger.info(f"Filtered CEO items from team distribution for {meeting_id}")
 
     # 6. Send Telegram notification
     try:
         drive_link = results.get("drive_link", "")
         participants = meeting_record.get("participants", []) if meeting_record else []
 
-        if sensitivity == "sensitive":
-            # Sensitive: send full summary to Eyal only
+        if sensitivity in ("ceo", "ceo_only", "restricted", "sensitive"):
+            # CEO: send full summary to Eyal only
             telegram_result = await telegram_bot.send_meeting_summary(
                 title=meeting_title,
                 summary=summary,
@@ -1615,7 +1616,7 @@ async def distribute_approved_content(
                 sensitive=True,
             )
         else:
-            # Normal: send teaser to group (or Eyal in dev)
+            # PUBLIC/TEAM: send teaser to group (or Eyal in dev)
             from services.telegram_bot import format_summary_teaser
 
             teaser = format_summary_teaser(
@@ -1794,7 +1795,7 @@ async def distribute_approved_prep(
     }
 
     title = content.get("title", "Untitled Meeting")
-    sensitivity = content.get("sensitivity", "normal")
+    sensitivity = content.get("sensitivity", "founders")
     start_time = content.get("start_time", "TBD")
     meeting_type = content.get("meeting_type", "generic")
     focus_instructions = content.get("focus_instructions", [])
@@ -1864,9 +1865,9 @@ async def distribute_approved_prep(
         message += f'<a href="{drive_link}">View prep document</a>\n'
 
     try:
-        if sensitivity == "sensitive":
+        if sensitivity in ("ceo", "ceo_only", "restricted", "sensitive"):
             message += (
-                "\n<i>This prep contains sensitive content — not distributed to "
+                "\n<i>This prep contains CEO content — not distributed to "
                 "other participants. Forward manually if appropriate.</i>"
             )
             await telegram_bot.send_to_eyal(message, parse_mode="HTML")
@@ -1879,7 +1880,7 @@ async def distribute_approved_prep(
             results["telegram_sent"] = True
             results["distribution"] = "eyal_only"
         else:
-            # Normal: full team distribution
+            # FOUNDERS/PUBLIC/TEAM: full team distribution
             await telegram_bot.send_to_eyal(message, parse_mode="HTML")
             await telegram_bot.send_to_group(message, parse_mode="HTML")
             results["telegram_sent"] = True

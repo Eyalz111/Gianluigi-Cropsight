@@ -14,6 +14,7 @@ The prompt enforces:
 Based on Appendix A and Section 8 of GIANLUIGI_PROJECT_PLAN.md
 """
 
+from config.prompt_registry import prompt_registry
 from config.team import get_team_member_names
 
 # =============================================================================
@@ -188,18 +189,23 @@ Blocked keywords (never process):
 """
 
 SENSITIVITY_RULES = """
-SENSITIVITY RULES:
-Meetings involving lawyers, investors, NDAs, or founders agreement discussions are classified as sensitive. Output goes to Eyal only, not the team.
+SENSITIVITY TIERS (audience-aware):
+Meetings are classified with a 4-tier hierarchy: CEO(4) > FOUNDERS(3) > TEAM(2) > PUBLIC(1)
 
-Sensitive keywords:
+- PUBLIC — safe for anyone (rare; use for press-released decisions)
+- TEAM — future all-employees tier (reserved for when team grows)
+- FOUNDERS — OK for full founding team (default for operational discussions)
+- CEO — Eyal only (investor, legal, interpersonal dynamics, confidential)
+
+CEO keywords:
 - Legal: "lawyer", "legal", "fischer", "fbc", "zohar"
 - Investor: "investor", "investment", "funding", "vc"
 - Confidential: "nda", "confidential", "founders agreement"
 - HR/Equity: "hr", "compensation", "equity"
 
-For sensitive meetings:
+For CEO meetings:
 - Only send summary to Eyal (not the team group)
-- Note sensitivity classification in the output
+- Note sensitivity tier in the output
 - Let Eyal decide what to share with the team
 """
 
@@ -291,19 +297,21 @@ def get_system_prompt() -> str:
     Build and return the complete system prompt for Gianluigi.
 
     Assembles all guardrail sections into the final prompt.
+    Tries YAML registry first, falls back to Python constants.
 
     Returns:
         The full system prompt string to be used with Claude API.
     """
-    return SYSTEM_PROMPT.format(
-        tone_guardrails=TONE_GUARDRAILS,
-        source_citation_rules=SOURCE_CITATION_RULES,
-        approval_flow_rules=APPROVAL_FLOW_RULES,
-        calendar_rules=CALENDAR_RULES,
-        sensitivity_rules=SENSITIVITY_RULES,
-        personal_content_rules=PERSONAL_CONTENT_RULES,
-        external_participant_rules=EXTERNAL_PARTICIPANT_RULES,
-        information_security_rules=INFORMATION_SECURITY_RULES,
+    template = prompt_registry.get("system_prompt_template") or SYSTEM_PROMPT
+    return template.format(
+        tone_guardrails=prompt_registry.get("tone_guardrails") or TONE_GUARDRAILS,
+        source_citation_rules=prompt_registry.get("source_citation_rules") or SOURCE_CITATION_RULES,
+        approval_flow_rules=prompt_registry.get("approval_flow_rules") or APPROVAL_FLOW_RULES,
+        calendar_rules=prompt_registry.get("calendar_rules") or CALENDAR_RULES,
+        sensitivity_rules=prompt_registry.get("sensitivity_rules") or SENSITIVITY_RULES,
+        personal_content_rules=prompt_registry.get("personal_content_rules") or PERSONAL_CONTENT_RULES,
+        external_participant_rules=prompt_registry.get("external_participant_rules") or EXTERNAL_PARTICIPANT_RULES,
+        information_security_rules=prompt_registry.get("information_security_rules") or INFORMATION_SECURITY_RULES,
     )
 
 
@@ -651,7 +659,7 @@ def format_summary(
         meeting_date: Date of the meeting.
         participants: List of participant names.
         duration_minutes: Meeting duration.
-        sensitivity: 'normal' or 'sensitive'.
+        sensitivity: Tier string ('founders', 'ceo', etc.).
         decisions: List of decision dicts.
         tasks: List of task dicts.
         follow_ups: List of follow-up meeting dicts.
@@ -732,12 +740,13 @@ def format_summary(
     else:
         stakeholders_text = "*No new stakeholders mentioned*\n"
 
-    return SUMMARY_TEMPLATE.format(
+    template = prompt_registry.get("summary_template") or SUMMARY_TEMPLATE
+    return template.format(
         title=meeting_title,
         date=meeting_date,
         duration=duration_minutes,
         participants=", ".join(participants),
-        sensitivity=sensitivity.title(),
+        sensitivity=sensitivity.upper().replace("_", " "),
         decisions=decisions_text,
         tasks=tasks_text,
         follow_ups=follow_ups_text,

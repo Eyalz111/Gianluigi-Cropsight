@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 from config.settings import settings
+from models.schemas import filter_by_sensitivity
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -97,14 +98,16 @@ async def link_meeting_to_topics(
     return linked_threads
 
 
-async def generate_topic_evolution(topic_id: str) -> str:
+async def generate_topic_evolution(topic_id: str, max_sensitivity_level: int = 4) -> str:
     """
     Generate a chronological narrative of how a topic evolved across meetings.
 
     Uses Sonnet to create a paragraph summarizing the topic's journey.
+    Default CEO level (MCP-facing tool).
 
     Args:
         topic_id: UUID of the topic thread.
+        max_sensitivity_level: Max tier level (default 4=CEO, MCP is Eyal-only).
 
     Returns:
         Narrative string.
@@ -116,6 +119,11 @@ async def generate_topic_evolution(topic_id: str) -> str:
         return "Topic thread not found."
 
     mentions = thread.get("mentions", [])
+    # Filter mentions by their linked meeting sensitivity
+    mentions = [
+        m for m in mentions
+        if filter_by_sensitivity([m.get("meetings", {}) or {}], max_sensitivity_level)
+    ]
     if not mentions:
         return f"Topic '{thread.get('topic_name')}' has no meeting mentions."
 
