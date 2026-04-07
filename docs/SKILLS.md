@@ -1,7 +1,7 @@
 # Gianluigi Skills Manifest
 
-**Version:** 1.0
-**Last Updated:** April 2, 2026
+**Version:** 2.2
+**Last Updated:** April 7, 2026
 
 This document defines Gianluigi's capabilities as discrete, modular skills. Each skill is a self-contained capability that can be independently tested, monitored, and evolved.
 
@@ -148,9 +148,23 @@ Each skill is documented with:
 - **Dependencies**: Dropbox SDK, Google Drive API, Supabase
 - **Cost**: $0 (API calls only, no LLM)
 
+### 18. Deal Intelligence
+- **Trigger**: MCP `deal_ops` tool, transcript processing (auto-detect deal signals), morning brief
+- **Inputs**: Meeting transcripts (signal detection), Supabase deals/interactions/commitments tables
+- **Outputs**: Deal pulse (overdue follow-ups + stale deals), commitments due, deal signal alerts, auto-interactions from meetings
+- **Dependencies**: Supabase, transcript processor
+- **Cost**: $0 (keyword matching, no LLM)
+
+### 19. Gantt Drift Detection
+- **Trigger**: MCP `get_full_status(view="ceo_today")`, morning brief
+- **Inputs**: Gantt chart status (via Sheets), task overdue data (via Supabase)
+- **Outputs**: Drift alerts when >50% of tasks in a Gantt section are overdue but Gantt shows active
+- **Dependencies**: Gantt manager, Supabase
+- **Cost**: $0 (data comparison, no LLM)
+
 ---
 
-## MCP Interface (38 tools)
+## MCP Interface (43 tools)
 
 All skills are accessible via Claude.ai MCP server. Tools are grouped by category prefix:
 - `[TASKS]` — get_tasks, create_task, update_task
@@ -162,5 +176,8 @@ All skills are accessible via Claude.ai MCP server. Tools are grouped by categor
 - `[SYSTEM]` — get_system_context, get_system_health, get_cost_summary, get_full_status, run_qa_check
 - `[SESSION]` — get_last_session_summary, save_session_summary, search_memory
 - `[REVIEW]` — get_weekly_summary, start_weekly_review, confirm_weekly_review
-- `[OPERATIONS]` — quick_inject, confirm_quick_inject, get_pending_approvals, get_stakeholder_info, get_commitments
+- `[DEALS]` — deal_ops (composite: list/get/create/update/timeline/commitment_list/commitment_create/commitment_update/pulse)
+- `[OPERATIONS]` — quick_inject, confirm_quick_inject, get_pending_approvals, get_stakeholder_info
 - `[PROJECTS]` — list_canonical_projects, add_canonical_project
+- `[INTELLIGENCE]` — get_intelligence_signal_status, approve_intelligence_signal, trigger_intelligence_signal, get_competitor_watchlist, add_competitor
+- `[SYNC]` — sync_from_sheets

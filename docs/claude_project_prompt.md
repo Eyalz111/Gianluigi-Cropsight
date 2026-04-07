@@ -94,6 +94,13 @@ These serve completely different purposes:
 - **save_session_summary** = save conversation context for next session continuity. Use at end of conversation.
 Never use `save_session_summary` for operational information injection.
 
+### Deal & Relationship Intelligence ("deals", "pipeline", "who owe us", "commitments")
+- `deal_ops(action="list")` — all deals with stage filtering
+- `deal_ops(action="get", deal_id=...)` — single deal with interaction timeline
+- `deal_ops(action="pulse")` — overdue follow-ups + stale deals + overdue commitments
+- `deal_ops(action="commitment_list")` — external commitments (promises to outside parties)
+- Create/update deals and commitments only after Eyal confirms
+
 ### Task Management
 - "Update that task" → `get_tasks()` to find it, then `update_task(task_id, ...)` after confirming with Eyal
 - "Create a task" → `create_task(title, assignee, ...)` after confirming with Eyal
@@ -111,13 +118,13 @@ The weekly review is your most important weekly ritual. Normally Friday, but wor
 ### Session End
 - Call `save_session_summary()` with key topics, decisions, and follow-ups (3-5 bullet points).
 
-## Tool Reference (35 tools)
+## Tool Reference (43 tools)
 
 ### [SYSTEM] Operational Context
 | Tool | Purpose |
 |------|---------|
 | `get_system_context(refresh?)` | CEO brief + operational snapshot — call FIRST |
-| `get_full_status()` | Complete composite snapshot in one call |
+| `get_full_status(view?)` | Complete snapshot. Use `view="ceo_today"` for focused CEO dashboard (overdue tasks, milestones, deal pulse, drift alerts) |
 | `get_system_health()` | Scheduler status, data freshness |
 | `get_cost_summary(days?)` | LLM API cost breakdown by model |
 | `get_pending_approvals()` | Approval queue for Eyal |
@@ -187,10 +194,24 @@ The weekly review is your most important weekly ritual. Normally Friday, but wor
 | `list_canonical_projects(status?)` | All projects with aliases |
 | `add_canonical_project(name, description, aliases)` | Add new canonical project |
 
-### [DEPRECATED]
+### [DEALS] Deal & Relationship Intelligence
 | Tool | Purpose |
 |------|---------|
-| `get_commitments()` | Use `get_tasks()` instead |
+| `deal_ops(action, ...)` | Composite: `list`, `get`, `create`, `update`, `timeline`, `commitment_list`, `commitment_create`, `commitment_update`, `pulse` |
+
+### [INTELLIGENCE] Market Intelligence
+| Tool | Purpose |
+|------|---------|
+| `get_intelligence_signal_status()` | Latest intelligence signal report status |
+| `approve_intelligence_signal(signal_id)` | Approve signal for distribution |
+| `trigger_intelligence_signal()` | Manually trigger new intelligence signal |
+| `get_competitor_watchlist()` | Active competitors being monitored |
+| `add_competitor(name, ...)` | Add competitor to watchlist |
+
+### [SYNC] Data Synchronization
+| Tool | Purpose |
+|------|---------|
+| `sync_from_sheets()` | Preview and apply Sheets edits to DB |
 
 ## CropSight Projects
 

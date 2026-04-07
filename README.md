@@ -7,7 +7,7 @@ CropSight's AI Operations Assistant — an "AI Office Manager" for a 4-person Ag
 - **Meeting intelligence:** Processes transcripts (Tactiq), extracts decisions, tasks, open questions, stakeholders using Claude Opus. Continuity-aware extraction recognizes when discussions reference existing tasks.
 - **Cross-meeting memory:** Topic threading links discussions across meetings. Meeting continuity engine provides task completion stats, decision review dates, and question aging across sessions.
 - **Task & decision tracking:** Supabase DB + Google Sheets with canonical project labels, decision rationale/confidence, review triggers, decision chain traversal, freshness tracking
-- **CEO dashboard:** 38 MCP tools accessible via Claude.ai — status updates, Gantt analytics, memory search, task management, weekly reviews, QA health checks
+- **CEO dashboard:** 43 MCP tools accessible via Claude.ai — status updates, Gantt analytics, memory search, task management, weekly reviews, deal intelligence, QA health checks
 - **Team distribution:** Sensitivity-aware (LLM-classified) email + Telegram distribution with CEO approval gate
 - **Operational Gantt:** Bidirectional Sheets integration with proposal-based editing, snapshots, rollback, velocity metrics
 - **Email intelligence:** Personal Gmail scanning, morning briefs, email classification, body storage, attachment persistence
@@ -53,7 +53,7 @@ Tactiq (transcript) --> Google Drive --> Gianluigi (Cloud Run)
 | CEO Interface | Claude.ai via MCP (Streamable HTTP, FastMCP SDK) |
 | Language | Python 3.11+, async |
 
-## MCP Tools (38)
+## MCP Tools (43)
 
 Grouped by category:
 
@@ -65,11 +65,13 @@ Grouped by category:
 | DECISIONS (4) | get_decisions, update_decision, get_decisions_for_review, get_decision_chain | Decision lifecycle + chain traversal |
 | TOPICS (4) | get_topic_thread, list_topic_threads, merge_topic_threads, rename_topic_thread | Cross-meeting threading |
 | GANTT (5) | get_gantt_status, get_gantt_horizon, get_gantt_metrics, propose_gantt_update, approve_gantt_proposal | Operational planning |
+| DEALS (1) | deal_ops | Deal intelligence composite (list/get/create/update/timeline/commitment/pulse) |
 | REVIEW (3) | get_weekly_summary, start_weekly_review, confirm_weekly_review | Weekly review |
 | QUICK (2) | quick_inject, confirm_quick_inject | Quick data injection |
 | SESSION (2) | get_last_session_summary, save_session_summary | Session continuity |
 | PROJECTS (2) | list_canonical_projects, add_canonical_project | Project label management |
-| COMMITMENTS (1) | get_commitments | Legacy query |
+| INTELLIGENCE (5) | get_intelligence_signal_status, approve_intelligence_signal, trigger_intelligence_signal, get_competitor_watchlist, add_competitor | Market intelligence |
+| SYNC (1) | sync_from_sheets | Sheets → DB sync |
 
 ## Key Design Principles
 
@@ -88,12 +90,12 @@ guardrails/      # Approval flow, sensitivity classifier, Gantt validation, MCP 
 processors/      # Transcript extraction, cross-reference, meeting continuity, topic threading,
                  # debrief, meeting prep, weekly review/digest, Gantt intelligence, decision review,
                  # document processor, task signal detection, sheets sync, morning brief
-services/        # Google Sheets/Drive/Calendar/Gmail, Telegram bot, MCP server (38 tools),
+services/        # Google Sheets/Drive/Calendar/Gmail, Telegram bot, MCP server (43 tools),
                  # Supabase client, Gantt manager, word generator, embeddings, Dropbox sync
 schedulers/      # Transcript watcher, morning brief, email watcher, weekly digest/review,
                  # task archival, debrief prompt, QA agent, Dropbox sync
 scripts/         # Migration SQL, deployment, QA, Sheets rebuild, label backfill
-tests/           # 1450+ tests
+tests/           # 1870+ tests
 docs/            # Architecture docs, skills manifest, Claude.ai project prompt, QA review notes
 ```
 
@@ -137,7 +139,7 @@ Secrets are set on the Cloud Run service and persist across deploys.
 | `KNOWN_ISSUES.md` | Current bugs and limitations |
 | `docs/SKILLS.md` | 17 system capabilities with triggers, inputs, outputs, costs |
 | `config/settings.py` | All environment variables and configuration |
-| `services/mcp_server.py` | MCP server with 38 tools |
+| `services/mcp_server.py` | MCP server with 43 tools |
 | `schedulers/qa_scheduler.py` | Daily QA agent — system self-checks |
 
 ## CropSight
