@@ -422,7 +422,21 @@ EXTRACTION INSTRUCTIONS:
    - Name and context of how they were mentioned
    - Only include if new or noteworthy
 
-6. Write a DISCUSSION SUMMARY
+6. Detect DEAL SIGNALS (commercial/partnership discussions)
+   - Organization name, contact person
+   - Deal stage indicators (pilot, proposal, negotiation, etc.)
+   - Value estimates or budget mentions
+   - Next steps agreed with external parties
+   - Only flag if there are genuine commercial discussions, not internal strategy
+
+7. Extract EXTERNAL COMMITMENTS (promises to outside parties)
+   - What was promised and to whom
+   - Who on our side promised it
+   - Any deadline mentioned (explicit or implied)
+   - Organization name
+   - Only include commitments TO external parties, not internal tasks
+
+8. Write a DISCUSSION SUMMARY
    - 2-4 paragraphs covering the key topics
    - Professional tone only
    - No emotional characterizations

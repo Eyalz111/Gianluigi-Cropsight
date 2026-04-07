@@ -22,7 +22,7 @@ Usage:
 import json
 import logging
 import math
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
@@ -3673,6 +3673,261 @@ class SupabaseClient:
                 deactivated += 1
 
         return deactivated
+
+    # ── Deal Intelligence (Phase 4) ──────────────────────────────
+
+    def create_deal(
+        self,
+        name: str,
+        organization: str,
+        contact_person: str | None = None,
+        stage: str = "lead",
+        value_estimate: str | None = None,
+        probability: int | None = None,
+        owner: str = "Eyal",
+        next_action: str | None = None,
+        next_action_date: date | None = None,
+        source: str | None = None,
+        notes: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Create a new deal record."""
+        data = {
+            "name": name,
+            "organization": organization,
+            "stage": stage,
+            "owner": owner,
+        }
+        if contact_person:
+            data["contact_person"] = contact_person
+        if value_estimate:
+            data["value_estimate"] = value_estimate
+        if probability is not None:
+            data["probability"] = probability
+        if next_action:
+            data["next_action"] = next_action
+        if next_action_date:
+            data["next_action_date"] = self._serialize_datetime(next_action_date)
+        if source:
+            data["source"] = source
+        if notes:
+            data["notes"] = notes
+        if metadata:
+            data["metadata"] = metadata
+
+        result = self.client.table("deals").insert(data).execute()
+        logger.info(f"Created deal: {name} ({organization})")
+
+        self.log_action(
+            action="deal_created",
+            details={"deal_id": result.data[0]["id"], "name": name, "organization": organization},
+            triggered_by="auto",
+        )
+
+        return result.data[0]
+
+    def update_deal(self, deal_id: str, **updates) -> dict:
+        """Update a deal record. Auto-sets updated_at."""
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        result = (
+            self.client.table("deals")
+            .update(updates)
+            .eq("id", deal_id)
+            .execute()
+        )
+        if not result.data:
+            raise ValueError(f"Deal {deal_id} not found")
+        logger.info(f"Updated deal {deal_id}: {list(updates.keys())}")
+        return result.data[0]
+
+    def get_deal(self, deal_id: str) -> dict | None:
+        """Get a single deal by ID."""
+        result = (
+            self.client.table("deals")
+            .select("*")
+            .eq("id", deal_id)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def get_deals(
+        self,
+        stage: str | None = None,
+        owner: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """List deals, optionally filtered by stage or owner."""
+        query = self.client.table("deals").select("*")
+        if stage:
+            query = query.eq("stage", stage)
+        if owner:
+            query = query.eq("owner", owner)
+        result = query.order("updated_at", desc=True).limit(limit).execute()
+        return result.data or []
+
+    def get_deal_timeline(self, deal_id: str, limit: int = 20) -> list[dict]:
+        """Get interaction history for a deal, newest first."""
+        result = (
+            self.client.table("deal_interactions")
+            .select("*")
+            .eq("deal_id", deal_id)
+            .order("date", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+
+    def get_stale_deals(self, days: int = 7) -> list[dict]:
+        """Get deals with no interaction in N days (excluding closed/on_hold)."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        result = (
+            self.client.table("deals")
+            .select("*")
+            .lt("last_interaction_date", cutoff)
+            .not_.in_("stage", ["closed_won", "closed_lost", "on_hold"])
+            .order("last_interaction_date")
+            .execute()
+        )
+        return result.data or []
+
+    def get_overdue_deal_actions(self) -> list[dict]:
+        """Get deals with overdue next_action_date."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = (
+            self.client.table("deals")
+            .select("*")
+            .lt("next_action_date", today)
+            .not_.in_("stage", ["closed_won", "closed_lost", "on_hold"])
+            .not_.is_("next_action_date", "null")
+            .order("next_action_date")
+            .execute()
+        )
+        return result.data or []
+
+    def create_deal_interaction(
+        self,
+        deal_id: str,
+        interaction_type: str,
+        summary: str,
+        interaction_date: date | str | None = None,
+        source_id: str | None = None,
+        source_type: str | None = None,
+        created_by: str = "gianluigi",
+    ) -> dict:
+        """Create an interaction record and update deal's last_interaction_date."""
+        if interaction_date is None:
+            interaction_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date_str = self._serialize_datetime(interaction_date) if not isinstance(interaction_date, str) else interaction_date
+
+        data = {
+            "deal_id": deal_id,
+            "interaction_type": interaction_type,
+            "summary": summary,
+            "date": date_str,
+            "created_by": created_by,
+        }
+        if source_id:
+            data["source_id"] = source_id
+        if source_type:
+            data["source_type"] = source_type
+
+        result = self.client.table("deal_interactions").insert(data).execute()
+
+        # Update deal's last_interaction_date
+        self.client.table("deals").update(
+            {"last_interaction_date": date_str, "updated_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", deal_id).execute()
+
+        logger.info(f"Created {interaction_type} interaction for deal {deal_id}")
+        return result.data[0]
+
+    # ── External Commitments ─────────────────────────────────────
+
+    def create_external_commitment(
+        self,
+        organization: str,
+        commitment: str,
+        deal_id: str | None = None,
+        contact_person: str | None = None,
+        promised_by: str = "Eyal",
+        promised_to: str | None = None,
+        deadline: date | str | None = None,
+        source_meeting_id: str | None = None,
+        notes: str | None = None,
+    ) -> dict:
+        """Create an external commitment (promise to an outside party)."""
+        data = {
+            "organization": organization,
+            "commitment": commitment,
+            "promised_by": promised_by,
+            "status": "open",
+        }
+        if deal_id:
+            data["deal_id"] = deal_id
+        if contact_person:
+            data["contact_person"] = contact_person
+        if promised_to:
+            data["promised_to"] = promised_to
+        if deadline:
+            data["deadline"] = self._serialize_datetime(deadline) if not isinstance(deadline, str) else deadline
+        if source_meeting_id:
+            data["source_meeting_id"] = source_meeting_id
+        if notes:
+            data["notes"] = notes
+
+        result = self.client.table("external_commitments").insert(data).execute()
+        logger.info(f"Created external commitment to {organization}: {commitment[:50]}")
+
+        self.log_action(
+            action="external_commitment_created",
+            details={"commitment_id": result.data[0]["id"], "organization": organization},
+            triggered_by="auto",
+        )
+
+        return result.data[0]
+
+    def update_external_commitment(self, commitment_id: str, **updates) -> dict:
+        """Update an external commitment. Auto-sets updated_at."""
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        result = (
+            self.client.table("external_commitments")
+            .update(updates)
+            .eq("id", commitment_id)
+            .execute()
+        )
+        if not result.data:
+            raise ValueError(f"External commitment {commitment_id} not found")
+        logger.info(f"Updated external commitment {commitment_id}: {list(updates.keys())}")
+        return result.data[0]
+
+    def get_external_commitments(
+        self,
+        status: str | None = None,
+        organization: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """List external commitments, optionally filtered."""
+        query = self.client.table("external_commitments").select("*")
+        if status:
+            query = query.eq("status", status)
+        if organization:
+            query = query.ilike("organization", f"%{organization}%")
+        result = query.order("deadline").limit(limit).execute()
+        return result.data or []
+
+    def get_overdue_commitments(self) -> list[dict]:
+        """Get open external commitments past their deadline."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = (
+            self.client.table("external_commitments")
+            .select("*")
+            .eq("status", "open")
+            .lt("deadline", today)
+            .not_.is_("deadline", "null")
+            .order("deadline")
+            .execute()
+        )
+        return result.data or []
 
 
 # Singleton instance for easy import

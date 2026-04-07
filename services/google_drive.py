@@ -40,6 +40,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 from config.settings import settings
+from core.retry import retry
 
 logger = logging.getLogger(__name__)
 
@@ -229,23 +230,27 @@ class GoogleDriveService:
             file_id: Google Drive file ID.
 
         Returns:
-            Raw file bytes.
+            Raw file bytes (empty on failure after retries).
         """
         try:
-            request = self.service.files().get_media(fileId=file_id)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-
-            raw_bytes = fh.getvalue()
-            logger.info(f"Downloaded file bytes {file_id}: {len(raw_bytes)} bytes")
-            return raw_bytes
-
+            return await self._download_file_bytes_with_retry(file_id)
         except Exception as e:
-            logger.error(f"Error downloading file bytes {file_id}: {e}")
+            logger.error(f"Error downloading file bytes {file_id} (after retries): {e}")
             return b""
+
+    @retry(max_attempts=3, backoff=2.0, base_delay=2.0)
+    async def _download_file_bytes_with_retry(self, file_id: str) -> bytes:
+        """Inner download with retry on transient errors (BrokenPipeError, ConnectionError, etc.)."""
+        request = self.service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+
+        raw_bytes = fh.getvalue()
+        logger.info(f"Downloaded file bytes {file_id}: {len(raw_bytes)} bytes")
+        return raw_bytes
 
     def mark_document_processed(self, file_id: str) -> None:
         """
@@ -264,41 +269,44 @@ class GoogleDriveService:
             file_id: Google Drive file ID.
 
         Returns:
-            File content as string.
+            File content as string (empty on failure after retries).
         """
         try:
-            # Get file metadata to check type
-            metadata = await self.get_file_metadata(file_id)
-            mime_type = metadata.get("mimeType", "")
-
-            # Handle Google Docs - export as plain text
-            if mime_type == "application/vnd.google-apps.document":
-                request = self.service.files().export_media(
-                    fileId=file_id,
-                    mimeType="text/plain"
-                )
-            else:
-                # Regular file - download content
-                request = self.service.files().get_media(fileId=file_id)
-
-            # Download content
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-
-            content = fh.getvalue().decode("utf-8", errors="ignore")
-
-            # Mark as processed
+            content = await self._download_file_with_retry(file_id)
+            # Mark as processed only on success
             self._processed_file_ids.add(file_id)
-
-            logger.info(f"Downloaded file {file_id}: {len(content)} chars")
             return content
-
         except Exception as e:
-            logger.error(f"Error downloading file {file_id}: {e}")
+            logger.error(f"Error downloading file {file_id} (after retries): {e}")
             return ""
+
+    @retry(max_attempts=3, backoff=2.0, base_delay=2.0)
+    async def _download_file_with_retry(self, file_id: str) -> str:
+        """Inner download with retry on transient errors (BrokenPipeError, ConnectionError, etc.)."""
+        # Get file metadata to check type
+        metadata = await self.get_file_metadata(file_id)
+        mime_type = metadata.get("mimeType", "")
+
+        # Handle Google Docs - export as plain text
+        if mime_type == "application/vnd.google-apps.document":
+            request = self.service.files().export_media(
+                fileId=file_id,
+                mimeType="text/plain"
+            )
+        else:
+            # Regular file - download content
+            request = self.service.files().get_media(fileId=file_id)
+
+        # Download content
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+
+        content = fh.getvalue().decode("utf-8", errors="ignore")
+        logger.info(f"Downloaded file {file_id}: {len(content)} chars")
+        return content
 
     async def get_file_metadata(self, file_id: str) -> dict:
         """

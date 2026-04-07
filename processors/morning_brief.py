@@ -281,7 +281,74 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"Continuity context for morning brief failed: {e}")
 
-    # 10. QA system health — inline summary from daily QA check (X1)
+    # 10. Deal Pulse — overdue follow-ups + stale deals (Phase 4)
+    try:
+        from processors.deal_intelligence import generate_deal_pulse, generate_commitments_due
+
+        deal_pulse = generate_deal_pulse(max_items=3)
+        if deal_pulse:
+            sections.append({
+                "type": "deal_pulse",
+                "title": "Deal Pulse",
+                "items": deal_pulse,
+            })
+
+        commitments_due = generate_commitments_due(max_items=3)
+        if commitments_due:
+            sections.append({
+                "type": "commitments_due",
+                "title": "Commitments Due",
+                "items": commitments_due,
+            })
+    except Exception as e:
+        logger.debug(f"Deal pulse for morning brief failed: {e}")
+
+    # 11. Task Urgency — high-priority overdue tasks (Phase 5)
+    try:
+        today_str_urgency = date.today().isoformat()
+        all_tasks = supabase_client.get_tasks(status="pending", limit=100)
+        all_tasks += supabase_client.get_tasks(status="in_progress", limit=100)
+        overdue_high = [
+            t for t in all_tasks
+            if t.get("deadline") and t["deadline"] < today_str_urgency
+            and t.get("priority") == "H"
+        ][:3]
+        if overdue_high:
+            sections.append({
+                "type": "task_urgency",
+                "title": "Task Urgency",
+                "items": [
+                    {"title": t.get("title", "")[:80], "assignee": t.get("assignee", ""), "deadline": t.get("deadline", "")}
+                    for t in overdue_high
+                ],
+            })
+    except Exception as e:
+        logger.debug(f"Task urgency for morning brief failed: {e}")
+
+    # 12. Gantt Milestones This Week + Drift Alerts (Phase 5)
+    try:
+        from processors.gantt_intelligence import compute_gantt_metrics, detect_gantt_drift
+
+        metrics = await compute_gantt_metrics()
+        milestones = metrics.get("milestone_risks", [])[:3]
+        if milestones:
+            sections.append({
+                "type": "gantt_milestones",
+                "title": "Gantt Milestones",
+                "items": milestones,
+            })
+
+        drift = await detect_gantt_drift()
+        if drift:
+            sections.append({
+                "type": "drift_alerts",
+                "title": "Drift Alerts",
+                "items": drift[:2],
+            })
+    except Exception as e:
+        logger.debug(f"Gantt milestones/drift for morning brief failed: {e}")
+
+    # 13. QA system health — inline summary from daily QA check (X1)
     try:
         from schedulers.qa_scheduler import qa_scheduler
         qa_report = qa_scheduler.last_report
@@ -425,6 +492,50 @@ def format_morning_brief(brief: dict) -> str:
             for issue in section.get("issues", [])[:3]:
                 lines.append(f"  - {issue[:80]}")
             lines.append("")
+
+        elif section_type == "deal_pulse":
+            items = section.get("items", [])
+            if items:
+                lines.append(f"<b>{title}:</b>")
+                for item in items:
+                    icon = "!" if item.get("type") == "overdue" else "~"
+                    lines.append(f"  {icon} {item['name']} ({item['organization']}): {item['detail']}")
+                lines.append("")
+
+        elif section_type == "commitments_due":
+            items = section.get("items", [])
+            if items:
+                lines.append(f"<b>{title}:</b>")
+                for item in items:
+                    to_str = f" to {item['promised_to']}" if item.get("promised_to") else ""
+                    lines.append(f"  ! {item['commitment']}{to_str} ({item['days_overdue']}d overdue)")
+                lines.append("")
+
+        elif section_type == "task_urgency":
+            items = section.get("items", [])
+            if items:
+                lines.append(f"<b>{title}:</b>")
+                for item in items:
+                    assignee = f" ({item['assignee']})" if item.get("assignee") else ""
+                    lines.append(f"  ! {item['title']}{assignee} — due {item.get('deadline', '?')}")
+                lines.append("")
+
+        elif section_type == "gantt_milestones":
+            items = section.get("items", [])
+            if items:
+                lines.append(f"<b>{title}:</b>")
+                for item in items:
+                    weeks = item.get("weeks_away", "?")
+                    lines.append(f"  - {item.get('milestone', '?')} ({item.get('section', '')}) — {weeks}w away")
+                lines.append("")
+
+        elif section_type == "drift_alerts":
+            items = section.get("items", [])
+            if items:
+                lines.append(f"<b>{title}:</b>")
+                for item in items:
+                    lines.append(f"  ! {item.get('drift_description', '')}")
+                lines.append("")
 
         elif section_type == "sheets_sync":
             summary = section.get("summary", "")

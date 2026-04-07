@@ -93,7 +93,7 @@ class TestServerBuild:
             "get_tasks",
             "get_decisions",
             "get_open_questions",
-            "get_commitments",
+            "deal_ops",
             "get_stakeholder_info",
             "get_meeting_history",
             "get_pending_approvals",

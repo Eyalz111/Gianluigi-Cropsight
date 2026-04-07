@@ -44,6 +44,9 @@ DAYS_BEFORE_WARNING = 2
 class TaskReminderScheduler:
     """
     Schedules and sends task deadline reminders.
+
+    Overdue task reminders include inline action buttons:
+    [Done] [+1 Week] [Discuss]
     """
 
     def __init__(
@@ -64,6 +67,12 @@ class TaskReminderScheduler:
         # Track reminders sent today to avoid duplicates
         self._reminders_sent_today: set[str] = set()
         self._last_reminder_date: str = ""
+        # Phase 3: inline task reply support
+        self._task_action_counter = 0
+        # short_id → task info dict for button callbacks
+        self.task_action_map: dict[str, dict] = {}
+        # message_id → short_id for free-text reply detection
+        self.message_task_map: dict[int, str] = {}
 
     async def start(self) -> None:
         """
@@ -217,15 +226,20 @@ class TaskReminderScheduler:
 
         return summary
 
+    def _next_short_id(self) -> str:
+        """Generate a short incrementing ID for callback_data (Telegram 64-byte limit)."""
+        self._task_action_counter += 1
+        return f"t{self._task_action_counter}"
+
     async def _send_overdue_reminder(
         self,
         task: dict,
         days_overdue: int
     ) -> bool:
         """
-        Send reminder for an overdue task.
+        Send reminder for an overdue task with inline action buttons.
 
-        Notifies both assignee and Eyal.
+        Notifies Eyal with [Done] [+1 Week] [Discuss] buttons.
 
         Args:
             task: Task dict from sheet.
@@ -234,6 +248,8 @@ class TaskReminderScheduler:
         Returns:
             True if sent successfully.
         """
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
         assignee = task.get("assignee", "Unknown")
         task_desc = task.get("task", "Unknown task")
         priority = task.get("priority", "M")
@@ -252,9 +268,25 @@ class TaskReminderScheduler:
         if source:
             message += f"*From Meeting:* {source}\n"
 
-        message += f"\nPlease update the Task Tracker when complete."
+        message += f"\nTap a button or reply with an update:"
 
-        # Send to assignee if we have their Telegram ID
+        # Generate short ID and store mapping
+        short_id = self._next_short_id()
+        self.task_action_map[short_id] = {
+            "task_text": task_desc,
+            "assignee": assignee,
+            "row_number": task.get("row_number"),
+            "deadline": task.get("deadline", ""),
+        }
+
+        # Build inline keyboard
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Done", callback_data=f"taskdone:{short_id}"),
+            InlineKeyboardButton("+1 Week", callback_data=f"taskdelay:{short_id}"),
+            InlineKeyboardButton("Discuss", callback_data=f"taskdiscuss:{short_id}"),
+        ]])
+
+        # Send to assignee (no buttons — buttons only for Eyal)
         assignee_telegram = self._get_telegram_id(assignee)
         if assignee_telegram:
             await telegram_bot.send_message(
@@ -262,8 +294,21 @@ class TaskReminderScheduler:
                 text=message
             )
 
-        # Always notify Eyal for overdue tasks
-        await telegram_bot.send_to_eyal(message)
+        # Send to Eyal WITH inline buttons
+        try:
+            msg = await telegram_bot.app.bot.send_message(
+                chat_id=telegram_bot.eyal_chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+            # Store message_id → short_id for free-text reply detection
+            if msg:
+                self.message_task_map[msg.message_id] = short_id
+        except Exception as e:
+            logger.error(f"Failed to send overdue reminder with buttons: {e}")
+            # Fallback: send without buttons
+            await telegram_bot.send_to_eyal(message)
 
         logger.info(f"Sent overdue reminder for: {task_desc}")
         return True

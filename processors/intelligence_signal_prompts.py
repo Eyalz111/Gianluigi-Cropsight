@@ -11,6 +11,8 @@ energetic journalist who reports facts without opinions or recommendations.
 import logging
 from datetime import datetime, timezone
 
+from config.prompt_registry import prompt_registry
+
 logger = logging.getLogger(__name__)
 
 # ── Banned phrases ─────────────────────────────────────────────────────
@@ -36,7 +38,11 @@ def system_prompt_synthesis() -> str:
     System prompt for the Opus synthesis call.
 
     Establishes the news anchor / editor-in-chief character.
+    Tries YAML registry first, falls back to inline generation.
     """
+    yaml_prompt = prompt_registry.get("signal_synthesis_system")
+    if yaml_prompt:
+        return yaml_prompt
     banned_list = ", ".join(f'"{p}"' for p in BANNED_PHRASES)
 
     return f"""You are the editor-in-chief and lead correspondent of the CropSight Intelligence Signal — a weekly market intelligence publication for a 4-person AgTech startup that builds ML-powered crop yield forecasting.
@@ -157,7 +163,11 @@ A creative, non-obvious synthesis. Connect dots across sections. What story woul
 
 
 def system_prompt_script() -> str:
-    """System prompt for video narration script generation."""
+    """System prompt for video narration script generation.
+    Tries YAML registry first, falls back to inline constant."""
+    yaml_prompt = prompt_registry.get("signal_script_system")
+    if yaml_prompt:
+        return yaml_prompt
     return """You are a news flash narrator for the CropSight Intelligence Signal video.
 Your tone is professional but energetic — like a Bloomberg TV anchor doing a 90-second market segment.
 Write for spoken delivery: short sentences, natural rhythm, no jargon that sounds awkward when read aloud.
@@ -189,7 +199,11 @@ Report:
 
 
 def system_prompt_structured_script() -> str:
-    """System prompt for structured video script with visual metadata."""
+    """System prompt for structured video script with visual metadata.
+    Tries YAML registry first, falls back to inline constant."""
+    yaml_prompt = prompt_registry.get("signal_structured_script_system")
+    if yaml_prompt:
+        return yaml_prompt
     return """You are a news flash narrator for the CropSight Intelligence Signal video.
 Your tone is professional but energetic — like a Bloomberg TV anchor doing a 90-second market segment.
 Write for spoken delivery: short sentences, natural rhythm.

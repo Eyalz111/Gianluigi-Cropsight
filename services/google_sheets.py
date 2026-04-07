@@ -303,6 +303,9 @@ STAKEHOLDER_COLUMNS = [
     "Secondary Due Date",
     "Status",
     "Notes",
+    "Deal Stage",
+    "Deal Value",
+    "Last Interaction",
 ]
 
 
@@ -1000,6 +1003,9 @@ class GoogleSheetsService:
                 "secondary_due_date": row[13] if len(row) > 13 else "",
                 "status": row[14] if len(row) > 14 else "",
                 "notes": row[15] if len(row) > 15 else "",
+                "deal_stage": row[16] if len(row) > 16 else "",
+                "deal_value": row[17] if len(row) > 17 else "",
+                "last_interaction": row[18] if len(row) > 18 else "",
             })
 
         return stakeholders
@@ -1875,7 +1881,7 @@ class GoogleSheetsService:
             return False
 
         try:
-            num_cols = len(STAKEHOLDER_COLUMNS)  # 16 columns
+            num_cols = len(STAKEHOLDER_COLUMNS)  # 19 columns
             sid = self._get_first_sheet_id(settings.STAKEHOLDER_TRACKER_SHEET_ID)
             requests = []
 

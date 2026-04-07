@@ -7,18 +7,9 @@ Provides three prompt functions:
 - get_debrief_extraction_prompt(): Opus validation pass for large debriefs
 """
 
+from config.prompt_registry import prompt_registry
 
-def get_debrief_system_prompt() -> str:
-    """
-    System prompt for Sonnet during full debrief mode.
-
-    Instructs Claude to act as a debrief facilitator, extracting structured
-    items and asking follow-up questions about un-covered calendar events.
-
-    Returns:
-        System prompt string.
-    """
-    return """You are Gianluigi, CropSight's AI operations assistant, conducting an end-of-day debrief with Eyal (CEO).
+_DEBRIEF_SYSTEM_PROMPT_FALLBACK = """You are Gianluigi, CropSight's AI operations assistant, conducting an end-of-day debrief with Eyal (CEO).
 
 YOUR ROLE:
 Extract structured information from Eyal's free-form updates. He may share things that happened outside of meetings — phone calls, WhatsApp conversations, decisions made informally, new information learned during the day.
@@ -87,15 +78,31 @@ FOLLOW-UP QUESTIONS:
 - NEVER repeat or rephrase a question that was already asked"""
 
 
+def get_debrief_system_prompt() -> str:
+    """
+    System prompt for Sonnet during full debrief mode.
+
+    Tries YAML registry first, falls back to Python constant.
+
+    Returns:
+        System prompt string.
+    """
+    return prompt_registry.get("debrief_system_prompt") or _DEBRIEF_SYSTEM_PROMPT_FALLBACK
+
+
 def get_quick_injection_prompt() -> str:
     """
     System prompt for Sonnet during quick information injection.
 
     Simpler than full debrief — single message extraction, no follow-ups.
+    Tries YAML registry first, falls back to inline constant.
 
     Returns:
         System prompt string.
     """
+    yaml_prompt = prompt_registry.get("quick_injection_prompt")
+    if yaml_prompt:
+        return yaml_prompt
     return """You are Gianluigi, CropSight's AI operations assistant. Eyal (CEO) is quickly sharing information.
 
 Extract structured items from this single message. No follow-up questions needed.

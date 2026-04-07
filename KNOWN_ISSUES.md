@@ -1,6 +1,6 @@
-# Known Issues — Gianluigi v2.0 (Post Phase 13)
+# Known Issues — Gianluigi v2.2 (Post Session 3)
 
-Current as of April 2, 2026.
+Current as of April 7, 2026.
 
 ---
 

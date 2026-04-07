@@ -59,6 +59,7 @@ def run_qa_check() -> dict:
     report["checks"]["distribution_completeness"] = _check_distribution_completeness(report["issues"])
     report["checks"]["scheduler_health"] = _check_scheduler_health(report["issues"])
     report["checks"]["data_integrity"] = _check_data_integrity(report["issues"])
+    report["checks"]["prompt_health"] = _check_prompt_health(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -261,6 +262,36 @@ def _check_data_integrity(issues: list[str]) -> dict:
 
     except Exception as e:
         logger.warning(f"Data integrity check failed: {e}")
+
+    return result
+
+
+def _check_prompt_health(issues: list[str]) -> dict:
+    """Check that YAML prompt files are loadable and up-to-date."""
+    result = {"prompts_loaded": 0, "load_errors": 0, "files_modified": 0}
+
+    try:
+        from config.prompt_registry import prompt_registry
+
+        health = prompt_registry.health_check()
+        result["prompts_loaded"] = health["prompts_loaded"]
+        result["load_errors"] = health["load_errors"]
+        result["files_modified"] = health["files_modified_since_startup"]
+
+        if health["load_errors"] > 0:
+            issues.append(
+                f"Prompt health: {health['load_errors']} YAML load error(s) — "
+                f"using Python fallbacks"
+            )
+
+        if health["files_modified_since_startup"] > 0:
+            issues.append(
+                f"Prompt health: {health['files_modified_since_startup']} prompt file(s) "
+                f"modified since startup — consider reloading"
+            )
+
+    except Exception as e:
+        logger.warning(f"Prompt health check failed: {e}")
 
     return result
 

@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 35 tools (25 read + 10 write) as thin wrappers around existing brain functions.
+Provides 43 tools (read + write + composite) as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -505,38 +505,163 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 8. get_commitments
+        # 8. deal_ops (composite — replaces deprecated get_commitments)
         # ============================================================
         @mcp.tool(
-            name="get_commitments",
+            name="deal_ops",
             description=(
-                "[DEPRECATED] Commitments have been merged into tasks. "
-                "Use get_tasks() for all action items. "
-                "This tool still returns legacy commitment records for backward compatibility."
+                "[DEALS] Composite tool for deal & relationship intelligence. "
+                "Actions: 'list' (all deals), 'get' (single deal + timeline), "
+                "'create' (new deal), 'update' (change deal fields), "
+                "'timeline' (deal interaction history), "
+                "'commitment_list' (external commitments), "
+                "'commitment_create' (new external commitment), "
+                "'commitment_update' (update commitment status), "
+                "'pulse' (deal pulse + overdue commitments for brief)."
             ),
         )
-        async def get_commitments(
-            assignee: str | None = None,
+        async def deal_ops(
+            action: str,
+            deal_id: str | None = None,
+            name: str | None = None,
+            organization: str | None = None,
+            stage: str | None = None,
+            contact_person: str | None = None,
+            value_estimate: str | None = None,
+            next_action: str | None = None,
+            next_action_date: str | None = None,
+            source: str | None = None,
+            notes: str | None = None,
+            commitment: str | None = None,
+            promised_to: str | None = None,
+            deadline: str | None = None,
             status: str | None = None,
+            commitment_id: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client
+                from processors.deal_intelligence import generate_deal_pulse, generate_commitments_due
 
-                commitments = supabase_client.get_commitments(
-                    speaker=assignee,
-                    status=status,
-                )
-                mcp_auth.log_call("get_commitments", {"assignee": assignee, "status": status})
-                result = _success(commitments)
-                result["note"] = (
-                    "Commitments have been merged into tasks (action items). "
-                    "Use get_tasks() for all action items going forward."
-                )
-                return result
+                if action == "list":
+                    deals = supabase_client.get_deals(stage=stage)
+                    mcp_auth.log_call("deal_ops", {"action": "list", "stage": stage})
+                    return _success(deals)
+
+                elif action == "get":
+                    if not deal_id:
+                        return _error("deal_id required for 'get' action")
+                    deal = supabase_client.get_deal(deal_id)
+                    if not deal:
+                        return _error(f"Deal {deal_id} not found")
+                    timeline = supabase_client.get_deal_timeline(deal_id, limit=10)
+                    mcp_auth.log_call("deal_ops", {"action": "get", "deal_id": deal_id})
+                    return _success({"deal": deal, "timeline": timeline})
+
+                elif action == "create":
+                    if not name or not organization:
+                        return _error("name and organization required for 'create' action")
+                    deal = supabase_client.create_deal(
+                        name=name,
+                        organization=organization,
+                        contact_person=contact_person,
+                        stage=stage or "lead",
+                        value_estimate=value_estimate,
+                        next_action=next_action,
+                        next_action_date=next_action_date,
+                        source=source,
+                        notes=notes,
+                    )
+                    mcp_auth.log_call("deal_ops", {"action": "create", "name": name})
+                    return _success(deal)
+
+                elif action == "update":
+                    if not deal_id:
+                        return _error("deal_id required for 'update' action")
+                    updates = {}
+                    if stage:
+                        updates["stage"] = stage
+                    if contact_person:
+                        updates["contact_person"] = contact_person
+                    if value_estimate:
+                        updates["value_estimate"] = value_estimate
+                    if next_action:
+                        updates["next_action"] = next_action
+                    if next_action_date:
+                        updates["next_action_date"] = next_action_date
+                    if notes:
+                        updates["notes"] = notes
+                    if name:
+                        updates["name"] = name
+                    if not updates:
+                        return _error("No fields to update")
+                    deal = supabase_client.update_deal(deal_id, **updates)
+                    mcp_auth.log_call("deal_ops", {"action": "update", "deal_id": deal_id})
+                    return _success(deal)
+
+                elif action == "timeline":
+                    if not deal_id:
+                        return _error("deal_id required for 'timeline' action")
+                    timeline = supabase_client.get_deal_timeline(deal_id)
+                    mcp_auth.log_call("deal_ops", {"action": "timeline", "deal_id": deal_id})
+                    return _success(timeline)
+
+                elif action == "commitment_list":
+                    commitments = supabase_client.get_external_commitments(
+                        status=status,
+                        organization=organization,
+                    )
+                    mcp_auth.log_call("deal_ops", {"action": "commitment_list"})
+                    return _success(commitments)
+
+                elif action == "commitment_create":
+                    if not organization or not commitment:
+                        return _error("organization and commitment required")
+                    result = supabase_client.create_external_commitment(
+                        organization=organization,
+                        commitment=commitment,
+                        deal_id=deal_id,
+                        contact_person=contact_person,
+                        promised_to=promised_to,
+                        deadline=deadline,
+                        notes=notes,
+                    )
+                    mcp_auth.log_call("deal_ops", {"action": "commitment_create"})
+                    return _success(result)
+
+                elif action == "commitment_update":
+                    if not commitment_id:
+                        return _error("commitment_id required")
+                    updates = {}
+                    if status:
+                        updates["status"] = status
+                    if notes:
+                        updates["notes"] = notes
+                    if deadline:
+                        updates["deadline"] = deadline
+                    if not updates:
+                        return _error("No fields to update")
+                    result = supabase_client.update_external_commitment(commitment_id, **updates)
+                    mcp_auth.log_call("deal_ops", {"action": "commitment_update"})
+                    return _success(result)
+
+                elif action == "pulse":
+                    pulse = generate_deal_pulse()
+                    commitments_due = generate_commitments_due()
+                    mcp_auth.log_call("deal_ops", {"action": "pulse"})
+                    return _success({
+                        "deal_pulse": pulse,
+                        "commitments_due": commitments_due,
+                    })
+
+                else:
+                    return _error(
+                        f"Unknown action '{action}'. Valid: list, get, create, update, "
+                        "timeline, commitment_list, commitment_create, commitment_update, pulse"
+                    )
 
             except Exception as e:
-                logger.error(f"get_commitments error: {e}")
-                mcp_auth.log_call("get_commitments", success=False, error=str(e))
+                logger.error(f"deal_ops error: {e}")
+                mcp_auth.log_call("deal_ops", {"action": action}, success=False, error=str(e))
                 return _error(str(e))
 
         # ============================================================
@@ -769,10 +894,12 @@ class MCPServer:
             description=(
                 "[SYSTEM] Get a complete operational status in one call — tasks, Gantt status, "
                 "pending approvals, upcoming meetings, and attention items. "
-                "Use this instead of calling 5+ individual tools for status updates."
+                "Use view='ceo_today' for a focused CEO dashboard: overdue tasks, "
+                "this week's tasks, Gantt milestones, deal pulse, drift alerts. "
+                "Default view='standard' returns the full status."
             ),
         )
-        async def get_full_status() -> dict:
+        async def get_full_status(view: str = "standard") -> dict:
             # NOTE: MCP is CEO-only interface — no sensitivity filtering applied.
             # All data returned unfiltered (max_sensitivity_level=4).
             import asyncio
@@ -836,7 +963,63 @@ class MCPServer:
                 warnings.append(f"Alerts unavailable: {e}")
                 result["attention_items"] = []
 
-            mcp_auth.log_call("get_full_status", response_size=len(str(result)))
+            # CEO Today view — add focused dashboard sections
+            if view == "ceo_today":
+                # Overdue tasks (with titles)
+                try:
+                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    overdue = [
+                        {"title": t.get("title", ""), "assignee": t.get("assignee", ""), "deadline": t.get("deadline", "")}
+                        for t in result.get("tasks", [])
+                        if t.get("deadline") and t["deadline"] < today and t.get("status") not in ("done", "cancelled")
+                    ][:5]
+                    result["overdue_tasks"] = overdue
+                except Exception as e:
+                    warnings.append(f"Overdue tasks filter failed: {e}")
+                    result["overdue_tasks"] = []
+
+                # This week's tasks
+                try:
+                    from datetime import timedelta as _td
+                    week_end = (datetime.now(timezone.utc) + _td(days=7)).strftime("%Y-%m-%d")
+                    this_week = [
+                        {"title": t.get("title", ""), "assignee": t.get("assignee", ""), "deadline": t.get("deadline", ""), "status": t.get("status", "")}
+                        for t in result.get("tasks", [])
+                        if t.get("deadline") and t["deadline"] <= week_end and t.get("status") not in ("done", "cancelled")
+                    ][:10]
+                    result["this_week_tasks"] = this_week
+                except Exception as e:
+                    warnings.append(f"This week tasks filter failed: {e}")
+                    result["this_week_tasks"] = []
+
+                # Gantt milestones this week
+                try:
+                    from processors.gantt_intelligence import compute_gantt_metrics
+                    metrics = await compute_gantt_metrics()
+                    result["gantt_milestones"] = metrics.get("milestone_risks", [])[:3]
+                except Exception as e:
+                    warnings.append(f"Gantt milestones unavailable: {e}")
+                    result["gantt_milestones"] = []
+
+                # Deal pulse
+                try:
+                    from processors.deal_intelligence import generate_deal_pulse, generate_commitments_due
+                    result["deal_pulse"] = generate_deal_pulse(max_items=3)
+                    result["commitments_due"] = generate_commitments_due(max_items=3)
+                except Exception as e:
+                    warnings.append(f"Deal pulse unavailable: {e}")
+                    result["deal_pulse"] = []
+                    result["commitments_due"] = []
+
+                # Drift alerts
+                try:
+                    from processors.gantt_intelligence import detect_gantt_drift
+                    result["drift_alerts"] = await detect_gantt_drift()
+                except Exception as e:
+                    warnings.append(f"Drift detection unavailable: {e}")
+                    result["drift_alerts"] = []
+
+            mcp_auth.log_call("get_full_status", {"view": view}, response_size=len(str(result)))
             return _success(
                 result,
                 source="composite",

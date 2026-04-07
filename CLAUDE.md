@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** April 5, 2026
-**Current Version:** v2.1 (Phases 0-13 + X1/X2 + Intelligence Signal, 43 MCP tools)
-**Status:** Intelligence Signal feature complete. Weekly market intelligence with video.
+**Last Updated:** April 7, 2026
+**Current Version:** v2.2 (Phases 0-13 + X1/X2 + Intelligence Signal + Deal Intelligence + CEO UX, 43 MCP tools)
+**Status:** Deal intelligence and CEO Today view complete. Session 3 of v2.2 upgrade.
 
 ---
 
@@ -50,6 +50,11 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **X1:** Daily QA Agent (extraction quality, distribution, scheduler health, data integrity)
 - **X2:** Skills manifest (17 capabilities documented in docs/SKILLS.md)
 - **Intelligence Signal (v2.1):** Weekly market intelligence — Perplexity research → Opus synthesis → .docx report → video (MoviePy + ElevenLabs v3 TTS) → email distribution with attachments. 5 new MCP tools (38→43), competitor watchlist auto-curation, Thursday 18:00 IST scheduler.
+- **v2.2 Session 1:** Broken pipe retry fix (3 attempts, exponential backoff), 15-min transcript watcher interval, YAML prompt library (`config/prompts/`) with hot-reload.
+- **v2.2 Session 2:** Sensitivity tiers redesigned (FOUNDERS/CEO/TEAM/PUBLIC), retrieval-level filtering, interpersonal signal extraction, Telegram task replies via inline buttons.
+- **v2.2 Session 2.5:** Sensitivity tier rename (TEAM→FOUNDERS, CEO_ONLY→CEO), retrieval-level filtering across all processors.
+- **v2.2 Session 3 — Deal Intelligence (Phase 4):** 3 new DB tables (deals, deal_interactions, external_commitments), `deal_ops` MCP composite tool (9 actions, replaces deprecated `get_commitments`), deal signal detection from transcripts, Deal Pulse + Commitments Due in morning brief, stakeholder sheet +3 columns (Deal Stage, Deal Value, Last Interaction), zero-friction auto-interaction from meetings/emails.
+- **v2.2 Session 3 — CEO UX (Phase 5):** `get_full_status(view="ceo_today")` CEO dashboard (overdue tasks, this week, milestones, deal pulse, drift alerts), Gantt drift detection (>50% overdue = drift alert), morning brief enhancements (Task Urgency, Gantt Milestones, Drift Alerts sections).
 
 ### Known Issues
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
@@ -95,8 +100,14 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **X1:** Daily QA Agent — extraction quality, distribution completeness, scheduler health, data integrity checks. Runs 06:00 IST, feeds morning brief, on-demand MCP tool
 - **X2:** Skills manifest (`docs/SKILLS.md`) — 17 capabilities documented
 
-### Deferred (Beyond v2.0)
-- Risk register, meeting effectiveness scoring, OKR layer, competitor monitoring, full Sheets bidirectional sync
+- **v2.2 Session 1:** Broken pipe retry, 15-min watcher, YAML prompt library
+- **v2.2 Session 2:** Sensitivity tiers (4-level), interpersonal signals, Telegram task replies
+- **v2.2 Session 2.5:** Sensitivity tier rename (FOUNDERS/CEO), retrieval-level filtering
+- **v2.2 Session 3 Phase 4:** Deal Intelligence — 3 tables, `deal_ops` MCP tool (replaces `get_commitments`), deal signal detection, Deal Pulse + Commitments Due in morning brief, stakeholder sheet expansion
+- **v2.2 Session 3 Phase 5:** CEO UX — `ceo_today` view on `get_full_status`, Gantt drift detection, Task Urgency/Milestones/Drift in morning brief
+
+### Deferred (Beyond v2.2)
+- Risk register, meeting effectiveness scoring, OKR layer, full Sheets bidirectional sync
 
 ### Known MCP Limitation: Personal Data Leakage
 Claude.ai mixes MCP tool results with its own conversation memory. MCP `instructions` are guidance, not a sandbox — Claude.ai can and will use prior conversation context when Gianluigi data is sparse. **Current mitigation:** Use a dedicated Claude Project ("CropSight Ops") to isolate business conversations. **Future:** OAuth integration (Phase 8) may enable stricter session isolation. This is a Claude.ai platform limitation, not a Gianluigi bug.

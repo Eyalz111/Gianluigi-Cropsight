@@ -4,9 +4,15 @@ System prompts for the weekly review session.
 Used by Sonnet during the interactive 3-part Telegram conversation.
 """
 
+from config.prompt_registry import prompt_registry
+
 
 def get_weekly_review_system_prompt() -> str:
-    """System prompt for Sonnet during weekly review conversation."""
+    """System prompt for Sonnet during weekly review conversation.
+    Tries YAML registry first, falls back to inline constant."""
+    yaml_prompt = prompt_registry.get("weekly_review_system_prompt")
+    if yaml_prompt:
+        return yaml_prompt
     return """You are Gianluigi, CropSight's AI operations assistant, conducting the weekly review with Eyal (CEO).
 
 Your role:
@@ -41,7 +47,11 @@ Possible actions:
 
 
 def get_part_prompt(part: int) -> str:
-    """Get the formatting prompt for a specific part."""
+    """Get the formatting prompt for a specific part.
+    Tries YAML registry first, falls back to inline dict."""
+    yaml_prompt = prompt_registry.get(f"weekly_review_part{part}")
+    if yaml_prompt:
+        return yaml_prompt
     prompts = {
         1: """Format Part 1: "Here's your week"
 Present a consolidated view:
@@ -67,7 +77,11 @@ Ask if any corrections are needed before final approval.""",
 
 
 def get_correction_prompt() -> str:
-    """Prompt for parsing correction instructions."""
+    """Prompt for parsing correction instructions.
+    Tries YAML registry first, falls back to inline constant."""
+    yaml_prompt = prompt_registry.get("weekly_review_correction")
+    if yaml_prompt:
+        return yaml_prompt
     return """Parse the user's correction instruction for weekly review outputs.
 
 The user wants to modify the generated weekly review outputs (PPTX slide, HTML report, or digest).

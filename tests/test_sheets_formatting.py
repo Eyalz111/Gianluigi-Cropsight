@@ -479,7 +479,7 @@ class TestFormatStakeholderTracker:
 
     @pytest.mark.asyncio
     async def test_includes_borders(self):
-        """Should include an updateBorders request covering all 16 columns."""
+        """Should include an updateBorders request covering all 19 columns."""
         svc, mock_api = _make_service()
 
         with patch("services.google_sheets.settings") as mock_settings:
@@ -490,7 +490,7 @@ class TestFormatStakeholderTracker:
             requests = _extract_requests(mock_api)
             border_reqs = [r for r in requests if "updateBorders" in r]
             assert len(border_reqs) == 1, "Expected one updateBorders request"
-            assert border_reqs[0]["updateBorders"]["range"]["endColumnIndex"] == 16
+            assert border_reqs[0]["updateBorders"]["range"]["endColumnIndex"] == 19
 
     @pytest.mark.asyncio
     async def test_alternating_row_banding(self):
@@ -508,7 +508,7 @@ class TestFormatStakeholderTracker:
 
             banded = banding_reqs[0]["addBanding"]["bandedRange"]
             assert banded["range"]["startRowIndex"] == 1
-            assert banded["range"]["endColumnIndex"] == 16
+            assert banded["range"]["endColumnIndex"] == 19
 
     @pytest.mark.asyncio
     async def test_fixed_column_widths(self):

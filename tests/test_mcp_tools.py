@@ -292,17 +292,17 @@ class TestGetOpenQuestions:
 # =============================================================================
 
 
-class TestGetCommitments:
+class TestDealOps:
     @pytest.mark.asyncio
-    async def test_returns_commitments(self, server, mock_mcp_auth):
-        commitments = [{"id": "c1", "speaker": "Eyal", "content": "Send deck by Friday"}]
+    async def test_deal_ops_list(self, server, mock_mcp_auth):
+        deals = [{"id": "d1", "name": "Test Deal", "organization": "TestOrg"}]
         with patch("services.supabase_client.supabase_client") as mock_sb:
-            mock_sb.get_commitments.return_value = commitments
-            result = await call_tool(server, "get_commitments", {"assignee": "Eyal"})
+            mock_sb.get_deals.return_value = deals
+            result = await call_tool(server, "deal_ops", {"action": "list"})
 
         assert result["status"] == "success"
-        # Verify the wrapper maps "assignee" to "speaker" param
-        mock_sb.get_commitments.assert_called_once_with(speaker="Eyal", status=None)
+        assert len(result["data"]) == 1
+        mock_sb.get_deals.assert_called_once_with(stage=None)
 
 
 # =============================================================================

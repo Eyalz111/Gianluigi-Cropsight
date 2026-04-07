@@ -2,7 +2,7 @@
 Gantt intelligence — computed metrics from existing Gantt data.
 
 Read-only analytics: velocity, slippage ratio, milestone risk score,
-and Now-Next-Later view. Does NOT change the Gantt sheet structure.
+Now-Next-Later view, and drift detection. Does NOT change the Gantt sheet structure.
 
 Usage:
     from processors.gantt_intelligence import compute_gantt_metrics, generate_now_next_later
@@ -150,3 +150,95 @@ async def generate_now_next_later() -> dict:
         logger.error(f"Now-Next-Later generation failed: {e}")
 
     return result
+
+
+async def detect_gantt_drift() -> list[dict]:
+    """
+    Detect mismatches between Gantt status and task reality.
+
+    Compares Gantt items marked active/in-progress against tasks in the
+    same category. If >50% of tasks in a Gantt area are overdue but the
+    Gantt shows "on track", that's a drift alert.
+
+    Returns:
+        List of drift alerts, each:
+        {
+            "section": str,
+            "gantt_status": str,
+            "overdue_task_count": int,
+            "total_tasks": int,
+            "drift_description": str,
+        }
+    """
+    from services.gantt_manager import gantt_manager
+    from services.supabase_client import supabase_client
+
+    alerts = []
+
+    try:
+        gantt_data = await gantt_manager.get_gantt_status()
+        if "error" in gantt_data:
+            return alerts
+
+        # Group Gantt items by section
+        gantt_sections: dict[str, list[dict]] = {}
+        for item in gantt_data.get("items", []):
+            section = item.get("section", "Other")
+            gantt_sections.setdefault(section, []).append(item)
+
+        # Get all open tasks with categories
+        all_tasks = supabase_client.get_tasks(status="pending", limit=200)
+        all_tasks += supabase_client.get_tasks(status="in_progress", limit=200)
+
+        # Map task categories to likely Gantt sections
+        category_to_section = {
+            "Product & Tech": ["Product & Tech", "Technology", "Platform"],
+            "BD & Sales": ["BD & Sales", "Business Development", "Sales"],
+            "Legal & Compliance": ["Legal & Compliance", "Legal"],
+            "Finance & Fundraising": ["Finance & Fundraising", "Finance", "Fundraising"],
+            "Operations & HR": ["Operations & HR", "Operations"],
+            "Strategy & Research": ["Strategy & Research", "Strategy"],
+        }
+
+        # Check each Gantt section for drift
+        for section, gantt_items in gantt_sections.items():
+            # Find active gantt items in this section
+            active_gantt = [i for i in gantt_items if i.get("status") in ("active", "planned")]
+            if not active_gantt:
+                continue
+
+            # Find tasks matching this section
+            matching_tasks = []
+            for task in all_tasks:
+                task_cat = task.get("category", "")
+                possible_sections = category_to_section.get(task_cat, [])
+                if section in possible_sections or task_cat == section:
+                    matching_tasks.append(task)
+
+            if not matching_tasks:
+                continue
+
+            # Count overdue tasks
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            overdue_count = sum(
+                1 for t in matching_tasks
+                if t.get("deadline") and t["deadline"] < today
+            )
+
+            total = len(matching_tasks)
+            if total > 0 and overdue_count / total > 0.5:
+                alerts.append({
+                    "section": section,
+                    "gantt_status": "active",
+                    "overdue_task_count": overdue_count,
+                    "total_tasks": total,
+                    "drift_description": (
+                        f"{section}: Gantt shows active, but {overdue_count}/{total} "
+                        f"tasks are overdue ({round(overdue_count/total*100)}%)"
+                    ),
+                })
+
+    except Exception as e:
+        logger.error(f"Gantt drift detection failed: {e}")
+
+    return alerts

@@ -228,7 +228,27 @@ async def process_transcript(
     except Exception as e:
         logger.error(f"Topic threading failed (non-fatal): {e}")
 
-    # Step 7e: Post-meeting proactive alerts (v0.3 Tier 2)
+    # Step 7e: Deal signal detection (Phase 4 — non-fatal)
+    deal_signals = {}
+    try:
+        from processors.deal_intelligence import detect_deal_signals
+
+        deal_signals = detect_deal_signals(
+            transcript_text=file_content,
+            meeting_title=meeting_title,
+            participants=participants,
+            meeting_date=meeting_date,
+            meeting_id=meeting_id,
+        )
+        if deal_signals.get("has_deal_signals"):
+            logger.info(
+                f"Deal signals detected: {deal_signals['deal_keywords_found'][:5]}, "
+                f"external participants: {deal_signals['external_participants']}"
+            )
+    except Exception as e:
+        logger.error(f"Deal signal detection failed (non-fatal): {e}")
+
+    # Step 7f: Post-meeting proactive alerts (v0.3 Tier 2)
     from processors.proactive_alerts import generate_post_meeting_alerts
 
     post_meeting_alerts = []
@@ -259,6 +279,7 @@ async def process_transcript(
             "questions_resolved": len(cross_ref_results.get("resolved_questions", [])),
             "entities_new": len(entity_results.get("new_entities", [])),
             "entity_mentions": entity_results.get("total_mentions", 0),
+            "deal_signals_detected": deal_signals.get("has_deal_signals", False),
         },
         triggered_by="auto",
     )
