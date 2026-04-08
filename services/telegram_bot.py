@@ -3003,7 +3003,7 @@ When you receive approval requests, use the buttons to approve, request changes,
                     updates["deadline"] = new_deadline
                 if updates:
                     from services.google_sheets import sheets_service
-                    await sheets_service.update_task_row(row_number, updates)
+                    await sheets_service.update_task_row(row_number, **updates)
                     logger.info(f"Updated task in Sheets row {row_number} → {updates}")
         except Exception as e:
             logger.error(f"Failed to update task in Sheets: {e}")
