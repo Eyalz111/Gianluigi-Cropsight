@@ -72,3 +72,6 @@ pytest-cov>=4.1.0              # Coverage reporting
 Pillow>=10.4.0                   # Slide image generation for video
 matplotlib>=3.9.0                # Chart rendering for video slides (Agg backend, headless)
 moviepy>=2.1.0,<3.0              # Video compositing with proper framerate + audio mux
+
+# v2.2 — YAML prompt library
+PyYAML>=6.0.2                    # YAML prompt file loader (config/prompts/*.yaml)
