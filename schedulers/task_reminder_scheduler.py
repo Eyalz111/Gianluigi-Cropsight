@@ -293,10 +293,13 @@ class TaskReminderScheduler:
 
         message += f"\nTap a button or reply with an update:"
 
-        # Generate short ID and store mapping
-        short_id = self._next_short_id()
-        # Resolve DB task_id so button handlers can update by id (not brittle title match)
+        # Resolve DB task_id so button handlers can update by id directly,
+        # surviving instance restarts (no in-memory map dependency).
         db_task_id = self._resolve_db_task_id(task_desc, assignee)
+
+        # Generate short ID and store mapping (legacy fallback when task_id is None,
+        # plus extra metadata cache for the active instance)
+        short_id = self._next_short_id()
         self.task_action_map[short_id] = {
             "task_id": db_task_id,
             "task_text": task_desc,
@@ -304,12 +307,21 @@ class TaskReminderScheduler:
             "row_number": task.get("row_number"),
             "deadline": task.get("deadline", ""),
         }
+        # Also cache by task_id so the handler can find metadata after restart
+        # (callback_data carries the UUID; metadata cache is best-effort)
+        if db_task_id:
+            self.task_action_map[db_task_id] = self.task_action_map[short_id]
+
+        # Encode task_id in callback_data when available (44 bytes — UUID is
+        # 36 chars + 8-char prefix). Falls back to short_id only when DB
+        # resolution failed at send time.
+        callback_key = db_task_id if db_task_id else short_id
 
         # Build inline keyboard
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Done", callback_data=f"taskdone:{short_id}"),
-            InlineKeyboardButton("+1 Week", callback_data=f"taskdelay:{short_id}"),
-            InlineKeyboardButton("Discuss", callback_data=f"taskdiscuss:{short_id}"),
+            InlineKeyboardButton("Done", callback_data=f"taskdone:{callback_key}"),
+            InlineKeyboardButton("+1 Week", callback_data=f"taskdelay:{callback_key}"),
+            InlineKeyboardButton("Discuss", callback_data=f"taskdiscuss:{callback_key}"),
         ]])
 
         # Send to assignee (no buttons — buttons only for Eyal)

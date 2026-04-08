@@ -2991,18 +2991,72 @@ When you receive approval requests, use the buttons to approve, request changes,
         self,
         query,
         action: str,
-        short_id: str,
+        callback_key: str,
     ) -> None:
         """
         Handle inline button press on an overdue task reminder.
 
         Actions: taskdone, taskdelay, taskdiscuss.
+
+        callback_key may be:
+        - A task UUID (new format from rev 52+) — does direct DB lookup
+        - A short_id like "t12" (legacy format) — uses in-memory map
+
+        Both paths converge on the same task_info dict with task_id, task_text,
+        assignee, row_number, deadline.
         """
         from schedulers.task_reminder_scheduler import task_reminder_scheduler
+        from services.supabase_client import supabase_client as _sc
 
-        task_info = task_reminder_scheduler.task_action_map.get(short_id)
+        # Detect format: UUID (36 chars with dashes) vs legacy short_id (e.g. "t12")
+        is_uuid = len(callback_key) == 36 and callback_key.count("-") == 4
+
+        task_info: dict | None = None
+
+        if is_uuid:
+            # New format — try in-memory cache first (faster), then fresh DB lookup
+            task_info = task_reminder_scheduler.task_action_map.get(callback_key)
+            if not task_info:
+                # Cold lookup — fetch task from DB and synthesize task_info
+                try:
+                    db_task = _sc.client.table("tasks").select("*").eq("id", callback_key).limit(1).execute()
+                    if db_task.data:
+                        t = db_task.data[0]
+                        # Look up Sheets row_number on demand
+                        row_number = None
+                        try:
+                            from services.google_sheets import sheets_service
+                            row_number = await sheets_service.find_task_row(t.get("title", ""))
+                        except Exception as e:
+                            logger.warning(f"Could not find Sheets row for task {callback_key}: {e}")
+                        task_info = {
+                            "task_id": callback_key,
+                            "task_text": t.get("title", ""),
+                            "assignee": t.get("assignee", ""),
+                            "row_number": row_number,
+                            "deadline": t.get("deadline", "") or "",
+                        }
+                        logger.info(f"Cold-resolved task action for {callback_key} (instance restart recovery)")
+                except Exception as e:
+                    logger.error(f"Cold lookup failed for task {callback_key}: {e}")
+        else:
+            # Legacy short_id format — only works on the same instance that sent the reminder
+            task_info = task_reminder_scheduler.task_action_map.get(callback_key)
+
         if not task_info:
-            await query.answer("Task action expired. Please use MCP or Sheets.")
+            # Loud failure — edit the message so Eyal sees the issue (not just an ephemeral toast)
+            try:
+                await query.edit_message_text(
+                    "Task reminder expired (instance restarted). "
+                    "Reply with 'done' / 'delay 7 days' / 'discuss' "
+                    "or wait for the next reminder cycle."
+                )
+            except Exception:
+                pass
+            await query.answer("Reminder expired — see message")
+            logger.warning(
+                f"Task action for {callback_key!r} not found in map and not resolvable from DB"
+            )
             return
 
         task_text = task_info.get("task_text", "Unknown task")
