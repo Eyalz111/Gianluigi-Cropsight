@@ -15,7 +15,7 @@ class TestDeleteMeetingCascade:
     """Tests for supabase_client.delete_meeting_cascade."""
 
     def test_deletes_in_correct_order(self):
-        """Embeddings and tasks deleted before meeting (FK order)."""
+        """Embeddings, child tables (incl. topic_thread_mentions), tasks, meeting."""
         from services.supabase_client import SupabaseClient
 
         client = SupabaseClient()
@@ -35,24 +35,44 @@ class TestDeleteMeetingCascade:
             )[1]
             return mock_chain
 
+        # Provide stub data for every table the cascade touches so counts propagate
+        stubs = {
+            "embeddings": [{"id": "e1"}, {"id": "e2"}],
+            "task_mentions": [],
+            "entity_mentions": [],
+            "topic_thread_mentions": [{"id": "tm1"}],
+            "commitments": [],
+            "decisions": [{"id": "d1"}],
+            "follow_up_meetings": [],
+            "open_questions": [{"id": "q1"}],
+            "pending_approvals": [],
+            "tasks": [{"id": "t1"}],
+            "meetings": [{"id": "m1"}],
+        }
+
         def table_router(name):
-            if name == "embeddings":
-                return make_delete_chain("embeddings", [{"id": "e1"}, {"id": "e2"}])
-            elif name == "tasks":
-                return make_delete_chain("tasks", [{"id": "t1"}])
-            elif name == "meetings":
-                return make_delete_chain("meetings", [{"id": "m1"}])
-            return MagicMock()
+            return make_delete_chain(name, stubs.get(name, []))
 
         mock_supabase.table.side_effect = table_router
         object.__setattr__(client, "_client", mock_supabase)
 
         result = client.delete_meeting_cascade("test-meeting-id")
 
-        assert call_order == ["embeddings", "tasks", "meetings"]
+        # Order: embeddings first, then child tables (including topic_thread_mentions)
+        # in the loop order, then pending_approvals, then tasks, then meetings
+        assert call_order[0] == "embeddings"
+        assert "topic_thread_mentions" in call_order
+        assert call_order[-2] == "tasks"
+        assert call_order[-1] == "meetings"
+        # topic_thread_mentions must be before tasks + meetings (FK order)
+        assert call_order.index("topic_thread_mentions") < call_order.index("tasks")
+
         assert result["embeddings"] == 2
         assert result["tasks"] == 1
         assert result["meetings"] == 1
+        assert result["topic_thread_mentions"] == 1
+        assert result["decisions"] == 1
+        assert result["open_questions"] == 1
 
     def test_handles_empty_results(self):
         """Counts are 0 when tables have no matching records."""

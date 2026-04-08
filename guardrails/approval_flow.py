@@ -702,6 +702,103 @@ async def submit_for_approval(
     }
 
 
+async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict:
+    """
+    Cascading reject: delete extracted data from DB and rebuild Sheets.
+
+    For real meetings (not digests/preps/briefs), calls delete_meeting_cascade()
+    which removes the meeting plus all child records (tasks, decisions,
+    embeddings, open_questions, follow_up_meetings, task_mentions,
+    entity_mentions, topic_thread_mentions, commitments, pending_approvals).
+
+    Then rebuilds Tasks and Decisions Sheets from a fresh DB pull so the
+    tracker matches DB state.
+
+    For non-meeting content (digests, preps, briefs, reviews, gantt_updates),
+    only deletes the pending_approvals row — there's nothing else to clean up.
+
+    On any failure, fires a CRITICAL system alert so silent DB inconsistency
+    becomes impossible.
+
+    Returns:
+        Dict like {"deleted": {"tasks": N, "decisions": M, ...}} on success,
+        or {"deleted": {}, "error": str} on failure. Always safe to include
+        in a user-facing message.
+    """
+    from services.alerting import send_system_alert, AlertSeverity
+
+    # Non-meeting content: just remove the pending_approvals row
+    if is_non_meeting:
+        try:
+            supabase_client.delete_pending_approval(meeting_id)
+            supabase_client.log_action(
+                action="approval_rejected",
+                details={"meeting_id": meeting_id, "non_meeting": True},
+                triggered_by="eyal",
+            )
+            return {"deleted": {}}
+        except Exception as e:
+            logger.error(f"Failed to reject non-meeting content {meeting_id}: {e}")
+            try:
+                await send_system_alert(
+                    AlertSeverity.CRITICAL,
+                    "approval_flow._reject_meeting_cascade",
+                    f"Non-meeting reject failed for {meeting_id}: {e}",
+                    error=e,
+                )
+            except Exception as alert_err:
+                logger.error(f"Alert on reject failure also failed: {alert_err}")
+            return {"deleted": {}, "error": str(e)}
+
+    # Real meeting: cascade delete + sheets rebuild
+    counts: dict = {}
+    try:
+        counts = supabase_client.delete_meeting_cascade(meeting_id)
+        supabase_client.log_action(
+            action="meeting_rejected_and_deleted",
+            details={"meeting_id": meeting_id, "counts": counts},
+            triggered_by="eyal",
+        )
+        logger.info(f"Cascade-deleted rejected meeting {meeting_id}: {counts}")
+    except Exception as e:
+        logger.error(f"Cascade delete failed for rejected meeting {meeting_id}: {e}")
+        try:
+            await send_system_alert(
+                AlertSeverity.CRITICAL,
+                "approval_flow._reject_meeting_cascade",
+                f"Cascade delete failed for rejected meeting {meeting_id}: {e}. "
+                f"DB may still contain extracted data — consider running "
+                f"scripts/cleanup_rejected_meetings.py",
+                error=e,
+            )
+        except Exception as alert_err:
+            logger.error(f"Alert on reject cascade failure also failed: {alert_err}")
+        return {"deleted": {}, "error": str(e)}
+
+    # Rebuild Sheets from fresh DB state (best-effort — don't fail the reject)
+    try:
+        from services.google_sheets import sheets_service
+
+        fresh_tasks = supabase_client.get_tasks(status=None, limit=1000)
+        fresh_decisions = supabase_client.list_decisions(limit=1000)
+        await sheets_service.rebuild_tasks_sheet(fresh_tasks)
+        await sheets_service.rebuild_decisions_sheet(fresh_decisions)
+        logger.info("Rebuilt Tasks + Decisions sheets after cascading reject")
+    except Exception as e:
+        logger.error(f"Sheets rebuild after reject failed (non-fatal): {e}")
+        try:
+            await send_system_alert(
+                AlertSeverity.WARNING,
+                "approval_flow._reject_meeting_cascade",
+                f"Sheets rebuild failed after rejecting {meeting_id} — "
+                f"run scripts/rebuild_sheets.py to reconcile. Error: {e}",
+            )
+        except Exception:
+            pass
+
+    return {"deleted": counts}
+
+
 async def process_response(
     meeting_id: str,
     response: str,
@@ -964,24 +1061,45 @@ async def process_response(
         }
 
     elif action == "reject":
-        # Update status (skip for non-meeting content)
-        if not is_non_meeting:
-            await update_approval_status(meeting_id, ApprovalStatus.REJECTED)
+        # Cascading reject: delete the meeting + all extracted child data
+        # (tasks, decisions, embeddings, etc.) from DB, then rebuild Sheets.
+        # See _reject_meeting_cascade() for details.
+        cascade_result = await _reject_meeting_cascade(meeting_id, is_non_meeting)
 
-        # Remove from persistent store if still there
+        # Remove from persistent store (non-meeting path doesn't delete it itself)
         supabase_client.delete_pending_approval(meeting_id)
 
-        # Log rejection
-        supabase_client.log_action(
-            action="approval_rejected",
-            details={"meeting_id": meeting_id},
-            triggered_by="eyal",
-        )
+        # Build a human-readable confirmation message including counts
+        deleted = cascade_result.get("deleted", {}) or {}
+        if cascade_result.get("error"):
+            next_step = (
+                f"Rejected, but cleanup had errors: {cascade_result['error']}. "
+                f"Run scripts/cleanup_rejected_meetings.py to finish."
+            )
+        elif is_non_meeting:
+            next_step = "Content discarded"
+        else:
+            parts = []
+            for label, key in (
+                ("tasks", "tasks"),
+                ("decisions", "decisions"),
+                ("questions", "open_questions"),
+                ("embeddings", "embeddings"),
+                ("topic mentions", "topic_thread_mentions"),
+            ):
+                n = deleted.get(key, 0)
+                if n:
+                    parts.append(f"{n} {label}")
+            if parts:
+                next_step = "Rejected. Deleted: " + ", ".join(parts) + "."
+            else:
+                next_step = "Rejected. Nothing extracted to clean up."
 
         return {
             "action": "rejected",
             "edits": None,
-            "next_step": "Content discarded",
+            "next_step": next_step,
+            "deleted": deleted,
         }
 
     else:  # action == "edit"
@@ -1395,6 +1513,21 @@ Return ONLY the JSON object, no other text."""
             logger.info(f"Synced edited data to DB for meeting {meeting_id}")
         except Exception as e:
             logger.error(f"Failed to sync edited data to DB: {e}")
+            # T1.8: DB sync failure silently left the DB inconsistent with
+            # pending_approvals. Alert loudly so Eyal can run /reprocess or
+            # investigate before the next distribution.
+            try:
+                from services.alerting import send_system_alert, AlertSeverity
+                await send_system_alert(
+                    AlertSeverity.CRITICAL,
+                    "approval_flow.apply_edits",
+                    f"DB sync failed for edited meeting {meeting_id}: {e}. "
+                    f"DB may be inconsistent with pending_approvals — "
+                    f"consider /reprocess before distributing.",
+                    error=e,
+                )
+            except Exception as alert_err:
+                logger.error(f"Alert on DB sync failure also failed: {alert_err}")
 
         return {
             "title": meeting.get("title"),

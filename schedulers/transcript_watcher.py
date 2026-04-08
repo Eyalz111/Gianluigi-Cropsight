@@ -259,22 +259,59 @@ class TranscriptWatcher:
         """
         logger.info(f"Running processing pipeline for: {metadata['title']}")
 
-        # Check if this meeting was already processed (avoid duplicates on restart)
-        # Use ilike for partial match since path may include folder prefix
-        existing = supabase_client.client.table("meetings").select("id").ilike(
-            "source_file_path", f"%{file_name}"
-        ).execute()
-        if existing.data:
-            logger.info(
-                f"Meeting already processed (source: {file_name}), skipping"
-            )
-            drive_service.mark_file_processed(file_id)
-            return {
-                "file_id": file_id,
-                "file_name": file_name,
-                "status": "already_processed",
-                "meeting_id": existing.data[0]["id"],
-            }
+        # T1.6: Rejection-aware skip check.
+        # - approved: skip (already processed and accepted)
+        # - pending/editing/auto_publishing/unknown: skip (in-progress, avoid races)
+        # - rejected: cascade delete any stragglers and re-process
+        existing_result = (
+            supabase_client.client.table("meetings")
+            .select("id, approval_status")
+            .ilike("source_file_path", f"%{file_name}")
+            .limit(1)
+            .execute()
+        )
+        if existing_result.data:
+            existing = existing_result.data[0]
+            existing_status = existing.get("approval_status") or "pending"
+
+            if existing_status == "rejected":
+                # Rejection means "this shouldn't exist" — clean up any
+                # stragglers (should be none after T1.1) and fall through
+                # to re-process from scratch.
+                logger.info(
+                    f"Re-processing rejected meeting "
+                    f"(source: {file_name}, meeting_id: {existing['id']})"
+                )
+                try:
+                    supabase_client.delete_meeting_cascade(existing["id"])
+                except Exception as e:
+                    logger.warning(
+                        f"Cascade delete of stragglers for {existing['id']} failed "
+                        f"(continuing anyway): {e}"
+                    )
+                # Fall through to normal processing below
+            elif existing_status == "approved":
+                logger.info(f"Skipping approved meeting (source: {file_name})")
+                drive_service.mark_file_processed(file_id)
+                return {
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "already_processed",
+                    "meeting_id": existing["id"],
+                }
+            else:
+                # pending / editing / auto_publishing / unknown
+                logger.info(
+                    f"Skipping in-progress meeting "
+                    f"(source: {file_name}, status: {existing_status})"
+                )
+                drive_service.mark_file_processed(file_id)
+                return {
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "already_processed",
+                    "meeting_id": existing["id"],
+                }
 
         # Extract participants from transcript if not in metadata
         participants = metadata.get("participants", [])

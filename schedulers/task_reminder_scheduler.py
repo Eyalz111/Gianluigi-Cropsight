@@ -231,6 +231,29 @@ class TaskReminderScheduler:
         self._task_action_counter += 1
         return f"t{self._task_action_counter}"
 
+    def _resolve_db_task_id(self, task_text: str, assignee: str) -> str | None:
+        """
+        Resolve the Supabase task_id for a task by matching title + assignee.
+
+        Called once per reminder send, so the button callback handler can later
+        do a direct id-based lookup instead of brittle title matching.
+
+        Returns None if no match is found — caller should fall back to title match.
+        """
+        try:
+            db_tasks = supabase_client.get_tasks(assignee=assignee, status="pending")
+            db_tasks += supabase_client.get_tasks(assignee=assignee, status="overdue")
+            target = (task_text or "").strip().lower()
+            for dt in db_tasks:
+                if dt.get("title", "").strip().lower() == target:
+                    return dt["id"]
+            logger.warning(
+                f"Could not resolve DB task_id for reminder: '{task_text[:60]}' ({assignee})"
+            )
+        except Exception as e:
+            logger.warning(f"DB task_id resolution failed: {e}")
+        return None
+
     async def _send_overdue_reminder(
         self,
         task: dict,
@@ -272,7 +295,10 @@ class TaskReminderScheduler:
 
         # Generate short ID and store mapping
         short_id = self._next_short_id()
+        # Resolve DB task_id so button handlers can update by id (not brittle title match)
+        db_task_id = self._resolve_db_task_id(task_desc, assignee)
         self.task_action_map[short_id] = {
+            "task_id": db_task_id,
             "task_text": task_desc,
             "assignee": assignee,
             "row_number": task.get("row_number"),

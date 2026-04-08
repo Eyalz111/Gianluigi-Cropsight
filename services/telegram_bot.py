@@ -2789,21 +2789,38 @@ When you receive approval requests, use the buttons to approve, request changes,
         elif action == "reject":
             # Delete orphan multi-part messages (all except the button message)
             await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
-            supabase_client.update_meeting(
-                meeting_id,
-                approval_status="rejected"
-            )
-            supabase_client.log_action(
-                action="approval_rejected",
-                details={"meeting_id": meeting_id},
-                triggered_by="eyal",
-            )
-            conversation_memory.clear(str(self.eyal_chat_id))
 
-            await query.edit_message_text(
-                "Rejected. The summary will not be distributed."
-            )
-            logger.info(f"Meeting {meeting_id} rejected by Eyal")
+            # Delegate to process_response so both paths (Telegram + email) go
+            # through the same cascading-reject logic. This is critical because
+            # the old inline path only flipped approval_status and left tasks/
+            # decisions/embeddings as orphans in the DB.
+            await query.edit_message_text("Rejecting...")
+            try:
+                from guardrails.approval_flow import process_response
+                result = await process_response(
+                    meeting_id=meeting_id,
+                    response="reject",
+                    response_source="telegram",
+                    force_action="reject",
+                )
+                confirmation = result.get("next_step") or "Rejected."
+                await query.edit_message_text(confirmation)
+                logger.info(f"Meeting {meeting_id} rejected by Eyal: {confirmation}")
+            except Exception as e:
+                logger.error(f"Reject delegation failed for {meeting_id}: {e}")
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL,
+                        "telegram_bot.reject_callback",
+                        f"Reject handler failed for {meeting_id}: {e}",
+                        error=e,
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Alert on reject failure also failed: {alert_err}")
+                await query.edit_message_text(f"Reject failed: {e}")
+
+            conversation_memory.clear(str(self.eyal_chat_id))
 
         elif action == "edit":
             await query.edit_message_text(
@@ -2949,7 +2966,12 @@ When you receive approval requests, use the buttons to approve, request changes,
         """
         Execute a task update from a reminder button or free-text reply.
 
-        Updates both Supabase (by title match) and Google Sheets (by row number).
+        DB-first, Sheets-second. Prefers task_id (set by reminder scheduler
+        via _resolve_db_task_id); falls back to title+assignee match for
+        legacy reminders where task_id is None.
+
+        If either DB or Sheets update fails, fires a CRITICAL system alert
+        so silent failures become impossible.
 
         Returns:
             New deadline string if delay was applied, None otherwise.
@@ -2957,6 +2979,7 @@ When you receive approval requests, use the buttons to approve, request changes,
         task_text = task_info.get("task_text", "")
         assignee = task_info.get("assignee", "")
         row_number = task_info.get("row_number")
+        task_id = task_info.get("task_id")
 
         new_deadline = None
 
@@ -2971,42 +2994,80 @@ When you receive approval requests, use the buttons to approve, request changes,
             new_date = old_date + timedelta(days=delay_days)
             new_deadline = new_date.isoformat()
 
-        # Update Supabase — find task by title + assignee
-        try:
-            tasks = supabase_client.get_tasks(assignee=assignee, status="pending")
-            tasks += supabase_client.get_tasks(assignee=assignee, status="overdue")
-            db_task = None
-            for t in tasks:
-                if t.get("title", "").strip().lower() == task_text.strip().lower():
-                    db_task = t
-                    break
+        # Build update payload
+        updates: dict = {}
+        if status:
+            updates["status"] = status
+        if new_deadline:
+            updates["deadline"] = new_deadline
+        if not updates:
+            return new_deadline
 
-            if db_task:
-                updates = {}
-                if status:
-                    updates["status"] = status
-                if new_deadline:
-                    updates["deadline"] = new_deadline
-                if updates:
-                    supabase_client.update_task(db_task["id"], **updates)
-                    logger.info(f"Updated task in DB: {db_task['id']} → {updates}")
+        # Local import — telegram_bot does not import supabase_client at module
+        # level (all its other Supabase calls use local imports too)
+        from services.supabase_client import supabase_client
+
+        # --- 1. DB update (prefer task_id, fall back to title match) ---
+        db_ok = False
+        db_error: str | None = None
+        resolved_task_id = task_id
+        try:
+            if not resolved_task_id:
+                tasks = supabase_client.get_tasks(assignee=assignee, status="pending")
+                tasks += supabase_client.get_tasks(assignee=assignee, status="overdue")
+                target = (task_text or "").strip().lower()
+                for t in tasks:
+                    if t.get("title", "").strip().lower() == target:
+                        resolved_task_id = t["id"]
+                        break
+
+            if resolved_task_id:
+                supabase_client.update_task(resolved_task_id, **updates)
+                db_ok = True
+                logger.info(f"Updated task in DB: {resolved_task_id} -> {updates}")
+            else:
+                db_error = (
+                    f"No matching DB task for '{task_text[:60]}' ({assignee}) "
+                    f"— title-match fallback failed"
+                )
+                logger.error(db_error)
         except Exception as e:
+            db_error = str(e)
             logger.error(f"Failed to update task in Supabase: {e}")
 
-        # Update Google Sheets
+        # --- 2. Sheets update (independent of DB outcome) ---
+        sheets_ok = False
+        sheets_error: str | None = None
         try:
             if row_number:
-                updates = {}
-                if status:
-                    updates["status"] = "done" if status == "done" else status
-                if new_deadline:
-                    updates["deadline"] = new_deadline
-                if updates:
-                    from services.google_sheets import sheets_service
-                    await sheets_service.update_task_row(row_number, **updates)
-                    logger.info(f"Updated task in Sheets row {row_number} → {updates}")
+                from services.google_sheets import sheets_service
+                await sheets_service.update_task_row(row_number, **updates)
+                sheets_ok = True
+                logger.info(f"Updated task in Sheets row {row_number} -> {updates}")
+            else:
+                # No row number — skip Sheets silently, not a failure
+                sheets_ok = True
         except Exception as e:
+            sheets_error = str(e)
             logger.error(f"Failed to update task in Sheets: {e}")
+
+        # --- 3. Alert loudly if either side failed ---
+        if not db_ok or not sheets_ok:
+            try:
+                from services.alerting import send_system_alert, AlertSeverity
+                failures = []
+                if not db_ok:
+                    failures.append(f"DB: {db_error}")
+                if not sheets_ok:
+                    failures.append(f"Sheets: {sheets_error}")
+                await send_system_alert(
+                    AlertSeverity.CRITICAL,
+                    "telegram_bot.task_update",
+                    f"Task update partial failure for '{task_text[:60]}' "
+                    f"({assignee}): " + "; ".join(failures),
+                )
+            except Exception as alert_err:
+                logger.error(f"Alert on task update failure also failed: {alert_err}")
 
         return new_deadline
 
