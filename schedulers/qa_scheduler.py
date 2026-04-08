@@ -60,6 +60,7 @@ def run_qa_check() -> dict:
     report["checks"]["scheduler_health"] = _check_scheduler_health(report["issues"])
     report["checks"]["data_integrity"] = _check_data_integrity(report["issues"])
     report["checks"]["prompt_health"] = _check_prompt_health(report["issues"])
+    report["checks"]["rejected_meetings"] = _check_rejected_meetings(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -262,6 +263,88 @@ def _check_data_integrity(issues: list[str]) -> dict:
 
     except Exception as e:
         logger.warning(f"Data integrity check failed: {e}")
+
+    return result
+
+
+def _check_rejected_meetings(issues: list[str]) -> dict:
+    """
+    Defense in depth (T2.4): surface any rejected meetings that still have
+    orphan child data. After Tier 1's cascading reject this should always
+    return 0. If it ever returns >0, the cleanup script needs to run.
+    """
+    result = {
+        "rejected_meetings": 0,
+        "rejected_with_orphans": 0,
+        "orphan_tasks": 0,
+        "orphan_decisions": 0,
+        "orphan_embeddings": 0,
+    }
+
+    try:
+        rejected = supabase_client.list_meetings(
+            approval_status="rejected", limit=100
+        )
+        result["rejected_meetings"] = len(rejected)
+
+        for m in rejected:
+            mid = m.get("id")
+            if not mid:
+                continue
+
+            has_orphans = False
+
+            try:
+                t = (
+                    supabase_client.client.table("tasks")
+                    .select("id", count="exact")
+                    .eq("meeting_id", mid)
+                    .execute()
+                )
+                if t.count:
+                    result["orphan_tasks"] += t.count
+                    has_orphans = True
+            except Exception:
+                pass
+
+            try:
+                d = (
+                    supabase_client.client.table("decisions")
+                    .select("id", count="exact")
+                    .eq("meeting_id", mid)
+                    .execute()
+                )
+                if d.count:
+                    result["orphan_decisions"] += d.count
+                    has_orphans = True
+            except Exception:
+                pass
+
+            try:
+                e = (
+                    supabase_client.client.table("embeddings")
+                    .select("id", count="exact")
+                    .eq("source_id", mid)
+                    .execute()
+                )
+                if e.count:
+                    result["orphan_embeddings"] += e.count
+                    has_orphans = True
+            except Exception:
+                pass
+
+            if has_orphans:
+                result["rejected_with_orphans"] += 1
+
+        if result["rejected_with_orphans"] > 0:
+            issues.append(
+                f"{result['rejected_with_orphans']} rejected meetings have orphan data "
+                f"({result['orphan_tasks']} tasks, {result['orphan_decisions']} decisions, "
+                f"{result['orphan_embeddings']} embeddings) "
+                f"— run scripts/cleanup_rejected_meetings.py --apply"
+            )
+    except Exception as e:
+        logger.warning(f"Rejected meetings check failed: {e}")
 
     return result
 

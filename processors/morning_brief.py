@@ -366,6 +366,71 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"QA health for morning brief failed: {e}")
 
+    # 14. System state — ALWAYS included so silence is never ambiguous (T2.2)
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        yesterday = (_dt.now() - _td(days=1)).isoformat()
+
+        # Watcher heartbeat freshness
+        watcher_status = "unknown"
+        try:
+            heartbeats = supabase_client.get_scheduler_heartbeats()
+            watcher_hb = next(
+                (hb for hb in heartbeats if hb.get("scheduler_name") == "transcript_watcher"),
+                None,
+            )
+            if watcher_hb:
+                last_beat = str(watcher_hb.get("last_heartbeat", ""))
+                if last_beat >= yesterday:
+                    watcher_status = watcher_hb.get("status", "ok")
+                else:
+                    watcher_status = "stale"
+        except Exception:
+            pass
+
+        # Rejected meetings count (should be 0 after Tier 1)
+        rejected_count = 0
+        try:
+            rejected_list = supabase_client.list_meetings(
+                approval_status="rejected", limit=100
+            )
+            rejected_count = len(rejected_list)
+        except Exception:
+            pass
+
+        # Errors in last 24h
+        errors_24h = 0
+        try:
+            error_result = (
+                supabase_client.client.table("audit_log")
+                .select("id", count="exact")
+                .in_("action", ["critical_error", "watcher_error", "reminder_scheduler_error"])
+                .gte("created_at", yesterday)
+                .execute()
+            )
+            errors_24h = error_result.count or 0
+        except Exception:
+            pass
+
+        # Pending approvals queue depth
+        pending_queue = 0
+        try:
+            pending_list = supabase_client.get_pending_approval_summary()
+            pending_queue = len(pending_list) if pending_list else 0
+        except Exception:
+            pass
+
+        sections.append({
+            "type": "system_state",
+            "title": "System State",
+            "watcher_status": watcher_status,
+            "rejected_count": rejected_count,
+            "errors_24h": errors_24h,
+            "pending_queue": pending_queue,
+        })
+    except Exception as e:
+        logger.debug(f"System state for morning brief failed: {e}")
+
     return {
         "sections": sections,
         "stats": stats,
@@ -491,6 +556,31 @@ def format_morning_brief(brief: dict) -> str:
             lines.append(f"<b>System Health:</b> {score_label}")
             for issue in section.get("issues", [])[:3]:
                 lines.append(f"  - {issue[:80]}")
+            lines.append("")
+
+        elif section_type == "system_state":
+            # Always-included heartbeat section (T2.2)
+            watcher = section.get("watcher_status", "unknown")
+            rejected = section.get("rejected_count", 0)
+            errors = section.get("errors_24h", 0)
+            queue = section.get("pending_queue", 0)
+
+            all_clear = (
+                rejected == 0
+                and errors == 0
+                and watcher in ("ok", "healthy", "unknown")
+            )
+            if all_clear and queue == 0:
+                lines.append("<b>System State:</b> all clear")
+            else:
+                lines.append("<b>System State:</b>")
+                lines.append(f"  Watcher: {watcher}")
+                if rejected:
+                    lines.append(f"  Rejected meetings with orphan data: {rejected}")
+                if errors:
+                    lines.append(f"  Errors in 24h: {errors}")
+                if queue:
+                    lines.append(f"  Pending approvals: {queue}")
             lines.append("")
 
         elif section_type == "deal_pulse":

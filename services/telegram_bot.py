@@ -1217,6 +1217,70 @@ Or just send me a question and I'll search our meeting history to answer it!
             except Exception:
                 pass
 
+            # T2.1 — Transcript watcher heartbeat
+            try:
+                heartbeats = supabase_client.get_scheduler_heartbeats()
+                watcher_hb = next(
+                    (hb for hb in heartbeats if hb.get("scheduler_name") == "transcript_watcher"),
+                    None,
+                )
+                if watcher_hb:
+                    last_beat = str(watcher_hb.get("last_heartbeat", ""))[:19].replace("T", " ")
+                    hb_status = watcher_hb.get("status", "unknown")
+                    lines.append(f"\n*Transcript Watcher:* {hb_status} (last: {last_beat})")
+                else:
+                    lines.append("\n*Transcript Watcher:* no heartbeat yet")
+            except Exception:
+                pass
+
+            # T2.1 — Rejected meetings (should always be 0 after Tier 1)
+            try:
+                rejected_meetings = supabase_client.list_meetings(
+                    approval_status="rejected", limit=10
+                )
+                if rejected_meetings:
+                    lines.append(
+                        f"\n*Rejected meetings with orphan data:* {len(rejected_meetings)} "
+                        f"(run scripts/cleanup_rejected_meetings.py)"
+                    )
+                else:
+                    lines.append("\n*Rejected meetings:* 0 (clean)")
+            except Exception:
+                pass
+
+            # T2.1 — Errors in last 24h from audit_log
+            try:
+                from datetime import datetime as _dt, timedelta as _td
+                yesterday = (_dt.now() - _td(days=1)).isoformat()
+                errors_result = (
+                    supabase_client.client.table("audit_log")
+                    .select("action, details, created_at")
+                    .in_("action", [
+                        "critical_error",
+                        "watcher_error",
+                        "reminder_scheduler_error",
+                    ])
+                    .gte("created_at", yesterday)
+                    .order("created_at", desc=True)
+                    .limit(5)
+                    .execute()
+                )
+                errors = errors_result.data or []
+                if errors:
+                    lines.append(f"\n*Errors (24h):* {len(errors)}")
+                    for err in errors[:3]:
+                        action = err.get("action", "")
+                        details = err.get("details", {})
+                        if isinstance(details, dict):
+                            msg = str(details.get("error", details.get("message", "")))[:60]
+                        else:
+                            msg = str(details)[:60]
+                        lines.append(f"  - {action}: {msg}")
+                else:
+                    lines.append("\n*Errors (24h):* 0")
+            except Exception:
+                pass
+
             await self.send_message(update.effective_chat.id, "\n".join(lines))
 
         except Exception as e:
@@ -2835,6 +2899,8 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         elif action == "sens_toggle":
             # Cycle sensitivity tier: founders → ceo → team → public → founders
+            # T2.5: wrap DB write in try/except + CRITICAL alert so silent
+            # failures cannot hide behind the UI cycling.
             from services.supabase_client import supabase_client as _sc
             from guardrails.sensitivity_classifier import propagate_meeting_sensitivity
             meeting = _sc.get_meeting(meeting_id)
@@ -2849,8 +2915,24 @@ When you receive approval requests, use the buttons to approve, request changes,
             current_idx = tier_cycle.index(current_sens) if current_sens in tier_cycle else 0
             new_sens = tier_cycle[(current_idx + 1) % len(tier_cycle)]
 
-            _sc.update_meeting(meeting_id, sensitivity=new_sens)
-            propagate_meeting_sensitivity(meeting_id, new_sens)
+            try:
+                _sc.update_meeting(meeting_id, sensitivity=new_sens)
+                propagate_meeting_sensitivity(meeting_id, new_sens)
+            except Exception as e:
+                logger.error(f"Sensitivity toggle DB update failed for {meeting_id}: {e}")
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL,
+                        "telegram_bot.sens_toggle",
+                        f"Sensitivity toggle DB write failed for {meeting_id}: {e}. "
+                        f"UI may show {new_sens} but DB is unchanged.",
+                        error=e,
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Alert on sens_toggle failure also failed: {alert_err}")
+                await query.answer(f"Failed to update sensitivity: {e}")
+                return
 
             # Update button text in-place
             tier_labels = {
