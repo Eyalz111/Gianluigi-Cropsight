@@ -3006,7 +3006,10 @@ When you receive approval requests, use the buttons to approve, request changes,
         assignee, row_number, deadline.
         """
         from schedulers.task_reminder_scheduler import task_reminder_scheduler
-        from services.supabase_client import supabase_client as _sc
+        # Import without alias so the existing 'discuss' branch (which references
+        # supabase_client by its bare name) keeps working.
+        from services.supabase_client import supabase_client
+        _sc = supabase_client  # local alias used by the cold-lookup code below
 
         # Detect format: UUID (36 chars with dashes) vs legacy short_id (e.g. "t12")
         is_uuid = len(callback_key) == 36 and callback_key.count("-") == 4
@@ -3084,14 +3087,45 @@ When you receive approval requests, use the buttons to approve, request changes,
                 f"Discuss: {task_text[:60]}\n\nAdded to next meeting agenda."
             )
             await query.answer("Will discuss in next meeting")
-            # Create an open question for the next meeting prep
+            # Look up the task's source meeting so the open_question is anchored
+            # to it (create_open_question requires meeting_id).
             try:
+                task_db_id = task_info.get("task_id")
+                source_meeting_id = None
+                if task_db_id:
+                    lookup = (
+                        supabase_client.client.table("tasks")
+                        .select("meeting_id")
+                        .eq("id", task_db_id)
+                        .limit(1)
+                        .execute()
+                    )
+                    if lookup.data:
+                        source_meeting_id = lookup.data[0].get("meeting_id")
+                if not source_meeting_id:
+                    raise ValueError(
+                        f"No source meeting_id for task {task_db_id} — cannot anchor open_question"
+                    )
                 supabase_client.create_open_question(
+                    meeting_id=source_meeting_id,
                     question=f"Discuss overdue task: {task_text}",
                     raised_by="Eyal",
                 )
+                logger.info(f"Created discussion open_question for task: {task_text[:60]}")
             except Exception as e:
                 logger.error(f"Failed to create discussion item: {e}")
+                # Loud failure — prevent silent no-ops like the Tier 1 task button bugs
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL,
+                        "telegram_bot.task_discuss",
+                        f"Failed to create open_question for discuss action on "
+                        f"'{task_text[:60]}': {e}",
+                        error=e,
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Alert on discuss failure also failed: {alert_err}")
 
     async def _execute_task_update_from_reminder(
         self,
