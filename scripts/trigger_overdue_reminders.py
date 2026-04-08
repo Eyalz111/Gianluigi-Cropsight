@@ -71,13 +71,15 @@ async def main() -> int:
         priority = task.get("priority", "M")
         source = task.get("source_meeting", "")
 
-        # Resolve DB task_id by title+assignee match
+        # Resolve DB task_id by title+assignee match (status=None covers
+        # pending + in_progress + overdue — done/cancelled filtered client-side)
         db_task_id = None
         try:
-            db_tasks = supabase_client.get_tasks(assignee=assignee, status="pending", limit=200)
-            db_tasks += supabase_client.get_tasks(assignee=assignee, status="overdue", limit=200)
+            db_tasks = supabase_client.get_tasks(assignee=assignee, status=None, limit=500)
             target = task_text.strip().lower()
             for dt in db_tasks:
+                if dt.get("status") in ("done", "cancelled"):
+                    continue
                 if dt.get("title", "").strip().lower() == target:
                     db_task_id = dt["id"]
                     break
