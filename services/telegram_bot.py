@@ -3149,10 +3149,13 @@ When you receive approval requests, use the buttons to approve, request changes,
         resolved_task_id = task_id
         try:
             if not resolved_task_id:
-                tasks = supabase_client.get_tasks(assignee=assignee, status="pending")
-                tasks += supabase_client.get_tasks(assignee=assignee, status="overdue")
+                # Query all active statuses — must include in_progress, not just pending/overdue.
+                # The reminder may target a task that's already started.
+                tasks = supabase_client.get_tasks(assignee=assignee, status=None, limit=500)
                 target = (task_text or "").strip().lower()
                 for t in tasks:
+                    if t.get("status") in ("done", "cancelled"):
+                        continue
                     if t.get("title", "").strip().lower() == target:
                         resolved_task_id = t["id"]
                         break

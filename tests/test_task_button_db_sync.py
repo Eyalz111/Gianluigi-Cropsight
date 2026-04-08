@@ -78,15 +78,37 @@ class TestReminderResolvesTaskId:
         scheduler = TaskReminderScheduler()
 
         with patch("schedulers.task_reminder_scheduler.supabase_client") as mock_sb:
-            mock_sb.get_tasks.side_effect = [
-                [{"id": "db-task-1", "title": "Send the Monday report", "assignee": "Eyal"}],
-                [],  # overdue query
+            # Single query with status=None now returns all active statuses
+            mock_sb.get_tasks.return_value = [
+                {"id": "db-task-1", "title": "Send the Monday report", "assignee": "Eyal", "status": "in_progress"},
             ]
             result = scheduler._resolve_db_task_id("Send the Monday report", "Eyal")
 
         assert result == "db-task-1"
-        # Both pending and overdue queries should have been attempted
-        assert mock_sb.get_tasks.call_count == 2
+        # Single status=None query (covers pending + in_progress + overdue)
+        assert mock_sb.get_tasks.call_count == 1
+        # Verify it was called with status=None
+        call_kwargs = mock_sb.get_tasks.call_args.kwargs
+        assert call_kwargs.get("status") is None
+
+    def test_resolve_db_task_id_includes_in_progress(self):
+        """Bug fix: tasks in 'in_progress' status must be findable.
+
+        Previously the lookup only queried 'pending' and 'overdue' statuses,
+        causing reminder buttons to fail with title-match-fallback errors
+        when the task was already in_progress.
+        """
+        from schedulers.task_reminder_scheduler import TaskReminderScheduler
+
+        scheduler = TaskReminderScheduler()
+
+        with patch("schedulers.task_reminder_scheduler.supabase_client") as mock_sb:
+            mock_sb.get_tasks.return_value = [
+                {"id": "ip-1", "title": "Already started task", "assignee": "Eyal", "status": "in_progress"},
+            ]
+            result = scheduler._resolve_db_task_id("Already started task", "Eyal")
+
+        assert result == "ip-1"
 
     def test_resolve_db_task_id_case_insensitive(self):
         """Match is case-insensitive and strips whitespace."""
@@ -177,9 +199,9 @@ class TestExecuteTaskUpdateFromReminder:
         with patch("services.supabase_client.supabase_client") as mock_sb, \
              patch("services.google_sheets.sheets_service") as mock_sheets, \
              patch("services.alerting.send_system_alert", new=AsyncMock()) as mock_alert:
-            mock_sb.get_tasks.side_effect = [
-                [{"id": "fallback-id", "title": "Send deck"}],
-                [],
+            # Single status=None query returns all active tasks for the assignee
+            mock_sb.get_tasks.return_value = [
+                {"id": "fallback-id", "title": "Send deck", "status": "pending"},
             ]
             mock_sb.update_task.return_value = {"id": "fallback-id"}
             mock_sheets.update_task_row = AsyncMock()
@@ -188,6 +210,34 @@ class TestExecuteTaskUpdateFromReminder:
 
             mock_sb.update_task.assert_called_once()
             assert mock_sb.update_task.call_args[0][0] == "fallback-id"
+            mock_alert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_title_match_finds_in_progress_task(self, bot):
+        """Bug fix: title fallback must include in_progress tasks.
+
+        Regression where reminder clicks failed for tasks already started.
+        """
+        task_info = {
+            "task_text": "Already started task",
+            "assignee": "Eyal",
+            "row_number": 5,
+            "deadline": "2026-04-10",
+        }
+
+        with patch("services.supabase_client.supabase_client") as mock_sb, \
+             patch("services.google_sheets.sheets_service") as mock_sheets, \
+             patch("services.alerting.send_system_alert", new=AsyncMock()) as mock_alert:
+            mock_sb.get_tasks.return_value = [
+                {"id": "ip-task-1", "title": "Already started task", "status": "in_progress"},
+            ]
+            mock_sb.update_task.return_value = {"id": "ip-task-1"}
+            mock_sheets.update_task_row = AsyncMock()
+
+            await bot._execute_task_update_from_reminder(task_info, status="done")
+
+            mock_sb.update_task.assert_called_once()
+            assert mock_sb.update_task.call_args[0][0] == "ip-task-1"
             mock_alert.assert_not_called()
 
     @pytest.mark.asyncio

@@ -241,10 +241,13 @@ class TaskReminderScheduler:
         Returns None if no match is found — caller should fall back to title match.
         """
         try:
-            db_tasks = supabase_client.get_tasks(assignee=assignee, status="pending")
-            db_tasks += supabase_client.get_tasks(assignee=assignee, status="overdue")
+            # Query all active statuses — pending, in_progress, overdue.
+            # Reminder targets ANY active task, not just pending ones.
+            db_tasks = supabase_client.get_tasks(assignee=assignee, status=None, limit=500)
             target = (task_text or "").strip().lower()
             for dt in db_tasks:
+                if dt.get("status") in ("done", "cancelled"):
+                    continue
                 if dt.get("title", "").strip().lower() == target:
                     return dt["id"]
             logger.warning(
