@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** April 7, 2026
-**Current Version:** v2.2 (Phases 0-13 + X1/X2 + Intelligence Signal + Deal Intelligence + CEO UX, 43 MCP tools)
-**Status:** Deal intelligence and CEO Today view complete. Session 3 of v2.2 upgrade.
+**Last Updated:** April 9, 2026
+**Current Version:** v2.2 (Phases 0-13 + X1/X2 + Intelligence Signal + Deal Intelligence + CEO UX + Approval Flow Robustness Tiers 1-3, 43 MCP tools)
+**Status:** Tier 3 approval-flow architectural robustness complete. Production revision `gianluigi-00061-vsk`. Smoke-tested live (reject path) 2026-04-09.
 
 ---
 
@@ -14,15 +14,17 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ---
 
-## Current State (Post Phase 13)
+## Current State (Post Tier 3)
 
-- 1450+ tests, all passing
-- MCP server with 38 tools, connected to Claude.ai via CropSight Ops project
-- Full cycle verified: transcript → extraction → approval → distribution → MCP query
+- ~1950 tests, all new tests passing (22 pre-existing failures baselined in `tier3_handoff.md`)
+- MCP server with 43 tools, connected to Claude.ai via CropSight Ops project
+- Full cycle verified live: transcript → extraction (pending) → approve → distribution → MCP query, and reject → tombstone → cascade-clear
 - Meeting continuity engine: cross-meeting context, task match annotations, decision chains
-- Daily QA agent: extraction quality, distribution completeness, scheduler health, data integrity
+- Daily QA agent: extraction quality, distribution completeness, scheduler health, data integrity, RLS coverage, rejected orphans, **approved-with-pending-children safety net (T3.1)**
 - Document versioning with content hash dedup, Dropbox sync ready (disabled, needs credentials)
 - Phase 11-13 migrations applied (sensitivity, email body, decision freshness, task signals, doc versioning)
+- **Approval flow robustness** (Tiers 1+2+T1.9+3) complete: cascading reject + tombstones + FK CASCADE + `approval_status` gating + Gmail/Telegram retry + sheet format on approval
+- Production revision: `gianluigi-00061-vsk` (as of 2026-04-09)
 
 ### What Works
 - Full transcript pipeline: Tactiq → Drive → Claude extraction → Supabase → approval → distribution
@@ -55,6 +57,16 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - **v2.2 Session 2.5:** Sensitivity tier rename (TEAM→FOUNDERS, CEO_ONLY→CEO), retrieval-level filtering across all processors.
 - **v2.2 Session 3 — Deal Intelligence (Phase 4):** 3 new DB tables (deals, deal_interactions, external_commitments), `deal_ops` MCP composite tool (9 actions, replaces deprecated `get_commitments`), deal signal detection from transcripts, Deal Pulse + Commitments Due in morning brief, stakeholder sheet +3 columns (Deal Stage, Deal Value, Last Interaction), zero-friction auto-interaction from meetings/emails.
 - **v2.2 Session 3 — CEO UX (Phase 5):** `get_full_status(view="ceo_today")` CEO dashboard (overdue tasks, this week, milestones, deal pulse, drift alerts), Gantt drift detection (>50% overdue = drift alert), morning brief enhancements (Task Urgency, Gantt Milestones, Drift Alerts sections).
+- **Approval Flow Robustness Tier 1 (2026-04-07):** Cascading reject via `delete_meeting_cascade` + unified Telegram→DB writer + cleanup script + watcher rejection awareness. Closes the "rejected meetings leave orphan children" leak.
+- **Approval Flow Robustness Tier 2 (2026-04-07):** `/status` dashboard + morning brief "System State" section + QA scheduler `_check_rejected_meetings` defense-in-depth check.
+- **Approval Flow Robustness T1.9 pivot (2026-04-09):** Reject uses DB tombstones (`keep_tombstone=True`) instead of hard delete — the `meetings` row is preserved with `approval_status='rejected'` so the watcher can skip re-processing the same source file. HTTP 403 on user-owned Drive files made the original Drive-move approach unworkable.
+- **Approval Flow Robustness Tier 3 (2026-04-09):** Architectural robustness + known-issue fixes.
+  - **T3.1 narrow** — `approval_status` column on tasks/decisions/open_questions/follow_up_meetings with CHECK constraint and partial indexes. The 4 central read helpers (`get_tasks`, `list_decisions`, `get_open_questions`, `list_follow_up_meetings`) now filter to approved-only by default (`include_pending=False`). Extraction writes rows as 'pending' via DB default; approve flow promotes them via `_promote_children_to_approved()` with 3-attempt retry.
+  - **T3.2 FK CASCADE** — every meeting child table now has `ON DELETE CASCADE` (discovered live-DB schema drift: tasks/decisions/open_questions had been `NO ACTION` in production despite `setup_supabase.sql` claiming `CASCADE`). `delete_meeting_cascade(keep_tombstone=False)` simplified to single DB delete + embeddings (polymorphic) cleanup.
+  - **T3.3 cleanup + safety net** — fixed latent bug in `scripts/cleanup_rejected_meetings.py` that was destroying tombstones by calling `delete_meeting_cascade()` without `keep_tombstone=True`. Added QA scheduler check `_check_approved_meetings_with_pending_children` that catches any silent `_promote_children_to_approved` failures (parent='approved' + child='pending' = invisible data hole). Runs daily, surfaces in morning brief.
+  - **T3.4 retry on Gmail/Telegram sends** — extracted network calls into `_execute_send` (gmail) and `_bot_send_message` (telegram_bot) wrapped with `@retry` from `core/retry.py`. 3 attempts, exponential backoff. Fixes BrokenPipe silent-drops observed during test 4.
+  - **T3.5 `format_task_tracker()` on approval** — `distribute_approved_content()` now calls `format_task_tracker()` after the tasks append loop, so new rows don't inherit header-bleed styling.
+  - **T3.6 known limitation doc** — `KNOWN_ISSUES.md` now documents the `source_file_path` ILIKE substring match collision risk for tombstone matching (rare because Tactiq filenames are timestamp-prefixed).
 
 ### Known Issues
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
