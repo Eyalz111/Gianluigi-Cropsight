@@ -14,65 +14,139 @@ from unittest.mock import patch, MagicMock, AsyncMock
 class TestDeleteMeetingCascade:
     """Tests for supabase_client.delete_meeting_cascade."""
 
-    def test_deletes_in_correct_order(self):
-        """Embeddings, child tables (incl. topic_thread_mentions), tasks, meeting."""
+    def test_hard_delete_uses_fk_cascade_not_per_table_loop(self):
+        """
+        Post-Tier-3.2: the hard-delete path (keep_tombstone=False) relies on
+        DB-level FK CASCADE. It should:
+          1. Pre-count children for reporting (SELECT count=exact on 5 tables)
+          2. Explicitly delete embeddings (polymorphic, no FK)
+          3. Delete pending_approvals (keyed by approval_id, no FK to meetings)
+          4. Run a single DELETE on meetings (FK cascade handles children)
+        The old per-table delete loop is GONE from this path.
+        """
         from services.supabase_client import SupabaseClient
 
         client = SupabaseClient()
         mock_supabase = MagicMock()
 
-        # Track call order
-        call_order = []
-
-        def make_delete_chain(table_name, data):
-            mock_chain = MagicMock()
-            mock_chain.delete.return_value = mock_chain
-            mock_chain.eq.return_value = mock_chain
-            mock_chain.execute.return_value = MagicMock(data=data)
-            mock_chain.execute.side_effect = lambda: (
-                call_order.append(table_name),
-                MagicMock(data=data),
-            )[1]
-            return mock_chain
-
-        # Provide stub data for every table the cascade touches so counts propagate
-        stubs = {
-            "embeddings": [{"id": "e1"}, {"id": "e2"}],
-            "task_mentions": [],
-            "entity_mentions": [],
-            "topic_thread_mentions": [{"id": "tm1"}],
-            "commitments": [],
-            "decisions": [{"id": "d1"}],
-            "follow_up_meetings": [],
-            "open_questions": [{"id": "q1"}],
-            "pending_approvals": [],
-            "tasks": [{"id": "t1"}],
-            "meetings": [{"id": "m1"}],
-        }
+        # Track every .table(name) call to assert overall shape
+        touched_tables: list[str] = []
+        delete_calls: list[str] = []
 
         def table_router(name):
-            return make_delete_chain(name, stubs.get(name, []))
+            touched_tables.append(name)
+            chain = MagicMock()
+
+            # Pre-count path: .select("id", count="exact").eq(...).execute()
+            select_chain = MagicMock()
+            select_chain.eq.return_value = select_chain
+            # .execute() returns an object with .count == 1 so pre-counts propagate
+            select_chain.execute.return_value = MagicMock(count=1)
+            chain.select.return_value = select_chain
+
+            # Delete path: .delete().eq(...).execute()
+            delete_chain = MagicMock()
+            delete_chain.eq.return_value = delete_chain
+
+            def _execute_delete():
+                delete_calls.append(name)
+                return MagicMock(data=[{"id": f"{name}-row"}])
+
+            delete_chain.execute.side_effect = _execute_delete
+            chain.delete.return_value = delete_chain
+
+            return chain
 
         mock_supabase.table.side_effect = table_router
         object.__setattr__(client, "_client", mock_supabase)
 
-        result = client.delete_meeting_cascade("test-meeting-id")
+        result = client.delete_meeting_cascade("test-meeting-id", keep_tombstone=False)
 
-        # Order: embeddings first, then child tables (including topic_thread_mentions)
-        # in the loop order, then pending_approvals, then tasks, then meetings
-        assert call_order[0] == "embeddings"
-        assert "topic_thread_mentions" in call_order
-        assert call_order[-2] == "tasks"
-        assert call_order[-1] == "meetings"
-        # topic_thread_mentions must be before tasks + meetings (FK order)
-        assert call_order.index("topic_thread_mentions") < call_order.index("tasks")
+        # Hard-delete path should only .delete() on 3 things:
+        #   - embeddings (polymorphic, explicit Python delete)
+        #   - pending_approvals (no FK to meetings, explicit delete)
+        #   - meetings (the parent — FK CASCADE handles the rest)
+        assert "embeddings" in delete_calls
+        assert "pending_approvals" in delete_calls
+        assert "meetings" in delete_calls
+        # These should NOT be in the delete list (FK CASCADE handles them)
+        assert "tasks" not in delete_calls
+        assert "decisions" not in delete_calls
+        assert "topic_thread_mentions" not in delete_calls
+        assert "open_questions" not in delete_calls
+        assert "follow_up_meetings" not in delete_calls
 
-        assert result["embeddings"] == 2
-        assert result["tasks"] == 1
-        assert result["meetings"] == 1
-        assert result["topic_thread_mentions"] == 1
-        assert result["decisions"] == 1
-        assert result["open_questions"] == 1
+        # Pre-count should have run on the 5 reporting tables
+        # (we can verify they were at least touched via .table(...))
+        for pre_count_table in (
+            "tasks", "decisions", "open_questions",
+            "follow_up_meetings", "topic_thread_mentions",
+        ):
+            assert pre_count_table in touched_tables
+
+        # Counts dict shape is preserved for callers that log it
+        assert "tasks" in result
+        assert "decisions" in result
+        assert "meetings" in result
+        assert "embeddings" in result
+
+    def test_tombstone_path_still_deletes_children_explicitly(self):
+        """
+        keep_tombstone=True path is unchanged — it MUST explicitly delete every
+        child table because the parent row is kept alive (so DB cascade can't fire).
+        """
+        from services.supabase_client import SupabaseClient
+
+        client = SupabaseClient()
+        mock_supabase = MagicMock()
+        delete_calls: list[str] = []
+
+        def table_router(name):
+            chain = MagicMock()
+
+            select_chain = MagicMock()
+            select_chain.eq.return_value = select_chain
+            select_chain.execute.return_value = MagicMock(count=0)
+            chain.select.return_value = select_chain
+
+            delete_chain = MagicMock()
+            delete_chain.eq.return_value = delete_chain
+
+            def _execute_delete():
+                delete_calls.append(name)
+                return MagicMock(data=[])
+
+            delete_chain.execute.side_effect = _execute_delete
+            chain.delete.return_value = delete_chain
+
+            # tombstone also calls .update(...).eq(...).execute() on meetings
+            update_chain = MagicMock()
+            update_chain.eq.return_value = update_chain
+            update_chain.execute.return_value = MagicMock(data=[{"id": "m1"}])
+            chain.update.return_value = update_chain
+
+            return chain
+
+        mock_supabase.table.side_effect = table_router
+        object.__setattr__(client, "_client", mock_supabase)
+
+        result = client.delete_meeting_cascade("test-id", keep_tombstone=True)
+
+        # Tombstone path: every child table must be explicitly deleted because
+        # the parent row is preserved (FK cascade won't fire).
+        for child in (
+            "task_mentions", "entity_mentions", "topic_thread_mentions",
+            "commitments", "decisions", "follow_up_meetings",
+            "open_questions", "tasks", "embeddings", "pending_approvals",
+        ):
+            assert child in delete_calls, f"tombstone path must delete {child}"
+
+        # meetings table is NOT deleted in tombstone path (it's updated instead)
+        assert "meetings" not in delete_calls
+
+        # Tombstone marker is set
+        assert result["tombstone"] == 1
+        assert result["meetings"] == 0
 
     def test_handles_empty_results(self):
         """Counts are 0 when tables have no matching records."""
@@ -81,11 +155,21 @@ class TestDeleteMeetingCascade:
         client = SupabaseClient()
         mock_supabase = MagicMock()
 
-        mock_chain = MagicMock()
-        mock_chain.delete.return_value = mock_chain
-        mock_chain.eq.return_value = mock_chain
-        mock_chain.execute.return_value = MagicMock(data=[])
-        mock_supabase.table.return_value = mock_chain
+        def table_router(name):
+            chain = MagicMock()
+            # Pre-count returns 0
+            select_chain = MagicMock()
+            select_chain.eq.return_value = select_chain
+            select_chain.execute.return_value = MagicMock(count=0)
+            chain.select.return_value = select_chain
+            # Delete returns empty data
+            delete_chain = MagicMock()
+            delete_chain.eq.return_value = delete_chain
+            delete_chain.execute.return_value = MagicMock(data=[])
+            chain.delete.return_value = delete_chain
+            return chain
+
+        mock_supabase.table.side_effect = table_router
         object.__setattr__(client, "_client", mock_supabase)
 
         result = client.delete_meeting_cascade("nonexistent-id")

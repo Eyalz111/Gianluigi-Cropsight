@@ -272,30 +272,24 @@ class SupabaseClient:
         """
         Delete a meeting and all related data.
 
-        Explicitly deletes all child tables before the meeting itself,
-        because ON DELETE CASCADE only fires if the parent delete succeeds —
-        and it won't succeed if any un-cascaded FK still references it.
+        Two paths:
+        - keep_tombstone=False (hard delete): Relies on DB-level ON DELETE
+          CASCADE FKs (see scripts/migrate_tier3_cascade_fks.sql). A single
+          DELETE FROM meetings cascades atomically to every child table
+          except embeddings, which is polymorphic (source_type: 'meeting'
+          or 'document') and has no FK. Pre-counts children for reporting.
 
-        Deletion order (children first, then parent):
-        1. embeddings (source_id, no FK cascade)
-        2. task_mentions (meeting_id FK)
-        3. entity_mentions (meeting_id FK)
-        4. topic_thread_mentions (meeting_id FK)
-        5. commitments (meeting_id FK)
-        6. decisions (meeting_id FK)
-        7. follow_up_meetings (source_meeting_id FK)
-        8. open_questions (meeting_id FK)
-        9. pending_approvals (by approval_id = meeting_id)
-        10. tasks (meeting_id, ON DELETE SET NULL would orphan)
-            Note: task_signals cascade automatically via ON DELETE CASCADE FK on tasks(id).
-        11. meeting record itself (UNLESS keep_tombstone=True)
+        - keep_tombstone=True (T1.9 reject): Keeps the meetings row as a
+          tombstone (approval_status='rejected', summary cleared). Because
+          the parent row is preserved, the DB cascade doesn't fire and we
+          must delete each child table explicitly. The watcher uses the
+          tombstone to skip re-processing the same source file.
 
         Args:
             meeting_id: UUID of the meeting to delete.
-            keep_tombstone: When True (used by T1.9 cascading reject), keeps
-                the `meetings` row with approval_status='rejected' and clears
-                its transcript + summary. The watcher then uses this tombstone
-                to skip re-processing the same source file on subsequent scans.
+            keep_tombstone: When True (used by cascading reject), keeps
+                the `meetings` row with approval_status='rejected' and
+                clears its transcript + summary.
 
         Returns:
             Dict with counts of deleted records by type. When keep_tombstone
@@ -313,53 +307,67 @@ class SupabaseClient:
         }
 
         try:
-            # 1. Delete embeddings (source_id references meeting, no cascade)
-            emb_result = (
-                self.client.table("embeddings")
-                .delete()
-                .eq("source_id", meeting_id)
-                .execute()
-            )
-            counts["embeddings"] = len(emb_result.data) if emb_result.data else 0
-
-            # 2-8. Delete all child tables that reference meetings
-            for table, fk_col in [
-                ("task_mentions", "meeting_id"),
-                ("entity_mentions", "meeting_id"),
-                ("topic_thread_mentions", "meeting_id"),
-                ("commitments", "meeting_id"),
+            # Pre-count children so callers (reject flow, cleanup script, MCP)
+            # can still report "deleted N tasks, M decisions, ..." — same
+            # public contract as pre-T3.2. Count queries are cheap (indexed).
+            for table, fk in [
+                ("tasks", "meeting_id"),
                 ("decisions", "meeting_id"),
-                ("follow_up_meetings", "source_meeting_id"),
                 ("open_questions", "meeting_id"),
+                ("follow_up_meetings", "source_meeting_id"),
+                ("topic_thread_mentions", "meeting_id"),
             ]:
                 try:
-                    result = self.client.table(table).delete().eq(fk_col, meeting_id).execute()
+                    r = (
+                        self.client.table(table)
+                        .select("id", count="exact")
+                        .eq(fk, meeting_id)
+                        .execute()
+                    )
                     if table in counts:
-                        counts[table] = len(result.data) if result.data else 0
+                        counts[table] = r.count or 0
                 except Exception as e:
-                    logger.debug(f"Skipping {table} cleanup: {e}")
+                    logger.debug(f"Pre-count for {table} skipped: {e}")
 
-            # 9. Delete pending approvals (approval_id = meeting_id string)
+            # Embeddings are polymorphic (source_type: 'meeting' | 'document')
+            # so they have no FK on meetings(id). Always delete explicitly.
             try:
-                self.client.table("pending_approvals").delete().eq(
-                    "approval_id", meeting_id
-                ).execute()
+                emb_result = (
+                    self.client.table("embeddings")
+                    .delete()
+                    .eq("source_id", meeting_id)
+                    .execute()
+                )
+                counts["embeddings"] = len(emb_result.data) if emb_result.data else 0
             except Exception as e:
-                logger.debug(f"Skipping pending_approvals cleanup: {e}")
+                logger.debug(f"Embedding cleanup skipped: {e}")
 
-            # 10. Delete tasks (ON DELETE SET NULL would orphan them)
-            task_result = (
-                self.client.table("tasks")
-                .delete()
-                .eq("meeting_id", meeting_id)
-                .execute()
-            )
-            counts["tasks"] = len(task_result.data) if task_result.data else 0
-
-            # 11. Delete the meeting itself (OR convert to tombstone)
             if keep_tombstone:
-                # Update the meeting row instead of deleting it. The watcher
-                # will use approval_status='rejected' to skip re-processing.
+                # TOMBSTONE PATH: parent row stays, so DB cascade won't fire.
+                # Explicitly clear every child table (unchanged behavior from T1.9).
+                for table, fk_col in [
+                    ("task_mentions", "meeting_id"),
+                    ("entity_mentions", "meeting_id"),
+                    ("topic_thread_mentions", "meeting_id"),
+                    ("commitments", "meeting_id"),
+                    ("decisions", "meeting_id"),
+                    ("follow_up_meetings", "source_meeting_id"),
+                    ("open_questions", "meeting_id"),
+                    ("tasks", "meeting_id"),
+                ]:
+                    try:
+                        self.client.table(table).delete().eq(fk_col, meeting_id).execute()
+                    except Exception as e:
+                        logger.debug(f"Skipping {table} cleanup: {e}")
+
+                # pending_approvals is keyed by approval_id, not FK'd to meetings.id.
+                try:
+                    self.client.table("pending_approvals").delete().eq(
+                        "approval_id", meeting_id
+                    ).execute()
+                except Exception as e:
+                    logger.debug(f"Skipping pending_approvals cleanup: {e}")
+
                 tombstone_updates = {
                     "approval_status": "rejected",
                     "raw_transcript": None,  # free up space
@@ -379,6 +387,16 @@ class SupabaseClient:
                     f"{counts['topic_thread_mentions']} topic_mentions"
                 )
             else:
+                # HARD-DELETE PATH: rely on FK CASCADE (post-T3.2 migration)
+                # for all 8 child tables. pending_approvals still needs an
+                # explicit delete (not FK'd to meetings.id).
+                try:
+                    self.client.table("pending_approvals").delete().eq(
+                        "approval_id", meeting_id
+                    ).execute()
+                except Exception as e:
+                    logger.debug(f"Skipping pending_approvals cleanup: {e}")
+
                 mtg_result = (
                     self.client.table("meetings")
                     .delete()
@@ -387,7 +405,7 @@ class SupabaseClient:
                 )
                 counts["meetings"] = len(mtg_result.data) if mtg_result.data else 0
                 logger.info(
-                    f"Cascade-deleted meeting {meeting_id}: "
+                    f"Cascade-deleted meeting {meeting_id} (FK CASCADE): "
                     f"{counts['embeddings']} embeddings, "
                     f"{counts['tasks']} tasks, "
                     f"{counts['decisions']} decisions, "
