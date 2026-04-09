@@ -61,6 +61,7 @@ def run_qa_check() -> dict:
     report["checks"]["data_integrity"] = _check_data_integrity(report["issues"])
     report["checks"]["prompt_health"] = _check_prompt_health(report["issues"])
     report["checks"]["rejected_meetings"] = _check_rejected_meetings(report["issues"])
+    report["checks"]["rls_coverage"] = _check_rls_coverage(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -345,6 +346,60 @@ def _check_rejected_meetings(issues: list[str]) -> dict:
             )
     except Exception as e:
         logger.warning(f"Rejected meetings check failed: {e}")
+
+    return result
+
+
+def _check_rls_coverage(issues: list[str]) -> dict:
+    """
+    Defense-in-depth security check: verify Row Level Security is enabled
+    on every table in the public schema.
+
+    Calls the Postgres function public.get_table_rls_status() which returns
+    (table_name, rls_enabled) for each table. If any table has
+    rls_enabled=false, that table is publicly accessible to anyone with the
+    project URL + anon key. Surface as a CRITICAL issue with the table list.
+
+    If the helper function doesn't exist yet (migrate_rls_security_v2.sql
+    hasn't been run), the check is skipped with a warning in the result —
+    not raised as an issue, since that would cause noise on fresh deploys.
+    """
+    result = {
+        "function_available": False,
+        "tables_total": 0,
+        "tables_without_rls": [],
+    }
+
+    try:
+        rpc_result = supabase_client.client.rpc("get_table_rls_status").execute()
+    except Exception as e:
+        err = str(e).lower()
+        if "could not find" in err or "function" in err or "does not exist" in err:
+            result["note"] = (
+                "Helper function public.get_table_rls_status() not found. "
+                "Run scripts/migrate_rls_security_v2.sql on Supabase to enable "
+                "automated RLS coverage checks."
+            )
+            logger.info("RLS coverage check skipped: helper function not installed")
+            return result
+        logger.warning(f"RLS coverage check failed: {e}")
+        result["error"] = str(e)
+        return result
+
+    result["function_available"] = True
+    rows = rpc_result.data or []
+    result["tables_total"] = len(rows)
+
+    missing = [r.get("table_name", "?") for r in rows if not r.get("rls_enabled")]
+    result["tables_without_rls"] = missing
+
+    if missing:
+        issues.append(
+            f"SECURITY: {len(missing)} public table(s) missing Row Level Security "
+            f"(publicly accessible): {', '.join(missing)}. "
+            f"Fix: ALTER TABLE <name> ENABLE ROW LEVEL SECURITY for each, "
+            f"then update scripts/migrate_rls_security_v2.sql."
+        )
 
     return result
 

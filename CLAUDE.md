@@ -165,6 +165,27 @@ Claude.ai mixes MCP tool results with its own conversation memory. MCP `instruct
 - pgvector for semantic search, tsvector for full-text
 - v1.0 tables: gantt_schema, gantt_proposals, gantt_snapshots, debrief_sessions, email_scans, mcp_sessions, weekly_reports (+ html_content, access_token, expires_at), weekly_review_sessions, meeting_prep_history (+ outline_content, focus_instructions, timeline_mode), pending_approvals (with expires_at), calendar_classifications (+ meeting_type), meetings (+ meeting_type)
 
+## MANDATORY: Row Level Security on every new table
+Every `CREATE TABLE` statement in a migration SQL file MUST be followed by
+`ALTER TABLE <name> ENABLE ROW LEVEL SECURITY;`. Without this, Supabase flags
+the table as publicly accessible via the anon key (security vulnerability).
+
+Gianluigi uses the service_role key, which bypasses RLS automatically — so
+enabling RLS has zero functional impact, it only locks out the anon/public
+path.
+
+Enforcement layers:
+1. **Test:** `tests/test_rls_coverage.py` queries Supabase and fails pytest
+   if any public table is missing RLS.
+2. **Runtime:** `schedulers/qa_scheduler._check_rls_coverage()` runs daily
+   and fires a CRITICAL alert in the morning brief + `/status` if anything
+   slipped through.
+3. **Template:** copy the pattern from `scripts/migrate_rls_security_v2.sql`
+   (bottom of file has a commented template).
+
+Both layers 1 and 2 depend on `public.get_table_rls_status()` being installed
+— it's created by `scripts/migrate_rls_security_v2.sql`.
+
 ## LLM Notes
 - **Opus:** Transcript extraction, document analysis (accuracy-critical) — Analyst Agent
 - **Sonnet:** Conversations, tool use, Gantt operations — Conversation + Operator Agents

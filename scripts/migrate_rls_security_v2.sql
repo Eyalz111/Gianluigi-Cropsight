@@ -40,15 +40,57 @@ ALTER TABLE deals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE deal_interactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE external_commitments ENABLE ROW LEVEL SECURITY;
 
--- Verification query — run after the migration to confirm all tables are locked
--- Expected: every row shows rowsecurity = true
+-- =============================================================================
+-- Defense-in-depth: get_table_rls_status() function
+-- =============================================================================
+-- Creates a SECURITY DEFINER function that returns RLS status for every
+-- table in the public schema. Used by:
+--   - tests/test_rls_coverage.py (pytest assertion — CI/local check)
+--   - schedulers/qa_scheduler._check_rls_coverage (daily runtime check)
+--
+-- Without this function, PostgREST has no way to read pg_tables.rowsecurity,
+-- so both defenses would be blind.
+--
+-- Idempotent: CREATE OR REPLACE makes re-runs safe.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.get_table_rls_status()
+RETURNS TABLE(table_name text, rls_enabled boolean)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT tablename::text AS table_name, rowsecurity AS rls_enabled
+    FROM pg_tables
+    WHERE schemaname = 'public'
+    ORDER BY tablename;
+$$;
+
+-- Grant execute to service_role ONLY (anon must not be able to enumerate)
+REVOKE ALL ON FUNCTION public.get_table_rls_status() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.get_table_rls_status() FROM anon;
+GRANT EXECUTE ON FUNCTION public.get_table_rls_status() TO service_role;
+
+-- =============================================================================
+-- Verification — run after the migration
+-- =============================================================================
+-- Expected: every row shows rls_enabled = true
 /*
-SELECT schemaname, tablename, rowsecurity
-FROM pg_tables
-WHERE schemaname = 'public'
-  AND tablename IN (
-    'intelligence_signals', 'competitor_watchlist', 'task_signals',
-    'deals', 'deal_interactions', 'external_commitments'
-  )
-ORDER BY tablename;
+SELECT * FROM public.get_table_rls_status() WHERE rls_enabled = false;
+*/
+
+-- =============================================================================
+-- Template for future migrations — copy this pattern for any new CREATE TABLE
+-- =============================================================================
+/*
+CREATE TABLE IF NOT EXISTS my_new_table (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+    -- ... columns ...
+);
+
+-- REQUIRED: enable RLS on every new table.
+-- service_role bypasses RLS automatically (Gianluigi uses service_role),
+-- so this locks the table from anon/public access with zero code changes.
+ALTER TABLE my_new_table ENABLE ROW LEVEL SECURITY;
 */
