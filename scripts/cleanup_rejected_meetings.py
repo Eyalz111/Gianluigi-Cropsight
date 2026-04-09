@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """
-Cleanup script: find rejected meetings and cascade-delete their extracted data.
+Cleanup script: find rejected meetings with orphan extracted data and
+cascade-clear them while preserving the tombstone row.
 
-The approval flow historically only flipped meetings.approval_status to
-'rejected' without deleting the extracted child data (tasks, decisions,
-embeddings, open_questions, follow_up_meetings, entity_mentions,
-task_mentions, topic_thread_mentions). This script finds those orphans and
-removes them via delete_meeting_cascade(), then rebuilds the Tasks and
-Decisions Sheets from fresh DB state.
+POST-T1.9 BEHAVIOR:
+Rejected meetings are tombstones — the `meetings` row is kept with
+approval_status='rejected' (summary/transcript cleared) while children
+(tasks, decisions, embeddings, open_questions, follow_up_meetings,
+task_mentions, entity_mentions, topic_thread_mentions, commitments) are
+cleared at reject time by delete_meeting_cascade(keep_tombstone=True).
+A tombstone with ZERO orphan children is the expected state and this
+script skips it (the tombstone is load-bearing — the watcher uses it to
+skip re-processing the same source file).
+
+This script only takes action on rejected meetings where orphan children
+still exist — which only happens for pre-T1.9 data or bugs. It calls
+delete_meeting_cascade(mid, keep_tombstone=True) so tombstones are
+preserved (the watcher keeps skipping the source file).
 
 Also performs an orphan sweep: extracted rows referencing non-existent
 meeting IDs (defense in depth against partial cascades).
 
 Idempotent — running it twice is safe. Second run finds zero rejected
-meetings and zero orphans.
+meetings with orphans and zero standalone orphans.
 
 Usage:
     python scripts/cleanup_rejected_meetings.py                  # dry-run (default)
@@ -163,6 +172,7 @@ async def main() -> int:
         "meetings": 0,
     }
 
+    tombstones_skipped = 0
     for m in rejected:
         mid = m.get("id")
         title = (m.get("title") or "")[:60]
@@ -176,13 +186,36 @@ async def main() -> int:
             f"other={total - counts.get('tasks',0) - counts.get('decisions',0) - counts.get('embeddings',0)}"
         )
 
+        if total == 0:
+            # Post-T1.9: zero children is the EXPECTED state for tombstones.
+            # Leave the meetings row intact — the watcher uses it to skip
+            # re-processing the same source file. Do NOT hard-delete.
+            tombstones_skipped += 1
+            logger.debug(
+                f"  Tombstone {mid[:8]} has 0 orphan children — skipping "
+                f"(expected post-T1.9)"
+            )
+            continue
+
         if args.apply:
             try:
-                del_counts = supabase_client.delete_meeting_cascade(mid)
+                # keep_tombstone=True: clear orphan children but preserve
+                # the meetings row as a tombstone. This handles pre-T1.9
+                # leftover data while keeping the file blocked from
+                # re-processing via the watcher.
+                del_counts = supabase_client.delete_meeting_cascade(
+                    mid, keep_tombstone=True
+                )
                 for k, v in del_counts.items():
                     total_counts[k] = total_counts.get(k, 0) + v
             except Exception as e:
                 logger.error(f"Cascade delete failed for {mid}: {e}")
+
+    if tombstones_skipped:
+        logger.info(
+            f"Skipped {tombstones_skipped} clean tombstones "
+            f"(0 orphan children — expected post-T1.9)"
+        )
 
     if args.apply:
         logger.info(f"Rejected-meeting cleanup totals: {total_counts}")

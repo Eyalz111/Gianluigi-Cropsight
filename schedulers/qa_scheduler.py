@@ -61,6 +61,7 @@ def run_qa_check() -> dict:
     report["checks"]["data_integrity"] = _check_data_integrity(report["issues"])
     report["checks"]["prompt_health"] = _check_prompt_health(report["issues"])
     report["checks"]["rejected_meetings"] = _check_rejected_meetings(report["issues"])
+    report["checks"]["approved_with_pending_children"] = _check_approved_meetings_with_pending_children(report["issues"])
     report["checks"]["rls_coverage"] = _check_rls_coverage(report["issues"])
 
     # Overall score
@@ -278,8 +279,22 @@ def _check_data_integrity(issues: list[str]) -> dict:
 def _check_rejected_meetings(issues: list[str]) -> dict:
     """
     Defense in depth (T2.4): surface any rejected meetings that still have
-    orphan child data. After Tier 1's cascading reject this should always
-    return 0. If it ever returns >0, the cleanup script needs to run.
+    orphan child data.
+
+    POST-T1.9 SEMANTICS: Rejected meetings are tombstones — the `meetings`
+    row is kept with approval_status='rejected' while children are
+    cascade-deleted at reject time. A tombstone with ZERO children is the
+    EXPECTED state and must not trigger an alert — this check only flags
+    tombstones that still have child rows.
+
+    A non-zero count here means one of:
+    - Pre-T1.9 data that pre-dates the cascade fix
+    - A bug in delete_meeting_cascade(keep_tombstone=True)
+    - Manual DB edit that re-created children
+
+    All three warrant running scripts/cleanup_rejected_meetings.py --apply,
+    which now preserves tombstones (see T3.3 fix) so the source-file
+    re-processing guard stays intact.
     """
     result = {
         "rejected_meetings": 0,
@@ -353,6 +368,85 @@ def _check_rejected_meetings(issues: list[str]) -> dict:
             )
     except Exception as e:
         logger.warning(f"Rejected meetings check failed: {e}")
+
+    return result
+
+
+def _check_approved_meetings_with_pending_children(issues: list[str]) -> dict:
+    """
+    Tier 3.1 safety net for the _promote_children_to_approved failure mode.
+
+    When a meeting is approved, guardrails/approval_flow._promote_children_to_approved
+    flips all child rows (tasks/decisions/open_questions/follow_up_meetings)
+    from approval_status='pending' to 'approved'. If that call fails
+    (transient DB error, partial success, manual SQL edit, future bug),
+    the meeting row shows 'approved' but the children stay 'pending' — so
+    default reads (MCP tools, morning brief, weekly review, team digests)
+    see nothing for that meeting.
+
+    This check runs daily and flags any such inconsistency so Eyal sees it
+    in the morning brief and can run the one-line SQL fix:
+        UPDATE <table> SET approval_status='approved' WHERE meeting_id='<id>';
+
+    Only looks at meetings approved in the last 30 days — older data
+    pre-dates T3.1 and backfilled to 'approved', so it can't be inconsistent.
+    """
+    result: dict = {
+        "meetings_checked": 0,
+        "inconsistent_meetings": 0,
+        "details": [],
+    }
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        approved = supabase_client.list_meetings(
+            approval_status="approved",
+            date_from=cutoff,
+            limit=500,
+        )
+        result["meetings_checked"] = len(approved)
+
+        for m in approved:
+            mid = m.get("id")
+            if not mid:
+                continue
+
+            pending_counts: dict[str, int] = {}
+            for table, fk in [
+                ("tasks", "meeting_id"),
+                ("decisions", "meeting_id"),
+                ("open_questions", "meeting_id"),
+                ("follow_up_meetings", "source_meeting_id"),
+            ]:
+                try:
+                    r = (
+                        supabase_client.client.table(table)
+                        .select("id", count="exact")
+                        .eq(fk, mid)
+                        .eq("approval_status", "pending")
+                        .execute()
+                    )
+                    if r.count and r.count > 0:
+                        pending_counts[table] = r.count
+                except Exception as e:
+                    logger.debug(f"Safety-net scan for {table} skipped: {e}")
+
+            if pending_counts:
+                result["inconsistent_meetings"] += 1
+                title = (m.get("title") or "untitled")[:50]
+                result["details"].append({
+                    "meeting_id": mid,
+                    "title": title,
+                    "pending_counts": pending_counts,
+                })
+                parts = ", ".join(f"{v} {k}" for k, v in pending_counts.items())
+                issues.append(
+                    f"Approved meeting '{title}' ({mid[:8]}) has pending children: "
+                    f"{parts} — run: UPDATE <table> SET approval_status='approved' "
+                    f"WHERE meeting_id='{mid}';"
+                )
+    except Exception as e:
+        logger.error(f"_check_approved_meetings_with_pending_children failed: {e}")
+        issues.append(f"QA safety-net scan (approved_with_pending_children) failed: {e}")
 
     return result
 
@@ -495,6 +589,19 @@ def format_qa_report(report: dict) -> str:
         lines.append(f"  {di['meetings_without_embeddings']} meetings without embeddings")
     if not di.get("tasks_without_meeting") and not di.get("meetings_without_embeddings"):
         lines.append("  All clean")
+
+    # Tier 3.1 safety net: approved meetings with still-pending children
+    apc = checks.get("approved_with_pending_children", {})
+    checked = apc.get("meetings_checked", 0)
+    inconsistent = apc.get("inconsistent_meetings", 0)
+    if checked:
+        if inconsistent:
+            lines.append(
+                f"Approval consistency: {inconsistent}/{checked} approved "
+                f"meetings have pending children (promote failure)"
+            )
+        else:
+            lines.append(f"Approval consistency: {checked} meetings checked, all clean")
 
     # Issues summary
     issues = report.get("issues", [])

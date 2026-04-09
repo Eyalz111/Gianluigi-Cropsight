@@ -42,6 +42,7 @@ from googleapiclient.discovery import build
 
 from config.settings import settings
 from config.team import TEAM_MEMBERS
+from core.retry import retry
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,25 @@ class GmailService:
     # Sending Emails
     # =========================================================================
 
+    @retry(max_attempts=3, backoff=2.0, base_delay=1.0)
+    async def _execute_send(self, send_body: dict) -> None:
+        """
+        Network-call wrapper for Gmail's messages().send() — extracted
+        so the @retry decorator can catch transient BrokenPipeError,
+        ConnectionError, TimeoutError, and other OSError subclasses
+        from the underlying socket. BrokenPipeError is a subclass of
+        OSError, which core.retry's default TRANSIENT_EXCEPTIONS tuple
+        catches, so the existing decorator covers the observed pain
+        directly. 3 attempts with exponential backoff (1s, 2s).
+
+        Tier 3.4: added after a BrokenPipe was observed during test 4
+        on 2026-04-09 that silently dropped an approval email.
+        """
+        self.service.users().messages().send(
+            userId="me",
+            body=send_body,
+        ).execute()
+
     async def send_email(
         self,
         to: list[str],
@@ -183,10 +203,10 @@ class GmailService:
             if thread_id:
                 send_body["threadId"] = thread_id
 
-            self.service.users().messages().send(
-                userId="me",
-                body=send_body,
-            ).execute()
+            # Tier 3.4: network call wrapped in @retry via _execute_send
+            # so transient BrokenPipe / socket errors don't silently drop
+            # approval emails.
+            await self._execute_send(send_body)
 
             logger.info(f"Email sent: {subject} to {to}")
             return True
@@ -251,9 +271,8 @@ class GmailService:
                 msg.as_bytes()
             ).decode("utf-8")
 
-            self.service.users().messages().send(
-                userId="me", body={"raw": raw_message},
-            ).execute()
+            # Tier 3.4: retry wrapper on the network call
+            await self._execute_send({"raw": raw_message})
 
             logger.info(f"Email with attachments sent: {subject} to {to}")
             return True

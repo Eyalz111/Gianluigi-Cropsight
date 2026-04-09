@@ -1747,6 +1747,18 @@ async def distribute_approved_content(
             results["sheets_updated"] = True
             results["tasks_added"] = len(tasks)
             logger.info(f"Added {len(tasks)} tasks to tracker")
+
+            # Tier 3.5: Reapply Task Tracker formatting so newly appended rows
+            # inherit the correct column styling instead of the header-bleed
+            # from whatever was at the append position. One batch API call
+            # (~2 Sheets calls total); non-fatal if it fails.
+            try:
+                await sheets_service.format_task_tracker()
+                logger.info("Reapplied Task Tracker formatting after append")
+            except Exception as fe:
+                logger.warning(
+                    f"format_task_tracker after append failed (non-fatal): {fe}"
+                )
         else:
             logger.warning("No tasks to add to Sheets (tasks list empty)")
     except Exception as e:

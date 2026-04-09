@@ -12,6 +12,9 @@ Current as of April 7, 2026.
 ### Google Sheets API
 - **Intermittent "broken pipe":** Cloud Run idle connections to Sheets API occasionally break. **Mitigated** in Phase 10 with `_execute_with_retry()` (3 retries, exponential backoff). Monitor — should be rare now.
 
+### Tombstone Matching (Tier 1.9)
+- **source_file_path collision:** The watcher matches rejected-meeting tombstones by filename using ILIKE substring match on `meetings.source_file_path`. If a new file is uploaded with the same filename as a previously-rejected file, the watcher will match the tombstone and skip the new file as "already rejected." In practice this is rare because Tactiq uses timestamp-prefixed filenames (e.g., `2026-04-09_1428_cropsight-sync.txt`) — collisions only happen for exact filename+timestamp duplicates, which don't occur organically. Future mitigation: add `drive_file_id` column to `meetings` and match by Drive file ID instead of filename for exact identity. Deferred — not causing active bugs.
+
 ### Email Intelligence
 - **Forwarded thread dedup:** Forwarded email threads may not deduplicate perfectly at low volume. Cosmetic.
 - **5-minute polling delay:** Email watcher is not real-time. Replies to approval emails take up to 5 minutes.

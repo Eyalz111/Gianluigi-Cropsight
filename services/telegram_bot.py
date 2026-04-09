@@ -41,6 +41,7 @@ from telegram.ext import (
 
 from config.settings import settings
 from config.team import TEAM_MEMBERS, get_team_member
+from core.retry import retry
 from services.conversation_memory import conversation_memory
 
 logger = logging.getLogger(__name__)
@@ -416,6 +417,22 @@ class TelegramBot:
     # Sending Messages
     # =========================================================================
 
+    @retry(max_attempts=3, backoff=2.0, base_delay=1.0)
+    async def _bot_send_message(self, **kwargs) -> None:
+        """
+        Network-call wrapper for Telegram's bot.send_message — extracted
+        so the @retry decorator can catch transient BrokenPipeError /
+        ConnectionError / TimeoutError / OSError from the underlying
+        socket. BrokenPipeError is a subclass of OSError, which
+        core.retry's default TRANSIENT_EXCEPTIONS tuple catches, so the
+        existing decorator covers the observed pain directly. 3 attempts
+        with exponential backoff (1s, 2s).
+
+        Tier 3.4: added after a BrokenPipe was observed during test 4
+        on 2026-04-09 that silently dropped an approval Telegram message.
+        """
+        await self.app.bot.send_message(**kwargs)
+
     async def send_message(
         self,
         chat_id: str | int,
@@ -438,24 +455,25 @@ class TelegramBot:
         try:
             # Split long messages (Telegram limit is 4096 chars).
             # Send overflow parts first, buttons only on the last part.
+            # Tier 3.4: _bot_send_message wraps the network call in @retry.
             if len(text) > 4000:
                 parts = _split_message(text, max_len=4000)
                 # Send all parts except the last without buttons
                 for part in parts[:-1]:
-                    await self.app.bot.send_message(
+                    await self._bot_send_message(
                         chat_id=chat_id,
                         text=part,
                         parse_mode=parse_mode,
                     )
                 # Send the last part with buttons
-                await self.app.bot.send_message(
+                await self._bot_send_message(
                     chat_id=chat_id,
                     text=parts[-1],
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
                 )
             else:
-                await self.app.bot.send_message(
+                await self._bot_send_message(
                     chat_id=chat_id,
                     text=text,
                     parse_mode=parse_mode,

@@ -184,30 +184,36 @@ class TestSupabaseGetTasksCategory:
     """Tests for category filter in get_tasks()."""
 
     def test_get_tasks_filters_by_category(self):
-        """get_tasks() should add .eq('category', ...) when category is provided."""
+        """get_tasks() should add .eq('category', ...) when category is provided.
+
+        Post-Tier-3.1: get_tasks also calls .eq('approval_status', 'approved')
+        by default before the category filter, so the mock chain must allow
+        multiple sequential .eq() calls. We use a self-referential mock where
+        .eq() returns the same mock — any .eq() call anywhere in the chain
+        is observable via mock.eq.call_args_list.
+        """
         from services.supabase_client import SupabaseClient
         client = SupabaseClient.__new__(SupabaseClient)
         mock_internal = MagicMock()
         object.__setattr__(client, '_client', mock_internal)
 
-        mock_table = MagicMock()
-        mock_internal.table.return_value = mock_table
-        mock_select = MagicMock()
-        mock_table.select.return_value = mock_select
+        # Self-referential chain: every .eq() returns the same mock so a
+        # sequence of .eq("approval_status", ...).eq("category", ...) works.
+        mock_chain = MagicMock()
+        mock_chain.eq.return_value = mock_chain
+        mock_chain.order.return_value = mock_chain
+        mock_chain.limit.return_value = mock_chain
+        mock_chain.execute.return_value = MagicMock(data=[])
 
-        # Chain: select().eq().order().limit().execute()
-        mock_eq = MagicMock()
-        mock_select.eq.return_value = mock_eq
-        mock_order = MagicMock()
-        mock_eq.order.return_value = mock_order
-        mock_limit = MagicMock()
-        mock_order.limit.return_value = mock_limit
-        mock_limit.execute.return_value = MagicMock(data=[])
+        mock_internal.table.return_value = mock_chain
+        mock_chain.select.return_value = mock_chain
 
         client.get_tasks(category="Product & Tech")
 
-        # Verify .eq was called with category
-        mock_select.eq.assert_called_with("category", "Product & Tech")
+        # Verify .eq was called with category somewhere in the chain
+        # (post-T3.1 there's also an approval_status filter before it).
+        mock_chain.eq.assert_any_call("category", "Product & Tech")
+        mock_chain.eq.assert_any_call("approval_status", "approved")
 
 
 # =============================================================================
