@@ -1,8 +1,12 @@
 # Tier 3 — Architectural Robustness (Design Doc)
 
-**Status:** Design only. Implementation deferred to a future dedicated session.
+**Status:** Original design only. **POST-T1.9 ADDENDUM at bottom** — read it before implementing.
 **Created:** 2026-04-08 (during the Approval Flow Robustness session that shipped Tier 1 + Tier 2).
-**Related:** `.claude/plans/kind-forging-dahl.md`
+**Updated:** 2026-04-09 — addendum added after T1.9 tombstone pivot, which changes T3.1's value calculus.
+**Related:**
+- `.claude/plans/kind-forging-dahl.md` — original Tier 1+2+3 plan
+- `.claude/plans/tier3_handoff.md` — handoff context for the next session
+- `docs/tier3_approval_status_column.md` — this document
 
 ---
 
@@ -275,3 +279,161 @@ T3.1 (approval_status column) is better when there's dedicated bandwidth for the
 - **Audit table for approval transitions** — nice to have but not required. Audit log already captures approval/reject actions.
 - **Soft-delete for meetings** — meetings are still hard-deleted. If we ever need undo, that's a separate feature.
 - **Multi-approver workflow** — out of scope. The system is single-approver (Eyal) by design.
+
+---
+
+# POST-T1.9 ADDENDUM (2026-04-09)
+
+**Read this before implementing anything above.**
+
+## What changed since the original design
+
+Between the original Tier 3 design (2026-04-08) and now, the Approval Flow Robustness session shipped several architectural changes that affect Tier 3:
+
+### T1.9 shifted reject from "full cascade delete" to "cascade-clear + tombstone"
+
+- `delete_meeting_cascade(meeting_id, keep_tombstone=False)` now accepts a flag
+- When `keep_tombstone=True` (used by the reject path), all child rows are deleted as before, BUT the `meetings` row itself is kept with `approval_status='rejected'` (plus cleared transcript/summary)
+- The watcher uses the tombstone to skip re-processing the same file forever (or until the tombstone is manually deleted)
+
+### T1.10 watcher rejection-aware skip logic
+`schedulers/transcript_watcher.py:260` now branches on `approval_status`:
+- `approved` → skip + cache in dedup set (terminal)
+- `rejected` (tombstone) → skip, DO NOT cache (so rename re-triggers)
+- `pending/editing/auto_publishing` → skip, don't cache
+
+### RLS defense-in-depth (4 layers)
+Completely unrelated to the original Tier 3, but shipped this session. The `get_table_rls_status()` helper function + pytest test + QA scheduler check + CLAUDE.md rule now guard against new tables being created without RLS.
+
+---
+
+## How this affects the original T3.1 (approval_status column)
+
+### The original pitch
+> "Child tables can surface content from rejected meetings if Tier 1's cascade hasn't run. Add `approval_status` column + filter read paths."
+
+### Post-T1.9 reality
+**Rejected meetings no longer have children at all.** The T1.9 cascade deletes every child row on reject, whether or not `keep_tombstone` is set. So the scenario T3.1 was guarding against ("read path surfaces a task from a rejected meeting") is structurally impossible for rejected data.
+
+T3.1 is still **theoretically valuable** for these scenarios:
+1. **Pending/editing states** — between extraction and approval, child rows exist with their parent meeting still in `approval_status='pending'`. Any read path that doesn't filter would show this in-progress data to team views.
+2. **Race conditions** — if a read happens mid-cascade, stale children could be visible for milliseconds. Extremely rare.
+3. **Manual DB edits** — if someone deletes the meeting tombstone without cascading, orphan children exist. The QA scheduler's `_check_rejected_meetings` catches this daily.
+4. **Future regressions** — if a future code path creates children without going through the approval flow, they'd appear as approved data.
+
+### The decision
+**The new Tier 3 session should run a grep-based read-site audit and decide:**
+- (a) **Full T3.1** — add column + filter every read site (2-3 days of work)
+- (b) **Narrow T3.1** — add column + filter only the highest-risk read paths (0.5-1 day)
+- (c) **Skip T3.1** — rely on T1.9 + QA scheduler + T3.2 FK CASCADE for defense in depth (0 days)
+
+The grep audit will determine which is proportionate. See `.claude/plans/tier3_handoff.md` for the exact grep commands.
+
+---
+
+## T3.2 is still 100% valuable
+
+The FK CASCADE migration is unaffected by T1.9. It's still the cleanest way to:
+- Prevent future child tables from being forgotten in `delete_meeting_cascade`
+- Handle manual row deletes from Supabase UI
+- Simplify `delete_meeting_cascade()` to a single statement + count wrapper
+
+**Recommendation:** Ship T3.2 regardless of the T3.1 decision.
+
+---
+
+## NEW items discovered during the session
+
+These were not in the original T3 design but are worth considering:
+
+### T3.3 — Tombstone lifecycle management
+- Should tombstones auto-expire after N days?
+- Does the cleanup script need updates to distinguish tombstones (no children, expected) from orphans (has children, alert)?
+- Does `_check_rejected_meetings` in QA scheduler need adjustment? Currently it flags rejected meetings with orphan children as an issue — which is correct for pre-T1.9 data but incorrect if tombstones have 0 children (which is the normal post-T1.9 state).
+
+**Action:** Audit the cleanup script + QA check and update them to reflect the tombstone reality.
+
+### T3.4 — Broken pipe retry on Gmail/Telegram sends
+Observed during test 4 (2026-04-09 22:39:52):
+```
+[gmail] Error sending email: [Errno 32] Broken pipe
+[telegram_bot] Error sending message to 8190904141: BrokenPipeError
+```
+
+The transcript extraction completed fine, but the approval message send failed. No retry was attempted. The existing Sheets API has `_execute_with_retry()` wrapping it — Gmail and Telegram sends don't have equivalent wrapping.
+
+**Action:** Add retry decorators to:
+- `services/gmail.send_message` (or equivalent)
+- `services/telegram_bot.send_approval_request` (or the appropriate send method)
+
+**Estimated effort:** 1-2 hours
+
+### T3.5 — `format_task_tracker()` on `add_task` append
+Cosmetic regression observed during test 2 (Franciacorta approval):
+> "The new tasks are colored and styled like the title"
+
+`rebuild_tasks_sheet()` calls `format_task_tracker()` at the end, which applies proper styling. But `add_task()` (used when approving a meeting) only appends raw values — no formatting reapplied. The new rows inherit weird styling from whatever was at the position.
+
+**Action:** Either
+- (a) Call `format_task_tracker()` at the end of `add_task()` (simple but expensive per-task)
+- (b) Rebuild the whole sheet at the end of `distribute_approved_content()` (batch fix)
+- (c) Explicitly set the format on new rows inline
+
+**Recommendation:** (b) — cleanest, consistent with reject flow which also rebuilds.
+
+### T3.6 — `source_file_path` + drive_file_id dual matching (OPTIONAL)
+Current watcher behavior: matches tombstones by filename only. Edge case: if Eyal uploads a new file with the same name as a previously-rejected file, the tombstone matches and the new content gets skipped.
+
+**In practice** this is rare because Tactiq uses date-prefixed filenames. But it's worth documenting.
+
+**Action:** Either
+- (a) Add `drive_file_id` column to meetings table, store on create, check on watcher
+- (b) Document as known limitation (cleaner)
+- (c) Detect via content hash or modification time
+
+**Recommendation:** (b) — document as known limitation. The cost of (a) is schema change + migration + new columns everywhere; the risk is minimal in practice.
+
+### T3.7 — Find-task-row fuzzy match cleanup (OPTIONAL)
+`sheets_service.find_task_row(title)` does partial string matching which is brittle. Not causing active bugs today but should be swapped for exact match or task_id-based lookup when we have time.
+
+---
+
+## Revised scope recommendation
+
+Given the session is using Opus 4.6 + 1M context, the following scope is achievable in one focused session (1-2 days):
+
+### Tier 3 (revised) — load-bearing items
+1. **T3.2 — FK CASCADE migration** (the main event; schema change + simplification of `delete_meeting_cascade`)
+2. **T3.3 — Tombstone lifecycle alignment** (update cleanup script + QA check to distinguish tombstones from orphans)
+3. **T3.4 — Gmail/Telegram retry** (known production pain)
+4. **T3.5 — Tasks sheet format on approval** (known cosmetic regression)
+
+### Tier 3 (revised) — decide based on grep audit
+5. **T3.1 — approval_status column** — scope (none/narrow/full) decided after grep audit
+
+### Tier 3 (revised) — optional / nice-to-have
+6. **T3.6 — drive_file_id dual matching** — likely defer to known-issues
+7. **T3.7 — find_task_row cleanup** — likely defer
+
+---
+
+## Estimated effort post-T1.9
+
+| Item | Effort |
+|---|---|
+| T3.2 FK CASCADE migration + cascade simplification | 0.5 day |
+| T3.3 Tombstone lifecycle alignment (script + QA) | 0.25 day |
+| T3.4 Gmail/Telegram retry | 0.25 day |
+| T3.5 Sheet format on approval | 0.25 day |
+| T3.1 (narrow) — if audit shows it's needed | 0.5-1 day |
+| T3.1 (full) — if audit strongly supports it | 1.5-2 days |
+| **Total (narrow T3.1)** | **1.75-2.25 days** |
+| **Total (full T3.1)** | **2.75-3.25 days** |
+
+---
+
+## See also
+
+- `.claude/plans/tier3_handoff.md` — concrete handoff doc for the next Opus 4.6 session with grep commands, current file references, and the 4-phase workflow
+- `CLAUDE.md` — "MANDATORY: Row Level Security on every new table" section (added 2026-04-09)
+- `scripts/migrate_rls_security_v2.sql` — RLS helper function + template (run on Supabase 2026-04-09)
