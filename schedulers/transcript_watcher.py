@@ -277,13 +277,20 @@ class TranscriptWatcher:
             if existing_status == "rejected":
                 # Tombstone — Eyal previously rejected this file. Do NOT
                 # re-process. To re-enable, Eyal can delete the tombstone
-                # meeting row OR upload the file with a different name.
+                # meeting row OR rename the file in Drive (so the
+                # source_file_path no longer matches).
+                #
+                # NOTE: we intentionally do NOT call mark_file_processed
+                # here. The tombstone is the source of truth — re-checking
+                # the DB on every scan is cheap and lets rename-based
+                # re-enablement work immediately (otherwise the in-memory
+                # dedup set would block the renamed file until the next
+                # container restart).
                 logger.info(
                     f"Skipping rejected meeting tombstone "
                     f"(source: {file_name}, meeting_id: {existing['id']}) "
-                    f"— delete the tombstone to re-process"
+                    f"— delete the tombstone or rename the file to re-process"
                 )
-                drive_service.mark_file_processed(file_id)
                 return {
                     "file_id": file_id,
                     "file_name": file_name,
@@ -291,6 +298,8 @@ class TranscriptWatcher:
                     "meeting_id": existing["id"],
                 }
             elif existing_status == "approved":
+                # Approved is terminal — safe to cache in the in-memory set
+                # so we don't re-query the DB on every scan.
                 logger.info(f"Skipping approved meeting (source: {file_name})")
                 drive_service.mark_file_processed(file_id)
                 return {
@@ -300,12 +309,13 @@ class TranscriptWatcher:
                     "meeting_id": existing["id"],
                 }
             else:
-                # pending / editing / auto_publishing / unknown
+                # pending / editing / auto_publishing / unknown — transient
+                # states that will resolve (to approved or rejected). Do NOT
+                # cache — we want to re-check the DB on the next scan.
                 logger.info(
                     f"Skipping in-progress meeting "
                     f"(source: {file_name}, status: {existing_status})"
                 )
-                drive_service.mark_file_processed(file_id)
                 return {
                     "file_id": file_id,
                     "file_name": file_name,
