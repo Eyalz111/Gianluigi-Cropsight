@@ -808,6 +808,151 @@ class GoogleDriveService:
         self._processed_file_ids.clear()
         self._processed_doc_ids.clear()
 
+    # ── Rejected-file quarantine (T1.9) ─────────────────────────────
+
+    _rejected_subfolder_cache: str | None = None
+
+    def _get_or_create_rejected_subfolder(self) -> str | None:
+        """
+        Return the Drive folder ID of the Rejected subfolder under
+        RAW_TRANSCRIPTS_FOLDER_ID. Lazy-creates on first use. Cached per
+        instance to avoid repeated lookups.
+
+        Returns None if the parent folder isn't configured.
+        """
+        if self._rejected_subfolder_cache:
+            return self._rejected_subfolder_cache
+        if not settings.RAW_TRANSCRIPTS_FOLDER_ID:
+            return None
+
+        try:
+            # Look for existing Rejected subfolder
+            query = (
+                f"'{settings.RAW_TRANSCRIPTS_FOLDER_ID}' in parents "
+                f"and name = 'Rejected' "
+                f"and mimeType = 'application/vnd.google-apps.folder' "
+                f"and trashed = false"
+            )
+            result = self.service.files().list(
+                q=query,
+                spaces="drive",
+                fields="files(id, name)",
+                pageSize=1,
+            ).execute()
+            if result.get("files"):
+                folder_id = result["files"][0]["id"]
+                self._rejected_subfolder_cache = folder_id
+                logger.info(f"Found existing Rejected subfolder: {folder_id}")
+                return folder_id
+
+            # Create it
+            metadata = {
+                "name": "Rejected",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [settings.RAW_TRANSCRIPTS_FOLDER_ID],
+            }
+            created = self.service.files().create(
+                body=metadata,
+                fields="id",
+            ).execute()
+            folder_id = created["id"]
+            self._rejected_subfolder_cache = folder_id
+            logger.info(f"Created Rejected subfolder in Raw Transcripts: {folder_id}")
+            return folder_id
+        except Exception as e:
+            logger.warning(f"Could not get/create Rejected subfolder: {e}")
+            return None
+
+    async def move_file_to_rejected(self, file_name: str) -> dict:
+        """
+        Move a file from the Raw Transcripts folder to the Rejected subfolder.
+
+        Used by the approval-reject cascade to quarantine files so the watcher
+        stops re-processing them on every scan. Best-effort: if the move fails
+        (permissions, scope, missing file), the caller is expected to continue
+        and surface a warning to the user.
+
+        Args:
+            file_name: The filename to match in Raw Transcripts folder.
+
+        Returns:
+            Dict with:
+              {"moved": bool, "file_id": str | None, "error": str | None,
+               "rejected_folder_id": str | None}
+        """
+        result: dict = {
+            "moved": False,
+            "file_id": None,
+            "error": None,
+            "rejected_folder_id": None,
+        }
+
+        if not settings.RAW_TRANSCRIPTS_FOLDER_ID:
+            result["error"] = "RAW_TRANSCRIPTS_FOLDER_ID not configured"
+            return result
+
+        try:
+            # 1. Find the file in the top-level Raw Transcripts folder (not subfolders)
+            escaped_name = file_name.replace("'", "\\'")
+            query = (
+                f"'{settings.RAW_TRANSCRIPTS_FOLDER_ID}' in parents "
+                f"and name = '{escaped_name}' "
+                f"and trashed = false"
+            )
+            search = self.service.files().list(
+                q=query,
+                spaces="drive",
+                fields="files(id, name, parents)",
+                pageSize=5,
+            ).execute()
+            files = search.get("files", [])
+            if not files:
+                result["error"] = f"File '{file_name}' not found in Raw Transcripts folder"
+                logger.warning(result["error"])
+                return result
+            if len(files) > 1:
+                logger.warning(
+                    f"Multiple files match '{file_name}' in Raw Transcripts — moving the first"
+                )
+
+            file_id = files[0]["id"]
+            current_parents = files[0].get("parents", [])
+            result["file_id"] = file_id
+
+            # 2. Ensure the Rejected subfolder exists
+            rejected_folder_id = self._get_or_create_rejected_subfolder()
+            if not rejected_folder_id:
+                result["error"] = "Could not get/create Rejected subfolder"
+                return result
+            result["rejected_folder_id"] = rejected_folder_id
+
+            # Sanity: don't try to move if the file is already inside the Rejected folder
+            if rejected_folder_id in current_parents:
+                result["moved"] = True  # already quarantined
+                logger.info(f"File '{file_name}' is already in the Rejected subfolder")
+                return result
+
+            # 3. Move the file: add new parent, remove old parents
+            # (Drive uses parents-as-list; to move we add new and remove old)
+            remove_parents = ",".join(p for p in current_parents if p != rejected_folder_id)
+            self.service.files().update(
+                fileId=file_id,
+                addParents=rejected_folder_id,
+                removeParents=remove_parents,
+                fields="id, parents",
+            ).execute()
+
+            result["moved"] = True
+            logger.info(
+                f"Moved rejected file '{file_name}' ({file_id}) "
+                f"to Rejected subfolder ({rejected_folder_id})"
+            )
+            return result
+        except Exception as e:
+            result["error"] = str(e)
+            logger.error(f"move_file_to_rejected failed for '{file_name}': {e}")
+            return result
+
 
 # Singleton instance
 drive_service = GoogleDriveService()

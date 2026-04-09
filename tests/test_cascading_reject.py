@@ -25,8 +25,10 @@ class TestRejectMeetingCascade:
         from guardrails.approval_flow import _reject_meeting_cascade
 
         with patch("guardrails.approval_flow.supabase_client") as mock_sb, \
+             patch("services.google_drive.drive_service") as mock_drive, \
              patch("services.google_sheets.sheets_service") as mock_sheets, \
              patch("services.alerting.send_system_alert", new=AsyncMock()):
+            mock_sb.get_meeting.return_value = {"id": "meeting-123", "source_file_path": "file.txt"}
             mock_sb.delete_meeting_cascade.return_value = {
                 "embeddings": 50,
                 "tasks": 3,
@@ -37,6 +39,7 @@ class TestRejectMeetingCascade:
             }
             mock_sb.get_tasks.return_value = [{"id": "t1"}]
             mock_sb.list_decisions.return_value = [{"id": "d1"}]
+            mock_drive.move_file_to_rejected = AsyncMock(return_value={"moved": True, "file_id": "f1", "error": None})
             mock_sheets.rebuild_tasks_sheet = AsyncMock()
             mock_sheets.rebuild_decisions_sheet = AsyncMock()
 
@@ -87,16 +90,82 @@ class TestRejectMeetingCascade:
             assert result.get("error")
 
     @pytest.mark.asyncio
+    async def test_moves_file_to_rejected_subfolder(self):
+        """T1.9: After cascade, the Drive file is moved to Rejected subfolder."""
+        from guardrails.approval_flow import _reject_meeting_cascade
+
+        with patch("guardrails.approval_flow.supabase_client") as mock_sb, \
+             patch("services.google_drive.drive_service") as mock_drive, \
+             patch("services.google_sheets.sheets_service") as mock_sheets, \
+             patch("services.alerting.send_system_alert", new=AsyncMock()):
+            mock_sb.get_meeting.return_value = {"id": "m1", "source_file_path": "test.txt"}
+            mock_sb.delete_meeting_cascade.return_value = {"tasks": 1, "meetings": 1}
+            mock_sb.get_tasks.return_value = []
+            mock_sb.list_decisions.return_value = []
+            mock_drive.move_file_to_rejected = AsyncMock(return_value={
+                "moved": True,
+                "file_id": "drive-file-1",
+                "error": None,
+                "rejected_folder_id": "rej-folder",
+            })
+            mock_sheets.rebuild_tasks_sheet = AsyncMock()
+            mock_sheets.rebuild_decisions_sheet = AsyncMock()
+
+            result = await _reject_meeting_cascade("m1", is_non_meeting=False)
+
+            mock_drive.move_file_to_rejected.assert_called_once_with("test.txt")
+            assert result["deleted"].get("drive_quarantined") is True
+
+    @pytest.mark.asyncio
+    async def test_drive_move_failure_is_non_fatal(self):
+        """T1.9: If Drive move fails, reject still succeeds and a WARNING is sent."""
+        from guardrails.approval_flow import _reject_meeting_cascade
+
+        with patch("guardrails.approval_flow.supabase_client") as mock_sb, \
+             patch("services.google_drive.drive_service") as mock_drive, \
+             patch("services.google_sheets.sheets_service") as mock_sheets, \
+             patch("services.alerting.send_system_alert", new=AsyncMock()) as mock_alert:
+            mock_sb.get_meeting.return_value = {"id": "m1", "source_file_path": "test.txt"}
+            mock_sb.delete_meeting_cascade.return_value = {"tasks": 1, "meetings": 1}
+            mock_sb.get_tasks.return_value = []
+            mock_sb.list_decisions.return_value = []
+            mock_drive.move_file_to_rejected = AsyncMock(return_value={
+                "moved": False,
+                "file_id": None,
+                "error": "Permission denied",
+                "rejected_folder_id": None,
+            })
+            mock_sheets.rebuild_tasks_sheet = AsyncMock()
+            mock_sheets.rebuild_decisions_sheet = AsyncMock()
+
+            result = await _reject_meeting_cascade("m1", is_non_meeting=False)
+
+            # Cascade still succeeded
+            assert result["deleted"].get("tasks") == 1
+            assert "error" not in result
+            # Drive quarantine was marked as not successful
+            assert result["deleted"].get("drive_quarantined") is False
+            # WARNING alert was fired with clear user guidance
+            mock_alert.assert_called()
+            from services.alerting import AlertSeverity
+            warning_calls = [c for c in mock_alert.call_args_list if c.args[0] == AlertSeverity.WARNING]
+            assert len(warning_calls) >= 1
+            assert "manually" in warning_calls[0].args[2].lower()
+
+    @pytest.mark.asyncio
     async def test_sheets_rebuild_failure_is_non_fatal(self):
         """Cascade succeeded + Sheets rebuild failed = warning, not failure."""
         from guardrails.approval_flow import _reject_meeting_cascade
 
         with patch("guardrails.approval_flow.supabase_client") as mock_sb, \
+             patch("services.google_drive.drive_service") as mock_drive, \
              patch("services.google_sheets.sheets_service") as mock_sheets, \
              patch("services.alerting.send_system_alert", new=AsyncMock()) as mock_alert:
+            mock_sb.get_meeting.return_value = {"id": "meeting-abc", "source_file_path": None}
             mock_sb.delete_meeting_cascade.return_value = {"tasks": 2, "meetings": 1}
             mock_sb.get_tasks.return_value = []
             mock_sb.list_decisions.return_value = []
+            mock_drive.move_file_to_rejected = AsyncMock(return_value={"moved": True, "error": None})
             mock_sheets.rebuild_tasks_sheet = AsyncMock(side_effect=Exception("sheets down"))
             mock_sheets.rebuild_decisions_sheet = AsyncMock()
 
@@ -107,9 +176,10 @@ class TestRejectMeetingCascade:
             assert "error" not in result
             # Warning alert should have fired (not CRITICAL)
             mock_alert.assert_called()
+            # At least one WARNING call (could be from sheets rebuild; drive move was skipped due to no source_file_path)
             from services.alerting import AlertSeverity
-            args, _ = mock_alert.call_args
-            assert args[0] == AlertSeverity.WARNING
+            warning_calls = [c for c in mock_alert.call_args_list if c.args[0] == AlertSeverity.WARNING]
+            assert len(warning_calls) >= 1
 
 
 # =============================================================================
