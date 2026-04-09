@@ -739,8 +739,12 @@ def _link_decision_chains(meeting_id: str, supersessions: list[dict]) -> None:
     if not supersessions:
         return
 
-    # Get decisions just stored for this meeting
-    new_decisions = supabase_client.list_decisions(meeting_id=meeting_id)
+    # Get decisions just stored for this meeting.
+    # Tier 3.1: extraction writes children as 'pending' — must include pending
+    # to see the ones we just inserted (they're pre-approval).
+    new_decisions = supabase_client.list_decisions(
+        meeting_id=meeting_id, include_pending=True
+    )
     if not new_decisions:
         return
 

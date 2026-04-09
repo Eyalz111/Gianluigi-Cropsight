@@ -702,6 +702,73 @@ async def submit_for_approval(
     }
 
 
+def _promote_children_to_approved(meeting_id: str) -> None:
+    """
+    Bulk-flip all extracted child rows for a meeting from pending → approved.
+
+    Called inside the approve branch of process_response() immediately after
+    the meetings row itself is flipped to 'approved'. Post-Tier-3.1, every
+    read path that doesn't explicitly opt into include_pending=True filters
+    children by approval_status='approved' — so this promote is load-bearing:
+    without it, morning brief, MCP tools, weekly review, etc. would see
+    nothing for a freshly-approved meeting.
+
+    Retry strategy: 3 in-process attempts with exponential backoff (1s, 2s).
+    Handles transient PostgREST / network errors. If all 3 attempts fail,
+    logs at CRITICAL level and returns — the distribution continues (since
+    pending_approvals still holds the content and the team gets the Sheet/
+    email/Telegram updates). The persistent-failure case is caught by the
+    QA scheduler safety-net check `_check_approved_meetings_with_pending_children`,
+    which runs daily and will flag the inconsistency in the next morning
+    brief even if the CRITICAL log is missed.
+
+    Note: this function is intentionally SYNC — supabase_client methods are
+    sync, and we avoid the fragile `asyncio.create_task()` pattern to fire
+    an async alert from a sync function. The QA scheduler safety net is the
+    reliable catch.
+    """
+    import time
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            for table, fk in [
+                ("tasks", "meeting_id"),
+                ("decisions", "meeting_id"),
+                ("open_questions", "meeting_id"),
+                ("follow_up_meetings", "source_meeting_id"),
+            ]:
+                (
+                    supabase_client.client.table(table)
+                    .update({"approval_status": "approved"})
+                    .eq(fk, meeting_id)
+                    .execute()
+                )
+            logger.info(
+                f"Promoted all extracted children of {meeting_id} to approved"
+            )
+            return
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                delay = 1.0 * (2 ** attempt)
+                logger.warning(
+                    f"Promote children attempt {attempt + 1}/3 failed for "
+                    f"{meeting_id}: {e}. Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+
+    # All 3 attempts failed — log CRITICAL and rely on the QA safety net.
+    logger.critical(
+        f"CRITICAL: _promote_children_to_approved failed after 3 attempts "
+        f"for {meeting_id}: {last_error}. Children remain 'pending' and are "
+        f"invisible to default reads. The QA scheduler safety-net check will "
+        f"surface this in the next morning brief. Manual fix: "
+        f"UPDATE tasks SET approval_status='approved' WHERE meeting_id='{meeting_id}'; "
+        f"(repeat for decisions, open_questions, follow_up_meetings)"
+    )
+
+
 async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict:
     """
     Cascading reject: delete extracted data from DB and rebuild Sheets.
@@ -899,6 +966,14 @@ async def process_response(
         # Update approval status in DB (skip for non-meeting content like digests)
         if content_type == "meeting_summary":
             await update_approval_status(meeting_id, ApprovalStatus.APPROVED)
+            # Tier 3.1: promote child rows (tasks/decisions/open_questions/
+            # follow_up_meetings) from 'pending' to 'approved' so default
+            # read paths see them. This must happen BEFORE distribution so
+            # distribute_approved_content sees the new state if it queries
+            # DB directly (fallback path). The function has its own 3-attempt
+            # retry and CRITICAL log on persistent failure; the QA scheduler
+            # safety-net check catches any meeting left in a mixed state.
+            _promote_children_to_approved(meeting_id)
 
         if content_type == "meeting_prep":
             if not pending_info:
@@ -1031,14 +1106,19 @@ async def process_response(
                 f"pending_approvals for {meeting_id} has no structured data — "
                 f"falling back to DB tables. This may indicate a bug in submit_for_approval."
             )
-            decisions = supabase_client.list_decisions(meeting_id=meeting_id)
-            tasks = supabase_client.get_tasks(status=None)
+            # Tier 3.1: this is the approve branch fallback — children for
+            # this meeting are still 'pending' at this point (promote happens
+            # above us in the caller). Must include pending to see anything.
+            decisions = supabase_client.list_decisions(
+                meeting_id=meeting_id, include_pending=True
+            )
+            tasks = supabase_client.get_tasks(status=None, include_pending=True)
             tasks = [t for t in tasks if t.get("meeting_id") == meeting_id]
             follow_ups = supabase_client.list_follow_up_meetings(
-                source_meeting_id=meeting_id
+                source_meeting_id=meeting_id, include_pending=True
             )
             open_questions = supabase_client.get_open_questions(
-                meeting_id=meeting_id
+                meeting_id=meeting_id, include_pending=True
             )
             content["decisions"] = decisions
             content["tasks"] = tasks
@@ -1330,21 +1410,24 @@ async def apply_edits(
 
     current_summary = meeting.get("summary", "")
 
-    # Gather structured data if not provided
+    # Gather structured data if not provided.
+    # Tier 3.1: apply_edits runs while the meeting is in 'editing' state
+    # and the children are still 'pending' (promote happens at approve time,
+    # not edit time). Must include pending to see them.
     if structured_data is None:
         structured_data = {}
     decisions = structured_data.get("decisions") or supabase_client.list_decisions(
-        meeting_id=meeting_id
+        meeting_id=meeting_id, include_pending=True
     )
     all_tasks = structured_data.get("tasks")
     if all_tasks is None:
-        all_tasks_list = supabase_client.get_tasks(status=None)
+        all_tasks_list = supabase_client.get_tasks(status=None, include_pending=True)
         all_tasks = [t for t in all_tasks_list if t.get("meeting_id") == meeting_id]
     follow_ups = structured_data.get("follow_ups") or supabase_client.list_follow_up_meetings(
-        source_meeting_id=meeting_id
+        source_meeting_id=meeting_id, include_pending=True
     )
     open_questions = structured_data.get("open_questions") or supabase_client.get_open_questions(
-        meeting_id=meeting_id
+        meeting_id=meeting_id, include_pending=True
     )
 
     edits_description = json.dumps(edits, indent=2)
@@ -1475,8 +1558,9 @@ Return ONLY the JSON object, no other text."""
         # This ensures DB, pending_approvals, distribution, and Sheets stay consistent.
         try:
             # Delete old records and insert edited ones for this meeting
-            # Tasks
-            old_tasks = supabase_client.get_tasks(status=None)
+            # Tasks — include_pending=True because edit happens while children
+            # are still 'pending' (pre-approve).
+            old_tasks = supabase_client.get_tasks(status=None, include_pending=True)
             old_task_ids = [t["id"] for t in old_tasks if t.get("meeting_id") == meeting_id]
             for tid in old_task_ids:
                 supabase_client.client.table("tasks").delete().eq("id", tid).execute()

@@ -577,6 +577,7 @@ class SupabaseClient:
         meeting_id: str | None = None,
         topic: str | None = None,
         limit: int = 100,
+        include_pending: bool = False,
     ) -> list[dict]:
         """
         List decisions with optional filtering.
@@ -585,11 +586,23 @@ class SupabaseClient:
             meeting_id: Filter by source meeting.
             topic: Filter by topic keyword (searches description).
             limit: Maximum number of results.
+            include_pending: When False (default), only return approval_status='approved'
+                rows — the safe default for public-facing reads. When True, returns ALL
+                statuses, not just pending+approved — the parameter is semantically
+                "do not filter", not "only pending". Per the CHECK constraint added in
+                Tier 3.1, child rows can only be 'pending' or 'approved', so "all" is
+                effectively "both". Use True only from the approval flow internals,
+                extraction, edit apply, QA scheduler orphan detection, and similar.
 
         Returns:
             List of decision records.
         """
         query = self.client.table("decisions").select("*, meetings(title, date)")
+
+        # Tier 3.1 narrow: filter to approved by default so every read path
+        # that doesn't explicitly opt into pending gets the right behavior.
+        if not include_pending:
+            query = query.eq("approval_status", "approved")
 
         if meeting_id:
             query = query.eq("meeting_id", meeting_id)
@@ -916,6 +929,7 @@ class SupabaseClient:
         category: str | None = None,
         include_overdue: bool = True,
         limit: int = 100,
+        include_pending: bool = False,
     ) -> list[dict]:
         """
         Get tasks with optional filtering.
@@ -926,11 +940,23 @@ class SupabaseClient:
             category: Filter by task category (e.g., 'Product & Tech').
             include_overdue: Include overdue tasks when filtering by status.
             limit: Maximum number of results.
+            include_pending: When False (default), only return approval_status='approved'
+                rows — the safe default for public-facing reads. When True, returns ALL
+                statuses, not just pending+approved — the parameter is semantically
+                "do not filter", not "only pending". Per the CHECK constraint added in
+                Tier 3.1, child rows can only be 'pending' or 'approved', so "all" is
+                effectively "both". Use True only from the approval flow internals,
+                extraction, edit apply, QA scheduler orphan detection, and similar.
 
         Returns:
             List of task records.
         """
         query = self.client.table("tasks").select("*, meetings(title, date)")
+
+        # Tier 3.1 narrow: filter to approved by default so every read path
+        # that doesn't explicitly opt into pending gets the right behavior.
+        if not include_pending:
+            query = query.eq("approval_status", "approved")
 
         if assignee:
             query = query.ilike("assignee", assignee)
@@ -1094,6 +1120,7 @@ class SupabaseClient:
         self,
         source_meeting_id: str | None = None,
         limit: int = 50,
+        include_pending: bool = False,
     ) -> list[dict]:
         """
         List follow-up meetings.
@@ -1101,6 +1128,13 @@ class SupabaseClient:
         Args:
             source_meeting_id: Filter by source meeting.
             limit: Maximum number of results.
+            include_pending: When False (default), only return approval_status='approved'
+                rows — the safe default for public-facing reads. When True, returns ALL
+                statuses, not just pending+approved — the parameter is semantically
+                "do not filter", not "only pending". Per the CHECK constraint added in
+                Tier 3.1, child rows can only be 'pending' or 'approved', so "all" is
+                effectively "both". Use True only from the approval flow internals,
+                extraction, edit apply, QA scheduler orphan detection, and similar.
 
         Returns:
             List of follow-up meeting records.
@@ -1108,6 +1142,10 @@ class SupabaseClient:
         query = self.client.table("follow_up_meetings").select(
             "*, meetings(title, date)"
         )
+
+        # Tier 3.1 narrow: filter to approved by default.
+        if not include_pending:
+            query = query.eq("approval_status", "approved")
 
         if source_meeting_id:
             query = query.eq("source_meeting_id", source_meeting_id)
@@ -1181,14 +1219,23 @@ class SupabaseClient:
         status: str = "open",
         meeting_id: str | None = None,
         limit: int = 100,
+        include_pending: bool = False,
     ) -> list[dict]:
         """
         Get open questions by status.
 
         Args:
-            status: Filter by status ('open' or 'resolved').
+            status: Filter by status ('open' or 'resolved'). Note: this is the
+                question lifecycle status, not the approval_status.
             meeting_id: Filter by source meeting.
             limit: Maximum number of results.
+            include_pending: When False (default), only return approval_status='approved'
+                rows — the safe default for public-facing reads. When True, returns ALL
+                statuses, not just pending+approved — the parameter is semantically
+                "do not filter", not "only pending". Per the CHECK constraint added in
+                Tier 3.1, child rows can only be 'pending' or 'approved', so "all" is
+                effectively "both". Use True only from the approval flow internals,
+                extraction, edit apply, QA scheduler orphan detection, and similar.
 
         Returns:
             List of open question records.
@@ -1197,6 +1244,11 @@ class SupabaseClient:
         query = self.client.table("open_questions").select(
             "*, meetings!open_questions_meeting_id_fkey(title, date)"
         )
+
+        # Tier 3.1 narrow: filter to approved by default.
+        if not include_pending:
+            query = query.eq("approval_status", "approved")
+
         query = query.eq("status", status)
 
         if meeting_id:

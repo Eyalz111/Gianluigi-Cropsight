@@ -95,10 +95,17 @@ def _check_extraction_quality(issues: list[str]) -> dict:
             if not mid:
                 continue
 
-            # Count decisions + tasks for this meeting
+            # Count decisions + tasks for this meeting.
+            # Tier 3.1: orphan detection must see all rows regardless of
+            # approval_status (a pending child whose parent is rejected is
+            # an orphan; so is an approved child whose parent is missing).
             try:
-                decisions = supabase_client.list_decisions(meeting_id=mid)
-                all_tasks = supabase_client.get_tasks(status=None)
+                decisions = supabase_client.list_decisions(
+                    meeting_id=mid, include_pending=True
+                )
+                all_tasks = supabase_client.get_tasks(
+                    status=None, include_pending=True
+                )
                 tasks = [t for t in all_tasks if t.get("meeting_id") == mid]
                 total_items = len(decisions) + len(tasks)
 

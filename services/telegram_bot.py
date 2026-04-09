@@ -3020,7 +3020,11 @@ When you receive approval requests, use the buttons to approve, request changes,
             # New format — try in-memory cache first (faster), then fresh DB lookup
             task_info = task_reminder_scheduler.task_action_map.get(callback_key)
             if not task_info:
-                # Cold lookup — fetch task from DB and synthesize task_info
+                # Cold lookup — fetch task from DB and synthesize task_info.
+                # Note: intentionally NOT filtering approval_status — button
+                # callbacks must work on pending tasks too (e.g., a task under
+                # active review). The PK match on `id` guarantees uniqueness.
+                # (Tier 3.1 narrow: audited, not load-bearing.)
                 try:
                     db_task = _sc.client.table("tasks").select("*").eq("id", callback_key).limit(1).execute()
                     if db_task.data:
