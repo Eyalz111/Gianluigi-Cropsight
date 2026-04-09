@@ -750,34 +750,27 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
                 logger.error(f"Alert on reject failure also failed: {alert_err}")
             return {"deleted": {}, "error": str(e)}
 
-    # Capture the source filename BEFORE the cascade (so we can quarantine
-    # the Drive file after). T1.9 — auto-move rejected files to a Rejected
-    # subfolder so the watcher stops re-processing them on every scan.
-    source_file_path_for_move: str | None = None
-    try:
-        meeting_row = supabase_client.get_meeting(meeting_id)
-        if meeting_row:
-            source_file_path_for_move = meeting_row.get("source_file_path")
-    except Exception as e:
-        logger.warning(f"Could not fetch meeting {meeting_id} for Drive quarantine: {e}")
-
-    # Real meeting: cascade delete + sheets rebuild
+    # Real meeting: cascade-clear children + keep tombstone row (T1.9 revised).
+    # The tombstone is a minimal `meetings` row with approval_status='rejected'
+    # and no transcript/summary data. The watcher uses this tombstone to skip
+    # re-processing the same source file on subsequent scans, without requiring
+    # any Drive write permission.
     counts: dict = {}
     try:
-        counts = supabase_client.delete_meeting_cascade(meeting_id)
+        counts = supabase_client.delete_meeting_cascade(meeting_id, keep_tombstone=True)
         supabase_client.log_action(
-            action="meeting_rejected_and_deleted",
+            action="meeting_rejected_tombstoned",
             details={"meeting_id": meeting_id, "counts": counts},
             triggered_by="eyal",
         )
-        logger.info(f"Cascade-deleted rejected meeting {meeting_id}: {counts}")
+        logger.info(f"Tombstoned rejected meeting {meeting_id}: {counts}")
     except Exception as e:
-        logger.error(f"Cascade delete failed for rejected meeting {meeting_id}: {e}")
+        logger.error(f"Cascade+tombstone failed for rejected meeting {meeting_id}: {e}")
         try:
             await send_system_alert(
                 AlertSeverity.CRITICAL,
                 "approval_flow._reject_meeting_cascade",
-                f"Cascade delete failed for rejected meeting {meeting_id}: {e}. "
+                f"Cascade/tombstone failed for rejected meeting {meeting_id}: {e}. "
                 f"DB may still contain extracted data — consider running "
                 f"scripts/cleanup_rejected_meetings.py",
                 error=e,
@@ -785,42 +778,6 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
         except Exception as alert_err:
             logger.error(f"Alert on reject cascade failure also failed: {alert_err}")
         return {"deleted": {}, "error": str(e)}
-
-    # T1.9: Move the file to the Rejected subfolder so the watcher stops
-    # re-processing it on every 15-min scan. Best-effort — if the move fails,
-    # the reject still succeeds and we surface a WARNING with manual cleanup
-    # instructions.
-    if source_file_path_for_move:
-        try:
-            from services.google_drive import drive_service as _drive
-
-            move_result = await _drive.move_file_to_rejected(source_file_path_for_move)
-            if move_result.get("moved"):
-                counts["drive_quarantined"] = True
-                logger.info(
-                    f"Quarantined rejected file '{source_file_path_for_move}' to "
-                    f"Rejected subfolder"
-                )
-            else:
-                counts["drive_quarantined"] = False
-                err = move_result.get("error", "unknown")
-                logger.warning(
-                    f"Drive quarantine failed for '{source_file_path_for_move}': {err}"
-                )
-                try:
-                    await send_system_alert(
-                        AlertSeverity.WARNING,
-                        "approval_flow._reject_meeting_cascade",
-                        f"Rejected meeting was cleaned from DB, but the file "
-                        f"'{source_file_path_for_move}' could not be moved to "
-                        f"the Rejected subfolder ({err}). To prevent re-processing, "
-                        f"manually move or delete the file from the Raw Transcripts folder.",
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(f"Drive quarantine step errored: {e}")
-            counts["drive_quarantined"] = False
 
     # Rebuild Sheets from fresh DB state (best-effort — don't fail the reject)
     try:

@@ -143,9 +143,12 @@ class GoogleDriveService:
             # Build query — no time filter; rely on _processed_file_ids
             # for deduplication. This avoids clock-skew issues where
             # the local computer time differs from Google's server time.
+            # Exclude sub-folders so we don't try to "process" the Rejected
+            # quarantine subfolder as a transcript file.
             query_parts = [
                 f"'{settings.RAW_TRANSCRIPTS_FOLDER_ID}' in parents",
                 "trashed = false",
+                "mimeType != 'application/vnd.google-apps.folder'",
             ]
 
             query = " and ".join(query_parts)

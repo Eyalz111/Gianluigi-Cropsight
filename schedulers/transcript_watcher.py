@@ -275,21 +275,21 @@ class TranscriptWatcher:
             existing_status = existing.get("approval_status") or "pending"
 
             if existing_status == "rejected":
-                # Rejection means "this shouldn't exist" — clean up any
-                # stragglers (should be none after T1.1) and fall through
-                # to re-process from scratch.
+                # Tombstone — Eyal previously rejected this file. Do NOT
+                # re-process. To re-enable, Eyal can delete the tombstone
+                # meeting row OR upload the file with a different name.
                 logger.info(
-                    f"Re-processing rejected meeting "
-                    f"(source: {file_name}, meeting_id: {existing['id']})"
+                    f"Skipping rejected meeting tombstone "
+                    f"(source: {file_name}, meeting_id: {existing['id']}) "
+                    f"— delete the tombstone to re-process"
                 )
-                try:
-                    supabase_client.delete_meeting_cascade(existing["id"])
-                except Exception as e:
-                    logger.warning(
-                        f"Cascade delete of stragglers for {existing['id']} failed "
-                        f"(continuing anyway): {e}"
-                    )
-                # Fall through to normal processing below
+                drive_service.mark_file_processed(file_id)
+                return {
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "already_processed_rejected",
+                    "meeting_id": existing["id"],
+                }
             elif existing_status == "approved":
                 logger.info(f"Skipping approved meeting (source: {file_name})")
                 drive_service.mark_file_processed(file_id)

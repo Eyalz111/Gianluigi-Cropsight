@@ -268,7 +268,7 @@ class SupabaseClient:
             return {}
         return result.data[0]
 
-    def delete_meeting_cascade(self, meeting_id: str) -> dict:
+    def delete_meeting_cascade(self, meeting_id: str, keep_tombstone: bool = False) -> dict:
         """
         Delete a meeting and all related data.
 
@@ -288,13 +288,19 @@ class SupabaseClient:
         9. pending_approvals (by approval_id = meeting_id)
         10. tasks (meeting_id, ON DELETE SET NULL would orphan)
             Note: task_signals cascade automatically via ON DELETE CASCADE FK on tasks(id).
-        11. meeting record itself
+        11. meeting record itself (UNLESS keep_tombstone=True)
 
         Args:
             meeting_id: UUID of the meeting to delete.
+            keep_tombstone: When True (used by T1.9 cascading reject), keeps
+                the `meetings` row with approval_status='rejected' and clears
+                its transcript + summary. The watcher then uses this tombstone
+                to skip re-processing the same source file on subsequent scans.
 
         Returns:
-            Dict with counts of deleted records by type.
+            Dict with counts of deleted records by type. When keep_tombstone
+            is True, `counts['meetings']` will be 0 (row kept) and an extra
+            `counts['tombstone']` = 1 is set.
         """
         counts = {
             "embeddings": 0,
@@ -350,24 +356,45 @@ class SupabaseClient:
             )
             counts["tasks"] = len(task_result.data) if task_result.data else 0
 
-            # 11. Delete the meeting itself (should now be clean)
-            mtg_result = (
-                self.client.table("meetings")
-                .delete()
-                .eq("id", meeting_id)
-                .execute()
-            )
-            counts["meetings"] = len(mtg_result.data) if mtg_result.data else 0
-
-            logger.info(
-                f"Cascade-deleted meeting {meeting_id}: "
-                f"{counts['embeddings']} embeddings, "
-                f"{counts['tasks']} tasks, "
-                f"{counts['decisions']} decisions, "
-                f"{counts['open_questions']} questions, "
-                f"{counts['topic_thread_mentions']} topic_mentions, "
-                f"{counts['meetings']} meetings"
-            )
+            # 11. Delete the meeting itself (OR convert to tombstone)
+            if keep_tombstone:
+                # Update the meeting row instead of deleting it. The watcher
+                # will use approval_status='rejected' to skip re-processing.
+                tombstone_updates = {
+                    "approval_status": "rejected",
+                    "raw_transcript": None,  # free up space
+                    "summary": f"[REJECTED at {datetime.now(timezone.utc).isoformat()}]",
+                    "approved_at": None,
+                }
+                self.client.table("meetings").update(tombstone_updates).eq(
+                    "id", meeting_id
+                ).execute()
+                counts["tombstone"] = 1
+                logger.info(
+                    f"Cascade-cleared meeting {meeting_id} (tombstone kept): "
+                    f"{counts['embeddings']} embeddings, "
+                    f"{counts['tasks']} tasks, "
+                    f"{counts['decisions']} decisions, "
+                    f"{counts['open_questions']} questions, "
+                    f"{counts['topic_thread_mentions']} topic_mentions"
+                )
+            else:
+                mtg_result = (
+                    self.client.table("meetings")
+                    .delete()
+                    .eq("id", meeting_id)
+                    .execute()
+                )
+                counts["meetings"] = len(mtg_result.data) if mtg_result.data else 0
+                logger.info(
+                    f"Cascade-deleted meeting {meeting_id}: "
+                    f"{counts['embeddings']} embeddings, "
+                    f"{counts['tasks']} tasks, "
+                    f"{counts['decisions']} decisions, "
+                    f"{counts['open_questions']} questions, "
+                    f"{counts['topic_thread_mentions']} topic_mentions, "
+                    f"{counts['meetings']} meetings"
+                )
 
         except Exception as e:
             logger.error(f"Error during cascade delete of {meeting_id}: {e}")
