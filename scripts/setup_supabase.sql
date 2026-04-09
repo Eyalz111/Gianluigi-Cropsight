@@ -5,6 +5,30 @@
 -- 1. Create a new Supabase project in EU region (Frankfurt)
 -- 2. Enable the pgvector extension (see below)
 --
+-- =============================================================================
+-- HISTORICAL REFERENCE — READ BEFORE USING
+-- =============================================================================
+-- This file is the BASELINE schema. Production Supabase also has the full
+-- chain of scripts/migrate_*.sql files applied on top. For a fresh setup:
+--   1. Run this file (setup_supabase.sql)
+--   2. Run every file matching scripts/migrate_*.sql IN CHRONOLOGICAL ORDER
+--      (they're date/phase-prefixed, see git log for the canonical sequence)
+--
+-- Recent baseline updates (2026-04-09, Tier 3):
+--   - Every meeting child table now has ON DELETE CASCADE on meeting_id
+--     (pre-T3.2 production had tasks.meeting_id, decisions.meeting_id,
+--     open_questions.meeting_id as NO ACTION — blocking parent deletes.
+--     This file has been updated to match the post-T3.2 CASCADE state.)
+--   - tasks/decisions/open_questions/follow_up_meetings now have
+--     approval_status TEXT DEFAULT 'pending' + CHECK constraint
+--     (added by scripts/migrate_tier3_approval_status.sql; baseline updated
+--     so fresh installs get the column at CREATE TABLE time).
+--
+-- If you're running this against an existing production DB, the IF NOT EXISTS
+-- guards make most of it a no-op — but the FK constraint lines below will
+-- try to add constraints that already exist. Safer: use the migrate_*.sql
+-- files for incremental updates, not this baseline file.
+--
 -- This schema matches Section 3 of GIANLUIGI_PROJECT_PLAN.md
 
 -- =============================================================================
@@ -39,6 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_meetings_approval_status ON meetings(approval_sta
 
 
 -- Decisions table: Key decisions extracted from meetings
+-- T3.1: approval_status gates pre-approval visibility; T3.2: meeting_id CASCADE.
 CREATE TABLE IF NOT EXISTS decisions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
@@ -46,22 +71,28 @@ CREATE TABLE IF NOT EXISTS decisions (
     context TEXT,                        -- surrounding discussion context
     participants_involved TEXT[],
     transcript_timestamp TEXT,           -- source citation, e.g., "43:28"
+    approval_status TEXT DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved')),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_meeting_id ON decisions(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_approval_status_pending
+    ON decisions(meeting_id) WHERE approval_status = 'pending';
 
 
 -- Tasks table: Action items from meetings or manually created
+-- T3.1: approval_status gates pre-approval visibility; T3.2: meeting_id CASCADE
+-- (nullable for manual tasks — cascade only fires when meeting_id is set).
 CREATE TABLE IF NOT EXISTS tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,  -- nullable for manual tasks
+    meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,  -- nullable for manual tasks
     title TEXT NOT NULL,
     assignee TEXT NOT NULL,
     deadline DATE,
     status TEXT DEFAULT 'pending',       -- 'pending', 'in_progress', 'done', 'overdue'
     priority TEXT DEFAULT 'M',           -- 'H', 'M', 'L'
     transcript_timestamp TEXT,           -- source citation
+    approval_status TEXT DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved')),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -69,6 +100,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_deadline ON tasks(deadline);
+CREATE INDEX IF NOT EXISTS idx_tasks_approval_status_pending
+    ON tasks(meeting_id) WHERE approval_status = 'pending';
 
 -- v0.2.1: Add category column to tasks
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category TEXT;
@@ -76,6 +109,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category);
 
 
 -- Follow-up meetings: Scheduled follow-ups identified from meetings
+-- T3.1: approval_status gates pre-approval visibility; T3.2: source_meeting_id CASCADE.
 CREATE TABLE IF NOT EXISTS follow_up_meetings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
@@ -85,10 +119,13 @@ CREATE TABLE IF NOT EXISTS follow_up_meetings (
     participants TEXT[],
     agenda_items TEXT[],
     prep_needed TEXT,                    -- what needs to happen before this meeting
+    approval_status TEXT DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved')),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_follow_up_meetings_source ON follow_up_meetings(source_meeting_id);
+CREATE INDEX IF NOT EXISTS idx_follow_up_meetings_approval_status_pending
+    ON follow_up_meetings(source_meeting_id) WHERE approval_status = 'pending';
 
 
 -- Documents table: Ingested documents for knowledge base
@@ -108,6 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(document_type);
 
 
 -- Open questions: Unresolved issues from meetings
+-- T3.1: approval_status gates pre-approval visibility; T3.2: meeting_id CASCADE.
 CREATE TABLE IF NOT EXISTS open_questions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
@@ -115,11 +153,14 @@ CREATE TABLE IF NOT EXISTS open_questions (
     raised_by TEXT,
     status TEXT DEFAULT 'open',          -- 'open', 'resolved'
     resolved_in_meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,
+    approval_status TEXT DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved')),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_open_questions_status ON open_questions(status);
 CREATE INDEX IF NOT EXISTS idx_open_questions_meeting_id ON open_questions(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_open_questions_approval_status_pending
+    ON open_questions(meeting_id) WHERE approval_status = 'pending';
 
 
 -- =============================================================================
@@ -471,6 +512,8 @@ $$;
 -- =============================================================================
 
 -- Tracks token usage per LLM call for cost monitoring
+-- T3.2: meeting_id is CASCADE so cost-tracking rows are cleaned up when a
+-- meeting is hard-deleted (e.g., from the cleanup script or direct DB admin).
 CREATE TABLE IF NOT EXISTS token_usage (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     call_site TEXT NOT NULL,           -- e.g., "transcript_extraction", "task_dedup"
@@ -479,7 +522,7 @@ CREATE TABLE IF NOT EXISTS token_usage (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER DEFAULT 0,
     cache_creation_tokens INTEGER DEFAULT 0,
-    meeting_id UUID REFERENCES meetings(id) ON DELETE SET NULL,
+    meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
