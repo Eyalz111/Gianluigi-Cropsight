@@ -71,8 +71,14 @@ steps:
         EYAL_TELEGRAM_ID=EYAL_TELEGRAM_ID:latest,
         CROPSIGHT_CALENDAR_COLOR_ID=CROPSIGHT_CALENDAR_COLOR_ID:latest,
         GIANLUIGI_EMAIL=GIANLUIGI_EMAIL:latest
-      - '--set-env-vars'
-      - 'ENVIRONMENT=staging,LOG_LEVEL=INFO,APPROVAL_MODE=manual'
+      # IMPORTANT: use --update-env-vars (not --set-env-vars). --set-env-vars
+      # REPLACES the entire env var set and will wipe anything applied
+      # out-of-band — e.g. the TMPDIR=/tmp var added during the 2026-04-11
+      # Live Ops Hardening pass that fixes the W15 MoviePy cwd-permission bug.
+      # TMPDIR=/tmp is also included here as belt-and-braces so every deploy
+      # baked from this config carries it explicitly.
+      - '--update-env-vars'
+      - 'ENVIRONMENT=staging,LOG_LEVEL=INFO,APPROVAL_MODE=manual,TMPDIR=/tmp'
 
 images:
   - 'gcr.io/$PROJECT_ID/gianluigi:$BUILD_ID'
