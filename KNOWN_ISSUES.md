@@ -52,6 +52,27 @@ Note: Morning brief, email scan, debrief prompt, alert scheduler, and task remin
 
 ---
 
+## Fixed in Sheets-Sync Hardening (April 11, 2026 — evening)
+
+Follow-up session after Eyal reported `/sync` saying "0 to sync" when he'd clearly edited statuses in the Tasks sheet, AND that the Tasks sheet kept silently losing rows ("once again don't have the tasks"). Commit `b60a59b`.
+
+- **Bare-range bug silently broke all Sheets reads (`get_all_tasks()` + `ensure_task_tracker_headers()`):** Both functions called `_read_sheet_range(range_name="A:I")` with no tab prefix. The Sheets API resolves bare A1 ranges against whichever sheet sits at index 0. The moment any backup tab (from `scripts/rebuild_sheets.py`, `duplicateSheet`, or manual reorder) landed in front of `Tasks`, every read silently returned the wrong data. This poisoned `/sync`, `find_task_row`, the task reminder scheduler, overdue reminders, Telegram task-status buttons, MCP task update path, and `archive_completed_tasks` — every single consumer of `get_all_tasks`. **Fix:** qualify every read with `settings.TASK_TRACKER_TAB_NAME`. Regression tests in `tests/test_sheets_sync_tab_resolution.py`.
+- **`rebuild_tasks_sheet`/`rebuild_decisions_sheet` could wipe on silent Supabase read failures:** The "tasks vanished" incidents traced back to this failure mode. A transient query error returning `[]` silently propagated into the rebuild, which clear-and-rewrote the sheet with 0 rows. **Fix:** added defensive `force_empty=False` guard that refuses to clear a populated sheet when fed an empty list unless the caller explicitly opts in. Also audit-logs every rebuild as `sheets_rebuild_tasks` / `sheets_rebuild_decisions` so future incidents can be diff'd against the timeline.
+- **`scripts/rebuild_sheets.py` silently truncated at 100:** Called `get_tasks()` and `list_decisions()` with the default `limit=100` while the other two rebuild callsites (`approval_flow._reject_meeting_cascade`, `cleanup_rejected_meetings`) correctly pass `limit=1000`. Latent foot-gun; didn't bite today (we have 64 tasks) but would have once the count crossed 100. **Fix:** bumped to `limit=10000`.
+- **Dead duplicate `find_task_row` definition:** Two `find_task_row` definitions in `services/google_sheets.py`; Python resolved to the second one and the first was unreachable. Deleted.
+- **Fuzzy duplicate detector false-positive storm:** `_detect_duplicate_tasks` was surfacing 9 duplicate pairs on live data, 7 of which were false positives because the matcher counted scheduling filler ("schedule:", "meeting", "session") toward its 60% word-overlap threshold. Post-hardening the same live data returns 2 pairs — both genuinely borderline cases. **Fix:** added scheduling stop-words + punctuation normalization.
+- **Extraction-time dedup excluded recently-done tasks:** `deduplicate_tasks()` in `processors/cross_reference.py` only compared new extractions against `pending` + `in_progress`. A task closed last week being re-mentioned always classified NEW, creating a fresh duplicate row. **Fix:** also fetch tasks with `status='done'`, `approval_status='approved'`, `updated_at >= now-30d`, and feed them into the comparison. Also sharpened the prompt to call out cross-assignee scheduling tasks and recently-done no-reopen-intent cases as DUPLICATE.
+- **Morning brief duplicate count was too thin to act on:** `format_sync_summary` showed only `"Potential duplicates: N task pairs"` — easy to dismiss with no lever to act. **Fix:** now surfaces an actionable list of up to 5 pairs with titles + assignees.
+- **Duplicate detection was stuck behind `/sync`:** `_detect_duplicate_tasks` ran only inside `compute_sheets_diff`, so when `/sync` was broken (see bare-range bug above) duplicates were invisible for days. **Fix:** added a dedicated `_check_duplicate_tasks` in the daily QA scheduler that runs independently of sync and surfaces its own issue line in the morning brief.
+
+Live data actions taken the same session:
+- Rebuilt Tasks tab from 67 approved DB rows (sheet had been empty).
+- Rebuilt Decisions tab from 68 approved DB rows (sheet had only a header).
+- Applied 19 pending status edits from Sheets → DB via `apply_sheets_to_db()` (Eyal's manual edits that had been invisible to the broken sync).
+- Deleted 3 duplicate task rows with full snapshot audit trail in `audit_log` as `task_dup_cleanup_delete`: `7ca91b65` (Paolo dup of investor Q&A), `9bff4e1a` (shorter Monday Strategy dup), `f71ddae8` (Product V1 roadmap merged into done Monday).
+
+---
+
 ## Fixed in Live Ops Hardening (April 11, 2026)
 
 Three production bugs surfaced during a live debugging session and fixed end-to-end (commits `4825f24`, `925da8c`, deployed as `gianluigi-00064-9ps`).
