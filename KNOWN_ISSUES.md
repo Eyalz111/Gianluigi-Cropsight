@@ -1,6 +1,6 @@
-# Known Issues — Gianluigi v2.2 (Post Session 3)
+# Known Issues — Gianluigi v2.2 (Post Session 3 + Live Ops Hardening)
 
-Current as of April 7, 2026.
+Current as of April 11, 2026.
 
 ---
 
@@ -49,6 +49,19 @@ These are implemented but disabled by default:
 - `CONTINUITY_AUTO_APPLY_ENABLED=false` — Auto-apply task matches from extraction (needs A3 production gate)
 
 Note: Morning brief, email scan, debrief prompt, alert scheduler, and task reminders were enabled in Phase 11.
+
+---
+
+## Fixed in Live Ops Hardening (April 11, 2026)
+
+Three production bugs surfaced during a live debugging session and fixed end-to-end (commits `4825f24`, `925da8c`, deployed as `gianluigi-00064-9ps`).
+
+- **Debrief silent dedup data loss:** `_inject_debrief_items` ran each CEO-typed quick-inject task through `deduplicate_tasks` (Haiku) and silently dropped the row if the LLM false-positive-flagged it as a duplicate (`if dedup_result.get("new_tasks"):` had no fallback). 2026-04-10 incident lost 3 tasks (Yoram legal / U Bank / D&O insurance). **Fix:** bypass dedup entirely for debrief — CEO-authored, trust the input. Lost items recovered manually into the existing pseudo-meeting.
+- **Debrief approval_status pending trap (T3.1 interaction):** Even after the dedup fix, the debrief pseudo-meeting and child rows defaulted to `approval_status='pending'` and were invisible to the central read helpers. **Fix:** promote pseudo-meeting + tasks/decisions/open_questions/follow_up_meetings to `approved` at end of `_inject_debrief_items` (debrief bypasses the normal meeting approval flow because Eyal already confirmed via the Inject button).
+- **Intelligence signal Telegram ping silent failure:** `_submit_for_approval` never called `schedule_approval_reminders()` and ignored the `send_to_eyal` return value. Eyal got zero notification for `signal-w15-2026` generated 2026-04-09. **Fix:** check return value, retry as HTML-stripped plain text on failure, schedule reminders so the same gentle-ping system used for meeting approvals covers intelligence signals.
+- **`/debrief` blue-link non-command:** Bot never called `setMyCommands`, so `/debrief` in message bodies rendered as a tappable link that only populated the composer instead of sending the command. **Fix:** register all 15 commands via `BotCommand` list at bot startup. Applied via direct API call too so it took effect without restart.
+- **PTB silent handler error swallowing:** python-telegram-bot's default behavior swallowed handler exceptions to stdout, hiding the real cause of `/debrief` "doing nothing". **Fix:** added global `_on_handler_error` that logs to our logger, persists to `audit_log` as `telegram_handler_error`, and DMs Eyal a one-line error summary. Also wrapped `_handle_debrief` in defensive try/except with immediate "Starting debrief..." ack and inline error reply.
+- **MoviePy temp_audiofile cwd permission denied (W15 video silent failure):** `write_videofile` defaulted `temp_audiofile=None`, causing the internal temp audio file to be created in the process cwd. On Cloud Run cwd is read-only outside `/tmp` → `Permission denied opening output moviepy_rawTEMP_MPY_wvf_snd.mp4`. Caught by outer try/except in `_generate_video` as non-fatal → `drive_video_url` stayed `None` → email distribution skipped the 30-min Drive transcoding wait and sent without video link. **Fix:** explicit `temp_audiofile=os.path.join(tmp_dir, "moviepy_temp_audio.m4a")` + `remove_temp=True` at both call sites, AND `TMPDIR=/tmp` env var set on the Cloud Run service as belt-and-braces.
 
 ---
 

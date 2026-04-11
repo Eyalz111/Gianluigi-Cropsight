@@ -1,8 +1,8 @@
 # CLAUDE.md — Gianluigi Project Context
 
-**Last Updated:** April 9, 2026
-**Current Version:** v2.2 (Phases 0-13 + X1/X2 + Intelligence Signal + Deal Intelligence + CEO UX + Approval Flow Robustness Tiers 1-3, 43 MCP tools)
-**Status:** Tier 3 approval-flow architectural robustness complete. Production revision `gianluigi-00061-vsk`. Smoke-tested live (reject path) 2026-04-09.
+**Last Updated:** April 11, 2026
+**Current Version:** v2.2 (Phases 0-13 + X1/X2 + Intelligence Signal + Deal Intelligence + CEO UX + Approval Flow Robustness Tiers 1-3 + Live Ops Hardening 2026-04-11, 43 MCP tools)
+**Status:** Tier 3 + Live Ops Hardening complete. Production revision `gianluigi-00064-9ps` (TMPDIR=/tmp env var set). Smoke-tested live: /debrief, quick-inject, intelligence signal approval, debrief recovery — all green 2026-04-11.
 
 ---
 
@@ -14,7 +14,7 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 
 ---
 
-## Current State (Post Tier 3)
+## Current State (Post Tier 3 + Live Ops Hardening)
 
 - ~1950 tests, all new tests passing (22 pre-existing failures baselined in `tier3_handoff.md`)
 - MCP server with 43 tools, connected to Claude.ai via CropSight Ops project
@@ -24,7 +24,8 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
 - Document versioning with content hash dedup, Dropbox sync ready (disabled, needs credentials)
 - Phase 11-13 migrations applied (sensitivity, email body, decision freshness, task signals, doc versioning)
 - **Approval flow robustness** (Tiers 1+2+T1.9+3) complete: cascading reject + tombstones + FK CASCADE + `approval_status` gating + Gmail/Telegram retry + sheet format on approval
-- Production revision: `gianluigi-00061-vsk` (as of 2026-04-09)
+- **Live ops hardening** (2026-04-11): debrief dedup bypass + approval_status promote, intelligence signal approval reminders + plain-text fallback, Telegram setMyCommands + global PTB error handler + defensive `_handle_debrief`, MoviePy temp_audiofile pinning + TMPDIR=/tmp env var (W15 video silent failure root cause)
+- Production revision: `gianluigi-00064-9ps` (as of 2026-04-11)
 
 ### What Works
 - Full transcript pipeline: Tactiq → Drive → Claude extraction → Supabase → approval → distribution
@@ -67,6 +68,12 @@ Gianluigi is CropSight's AI operations assistant — an "AI Office Manager" for 
   - **T3.4 retry on Gmail/Telegram sends** — extracted network calls into `_execute_send` (gmail) and `_bot_send_message` (telegram_bot) wrapped with `@retry` from `core/retry.py`. 3 attempts, exponential backoff. Fixes BrokenPipe silent-drops observed during test 4.
   - **T3.5 `format_task_tracker()` on approval** — `distribute_approved_content()` now calls `format_task_tracker()` after the tasks append loop, so new rows don't inherit header-bleed styling.
   - **T3.6 known limitation doc** — `KNOWN_ISSUES.md` now documents the `source_file_path` ILIKE substring match collision risk for tombstone matching (rare because Tactiq filenames are timestamp-prefixed).
+- **Live Ops Hardening (2026-04-11):** Three production bugs caught + fixed during a live debugging session (commits `4825f24`, `5f1d88d`, `925da8c`, deployed as `gianluigi-00064-9ps`).
+  - **Debrief silent dedup data loss** — `_inject_debrief_items` ran each CEO-typed quick-inject task through `deduplicate_tasks` (Haiku) and used `if dedup_result.get("new_tasks"):` with no fallback. When Haiku false-positive-flagged a task as a duplicate, the row was dropped silently — no log, no warning. The 2026-04-10 incident lost 3 tasks (Yoram legal / U Bank / D&O insurance) this way. Compounding bug: post-T3.1 the pseudo-meeting and its children defaulted to `approval_status='pending'` so even if dedup had worked, the rows would have been invisible to central read helpers. **Fix:** bypass dedup entirely for debrief (CEO-authored, trust the input) and promote pseudo-meeting + tasks/decisions/open_questions/follow_up_meetings to `approval_status='approved'` at the end of `_inject_debrief_items`. The 3 lost items were recovered manually into the existing pseudo-meeting (`2dfc3a1f-97bb-40f1-8d44-a570e837e98b`).
+  - **Intelligence signal Telegram ping unreliable** — `processors/intelligence_signal_agent.py::_submit_for_approval` never called `schedule_approval_reminders()`, so a missed one-shot ping had no follow-up. `send_to_eyal` swallows exceptions and returns False; the caller ignored the return value. Eyal got zero notification for `signal-w15-2026` generated 2026-04-09. **Fix:** check return value, retry with HTML-stripped plain-text fallback on failure, and call `schedule_approval_reminders(signal_id, "intelligence_signal")` so the same gentle reminder system used for meeting approvals also covers signals.
+  - **`/debrief` silent failure + general PTB diagnostic blindspot** — two stacked bugs: (1) `setMyCommands` was never called on bot startup, so `/debrief` rendered as a blue link in messages but tapping it only populated the composer instead of sending the command; (2) PTB swallows handler exceptions to stdout, so any error in `_handle_debrief` vanished without trace. **Fix:** added `BotCommand` list registration in `services/telegram_bot.py::start()` covering all 15 commands, wrapped `_handle_debrief` body in try/except with immediate "Starting debrief..." ack + Markdown error reply showing the exception, made the `get_pending_approval_summary` preview defensive, and added a global `_on_handler_error` that captures any handler crash, persists to `audit_log` as `telegram_handler_error`, and DMs Eyal a one-line summary so future silent failures are visible.
+  - **MoviePy temp_audiofile cwd permission denied (W15 video silent failure)** — `services/video_assembler.py::write_videofile` calls in both `assemble_video` and `assemble_video_segments` used MoviePy's default `temp_audiofile=None`. In this MoviePy version that creates the temp audio file in the process cwd instead of beside the output file. On Cloud Run cwd is read-only outside `/tmp` → `Permission denied opening output moviepy_rawTEMP_MPY_wvf_snd.mp4`. The whole video assembly failed silently (caught by outer try/except in `_generate_video` as a non-fatal warning) → `drive_video_url` stayed `None` → distribution skipped the 30-min Drive transcoding wait and emailed only the .docx, no video link. **Fix:** pass explicit `temp_audiofile=os.path.join(tmp_dir, "moviepy_temp_audio.m4a")` + `remove_temp=True` at both call sites (pin inside the existing `tempfile.mkdtemp()` directory) AND set `TMPDIR=/tmp` env var on the Cloud Run service (belt-and-braces against any other subsystem that respects TMPDIR).
+  - **Approval reminder coverage for intelligence signals** — `schedule_approval_reminders` was previously only called from the meeting approval flow; intelligence signals now also schedule reminders, mirroring the same gentle-ping pattern.
 
 ### Known Issues
 - Email dedup edge cases: forwarded threads may not deduplicate perfectly at low volume
