@@ -2,7 +2,7 @@
 
 **Last Updated:** April 11, 2026 (evening)
 **Current Version:** v2.2 (Phases 0-13 + X1/X2 + Intelligence Signal + Deal Intelligence + CEO UX + Approval Flow Robustness Tiers 1-3 + Live Ops Hardening 2026-04-11 + Sheets-Sync Hardening 2026-04-11, 43 MCP tools)
-**Status:** Sheets-Sync Hardening complete (commit `b60a59b`). **Not yet deployed** — Cloud Run still on `gianluigi-00064-9ps`; needs a redeploy for the code fixes (bare-range bug, rebuild defensive guards, dedup improvements) to take effect in prod. Live state already restored and verified: 64 approved tasks + 68 approved decisions in sync with Sheets, 0 drift, 0 open duplicates. Prior status: Tier 3 + Live Ops Hardening complete. Smoke-tested live earlier 2026-04-11: /debrief, quick-inject, intelligence signal approval, debrief recovery — all green.
+**Status:** Sheets-Sync Hardening deployed. Production revision `gianluigi-00065-8tj` (deployed via `gcloud run deploy --source .`, all 60 env vars preserved, `TMPDIR=/tmp` intact, `/health` returning 200). Live state: 64 approved tasks + 68 approved decisions in sync with Sheets, 0 drift, 2 borderline duplicate pairs explicitly kept. Prior status: Tier 3 + Live Ops Hardening complete on `gianluigi-00064-9ps`. Smoke-tested live 2026-04-11 (morning): /debrief, quick-inject, intelligence signal approval, debrief recovery. Smoke-tested live 2026-04-11 (evening): /sync end-to-end cycle (19 manual edits applied successfully), duplicate detection, defensive guards.
 
 ---
 
