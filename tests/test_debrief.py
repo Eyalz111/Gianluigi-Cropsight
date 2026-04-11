@@ -637,8 +637,15 @@ class TestInjectionPipeline:
                 assert "Debrief:" in call_kwargs.kwargs.get("title", "")
 
     @pytest.mark.asyncio
-    async def test_inject_tasks_with_dedup(self):
-        """Task injection should go through dedup."""
+    async def test_inject_tasks_direct_no_dedup(self):
+        """
+        Debrief task injection must bypass cross-meeting dedup.
+
+        Dedup was previously used here but the Haiku classifier silently
+        dropped genuinely-new tasks when it false-positive-matched them to
+        existing work (data-loss incident 2026-04-10). Debrief is CEO-authored
+        free text — trust the input and create directly.
+        """
         items = [
             {"type": "task", "title": "Follow up with Orit", "assignee": "Eyal", "priority": "H"},
         ]
@@ -651,12 +658,6 @@ class TestInjectionPipeline:
                 mock_embed.chunk_and_embed_document = AsyncMock(return_value=[])
 
                 with patch("processors.cross_reference.deduplicate_tasks") as mock_dedup:
-                    mock_dedup.return_value = {
-                        "new_tasks": [{"title": "Follow up with Orit", "assignee": "Eyal", "priority": "H"}],
-                        "duplicates": [],
-                        "updates": [],
-                    }
-
                     from processors.debrief import _inject_debrief_items
 
                     result = await _inject_debrief_items(
@@ -665,8 +666,48 @@ class TestInjectionPipeline:
                         source_date=date.today().isoformat(),
                     )
 
-                    mock_dedup.assert_called_once()
+                    # Dedup must NOT be called — we bypass it for debrief.
+                    mock_dedup.assert_not_called()
+                    # Task must be created directly.
+                    mock_db.create_task.assert_called_once()
                     assert result["counts"]["tasks"] == 1
+
+    @pytest.mark.asyncio
+    async def test_inject_promotes_approval_status(self):
+        """
+        Pseudo-meeting and child tasks must be promoted to approval_status='approved'.
+
+        Debrief bypasses the normal meeting approval flow because Eyal already
+        confirmed via the Inject button. Without this promote, T3.1's default
+        'pending' gate would hide debrief tasks from the central read helpers.
+        """
+        items = [
+            {"type": "task", "title": "Call U Bank", "assignee": "Eyal", "priority": "M"},
+        ]
+
+        with patch("processors.debrief.supabase_client") as mock_db:
+            mock_db.create_meeting.return_value = {"id": "pseudo-meeting-42"}
+            mock_db.create_task.return_value = {"id": "task-42"}
+
+            with patch("services.embeddings.embedding_service") as mock_embed:
+                mock_embed.chunk_and_embed_document = AsyncMock(return_value=[])
+
+                from processors.debrief import _inject_debrief_items
+
+                await _inject_debrief_items(
+                    session_id=None,
+                    items=items,
+                    source_date=date.today().isoformat(),
+                )
+
+                # Collect every .table(...) call on the client chain
+                table_calls = [
+                    c.args[0]
+                    for c in mock_db.client.table.call_args_list
+                ]
+                # Promote must hit meetings + at least tasks
+                assert "meetings" in table_calls
+                assert "tasks" in table_calls
 
     @pytest.mark.asyncio
     async def test_inject_gantt_updates_proposes(self):

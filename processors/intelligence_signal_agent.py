@@ -571,8 +571,40 @@ async def _submit_for_approval(
 
     from services.telegram_bot import telegram_bot
 
-    await telegram_bot.send_to_eyal(notification, parse_mode="HTML")
-    logger.info(f"Approval notification sent for {signal_id}")
+    # send_to_eyal swallows exceptions and returns False. Check the return
+    # value so a silently-failed ping doesn't vanish without a reminder.
+    sent = await telegram_bot.send_to_eyal(notification, parse_mode="HTML")
+    if not sent:
+        logger.error(
+            f"HTML approval notification failed for {signal_id}; "
+            f"retrying as plain text"
+        )
+        # Fallback: strip HTML tags so a malformed flag string can't kill the ping
+        import re
+        plain = re.sub(r"<[^>]+>", "", notification)
+        plain = (
+            f"Intelligence Signal W{week_number} ready for review.\n\n"
+            f"{plain}\n\n"
+            f"(HTML render failed — plain text fallback. "
+            f"Open {drive_link} and approve via CropSight Ops.)"
+        )
+        sent = await telegram_bot.send_to_eyal(plain, parse_mode=None)
+        if not sent:
+            logger.error(
+                f"Plain-text approval notification ALSO failed for {signal_id}. "
+                f"Approval is still in pending_approvals — reminders will retry."
+            )
+    else:
+        logger.info(f"Approval notification sent for {signal_id}")
+
+    # Schedule gentle reminder pings (same system used by meeting approvals).
+    # Without this, if the one-shot notification is missed or fails, the
+    # approval sits forever in pending_approvals with no follow-up.
+    try:
+        from guardrails.approval_flow import schedule_approval_reminders
+        schedule_approval_reminders(signal_id, "intelligence_signal")
+    except Exception as e:
+        logger.warning(f"Could not schedule approval reminders for {signal_id}: {e}")
 
 
 # ── Competitor watchlist auto-curation (Fix 3) ─────────────────────────

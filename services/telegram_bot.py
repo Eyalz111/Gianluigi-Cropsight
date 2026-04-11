@@ -29,7 +29,7 @@ import asyncio
 import logging
 from typing import Any
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -370,10 +370,42 @@ class TelegramBot:
             )
         )
 
+        # Global error handler — PTB swallows handler exceptions and logs
+        # them to its own logger, which goes to stdout and vanishes. Route
+        # them to our logger AND to supabase audit_log so we can diagnose
+        # silently-failing commands like the /debrief incident 2026-04-11.
+        self.app.add_error_handler(self._on_handler_error)
+
         # Initialize and start polling
         await self.app.initialize()
         await self.app.start()
         await self.app.updater.start_polling(drop_pending_updates=True)
+
+        # Register the command list with Telegram (setMyCommands).
+        # Without this, /commands embedded in message text render as blue
+        # links but tapping them only inserts into the composer — the user
+        # has to press Send. Registering makes them proper one-tap commands.
+        try:
+            await self.app.bot.set_my_commands([
+                BotCommand("debrief", "Start end-of-day debrief session"),
+                BotCommand("cancel", "Cancel active debrief"),
+                BotCommand("status", "Show pending approvals and system state"),
+                BotCommand("tasks", "List open tasks"),
+                BotCommand("decisions", "List recent decisions"),
+                BotCommand("questions", "List open questions"),
+                BotCommand("meetings", "List recent meetings"),
+                BotCommand("search", "Search memory"),
+                BotCommand("retract", "Retract a distributed meeting"),
+                BotCommand("reprocess", "Reprocess a meeting"),
+                BotCommand("review", "Start weekly review"),
+                BotCommand("sync", "Sync tasks from Sheets"),
+                BotCommand("emailscan", "Scan personal email for action items"),
+                BotCommand("cost", "Show API cost summary"),
+                BotCommand("help", "Show help"),
+            ])
+            logger.info("Telegram bot commands registered via setMyCommands")
+        except Exception as e:
+            logger.warning(f"Could not register bot commands: {e}")
 
         # Warn if Eyal's chat ID looks like a group (should be positive for DM)
         if self.eyal_chat_id and int(self.eyal_chat_id) < 0:
@@ -1770,46 +1802,80 @@ When you receive approval requests, use the buttons to approve, request changes,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         """Handle /debrief command — start or resume a debrief session."""
-        user = update.effective_user
-        is_eyal = str(user.id) == str(self.eyal_chat_id)
+        # Immediate ack — if anything below this raises, Eyal at least sees
+        # that the handler fired (debugging the "nothing happens" symptom
+        # reported 2026-04-11).
+        chat_id = update.effective_chat.id
+        try:
+            await self.send_message(chat_id, "Starting debrief...", parse_mode=None)
+        except Exception as ack_err:
+            logger.error(f"Debrief ack send failed: {ack_err}", exc_info=True)
 
-        if not is_eyal:
-            await self.send_message(
-                update.effective_chat.id,
-                "Only Eyal can use the debrief feature.",
+        try:
+            user = update.effective_user
+            is_eyal = str(user.id) == str(self.eyal_chat_id)
+
+            if not is_eyal:
+                await self.send_message(
+                    chat_id,
+                    "Only Eyal can use the debrief feature.",
+                )
+                return
+
+            # Session lock check — debrief can interrupt weekly review (push onto stack)
+            active = self._active_interactive_session
+            if active and active != "debrief" and active != "weekly_review":
+                await self.send_message(
+                    chat_id,
+                    f"Another interactive session ({active}) is active. "
+                    f"Finish or /cancel it first.",
+                )
+                return
+
+            if active == "weekly_review":
+                await self.send_message(
+                    chat_id,
+                    "Pausing weekly review to start debrief. "
+                    "You can resume the review when the debrief is done.",
+                    parse_mode=None,
+                )
+
+            # Surface pending approvals before debrief (wrapped — a stale DB
+            # row or a schema drift here should NOT kill the whole handler).
+            try:
+                pending = supabase_client.get_pending_approval_summary()
+                if pending:
+                    pending_note = (
+                        f"Heads up: {len(pending)} approval(s) pending. "
+                        f"Use /status to review.\n\n"
+                    )
+                    await self.send_message(chat_id, pending_note, parse_mode=None)
+            except Exception as pend_err:
+                logger.warning(f"Debrief pending-approvals preview failed: {pend_err}")
+
+            self._active_interactive_session = "debrief"
+            from processors.debrief import start_debrief
+
+            result = await start_debrief(user_id="eyal")
+            response = result.get("response", "Starting debrief...")
+            session_id = result.get("session_id")
+        except Exception as fatal:
+            logger.error(
+                f"_handle_debrief fatal error: {fatal}", exc_info=True
             )
+            # Surface the error to Eyal so we can actually see why /debrief dies.
+            try:
+                await self.send_message(
+                    chat_id,
+                    f"Debrief failed to start: `{type(fatal).__name__}: {fatal}`\n"
+                    f"Check main.py logs for the traceback.",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            # Release the session lock so we don't wedge the bot
+            self._active_interactive_session = None
             return
-
-        # Session lock check — debrief can interrupt weekly review (push onto stack)
-        active = self._active_interactive_session
-        if active and active != "debrief" and active != "weekly_review":
-            await self.send_message(
-                update.effective_chat.id,
-                f"Another interactive session ({active}) is active. "
-                f"Finish or /cancel it first.",
-            )
-            return
-
-        if active == "weekly_review":
-            await self.send_message(
-                update.effective_chat.id,
-                "Pausing weekly review to start debrief. "
-                "You can resume the review when the debrief is done.",
-                parse_mode=None,
-            )
-
-        # Surface pending approvals before debrief
-        pending = supabase_client.get_pending_approval_summary()
-        if pending:
-            pending_note = f"Heads up: {len(pending)} approval(s) pending. Use /status to review.\n\n"
-            await self.send_message(update.effective_chat.id, pending_note, parse_mode=None)
-
-        self._active_interactive_session = "debrief"
-        from processors.debrief import start_debrief
-
-        result = await start_debrief(user_id="eyal")
-        response = result.get("response", "Starting debrief...")
-        session_id = result.get("session_id")
 
         # Store session ID in context as cache
         if session_id:
@@ -2741,6 +2807,81 @@ When you receive approval requests, use the buttons to approve, request changes,
                 update.effective_chat.id,
                 "Sorry, I encountered an error processing your request."
             )
+
+    async def _on_handler_error(
+        self,
+        update: object,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """
+        Global PTB error handler.
+
+        Without this, exceptions raised inside command handlers are logged
+        only to PTB's internal logger and disappear into stdout — which is
+        why the /debrief silent failure on 2026-04-11 was invisible.
+
+        Captures the error to our logger, persists it to audit_log, and
+        DMs Eyal a short summary so he actually sees that something broke.
+        """
+        import traceback
+
+        err = context.error
+        tb_text = ""
+        if err is not None:
+            tb_text = "".join(
+                traceback.format_exception(type(err), err, err.__traceback__)
+            )
+
+        # Identify which handler/update blew up
+        update_kind = "unknown"
+        cmd_text = ""
+        try:
+            if isinstance(update, Update):
+                if update.message and update.message.text:
+                    cmd_text = update.message.text[:100]
+                    update_kind = "message"
+                elif update.callback_query:
+                    cmd_text = update.callback_query.data or ""
+                    update_kind = "callback"
+        except Exception:
+            pass
+
+        logger.error(
+            f"PTB handler error [{update_kind}] on {cmd_text!r}: "
+            f"{type(err).__name__ if err else 'None'}: {err}\n{tb_text}"
+        )
+
+        # Persist to audit_log so it's queryable from any session
+        try:
+            supabase_client.log_action(
+                action="telegram_handler_error",
+                details={
+                    "update_kind": update_kind,
+                    "trigger": cmd_text,
+                    "error_type": type(err).__name__ if err else "None",
+                    "error_msg": str(err)[:500] if err else "",
+                    "traceback": tb_text[:2000],
+                },
+                triggered_by="auto",
+            )
+        except Exception as log_err:
+            logger.error(f"Could not persist handler error to audit_log: {log_err}")
+
+        # DM Eyal a short summary so he knows something failed
+        if self.eyal_chat_id:
+            try:
+                summary = (
+                    f"Handler error on {update_kind} `{cmd_text[:60]}`:\n"
+                    f"`{type(err).__name__ if err else 'None'}: "
+                    f"{str(err)[:200] if err else ''}`"
+                )
+                await self.app.bot.send_message(
+                    chat_id=self.eyal_chat_id,
+                    text=summary,
+                    parse_mode="Markdown",
+                )
+            except Exception as dm_err:
+                logger.error(f"Could not DM Eyal about handler error: {dm_err}")
 
     async def _handle_callback_query(
         self,

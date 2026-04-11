@@ -10,7 +10,7 @@ Both share the same injection pipeline (_inject_debrief_items).
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from config.settings import settings
 from core.debrief_prompt import (
@@ -617,42 +617,19 @@ async def _inject_debrief_items(
 
         try:
             if item_type == "task":
-                # Dedup against existing tasks
-                try:
-                    from processors.cross_reference import deduplicate_tasks
-                    task_data = {
-                        "title": item.get("title", item.get("description", "")),
-                        "assignee": item.get("assignee", "Eyal"),
-                        "priority": item.get("priority", "M"),
-                        "category": item.get("category"),
-                    }
-                    dedup_result = await deduplicate_tasks(
-                        new_tasks=[task_data],
-                        meeting_id=meeting_id,
-                        transcript=f"Debrief item: {task_data.get('title', '')}",
-                    )
-                    if dedup_result.get("new_tasks"):
-                        for t in dedup_result["new_tasks"]:
-                            supabase_client.create_task(
-                                title=t.get("title", ""),
-                                assignee=t.get("assignee", "Eyal"),
-                                priority=t.get("priority", "M"),
-                                deadline=item.get("deadline"),
-                                meeting_id=meeting_id,
-                                category=t.get("category"),
-                            )
-                            counts["tasks"] += 1
-                except Exception as e:
-                    logger.warning(f"Dedup failed, creating task directly: {e}")
-                    supabase_client.create_task(
-                        title=item.get("title", item.get("description", "")),
-                        assignee=item.get("assignee", "Eyal"),
-                        priority=item.get("priority", "M"),
-                        deadline=item.get("deadline"),
-                        meeting_id=meeting_id,
-                        category=item.get("category"),
-                    )
-                    counts["tasks"] += 1
+                # Debrief/quick-inject is CEO-authored free text — trust the input
+                # and create directly. No cross-meeting dedup: Haiku false-positives
+                # would silently drop the task with no fallback (data-loss bug found
+                # 2026-04-11 on the 2026-04-10 U Bank / D&O / Yoram injection).
+                supabase_client.create_task(
+                    title=item.get("title", item.get("description", "")),
+                    assignee=item.get("assignee") or "Eyal",
+                    priority=item.get("priority", "M"),
+                    deadline=item.get("deadline"),
+                    meeting_id=meeting_id,
+                    category=item.get("category"),
+                )
+                counts["tasks"] += 1
 
             elif item_type == "decision":
                 supabase_client.create_decision(
@@ -715,6 +692,30 @@ async def _inject_debrief_items(
                 supabase_client.store_embeddings_batch(records)
         except Exception as e:
             logger.error(f"Debrief embedding failed: {e}")
+
+    # T3.1 approval gate: debrief rows inherit DB default approval_status='pending'
+    # and would be invisible to the central read helpers. Debrief is already
+    # CEO-confirmed via the Inject button, so promote the pseudo-meeting and its
+    # children to 'approved' here (debrief bypasses the normal approval flow).
+    try:
+        supabase_client.client.table("meetings").update({
+            "approval_status": "approved",
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", meeting_id).execute()
+        for child_table in ("tasks", "decisions", "open_questions", "follow_up_meetings"):
+            try:
+                supabase_client.client.table(child_table).update({
+                    "approval_status": "approved",
+                }).eq("meeting_id", meeting_id).execute()
+            except Exception as child_err:
+                logger.debug(
+                    f"Debrief approval promote skipped for {child_table}: {child_err}"
+                )
+    except Exception as promote_err:
+        logger.error(
+            f"Debrief approval promote failed for meeting {meeting_id}: {promote_err}",
+            exc_info=True,
+        )
 
     summary_parts = []
     if counts["tasks"]:
