@@ -378,13 +378,21 @@ class VideoAssembler:
             final = final.with_audio(audio_clip)
 
             # Pass 1: MoviePy compositing
+            # MoviePy creates an internal temp audio file (<output>TEMP_MPY_wvf_snd.<ext>)
+            # and in some versions writes it to the process cwd instead of the
+            # output dir. On Cloud Run cwd is read-only outside /tmp, which causes
+            # "Permission denied" failures (W15 incident, 2026-04-09). Pin the
+            # temp file inside tmp_dir explicitly.
             moviepy_output = os.path.join(tmp_dir, "moviepy_raw.mp4")
+            moviepy_temp_audio = os.path.join(tmp_dir, "moviepy_temp_audio.m4a")
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
                 lambda: final.write_videofile(
                     moviepy_output, fps=fps, codec="libx264",
                     audio_codec="aac", logger=None,
+                    temp_audiofile=moviepy_temp_audio,
+                    remove_temp=True,
                 ),
             )
 
@@ -680,8 +688,11 @@ class VideoAssembler:
                 video_clips, method="compose", padding=-0.3
             )
 
-            # Pass 1: MoviePy compositing (let it use its own defaults)
+            # Pass 1: MoviePy compositing
+            # Pin MoviePy's internal temp audio file inside tmp_dir — see
+            # _assemble_video for the Cloud Run cwd permission rationale.
             moviepy_output = os.path.join(tmp_dir, "moviepy_raw.mp4")
+            moviepy_temp_audio = os.path.join(tmp_dir, "moviepy_temp_audio.m4a")
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
@@ -691,6 +702,8 @@ class VideoAssembler:
                     codec="libx264",
                     audio_codec="aac",
                     logger=None,
+                    temp_audiofile=moviepy_temp_audio,
+                    remove_temp=True,
                 ),
             )
 
