@@ -133,6 +133,18 @@ async def main():
                         help="Run Haiku decision label backfill before rebuild")
     parser.add_argument("--skip-backup", action="store_true",
                         help="Skip the backup step")
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help=(
+            "Explicit opt-in to clear-and-rewrite the sheet even when the "
+            "fetched list is empty. Without this flag the rebuild refuses "
+            "to wipe a populated sheet on an empty fetch, which is the "
+            "safety net against silent Supabase read failures. Use when "
+            "you genuinely intend to render an empty sheet "
+            "(e.g. resetting a test environment)."
+        ),
+    )
     args = parser.parse_args()
 
     from services.supabase_client import supabase_client
@@ -178,11 +190,21 @@ async def main():
     try:
         tasks = supabase_client.get_tasks(limit=10000)
         logger.info(f"Fetched {len(tasks)} tasks from Supabase")
-        ok = await sheets_service.rebuild_tasks_sheet(tasks)
-        if ok:
-            logger.info("Tasks sheet rebuilt successfully")
+        if not tasks and not args.allow_empty:
+            logger.error(
+                "Fetched 0 tasks. The rebuild guard will refuse this. "
+                "If this is expected (e.g. you really want to clear the sheet), "
+                "re-run with --allow-empty. Otherwise investigate the upstream "
+                "query before proceeding."
+            )
         else:
-            logger.error("Tasks sheet rebuild failed")
+            ok = await sheets_service.rebuild_tasks_sheet(
+                tasks, force_empty=args.allow_empty
+            )
+            if ok:
+                logger.info("Tasks sheet rebuilt successfully")
+            else:
+                logger.error("Tasks sheet rebuild failed")
     except Exception as e:
         logger.error(f"Tasks rebuild error: {e}")
 
@@ -191,11 +213,19 @@ async def main():
     try:
         decisions = supabase_client.list_decisions(limit=10000)
         logger.info(f"Fetched {len(decisions)} decisions from Supabase")
-        ok = await sheets_service.rebuild_decisions_sheet(decisions)
-        if ok:
-            logger.info("Decisions sheet rebuilt successfully")
+        if not decisions and not args.allow_empty:
+            logger.error(
+                "Fetched 0 decisions. The rebuild guard will refuse this. "
+                "Re-run with --allow-empty if this is really intended."
+            )
         else:
-            logger.error("Decisions sheet rebuild failed")
+            ok = await sheets_service.rebuild_decisions_sheet(
+                decisions, force_empty=args.allow_empty
+            )
+            if ok:
+                logger.info("Decisions sheet rebuilt successfully")
+            else:
+                logger.error("Decisions sheet rebuild failed")
     except Exception as e:
         logger.error(f"Decisions rebuild error: {e}")
 
