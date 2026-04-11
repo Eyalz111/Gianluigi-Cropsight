@@ -192,19 +192,35 @@ def _detect_duplicate_tasks(tasks: list[dict]) -> list[dict]:
     if len(open_tasks) < 2:
         return []
 
-    stop_words = {"the", "a", "an", "to", "for", "and", "or", "of", "in", "on", "is", "it", "we", "with", "from"}
+    # Stop words tuned after the 2026-04-11 live audit: generic English +
+    # scheduling filler. Without "schedule:", "meeting", "session" most
+    # false-positive pairs were two unrelated "Schedule: X" tasks sharing
+    # those three tokens as their entire common vocabulary.
+    stop_words = {
+        "the", "a", "an", "to", "for", "and", "or", "of", "in", "on", "is",
+        "it", "we", "with", "from", "by", "at",
+        # scheduling filler
+        "schedule", "schedule:", "meeting", "meetings", "session", "sessions",
+        "call", "sync",
+    }
+    import re
+
+    def _words(title: str) -> set[str]:
+        lowered = (title or "").lower()
+        # Strip punctuation so "schedule:" and "schedule" collapse to one token
+        cleaned = re.sub(r"[^a-z0-9 ]", " ", lowered)
+        return set(cleaned.split()) - stop_words
+
     duplicates = []
     seen_pairs = set()
 
     for i, a in enumerate(open_tasks):
-        title_a = (a.get("title") or "").lower()
-        words_a = set(title_a.split()) - stop_words
+        words_a = _words(a.get("title", ""))
         if len(words_a) < 3:
             continue
 
         for b in open_tasks[i + 1:]:
-            title_b = (b.get("title") or "").lower()
-            words_b = set(title_b.split()) - stop_words
+            words_b = _words(b.get("title", ""))
             if len(words_b) < 3:
                 continue
 
@@ -483,10 +499,24 @@ def format_sync_summary(diff: dict) -> str:
             details.append(f"{len(d['sheets_only'])} new")
         parts.append(f"Decisions: {', '.join(details)}")
 
-    # Duplicate detection
+    # Duplicate detection — surface an actionable list, not just a count.
+    # 2026-04-11: prior version only showed a count, which was easy to
+    # dismiss and did not tell Eyal which rows to act on.
     dupes = t.get("potential_duplicates", [])
     if dupes:
-        parts.append(f"Potential duplicates: {len(dupes)} task pairs")
+        dup_lines = [f"Potential duplicates ({len(dupes)} pair{'s' if len(dupes) != 1 else ''}):"]
+        for dup in dupes[:5]:
+            a = dup["task_a"]
+            b = dup["task_b"]
+            dup_lines.append(
+                f"   ↳ {a['title'][:55]} ({a['assignee']})"
+            )
+            dup_lines.append(
+                f"      ↔ {b['title'][:55]} ({b['assignee']})"
+            )
+        if len(dupes) > 5:
+            dup_lines.append(f"   ... and {len(dupes) - 5} more")
+        parts.append("\n  ".join(dup_lines))
 
     if not parts:
         return ""

@@ -58,10 +58,34 @@ async def deduplicate_tasks(
     if not new_tasks:
         return result
 
-    # Fetch all open tasks from Supabase
-    pending = supabase_client.get_tasks(status="pending")
-    in_progress = supabase_client.get_tasks(status="in_progress")
-    existing_tasks = pending + in_progress
+    # Fetch existing tasks. Compare against open (pending/in_progress) PLUS
+    # tasks completed in the last 30 days — the 2026-04-11 audit found that
+    # excluding `done` tasks let re-mentioned work reappear as a fresh
+    # duplicate (e.g. a meeting rehashes a task that was closed last week).
+    # Including recent `done` tasks lets Haiku classify them as UPDATE
+    # (status change implied) instead of NEW.
+    from datetime import datetime, timedelta, timezone
+    pending = supabase_client.get_tasks(status="pending", limit=500)
+    in_progress = supabase_client.get_tasks(status="in_progress", limit=500)
+    recently_done = []
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        done_query = (
+            supabase_client.client.table("tasks")
+            .select("*, meetings(title, date)")
+            .eq("status", "done")
+            .eq("approval_status", "approved")
+            .gte("updated_at", cutoff)
+            .order("updated_at", desc=True)
+            .limit(100)
+            .execute()
+        )
+        recently_done = done_query.data or []
+    except Exception as e:
+        # updated_at column may not exist in older schemas — fail soft
+        logger.warning(f"deduplicate_tasks: could not fetch recently-done tasks ({e}), "
+                       f"falling back to open-only comparison")
+    existing_tasks = pending + in_progress + recently_done
 
     if not existing_tasks:
         # No existing tasks to compare against — all are new
@@ -89,7 +113,7 @@ async def deduplicate_tasks(
 
     prompt = f"""You are analyzing meeting tasks for a startup founding team. These are high-level strategic tasks, not granular work items.
 
-EXISTING OPEN TASKS:
+EXISTING TASKS (open + recently completed in last 30 days):
 {chr(10).join(existing_lines)}
 
 NEWLY EXTRACTED TASKS FROM THIS MEETING:
@@ -100,7 +124,17 @@ For each new task, classify:
 - UPDATE of #N — same task, but conversation implies a status change. Specify new_status and evidence.
 - NEW — genuinely new task not in the existing list.
 
-Be CONSERVATIVE: only classify as DUPLICATE/UPDATE when clearly the same underlying work. Different tasks for the same person in the same category are NOT duplicates.
+RULES:
+- Be CONSERVATIVE: only classify as DUPLICATE/UPDATE when clearly the same underlying work.
+- Different tasks for the same person in the same category are NOT duplicates by default.
+- EXCEPTION — scheduling tasks: if a new task is "Schedule: X meeting/session/call"
+  and an existing task (any assignee) is another "Schedule: X" for the SAME event
+  (same subject + same approximate timing), classify as DUPLICATE even if the
+  wording differs. Two people scheduling the same meeting is one task, not two.
+- If an existing task in the list has status "done" and the new task references
+  the same work without implying a reopen, classify as DUPLICATE (the work is
+  already captured). Only classify as UPDATE when the transcript makes a status
+  change explicit.
 
 Return JSON:
 {{"classifications": [{{"new_task_index": "A", "type": "DUPLICATE|UPDATE|NEW", "existing_task_id": "abc or null", "new_status": "done|in_progress|null", "evidence": "quote or null", "reason": "why this classification"}}]}}"""

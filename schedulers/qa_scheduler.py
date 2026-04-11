@@ -63,6 +63,7 @@ def run_qa_check() -> dict:
     report["checks"]["rejected_meetings"] = _check_rejected_meetings(report["issues"])
     report["checks"]["approved_with_pending_children"] = _check_approved_meetings_with_pending_children(report["issues"])
     report["checks"]["rls_coverage"] = _check_rls_coverage(report["issues"])
+    report["checks"]["duplicate_tasks"] = _check_duplicate_tasks(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -447,6 +448,54 @@ def _check_approved_meetings_with_pending_children(issues: list[str]) -> dict:
     except Exception as e:
         logger.error(f"_check_approved_meetings_with_pending_children failed: {e}")
         issues.append(f"QA safety-net scan (approved_with_pending_children) failed: {e}")
+
+    return result
+
+
+def _check_duplicate_tasks(issues: list[str]) -> dict:
+    """
+    Daily scan for potential duplicate tasks.
+
+    Wraps the fuzzy detector in processors.sheets_sync so the morning brief
+    always carries an up-to-date list even when no /sync has been run.
+    Added 2026-04-11 after duplicates were only surfaced through the sync
+    path, which had been silently broken for days.
+
+    Each pair surfaced as an issue includes both task IDs so Eyal can act
+    on them directly (e.g. via an MCP update_task call) without hunting
+    through the sheet.
+    """
+    result = {"pairs_found": 0, "sample": []}
+
+    try:
+        from processors.sheets_sync import _detect_duplicate_tasks
+
+        tasks = supabase_client.get_tasks(limit=10000)
+        pairs = _detect_duplicate_tasks(tasks)
+        result["pairs_found"] = len(pairs)
+        # Small snapshot in the report so the JSON stays self-contained
+        for dup in pairs[:5]:
+            result["sample"].append({
+                "a_id": dup["task_a"]["id"],
+                "a_title": dup["task_a"]["title"][:60],
+                "b_id": dup["task_b"]["id"],
+                "b_title": dup["task_b"]["title"][:60],
+            })
+
+        if pairs:
+            # Keep the issue line short — full detail is in result["sample"].
+            # ASCII-only to avoid issues on any log backend that defaults to
+            # cp1252 or similar (the '<->' was unicode in an earlier draft).
+            issues.append(
+                f"Potential duplicate tasks: {len(pairs)} open-task pair(s) flagged. "
+                f"Example: '{pairs[0]['task_a']['title'][:50]}' <-> "
+                f"'{pairs[0]['task_b']['title'][:50]}'. "
+                f"Run /sync for the full list."
+            )
+
+    except Exception as e:
+        logger.warning(f"Duplicate task check failed: {e}")
+        issues.append(f"Duplicate task check failed: {e}")
 
     return result
 

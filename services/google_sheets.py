@@ -528,22 +528,11 @@ class GoogleSheetsService:
             logger.error(f"Error updating task status: {e}")
             return False
 
-    async def find_task_row(self, title: str) -> int | None:
-        """
-        Find the row number of a task in the Task Tracker by title.
-
-        Args:
-            title: Task title to search for (case-insensitive partial match).
-
-        Returns:
-            Row number if found, None otherwise.
-        """
-        all_tasks = await self.get_all_tasks()
-        title_lower = title.lower()
-        for task in all_tasks:
-            if title_lower in task.get("task", "").lower():
-                return task["row_number"]
-        return None
+    # NOTE: a second find_task_row() definition lives below at line ~898 and
+    # is the one Python actually exposes (the later definition wins). The
+    # earlier copy that lived here was dead code and was deleted in the
+    # 2026-04-11 sheets-sync hardening pass. If you need to call it, see the
+    # canonical definition further down in this file.
 
     async def update_task_row(
         self,
@@ -617,9 +606,15 @@ class GoogleSheetsService:
             logger.warning("TASK_TRACKER_SHEET_ID not configured")
             return []
 
+        # MUST include the tab name. A bare "A:I" range is resolved by the
+        # Sheets API against whichever sheet sits at index 0, which silently
+        # breaks the moment any other tab (e.g. a backup created by
+        # rebuild_sheets.py or duplicateSheet) lands in front of "Tasks".
+        # See regression test test_get_all_tasks_uses_explicit_tab_name.
+        tab_name = settings.TASK_TRACKER_TAB_NAME or "Tasks"
         rows = await self._read_sheet_range(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            range_name="A:I"
+            range_name=f"'{tab_name}'!A:I"
         )
 
         if not rows or len(rows) < 2:
@@ -743,7 +738,9 @@ class GoogleSheetsService:
             logger.error(f"Error archiving tasks: {e}")
             return 0
 
-    async def rebuild_tasks_sheet(self, tasks_from_db: list[dict]) -> bool:
+    async def rebuild_tasks_sheet(
+        self, tasks_from_db: list[dict], force_empty: bool = False
+    ) -> bool:
         """
         Rebuild the Tasks sheet from Supabase data.
 
@@ -753,11 +750,38 @@ class GoogleSheetsService:
 
         Args:
             tasks_from_db: List of task dicts from Supabase.
+            force_empty: When False (default), refuse to clear the sheet if
+                tasks_from_db is empty — this prevents an upstream Supabase
+                read error (which silently returns []) from wiping the live
+                sheet. The 2026-04 incidents that lost the Tasks sheet trace
+                back to this exact failure mode. Set to True only when you
+                genuinely intend to render an empty Tasks sheet (e.g. a
+                deliberate reset script).
 
         Returns:
             True if rebuild was successful.
         """
         if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+
+        # Defensive guard: refuse to wipe a populated sheet with no data.
+        # This is the safety net for the "Sheets vanished" incidents.
+        if not tasks_from_db and not force_empty:
+            logger.error(
+                "rebuild_tasks_sheet refused: tasks_from_db is empty and "
+                "force_empty=False. This usually means an upstream Supabase "
+                "read failed silently. Investigate before re-running with "
+                "force_empty=True."
+            )
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.log_action(
+                    action="sheets_rebuild_refused_empty",
+                    details={"sheet": "Tasks"},
+                    triggered_by="system",
+                )
+            except Exception as log_err:
+                logger.error(f"Could not audit-log refusal: {log_err}")
             return False
 
         try:
@@ -819,6 +843,18 @@ class GoogleSheetsService:
 
             logger.info(f"Rebuilt Tasks sheet: {len(sorted_tasks)} tasks written")
 
+            # Audit-log every clear-and-rewrite so future incidents can be
+            # diff'd against the audit_log timeline.
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.log_action(
+                    action="sheets_rebuild_tasks",
+                    details={"row_count": len(sorted_tasks)},
+                    triggered_by="system",
+                )
+            except Exception as log_err:
+                logger.warning(f"Could not audit-log rebuild: {log_err}")
+
             # Apply formatting
             await self.format_task_tracker()
 
@@ -828,17 +864,39 @@ class GoogleSheetsService:
             logger.error(f"Error rebuilding Tasks sheet: {e}")
             return False
 
-    async def rebuild_decisions_sheet(self, decisions_from_db: list[dict]) -> bool:
+    async def rebuild_decisions_sheet(
+        self, decisions_from_db: list[dict], force_empty: bool = False
+    ) -> bool:
         """
         Rebuild the Decisions sheet from Supabase data.
 
         Args:
             decisions_from_db: List of decision dicts from Supabase.
+            force_empty: When False (default), refuse to clear the sheet if
+                decisions_from_db is empty. Mirrors rebuild_tasks_sheet's
+                guard against silent Supabase read failures wiping live data.
 
         Returns:
             True if rebuild was successful.
         """
         if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+
+        if not decisions_from_db and not force_empty:
+            logger.error(
+                "rebuild_decisions_sheet refused: decisions_from_db is empty "
+                "and force_empty=False. Investigate before re-running with "
+                "force_empty=True."
+            )
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.log_action(
+                    action="sheets_rebuild_refused_empty",
+                    details={"sheet": "Decisions"},
+                    triggered_by="system",
+                )
+            except Exception as log_err:
+                logger.error(f"Could not audit-log refusal: {log_err}")
             return False
 
         try:
@@ -889,6 +947,17 @@ class GoogleSheetsService:
             ).execute()
 
             logger.info(f"Rebuilt Decisions sheet: {len(sorted_decisions)} decisions written")
+
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.log_action(
+                    action="sheets_rebuild_decisions",
+                    details={"row_count": len(sorted_decisions)},
+                    triggered_by="system",
+                )
+            except Exception as log_err:
+                logger.warning(f"Could not audit-log rebuild: {log_err}")
+
             return True
 
         except Exception as e:
@@ -2005,16 +2074,18 @@ class GoogleSheetsService:
             return False
 
         try:
+            # Same bare-range hazard as get_all_tasks(): qualify with the tab.
+            tab_name = settings.TASK_TRACKER_TAB_NAME or "Tasks"
             rows = await self._read_sheet_range(
                 sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                range_name="A1:I1"
+                range_name=f"'{tab_name}'!A1:I1"
             )
 
             if not rows:
                 # Add headers
                 await self._write_sheet_range(
                     sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                    range_name="A1:I1",
+                    range_name=f"'{tab_name}'!A1:I1",
                     values=[TASK_TRACKER_HEADERS]
                 )
                 logger.info("Created Task Tracker headers")

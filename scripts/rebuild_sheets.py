@@ -172,9 +172,11 @@ async def main():
         logger.info("\n=== Step 2: Label backfill skipped (use --backfill-labels) ===")
 
     # Step 3: Rebuild Tasks sheet
+    # NOTE: limit=10000 to match approval_flow.py and cleanup_rejected_meetings.py.
+    # The default limit=100 silently truncates once total approved tasks crosses 100.
     logger.info("\n=== Step 3: Rebuilding Tasks sheet ===")
     try:
-        tasks = supabase_client.get_tasks()
+        tasks = supabase_client.get_tasks(limit=10000)
         logger.info(f"Fetched {len(tasks)} tasks from Supabase")
         ok = await sheets_service.rebuild_tasks_sheet(tasks)
         if ok:
@@ -187,7 +189,7 @@ async def main():
     # Step 4: Rebuild Decisions sheet
     logger.info("\n=== Step 4: Rebuilding Decisions sheet ===")
     try:
-        decisions = supabase_client.list_decisions()
+        decisions = supabase_client.list_decisions(limit=10000)
         logger.info(f"Fetched {len(decisions)} decisions from Supabase")
         ok = await sheets_service.rebuild_decisions_sheet(decisions)
         if ok:
