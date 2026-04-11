@@ -1,7 +1,29 @@
 # Cloud Build configuration for Gianluigi
-# Usage: gcloud builds submit --config cloudbuild.yaml .
 #
-# Prerequisites:
+# !!! DO NOT USE THIS CONFIG FOR ROUTINE DEPLOYS !!!
+#
+# The canonical deploy command on this project is:
+#
+#   gcloud run deploy gianluigi --source . --region=europe-west1
+#
+# This is a source-based deploy that rebuilds the image and updates the
+# Cloud Run revision WITHOUT touching env vars or secrets. All 60+ env
+# vars currently on the live revision (gianluigi-00064-9ps) are plain
+# values set directly on the template — there are zero Secret Manager
+# bindings. This cloudbuild.yaml still references gcr.io/ paths and
+# --set-secrets bindings that do not match prod; running it would wipe
+# env vars and break the service.
+#
+# Kept only as reference. If you need to re-enable this path, first:
+#   1. Move all 60 env vars from the live revision into --set-secrets
+#      (or --update-env-vars entries) in the order below.
+#   2. Update the image path from gcr.io/ to
+#      europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/
+#   3. Flip ENVIRONMENT from 'staging' to 'production' to match prod.
+#
+# Original usage (kept for history): gcloud builds submit --config cloudbuild.yaml .
+#
+# Prerequisites (if ever re-enabled):
 # 1. Enable Cloud Build, Cloud Run, and Container Registry APIs
 # 2. Create secrets in GCP Secret Manager (see docs/deployment.md)
 # 3. Grant Cloud Build service account permission to deploy to Cloud Run
