@@ -1043,20 +1043,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         """
         user = update.effective_user
         welcome_message = (
-            f"Hello {_escape_html(user.first_name)}! I'm <b>Gianluigi</b>, "
-            f"CropSight's AI operations assistant.\n\n"
-            f"I help the team by:\n"
-            f"- Processing meeting transcripts\n"
-            f"- Tracking tasks and decisions\n"
-            f"- Answering questions about past discussions\n"
-            f"- Preparing meeting briefs\n\n"
-            f"<b>Available commands:</b>\n"
-            f"/help - Show all commands\n"
-            f"/tasks - Show your open tasks\n"
-            f"/search [topic] - Search meeting history\n"
-            f"/decisions - List recent decisions\n"
-            f"/questions - List open questions\n\n"
-            f"Or just send me a question and I'll search our meeting history to answer it!"
+            f"Hi {_escape_html(user.first_name)} — I'm <b>Gianluigi</b>, "
+            f"CropSight's operations assistant. "
+            f"Ask me anything or type /help for commands."
         )
         await self.send_message(update.effective_chat.id, welcome_message, parse_mode="HTML")
 
@@ -1198,14 +1187,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             for i, m in enumerate(meetings, 1):
                 title = _escape_html(m.get("title", "Untitled"))
                 date = m.get("date", "")[:10]
-                participants = m.get("participants", [])
-                p_count = len(participants) if participants else 0
-                status = m.get("approval_status", "unknown")
-
-                lines.append(
-                    f"<b>{i}.</b> {title}\n"
-                    f"   {date} | {p_count} participants | {status}"
-                )
+                lines.append(f"  {i}. {title} ({date})")
 
             await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
@@ -1289,25 +1271,24 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             env = _settings.ENVIRONMENT
 
             lines = [
-                "<b>Gianluigi Status</b>\n",
-                f"Meetings processed: {meetings_count}",
-                f"Last processing: {last_date}",
-                f"Documents ingested: {docs_count}",
-                f"Tasks tracked: {total_tasks}",
-                f"Open tasks: {open_tasks} | Overdue: {overdue_tasks}",
-                f"Open commitments: {open_c} | Stale (2+ weeks): {stale_c}",
-                f"Monthly tokens: {total_tokens:,}",
-                f"Environment: {env}",
+                "<b>System snapshot</b>\n",
+                f"{meetings_count} meetings processed, last: {last_date}. "
+                f"{total_tasks} tasks tracked — {open_tasks} open, {overdue_tasks} overdue. "
+                f"{docs_count} documents ingested.",
+                f"\nMonthly API usage: {total_tokens:,} tokens. Environment: {env}.",
             ]
 
+            if open_c:
+                stale_note = f", {stale_c} stale" if stale_c else ""
+                lines.append(f"{open_c} open commitments{stale_note}.")
+
             if pending_approvals:
-                lines.append(f"\n<b>Pending Approvals ({len(pending_approvals)}):</b>")
+                pa_descs = []
                 for pa in pending_approvals:
                     ct = pa.get("content_type", "unknown").replace("_", " ")
                     created = pa.get("created_at", "")[:16].replace("T", " ")
-                    expires = pa.get("expires_at")
-                    exp_str = f" (expires {expires[:16].replace('T', ' ')})" if expires else ""
-                    lines.append(f"  - {ct}: {pa.get('approval_id', '')[:8]}... ({created}){exp_str}")
+                    pa_descs.append(f"{ct} ({created})")
+                lines.append(f"\n{len(pending_approvals)} pending approval(s): {', '.join(pa_descs)}.")
             else:
                 lines.append("\nNo pending approvals.")
 
@@ -1315,7 +1296,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             try:
                 prep_outlines = supabase_client.get_pending_prep_outlines()
                 if prep_outlines:
-                    lines.append(f"\n<b>Pending Prep Outlines ({len(prep_outlines)}):</b>")
+                    po_names = []
                     for po in prep_outlines:
                         content = po.get("content", {})
                         event = content.get("outline", {}).get("event", content.get("event", {}))
@@ -1326,10 +1307,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                             try:
                                 pdt = datetime.fromisoformat(pstart.replace("Z", "+00:00"))
                                 hours_left = (pdt - datetime.now(pdt.tzinfo)).total_seconds() / 3600
-                                time_info = f" ({hours_left:.0f}h until meeting)"
+                                time_info = f" ({hours_left:.0f}h)"
                             except (ValueError, TypeError):
                                 pass
-                        lines.append(f"  - {ptitle}{time_info}")
+                        po_names.append(f"{ptitle}{time_info}")
+                    lines.append(f"\n{len(prep_outlines)} pending prep(s): {', '.join(po_names)}.")
             except Exception:
                 pass
 
@@ -1340,12 +1322,14 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     rw = review_session.get("week_number", 0)
                     rs = review_session.get("status", "unknown")
                     rpart = review_session.get("current_part", 0)
-                    lines.append(f"\n<b>Weekly Review:</b>")
-                    lines.append(f"  W{rw} — {rs} (part {rpart})")
+                    lines.append(f"Weekly review W{rw}: {rs} (part {rpart}).")
             except Exception:
                 pass
 
-            # T2.1 — Transcript watcher heartbeat
+            # Health summary — collect into one block
+            health_parts = []
+
+            # Transcript watcher heartbeat
             try:
                 heartbeats = supabase_client.get_scheduler_heartbeats()
                 watcher_hb = next(
@@ -1353,30 +1337,29 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     None,
                 )
                 if watcher_hb:
-                    last_beat = str(watcher_hb.get("last_heartbeat", ""))[:19].replace("T", " ")
                     hb_status = watcher_hb.get("status", "unknown")
-                    lines.append(f"\n<b>Transcript Watcher:</b> {hb_status} (last: {last_beat})")
+                    if hb_status in ("ok", "healthy"):
+                        health_parts.append("Transcript watcher healthy")
+                    else:
+                        health_parts.append(f"Transcript watcher: {hb_status}")
                 else:
-                    lines.append("\n<b>Transcript Watcher:</b> no heartbeat yet")
+                    health_parts.append("Transcript watcher: no heartbeat")
             except Exception:
                 pass
 
-            # T2.1 — Rejected meetings (should always be 0 after Tier 1)
+            # Rejected meetings
             try:
                 rejected_meetings = supabase_client.list_meetings(
                     approval_status="rejected", limit=10
                 )
                 if rejected_meetings:
-                    lines.append(
-                        f"\n<b>Rejected meetings with orphan data:</b> {len(rejected_meetings)} "
-                        f"(run scripts/cleanup_rejected_meetings.py)"
+                    health_parts.append(
+                        f"{len(rejected_meetings)} rejected meetings with orphan data"
                     )
-                else:
-                    lines.append("\n<b>Rejected meetings:</b> 0 (clean)")
             except Exception:
                 pass
 
-            # T2.1 — Errors in last 24h from audit_log
+            # Errors in last 24h
             try:
                 from datetime import datetime as _dt, timedelta as _td
                 yesterday = (_dt.now() - _td(days=1)).isoformat()
@@ -1395,19 +1378,14 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 )
                 errors = errors_result.data or []
                 if errors:
-                    lines.append(f"\n<b>Errors (24h):</b> {len(errors)}")
-                    for err in errors[:3]:
-                        action = err.get("action", "")
-                        details = err.get("details", {})
-                        if isinstance(details, dict):
-                            msg = str(details.get("error", details.get("message", "")))[:60]
-                        else:
-                            msg = str(details)[:60]
-                        lines.append(f"  - {action}: {msg}")
+                    health_parts.append(f"{len(errors)} errors in 24h")
                 else:
-                    lines.append("\n<b>Errors (24h):</b> 0")
+                    health_parts.append("No errors in 24h")
             except Exception:
                 pass
+
+            if health_parts:
+                lines.append(f"\n{'. '.join(health_parts)}.")
 
             await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
@@ -1452,34 +1430,16 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         Lists available commands and how to interact.
         """
         help_message = (
-            "<b>Gianluigi - Help</b>\n\n"
-            "<b>Commands:</b>\n"
-            "/start - Welcome message\n"
-            "/help - This help message\n"
-            "/tasks - Show your open tasks\n"
-            "/mytasks - Same as /tasks\n"
-            "/search [query] - Search meetings and documents\n"
-            "/search -m [query] - Search meetings only\n"
-            "/search -d [query] - Search documents only\n"
-            "/meetings - List recent meetings\n"
-            "/meetings [title] - Search meetings by title\n"
-            "/decisions - List recent key decisions\n"
-            "/questions - List open questions\n"
-            "/reprocess [title] - Reprocess a transcript (Eyal only)\n"
-            "/debrief - Start end-of-day debrief (Eyal only)\n"
-            "/cancel - Cancel active debrief (Eyal only)\n"
-            "/emailscan - Trigger email scan + morning brief (Eyal only)\n"
-            "/cost - API token usage summary (Eyal only)\n"
-            "/status - System dashboard (Eyal only)\n\n"
-            "<b>Ask Questions:</b>\n"
-            "Just type your question and I'll search our meeting history to answer it.\n\n"
-            "Examples:\n"
-            '- "What did we decide about cloud providers?"\n'
-            '- "What are Roye\'s pending tasks?"\n'
-            '- "Summarize last week\'s meetings"\n\n'
-            "<b>For Eyal:</b>\n"
-            "When you receive approval requests, use the buttons to approve, "
-            "request changes, or reject. You can also reply with edit instructions."
+            "<b>Commands</b>\n\n"
+            "Ask a question — just type it, no command needed\n"
+            "/tasks — your open tasks\n"
+            "/decisions — recent decisions\n"
+            "/search [topic] — search meetings and docs\n"
+            "/meetings — recent meetings\n"
+            "/debrief — end-of-day capture\n"
+            "/status — system dashboard\n"
+            "/sync — sync Sheets changes\n"
+            "/cost — API usage"
         )
         await self.send_message(update.effective_chat.id, help_message, parse_mode="HTML")
 
@@ -1511,24 +1471,52 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             tasks = supabase_client.get_tasks(status="pending")
 
         if not tasks:
-            message = "No open tasks found."
-            await self.send_message(update.effective_chat.id, message)
-        else:
-            message = "<b>Open Tasks:</b>\n\n"
-            for i, task in enumerate(tasks[:10], 1):
-                priority = task.get("priority", "M")
-                priority_indicator = {"H": "!!", "M": "", "L": "~"}.get(priority, "")
-                deadline = task.get("deadline", "No deadline")
-                assignee = _escape_html(task.get("assignee", "Unassigned"))
+            await self.send_message(update.effective_chat.id, "No open tasks found.")
+            return
+
+        # Check for "all" arg to show full list
+        show_all = context.args and context.args[0].lower() == "all"
+        display_limit = len(tasks) if show_all else 5
+
+        # Count overdue
+        overdue = [t for t in tasks if t.get("status") == "overdue" or t.get("_overdue")]
+        total = len(tasks)
+        overdue_count = len(overdue)
+
+        if total <= 5:
+            # Prose format for small lists
+            parts = [f"You have {total} open task{'s' if total != 1 else ''}."]
+            for task in tasks:
                 title = _escape_html(task.get("title", "Untitled"))
+                assignee = _escape_html(task.get("assignee", "Unassigned"))
+                deadline = task.get("deadline", "")
+                deadline_str = f" — due {deadline}" if deadline else ""
+                parts.append(f"  • <b>{title}</b> ({assignee}){deadline_str}")
+            message = "\n".join(parts)
+        else:
+            # Compact list with overflow
+            header = f"{total} open tasks"
+            if overdue_count:
+                header += f", {overdue_count} overdue"
+            lines = [header + ".\n"]
+            for i, task in enumerate(tasks[:display_limit], 1):
+                priority = task.get("priority", "M")
+                indicator = {"H": "!! ", "M": "", "L": "~ "}.get(priority, "")
+                title = _escape_html(task.get("title", "Untitled"))
+                assignee = _escape_html(task.get("assignee", ""))
+                deadline = task.get("deadline", "")
+                suffix_parts = []
+                if assignee:
+                    suffix_parts.append(assignee)
+                if deadline:
+                    suffix_parts.append(f"due {deadline}")
+                suffix = f" — {', '.join(suffix_parts)}" if suffix_parts else ""
+                lines.append(f"  {i}. {indicator}{title}{suffix}")
+            if total > display_limit:
+                lines.append(f"\n<i>...and {total - display_limit} more — /tasks all to see them</i>")
+            message = "\n".join(lines)
 
-                message += f"{i}. {priority_indicator}{title}\n"
-                message += f"   Assignee: {assignee} | Due: {deadline}\n\n"
-
-            if len(tasks) > 10:
-                message += f"\n<i>...and {len(tasks) - 10} more tasks</i>"
-
-            await self.send_message(update.effective_chat.id, message, parse_mode="HTML")
+        await self.send_message(update.effective_chat.id, message, parse_mode="HTML")
 
     async def _handle_search(
         self,
@@ -1659,16 +1647,16 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         decisions = supabase_client.list_decisions()[:10]
 
         if not decisions:
-            message = "No decisions recorded yet."
-            await self.send_message(update.effective_chat.id, message)
+            await self.send_message(update.effective_chat.id, "No decisions recorded yet.")
         else:
-            message = "<b>Recent Decisions:</b>\n\n"
+            total = len(decisions)
+            lines = [f"{total} recent decision{'s' if total != 1 else ''}.\n"]
             for i, decision in enumerate(decisions, 1):
                 desc = _escape_html(decision.get("description", ""))[:100]
                 timestamp = decision.get("transcript_timestamp", "")
-                message += f"{i}. {desc}\n   <i>(ref: ~{timestamp})</i>\n\n"
-
-            await self.send_message(update.effective_chat.id, message, parse_mode="HTML")
+                ref = f" <i>(ref: ~{timestamp})</i>" if timestamp else ""
+                lines.append(f"  {i}. {desc}{ref}")
+            await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
     async def _handle_questions(
         self,
@@ -1685,16 +1673,15 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         questions = supabase_client.list_open_questions(status="open")[:10]
 
         if not questions:
-            message = "No open questions at the moment."
-            await self.send_message(update.effective_chat.id, message)
+            await self.send_message(update.effective_chat.id, "No open questions at the moment.")
         else:
-            message = "<b>Open Questions:</b>\n\n"
+            total = len(questions)
+            lines = [f"{total} open question{'s' if total != 1 else ''}.\n"]
             for i, q in enumerate(questions, 1):
                 question = _escape_html(q.get("question", ""))[:100]
                 raised_by = _escape_html(q.get("raised_by", "Unknown"))
-                message += f"{i}. {question}\n   <i>Raised by: {raised_by}</i>\n\n"
-
-            await self.send_message(update.effective_chat.id, message, parse_mode="HTML")
+                lines.append(f"  {i}. {question} <i>({raised_by})</i>")
+            await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
     async def _handle_retract(
         self,

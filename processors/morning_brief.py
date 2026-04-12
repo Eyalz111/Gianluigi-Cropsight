@@ -444,206 +444,200 @@ async def compile_morning_brief() -> dict:
 
 def format_morning_brief(brief: dict) -> str:
     """
-    Format brief for Telegram display.
+    Format brief for Telegram display (Option A: tightened scannable).
 
     Shows extracted intelligence with abstract source attribution.
     Source described by CATEGORY (team/investor/client/legal),
     NOT by sender address or subject line.
+
+    Sections are grouped into: emails, today's schedule, needs attention,
+    deals, milestones, system status. Empty sections are omitted entirely.
     """
     sections = brief.get("sections", [])
     if not sections:
         return ""
 
-    lines = ["<b>Good morning — Daily Brief</b>\n"]
+    # Collect data from sections into logical groups
+    email_groups: list[tuple[str, bool, list[dict]]] = []  # (label, sensitive, items)
+    calendar_events: list[dict] = []
+    prep_outlines: list[dict] = []
+    attention_items: list[str] = []  # pre-formatted lines with emoji
+    deal_items: list[str] = []
+    milestone_items: list[str] = []
+    system_parts: list[str] = []
+    weekly_review_line: str = ""
+
+    category_labels = {
+        "team": "Team emails",
+        "investor": "Investor emails",
+        "client": "Client emails",
+        "legal": "Legal emails",
+        "partner": "Partner emails",
+        "other": "External emails",
+    }
 
     for section in sections:
         section_type = section.get("type", "")
-        title = section.get("title", "")
 
         if section_type in ("email_scan", "constant_layer"):
             items = section.get("items", [])
             if not items:
                 continue
-
-            # Group by source category
             by_category: dict[str, list[dict]] = {}
             for item in items:
                 cat = item.get("_source_category", "other")
                 by_category.setdefault(cat, []).append(item)
-
-            category_labels = {
-                "team": "team correspondence",
-                "investor": "investor correspondence",
-                "client": "client correspondence",
-                "legal": "legal correspondence",
-                "partner": "partner correspondence",
-                "other": "external correspondence",
-            }
-
             for cat, cat_items in by_category.items():
-                label = category_labels.get(cat, "correspondence")
+                label = category_labels.get(cat, "Emails")
                 sensitive = any(i.get("_sensitive") for i in cat_items)
-                sensitive_tag = " [SENSITIVE]" if sensitive else ""
-
-                lines.append(
-                    f"<b>From {label} ({date.today().strftime('%b %d')}):</b>{sensitive_tag}"
-                )
-                for item in cat_items[:10]:
-                    item_type = item.get("type", "info")
-                    text = item.get("text", item.get("description", ""))[:120]
-                    lines.append(f"  • [{item_type}] {text}")
-                if len(cat_items) > 10:
-                    lines.append(f"  ... and {len(cat_items) - 10} more items")
-                lines.append("")
+                email_groups.append((label, sensitive, cat_items))
 
         elif section_type == "calendar":
-            events = section.get("events", [])
-            if events:
-                lines.append(f"<b>{title}:</b>")
-                for event in events:
-                    lines.append(f"  • {event.get('time', '')} — {event.get('title', '')}")
-                lines.append("")
-
-        elif section_type == "alerts":
-            alerts = section.get("alerts", [])
-            if alerts:
-                lines.append(f"<b>{title}:</b>")
-                for alert in alerts[:5]:
-                    severity = alert.get("severity", "")
-                    msg = alert.get("message", alert.get("description", ""))[:100]
-                    icon = "🔴" if severity == "high" else "🟡" if severity == "medium" else "🔵"
-                    lines.append(f"  {icon} {msg}")
-                lines.append("")
+            calendar_events = section.get("events", [])
 
         elif section_type == "pending_prep_outlines":
-            items = section.get("items", [])
-            if items:
-                lines.append(f"<b>{title} ({len(items)}):</b>")
-                for item in items:
-                    time_str = f" at {item['time']}" if item.get("time") else ""
-                    lines.append(f"  • {item.get('title', 'Unknown')}{time_str}")
-                lines.append("")
+            prep_outlines = section.get("items", [])
 
-        elif section_type == "upcoming_review":
-            time_str = section.get("time", "")
-            time_part = f" at {time_str}" if time_str else " today"
-            lines.append(f"<b>Weekly Review{time_part}:</b> prep starts 3h before")
-            lines.append("")
+        elif section_type == "alerts":
+            for alert in section.get("alerts", [])[:5]:
+                severity = alert.get("severity", "")
+                msg = alert.get("message", alert.get("description", ""))[:100]
+                if severity == "high":
+                    attention_items.append(f"  🔴 {msg}")
+                elif severity == "medium":
+                    attention_items.append(f"  🟡 {msg}")
+                # Drop low severity from attention — not actionable at 7am
+
+        elif section_type == "task_urgency":
+            for item in section.get("items", []):
+                assignee = f" ({item['assignee']})" if item.get("assignee") else ""
+                attention_items.append(f"  🟡 {item['title']}{assignee} — due {item.get('deadline', '?')}")
+
+        elif section_type == "drift_alerts":
+            for item in section.get("items", []):
+                attention_items.append(f"  🔴 {item.get('drift_description', '')}")
+
+        elif section_type == "deal_pulse":
+            for item in section.get("items", []):
+                icon = "🔴" if item.get("type") == "overdue" else ""
+                prefix = f"  {icon} " if icon else "  "
+                deal_items.append(f"{prefix}{item['name']} ({item['organization']}): {item['detail']}")
+
+        elif section_type == "commitments_due":
+            for item in section.get("items", []):
+                to_str = f" to {item['promised_to']}" if item.get("promised_to") else ""
+                deal_items.append(f"  🔴 {item['commitment']}{to_str} ({item['days_overdue']}d overdue)")
+
+        elif section_type == "gantt_milestones":
+            for item in section.get("items", []):
+                weeks = item.get("weeks_away", "?")
+                milestone_items.append(f"  {item.get('milestone', '?')} ({item.get('section', '')}) — {weeks}w away")
+
+        elif section_type == "system_state":
+            watcher = section.get("watcher_status", "unknown")
+            rejected = section.get("rejected_count", 0)
+            errors = section.get("errors_24h", 0)
+            queue = section.get("pending_queue", 0)
+            all_clear = (
+                rejected == 0 and errors == 0
+                and watcher in ("ok", "healthy", "unknown")
+            )
+            if all_clear and queue == 0:
+                system_parts.append("all clear")
+            else:
+                problems = []
+                if watcher not in ("ok", "healthy", "unknown"):
+                    problems.append(f"watcher {watcher}")
+                if rejected:
+                    problems.append(f"{rejected} rejected meetings with orphan data")
+                if errors:
+                    problems.append(f"{errors} errors in 24h")
+                if queue:
+                    problems.append(f"{queue} pending approvals")
+                system_parts.append(", ".join(problems))
+
+        elif section_type == "qa_health":
+            score = section.get("score", "unknown")
+            if score != "healthy":
+                issues = section.get("issues", [])
+                if issues:
+                    system_parts.append(f"QA: {issues[0][:80]}")
 
         elif section_type == "weekly_review":
-            week_num = section.get("week_number", 0)
             status = section.get("status", "unknown")
+            week_num = section.get("week_number", 0)
             status_label = {
                 "preparing": "being prepared",
                 "ready": "ready — use /review to start",
                 "in_progress": "in progress",
                 "confirming": "awaiting final confirmation",
             }.get(status, status)
-            lines.append(f"<b>Weekly Review W{week_num}:</b> {status_label}")
-            lines.append("")
+            weekly_review_line = f"Weekly review W{week_num}: {status_label}"
 
-        elif section_type == "continuity":
-            summary = section.get("summary", "")
-            if summary:
-                lines.append(f"<b>{section.get('title', 'Operations Snapshot')}:</b>")
-                lines.append(summary)
-                lines.append("")
+        elif section_type == "upcoming_review":
+            time_str = section.get("time", "")
+            time_part = f" at {time_str}" if time_str else " today"
+            weekly_review_line = f"Weekly review{time_part} — prep starts 3h before"
 
-        elif section_type == "qa_health":
-            score = section.get("score", "unknown")
-            issue_count = section.get("issue_count", 0)
-            score_label = {"healthy": "All systems OK", "warning": "Issues detected", "critical": "Action needed"}.get(score, score)
-            lines.append(f"<b>System Health:</b> {score_label}")
-            for issue in section.get("issues", [])[:3]:
-                lines.append(f"  - {issue[:80]}")
-            lines.append("")
+        # continuity, sheets_sync: intentionally omitted
 
-        elif section_type == "system_state":
-            # Always-included heartbeat section (T2.2)
-            watcher = section.get("watcher_status", "unknown")
-            rejected = section.get("rejected_count", 0)
-            errors = section.get("errors_24h", 0)
-            queue = section.get("pending_queue", 0)
+    # --- Assemble output ---
+    lines = ["<b>Good morning</b>\n"]
 
-            all_clear = (
-                rejected == 0
-                and errors == 0
-                and watcher in ("ok", "healthy", "unknown")
-            )
-            if all_clear and queue == 0:
-                lines.append("<b>System State:</b> all clear")
-            else:
-                lines.append("<b>System State:</b>")
-                lines.append(f"  Watcher: {watcher}")
-                if rejected:
-                    lines.append(f"  Rejected meetings with orphan data: {rejected}")
-                if errors:
-                    lines.append(f"  Errors in 24h: {errors}")
-                if queue:
-                    lines.append(f"  Pending approvals: {queue}")
-            lines.append("")
+    # Emails
+    for label, sensitive, cat_items in email_groups:
+        sensitive_tag = " [SENSITIVE]" if sensitive else ""
+        lines.append(f"<b>{label}</b>{sensitive_tag}")
+        for item in cat_items[:10]:
+            text = item.get("text", item.get("description", ""))[:120]
+            lines.append(f"  • {text}")
+        if len(cat_items) > 10:
+            lines.append(f"  ...and {len(cat_items) - 10} more")
+        lines.append("")
 
-        elif section_type == "deal_pulse":
-            items = section.get("items", [])
-            if items:
-                lines.append(f"<b>{title}:</b>")
-                for item in items:
-                    icon = "!" if item.get("type") == "overdue" else "~"
-                    lines.append(f"  {icon} {item['name']} ({item['organization']}): {item['detail']}")
-                lines.append("")
+    # Today (calendar + prep outlines)
+    today_items = []
+    for event in calendar_events:
+        today_items.append(f"  • {event.get('time', '')} — {event.get('title', '')}")
+    for po in prep_outlines:
+        time_str = f" at {po['time']}" if po.get("time") else ""
+        today_items.append(f"  • {po.get('title', 'Unknown')}{time_str} (prep pending)")
+    if today_items:
+        lines.append("<b>Today</b>")
+        lines.extend(today_items)
+        lines.append("")
 
-        elif section_type == "commitments_due":
-            items = section.get("items", [])
-            if items:
-                lines.append(f"<b>{title}:</b>")
-                for item in items:
-                    to_str = f" to {item['promised_to']}" if item.get("promised_to") else ""
-                    lines.append(f"  ! {item['commitment']}{to_str} ({item['days_overdue']}d overdue)")
-                lines.append("")
+    # Needs attention (alerts + task urgency + drift)
+    if attention_items:
+        lines.append("<b>Needs attention</b>")
+        lines.extend(attention_items)
+        lines.append("")
 
-        elif section_type == "task_urgency":
-            items = section.get("items", [])
-            if items:
-                lines.append(f"<b>{title}:</b>")
-                for item in items:
-                    assignee = f" ({item['assignee']})" if item.get("assignee") else ""
-                    lines.append(f"  ! {item['title']}{assignee} — due {item.get('deadline', '?')}")
-                lines.append("")
+    # Deals (deal pulse + commitments)
+    if deal_items:
+        lines.append("<b>Deals</b>")
+        lines.extend(deal_items)
+        lines.append("")
 
-        elif section_type == "gantt_milestones":
-            items = section.get("items", [])
-            if items:
-                lines.append(f"<b>{title}:</b>")
-                for item in items:
-                    weeks = item.get("weeks_away", "?")
-                    lines.append(f"  - {item.get('milestone', '?')} ({item.get('section', '')}) — {weeks}w away")
-                lines.append("")
+    # Milestones
+    if milestone_items:
+        lines.append("<b>Milestones</b>")
+        lines.extend(milestone_items)
+        lines.append("")
 
-        elif section_type == "drift_alerts":
-            items = section.get("items", [])
-            if items:
-                lines.append(f"<b>{title}:</b>")
-                for item in items:
-                    lines.append(f"  ! {item.get('drift_description', '')}")
-                lines.append("")
+    # Weekly review (one line, only if active)
+    if weekly_review_line:
+        lines.append(weekly_review_line)
+        lines.append("")
 
-        elif section_type == "sheets_sync":
-            summary = section.get("summary", "")
-            if summary:
-                lines.append(f"<b>{section.get('title', 'Sheets Sync')}:</b>")
-                lines.append(summary)
-                lines.append("")
+    # System status (one line, no bold header)
+    if system_parts:
+        lines.append(f"System: {'; '.join(system_parts)}")
 
-    # Stats footer
-    stats = brief.get("stats", {})
-    total_items = stats.get("email_scans", 0) + stats.get("constant_items", 0)
-    if total_items:
-        lines.append(f"<i>{total_items} email items • {stats.get('calendar_events', 0)} meetings today</i>")
-
-    result = "\n".join(lines)
+    result = "\n".join(lines).rstrip()
     # Truncate for Telegram
-    if len(result) > 4000:
-        result = result[:4000] + "\n\n... (truncated)"
+    if len(result) > 3800:
+        result = result[:3800] + "\n\n(...)"
     return result
 
 

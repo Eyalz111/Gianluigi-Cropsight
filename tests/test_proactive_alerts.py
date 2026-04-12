@@ -204,12 +204,14 @@ class TestFormatAlerts:
             {"type": "recurring_discussion", "severity": "low", "title": "Lavazza in 4 meetings", "details": ""},
         ]
         message = format_alerts_message(alerts)
-        assert "HIGH PRIORITY" in message
+        assert "Heads up" in message
         assert "🔴" in message  # high severity emoji
         assert "🟡" in message  # medium severity emoji
         assert "3 overdue tasks" in message
         assert "6 open questions" in message
         assert "Lavazza in 4 meetings" in message
+        # High should appear before medium in the output
+        assert message.index("3 overdue tasks") < message.index("6 open questions")
 
     def test_empty_alerts(self):
         """Empty alerts should return empty string."""
