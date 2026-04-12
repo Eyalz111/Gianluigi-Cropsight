@@ -123,10 +123,10 @@ async def start_debrief(
             # Resume same-day session
             items_count = len(existing.get("items_captured", []))
             remaining = existing.get("calendar_events_remaining", [])
-            response = f"Welcome back to your debrief. You have {items_count} items captured so far."
+            response = f"Picking up where we left off — {items_count} items so far."
             if remaining:
-                response += f"\n\nWe still haven't covered: {', '.join(remaining)}"
-            response += "\n\nWhat else happened today?"
+                response += f"\n\nStill haven't touched on: {', '.join(remaining)}"
+            response += "\n\nWhat else?"
             return {
                 "response": response,
                 "session_id": existing["id"],
@@ -201,7 +201,7 @@ async def start_debrief(
         logger.debug(f"Pending prep check in debrief failed: {e}")
 
     # Build greeting
-    greeting = "Let's do your end-of-day debrief."
+    greeting = "Ready for your end-of-day wrap-up."
     if uncovered_events:
         greeting += f"\n\nI see these meetings today without transcripts:\n"
         for event in uncovered_events:
@@ -532,7 +532,7 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
     if not approved:
         supabase_client.update_debrief_session(session_id, status="cancelled")
         return {
-            "response": "Debrief cancelled. Nothing was saved.",
+            "response": "Cancelled — nothing saved.",
             "action": "debrief_cancelled",
         }
 
@@ -560,7 +560,7 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
         supabase_client.update_debrief_session(session_id, status="approved")
 
         return {
-            "response": f"Debrief approved and saved. {result.get('summary', '')}",
+            "response": f"All saved. {result.get('summary', '')}",
             "action": "debrief_approved",
             "injected": result,
         }

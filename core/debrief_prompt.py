@@ -66,7 +66,7 @@ You MUST respond with valid JSON only. No text before or after the JSON.
         }
     ],
     "follow_up_question": "A single follow-up question, or null if none needed (see rules above)",
-    "response_text": "Brief acknowledgment of what you captured (1-2 sentences max). Do NOT include the follow-up question here — it goes in follow_up_question only"
+    "response_text": "Natural, brief acknowledgment (1-3 sentences). Sound like a person confirming, not a system logging. 'Got the Yoram meeting items' not 'Captured 3 items from your input'. Do NOT include the follow-up question here — it goes in follow_up_question only"
 }
 
 FOLLOW-UP QUESTIONS:

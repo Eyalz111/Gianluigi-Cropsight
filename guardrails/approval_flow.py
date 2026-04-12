@@ -1860,9 +1860,9 @@ async def distribute_approved_content(
                 drive_link=drive_link,
             )
             if settings.ENVIRONMENT != "production":
-                telegram_result = await telegram_bot.send_to_eyal(teaser)
+                telegram_result = await telegram_bot.send_to_eyal(teaser, parse_mode="HTML")
             else:
-                telegram_result = await telegram_bot.send_to_group(teaser)
+                telegram_result = await telegram_bot.send_to_group(teaser, parse_mode="HTML")
 
         results["telegram_sent"] = telegram_result
         logger.info(f"Telegram notification sent: {telegram_result}")

@@ -160,7 +160,7 @@ def format_alerts_message(alerts: list[dict]) -> str:
     if not alerts:
         return ""
 
-    lines = ["*Operational Alerts*\n"]
+    lines = ["<b>Operational Alerts</b>\n"]
 
     # Group by severity
     high = [a for a in alerts if a.get("severity") == "high"]
@@ -168,23 +168,24 @@ def format_alerts_message(alerts: list[dict]) -> str:
     low = [a for a in alerts if a.get("severity") == "low"]
 
     if high:
-        lines.append("*!!! HIGH PRIORITY*")
+        lines.append("<b>HIGH PRIORITY</b>")
         for a in high:
-            lines.append(f"  - {a.get('title', '')}")
-            if a.get("details"):
-                lines.append(f"    {a['details'][:100]}")
+            title = a.get("title", "")
+            details = a.get("details", "")
+            if details:
+                lines.append(f"  🔴 {title} — {details[:100]}")
+            else:
+                lines.append(f"  🔴 {title}")
         lines.append("")
 
     if medium:
-        lines.append("*!! MEDIUM*")
         for a in medium:
-            lines.append(f"  - {a.get('title', '')}")
+            lines.append(f"  🟡 {a.get('title', '')}")
         lines.append("")
 
     if low:
-        lines.append("*! LOW*")
         for a in low:
-            lines.append(f"  - {a.get('title', '')}")
+            lines.append(f"  {a.get('title', '')}")
         lines.append("")
 
     return "\n".join(lines)

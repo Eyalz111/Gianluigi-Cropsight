@@ -27,6 +27,7 @@ Usage:
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -63,38 +64,115 @@ def _escape_markdown(text: str) -> str:
     return text
 
 
-def _split_message(text: str, max_len: int = 4000) -> list[str]:
+def _split_message(text: str, max_len: int = 3800) -> list[str]:
     """
     Split a long message into parts that fit within Telegram's limit.
 
-    Splits on double-newline (section boundaries) when possible,
-    falls back to single newline, then hard cut.
+    Features:
+    - Continuation markers: (...) appended/prepended at split boundaries
+    - Never cuts mid-word: backs up to last space if no newline found
+    - HTML tag safety: never splits inside <b>, <i>, or <a> tags
+    - Splits on double-newline > single-newline > space > hard cut
     """
     if len(text) <= max_len:
         return [text]
+
+    # Reserve space for continuation markers
+    marker_suffix = "\n\n(...)"
+    marker_prefix = "(...)\n\n"
+    effective_len = max_len - len(marker_suffix)
 
     parts = []
     remaining = text
     while len(remaining) > max_len:
         # Try to split at a section boundary (double newline)
-        cut = remaining[:max_len].rfind("\n\n")
-        if cut > max_len // 2:
+        cut = remaining[:effective_len].rfind("\n\n")
+        if cut > effective_len // 2:
+            cut = _adjust_cut_for_html_tags(remaining, cut)
             parts.append(remaining[:cut])
             remaining = remaining[cut + 2:]
             continue
         # Fall back to single newline
-        cut = remaining[:max_len].rfind("\n")
-        if cut > max_len // 2:
+        cut = remaining[:effective_len].rfind("\n")
+        if cut > effective_len // 2:
+            cut = _adjust_cut_for_html_tags(remaining, cut)
             parts.append(remaining[:cut])
             remaining = remaining[cut + 1:]
             continue
-        # Hard cut
-        parts.append(remaining[:max_len])
-        remaining = remaining[max_len:]
+        # Fall back to space (never cut mid-word)
+        cut = remaining[:effective_len].rfind(" ")
+        if cut > effective_len // 2:
+            cut = _adjust_cut_for_html_tags(remaining, cut)
+            parts.append(remaining[:cut])
+            remaining = remaining[cut + 1:]
+            continue
+        # Hard cut (last resort — should be rare)
+        parts.append(remaining[:effective_len])
+        remaining = remaining[effective_len:]
 
     if remaining:
         parts.append(remaining)
+
+    # Add continuation markers between parts
+    if len(parts) > 1:
+        for i in range(len(parts) - 1):
+            parts[i] = parts[i] + marker_suffix
+        for i in range(1, len(parts)):
+            parts[i] = marker_prefix + parts[i]
+
     return parts
+
+
+# Precompiled patterns for HTML tag safety
+_OPEN_B_RE = re.compile(r"<b\b", re.IGNORECASE)
+_CLOSE_B_RE = re.compile(r"</b>", re.IGNORECASE)
+_OPEN_I_RE = re.compile(r"<i\b", re.IGNORECASE)
+_CLOSE_I_RE = re.compile(r"</i>", re.IGNORECASE)
+_ANCHOR_SPAN_RE = re.compile(r"<a\b[^>]*>.*?</a>", re.IGNORECASE | re.DOTALL)
+
+
+def _adjust_cut_for_html_tags(text: str, cut: int) -> int:
+    """
+    Adjust a cut point so it doesn't land inside an HTML tag span.
+
+    For <a href="...">...</a>: if the cut is inside the span, back up
+    to before the <a>.
+    For <b> and <i>: if open count > close count in the fragment,
+    back up to before the last unclosed opening tag.
+    """
+    fragment = text[:cut]
+
+    # Check <a> spans — if cut lands inside one, back up to before it
+    for m in _ANCHOR_SPAN_RE.finditer(text):
+        start, end = m.start(), m.end()
+        if start < cut < end:
+            # Cut lands inside an <a>...</a> span — back up
+            new_cut = text[:start].rfind("\n")
+            if new_cut > cut // 2:
+                return new_cut
+            new_cut = text[:start].rfind(" ")
+            if new_cut > cut // 2:
+                return new_cut
+            return start  # worst case: cut right before the tag
+
+    # Check <b> balance
+    open_b = len(_OPEN_B_RE.findall(fragment))
+    close_b = len(_CLOSE_B_RE.findall(fragment))
+    if open_b > close_b:
+        # Find the last unclosed <b> and back up before it
+        last_open = fragment.rfind("<b")
+        if last_open > cut // 2:
+            return last_open
+
+    # Check <i> balance
+    open_i = len(_OPEN_I_RE.findall(fragment))
+    close_i = len(_CLOSE_I_RE.findall(fragment))
+    if open_i > close_i:
+        last_open = fragment.rfind("<i")
+        if last_open > cut // 2:
+            return last_open
+
+    return cut
 
 
 def format_summary_teaser(
@@ -114,9 +192,10 @@ def format_summary_teaser(
     tasks = content.get("tasks", [])
     follow_ups = content.get("follow_ups", [])
 
-    parts = [f"*Meeting Summary: {title}* ({date})"]
+    esc = _escape_html
+    parts = [f"<b>Meeting Summary: {esc(title)}</b> ({esc(date)})"]
     if participants:
-        parts.append(f"Participants: {', '.join(participants)}")
+        parts.append(f"Participants: {esc(', '.join(participants))}")
 
     # Counts line
     counts = []
@@ -133,32 +212,32 @@ def format_summary_teaser(
     # Top decisions (max 3)
     if decisions:
         parts.append("")
-        parts.append("*Key decisions:*")
+        parts.append("<b>Key decisions:</b>")
         for d in decisions[:3]:
-            desc = d.get("description", "")
+            desc = esc(d.get("description", ""))
             if len(desc) > 80:
                 desc = desc[:77] + "..."
             parts.append(f"• {desc}")
         if len(decisions) > 3:
-            parts.append(f"  _...and {len(decisions) - 3} more in full summary_")
+            parts.append(f"  <i>...and {len(decisions) - 3} more in full summary</i>")
 
     # Top action items (max 5, H priority first)
     if tasks:
         sorted_tasks = sorted(tasks, key=lambda t: {"H": 0, "M": 1, "L": 2}.get(t.get("priority", "M"), 1))
         parts.append("")
-        parts.append("*Top action items:*")
+        parts.append("<b>Top action items:</b>")
         for t in sorted_tasks[:5]:
-            assignee = t.get("assignee", "TBD")
-            title_text = t.get("title", "")
+            assignee = esc(t.get("assignee", "TBD"))
+            title_text = esc(t.get("title", ""))
             if len(title_text) > 60:
                 title_text = title_text[:57] + "..."
-            deadline = t.get("deadline") or "no deadline"
+            deadline = esc(t.get("deadline") or "no deadline")
             parts.append(f"• {assignee}: {title_text} — {deadline}")
 
     # Drive link
     if drive_link:
         parts.append("")
-        parts.append(f"[Full summary]({drive_link})")
+        parts.append(f'<a href="{drive_link}">Full summary</a>')
 
     return "\n".join(parts)
 
@@ -745,7 +824,7 @@ class TelegramBot:
             )
             lines.append("")
 
-        lines.append("Use the buttons below to approve, request changes, or reject.")
+        lines.append("Approve or reject below.")
 
         message = "\n".join(lines)
 
@@ -963,24 +1042,23 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         Introduces Gianluigi and explains capabilities.
         """
         user = update.effective_user
-        welcome_message = f"""Hello {user.first_name}! I'm *Gianluigi*, CropSight's AI operations assistant.
-
-I help the team by:
-- Processing meeting transcripts
-- Tracking tasks and decisions
-- Answering questions about past discussions
-- Preparing meeting briefs
-
-*Available commands:*
-/help - Show all commands
-/tasks - Show your open tasks
-/search [topic] - Search meeting history
-/decisions - List recent decisions
-/questions - List open questions
-
-Or just send me a question and I'll search our meeting history to answer it!
-"""
-        await self.send_message(update.effective_chat.id, welcome_message)
+        welcome_message = (
+            f"Hello {_escape_html(user.first_name)}! I'm <b>Gianluigi</b>, "
+            f"CropSight's AI operations assistant.\n\n"
+            f"I help the team by:\n"
+            f"- Processing meeting transcripts\n"
+            f"- Tracking tasks and decisions\n"
+            f"- Answering questions about past discussions\n"
+            f"- Preparing meeting briefs\n\n"
+            f"<b>Available commands:</b>\n"
+            f"/help - Show all commands\n"
+            f"/tasks - Show your open tasks\n"
+            f"/search [topic] - Search meeting history\n"
+            f"/decisions - List recent decisions\n"
+            f"/questions - List open questions\n\n"
+            f"Or just send me a question and I'll search our meeting history to answer it!"
+        )
+        await self.send_message(update.effective_chat.id, welcome_message, parse_mode="HTML")
 
         # Register user if we can identify them
         logger.info(f"User started chat: {user.id} - {user.username}")
@@ -1049,7 +1127,7 @@ Or just send me a question and I'll search our meeting history to answer it!
             total_calls = sum(v["calls"] for v in agg.values())
             total_cache_read = sum(v["cache_read"] for v in agg.values())
 
-            lines = ["*API Usage (Last 7 Days)*\n"]
+            lines = ["<b>API Usage (Last 7 Days)</b>\n"]
             for (site, model), v in sorted(agg.items()):
                 # Shorten model name for display
                 short_model = model.split("/")[-1] if "/" in model else model
@@ -1059,19 +1137,19 @@ Or just send me a question and I'll search our meeting history to answer it!
                     pct = round(v["cache_read"] / max(v["input"], 1) * 100)
                     cache_pct = f" ({pct}% cached)"
                 lines.append(
-                    f"`{site}` ({short_model})\n"
+                    f"<code>{_escape_html(site)}</code> ({_escape_html(short_model)})\n"
                     f"  {v['calls']} calls | "
                     f"{v['input']:,} in / {v['output']:,} out"
                     f"{cache_pct}"
                 )
 
             lines.append(
-                f"\n*Totals:* {total_calls} calls | "
+                f"\n<b>Totals:</b> {total_calls} calls | "
                 f"{total_input:,} in / {total_output:,} out | "
                 f"{total_cache_read:,} cached"
             )
 
-            await self.send_message(update.effective_chat.id, "\n".join(lines))
+            await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"Error in /cost command: {e}")
@@ -1104,10 +1182,10 @@ Or just send me a question and I'll search our meeting history to answer it!
                     m for m in meetings
                     if term_lower in m.get("title", "").lower()
                 ][:10]
-                header = f"*Meetings matching:* _{_escape_markdown(search_term)}_\n"
+                header = f"<b>Meetings matching:</b> <i>{_escape_html(search_term)}</i>\n"
             else:
                 meetings = supabase_client.list_meetings(limit=10)
-                header = "*Recent Meetings (last 10):*\n"
+                header = "<b>Recent Meetings (last 10):</b>\n"
 
             if not meetings:
                 await self.send_message(
@@ -1118,18 +1196,18 @@ Or just send me a question and I'll search our meeting history to answer it!
 
             lines = [header]
             for i, m in enumerate(meetings, 1):
-                title = _escape_markdown(m.get("title", "Untitled"))
+                title = _escape_html(m.get("title", "Untitled"))
                 date = m.get("date", "")[:10]
                 participants = m.get("participants", [])
                 p_count = len(participants) if participants else 0
                 status = m.get("approval_status", "unknown")
 
                 lines.append(
-                    f"*{i}.* {title}\n"
+                    f"<b>{i}.</b> {title}\n"
                     f"   {date} | {p_count} participants | {status}"
                 )
 
-            await self.send_message(update.effective_chat.id, "\n".join(lines))
+            await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"Error in /meetings command: {e}")
@@ -1211,7 +1289,7 @@ Or just send me a question and I'll search our meeting history to answer it!
             env = _settings.ENVIRONMENT
 
             lines = [
-                "*Gianluigi Status*\n",
+                "<b>Gianluigi Status</b>\n",
                 f"Meetings processed: {meetings_count}",
                 f"Last processing: {last_date}",
                 f"Documents ingested: {docs_count}",
@@ -1223,7 +1301,7 @@ Or just send me a question and I'll search our meeting history to answer it!
             ]
 
             if pending_approvals:
-                lines.append(f"\n*Pending Approvals ({len(pending_approvals)}):*")
+                lines.append(f"\n<b>Pending Approvals ({len(pending_approvals)}):</b>")
                 for pa in pending_approvals:
                     ct = pa.get("content_type", "unknown").replace("_", " ")
                     created = pa.get("created_at", "")[:16].replace("T", " ")
@@ -1237,7 +1315,7 @@ Or just send me a question and I'll search our meeting history to answer it!
             try:
                 prep_outlines = supabase_client.get_pending_prep_outlines()
                 if prep_outlines:
-                    lines.append(f"\n*Pending Prep Outlines ({len(prep_outlines)}):*")
+                    lines.append(f"\n<b>Pending Prep Outlines ({len(prep_outlines)}):</b>")
                     for po in prep_outlines:
                         content = po.get("content", {})
                         event = content.get("outline", {}).get("event", content.get("event", {}))
@@ -1262,7 +1340,7 @@ Or just send me a question and I'll search our meeting history to answer it!
                     rw = review_session.get("week_number", 0)
                     rs = review_session.get("status", "unknown")
                     rpart = review_session.get("current_part", 0)
-                    lines.append(f"\n*Weekly Review:*")
+                    lines.append(f"\n<b>Weekly Review:</b>")
                     lines.append(f"  W{rw} — {rs} (part {rpart})")
             except Exception:
                 pass
@@ -1277,9 +1355,9 @@ Or just send me a question and I'll search our meeting history to answer it!
                 if watcher_hb:
                     last_beat = str(watcher_hb.get("last_heartbeat", ""))[:19].replace("T", " ")
                     hb_status = watcher_hb.get("status", "unknown")
-                    lines.append(f"\n*Transcript Watcher:* {hb_status} (last: {last_beat})")
+                    lines.append(f"\n<b>Transcript Watcher:</b> {hb_status} (last: {last_beat})")
                 else:
-                    lines.append("\n*Transcript Watcher:* no heartbeat yet")
+                    lines.append("\n<b>Transcript Watcher:</b> no heartbeat yet")
             except Exception:
                 pass
 
@@ -1290,11 +1368,11 @@ Or just send me a question and I'll search our meeting history to answer it!
                 )
                 if rejected_meetings:
                     lines.append(
-                        f"\n*Rejected meetings with orphan data:* {len(rejected_meetings)} "
+                        f"\n<b>Rejected meetings with orphan data:</b> {len(rejected_meetings)} "
                         f"(run scripts/cleanup_rejected_meetings.py)"
                     )
                 else:
-                    lines.append("\n*Rejected meetings:* 0 (clean)")
+                    lines.append("\n<b>Rejected meetings:</b> 0 (clean)")
             except Exception:
                 pass
 
@@ -1317,7 +1395,7 @@ Or just send me a question and I'll search our meeting history to answer it!
                 )
                 errors = errors_result.data or []
                 if errors:
-                    lines.append(f"\n*Errors (24h):* {len(errors)}")
+                    lines.append(f"\n<b>Errors (24h):</b> {len(errors)}")
                     for err in errors[:3]:
                         action = err.get("action", "")
                         details = err.get("details", {})
@@ -1327,11 +1405,11 @@ Or just send me a question and I'll search our meeting history to answer it!
                             msg = str(details)[:60]
                         lines.append(f"  - {action}: {msg}")
                 else:
-                    lines.append("\n*Errors (24h):* 0")
+                    lines.append("\n<b>Errors (24h):</b> 0")
             except Exception:
                 pass
 
-            await self.send_message(update.effective_chat.id, "\n".join(lines))
+            await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"Error in /status command: {e}")
@@ -1373,39 +1451,37 @@ Or just send me a question and I'll search our meeting history to answer it!
 
         Lists available commands and how to interact.
         """
-        help_message = """*Gianluigi - Help*
-
-*Commands:*
-/start - Welcome message
-/help - This help message
-/tasks - Show your open tasks
-/mytasks - Same as /tasks
-/search [query] - Search meetings and documents
-/search -m [query] - Search meetings only
-/search -d [query] - Search documents only
-/meetings - List recent meetings
-/meetings [title] - Search meetings by title
-/decisions - List recent key decisions
-/questions - List open questions
-/reprocess [title] - Reprocess a transcript (Eyal only)
-/debrief - Start end-of-day debrief (Eyal only)
-/cancel - Cancel active debrief (Eyal only)
-/emailscan - Trigger email scan + morning brief (Eyal only)
-/cost - API token usage summary (Eyal only)
-/status - System dashboard (Eyal only)
-
-*Ask Questions:*
-Just type your question and I'll search our meeting history to answer it.
-
-Examples:
-- "What did we decide about cloud providers?"
-- "What are Roye's pending tasks?"
-- "Summarize last week's meetings"
-
-*For Eyal:*
-When you receive approval requests, use the buttons to approve, request changes, or reject. You can also reply with edit instructions.
-"""
-        await self.send_message(update.effective_chat.id, help_message)
+        help_message = (
+            "<b>Gianluigi - Help</b>\n\n"
+            "<b>Commands:</b>\n"
+            "/start - Welcome message\n"
+            "/help - This help message\n"
+            "/tasks - Show your open tasks\n"
+            "/mytasks - Same as /tasks\n"
+            "/search [query] - Search meetings and documents\n"
+            "/search -m [query] - Search meetings only\n"
+            "/search -d [query] - Search documents only\n"
+            "/meetings - List recent meetings\n"
+            "/meetings [title] - Search meetings by title\n"
+            "/decisions - List recent key decisions\n"
+            "/questions - List open questions\n"
+            "/reprocess [title] - Reprocess a transcript (Eyal only)\n"
+            "/debrief - Start end-of-day debrief (Eyal only)\n"
+            "/cancel - Cancel active debrief (Eyal only)\n"
+            "/emailscan - Trigger email scan + morning brief (Eyal only)\n"
+            "/cost - API token usage summary (Eyal only)\n"
+            "/status - System dashboard (Eyal only)\n\n"
+            "<b>Ask Questions:</b>\n"
+            "Just type your question and I'll search our meeting history to answer it.\n\n"
+            "Examples:\n"
+            '- "What did we decide about cloud providers?"\n'
+            '- "What are Roye\'s pending tasks?"\n'
+            '- "Summarize last week\'s meetings"\n\n'
+            "<b>For Eyal:</b>\n"
+            "When you receive approval requests, use the buttons to approve, "
+            "request changes, or reject. You can also reply with edit instructions."
+        )
+        await self.send_message(update.effective_chat.id, help_message, parse_mode="HTML")
 
     async def _handle_tasks(
         self,
@@ -1436,21 +1512,23 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         if not tasks:
             message = "No open tasks found."
+            await self.send_message(update.effective_chat.id, message)
         else:
-            message = "*Open Tasks:*\n\n"
+            message = "<b>Open Tasks:</b>\n\n"
             for i, task in enumerate(tasks[:10], 1):
                 priority = task.get("priority", "M")
                 priority_indicator = {"H": "!!", "M": "", "L": "~"}.get(priority, "")
                 deadline = task.get("deadline", "No deadline")
-                assignee = task.get("assignee", "Unassigned")
+                assignee = _escape_html(task.get("assignee", "Unassigned"))
+                title = _escape_html(task.get("title", "Untitled"))
 
-                message += f"{i}. {priority_indicator}{task.get('title', 'Untitled')}\n"
+                message += f"{i}. {priority_indicator}{title}\n"
                 message += f"   Assignee: {assignee} | Due: {deadline}\n\n"
 
             if len(tasks) > 10:
-                message += f"\n_...and {len(tasks) - 10} more tasks_"
+                message += f"\n<i>...and {len(tasks) - 10} more tasks</i>"
 
-        await self.send_message(update.effective_chat.id, message)
+            await self.send_message(update.effective_chat.id, message, parse_mode="HTML")
 
     async def _handle_search(
         self,
@@ -1494,7 +1572,8 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         await self.send_message(
             update.effective_chat.id,
-            f"Searching for: _{query}_..."
+            "Let me look into that...",
+            parse_mode="HTML",
         )
 
         from services.supabase_client import supabase_client
@@ -1528,28 +1607,28 @@ When you receive approval requests, use the buttons to approve, request changes,
                     break
 
             # Format results
-            lines = [f"*Search Results for:* _{_escape_markdown(query)}_\n"]
+            lines = [f"<b>Search Results for:</b> <i>{_escape_html(query)}</i>\n"]
             for i, r in enumerate(top_results, 1):
                 source_type = r.get("source_type", "unknown")
-                chunk = r.get("chunk_text", "")[:200]
+                chunk = _escape_html(r.get("chunk_text", "")[:200])
                 similarity = r.get("similarity", 0)
 
                 # Try to get source title
                 source_id = r.get("source_id", "")
                 if source_type == "meeting":
                     meeting = supabase_client.get_meeting(source_id)
-                    title = meeting.get("title", "Unknown") if meeting else "Unknown"
+                    title = _escape_html(meeting.get("title", "Unknown") if meeting else "Unknown")
                     date = (meeting.get("date", "")[:10] if meeting else "")
-                    lines.append(f"*{i}. {_escape_markdown(title)}* ({date})")
+                    lines.append(f"<b>{i}. {title}</b> ({date})")
                 else:
                     doc = supabase_client.get_document(source_id)
-                    title = doc.get("title", "Unknown") if doc else "Unknown"
-                    lines.append(f"*{i}. {_escape_markdown(title)}* (document)")
+                    title = _escape_html(doc.get("title", "Unknown") if doc else "Unknown")
+                    lines.append(f"<b>{i}. {title}</b> (document)")
 
-                lines.append(f"  _{_escape_markdown(chunk)}_...")
+                lines.append(f"  <i>{chunk}</i>...")
                 lines.append("")
 
-            await self.send_message(update.effective_chat.id, "\n".join(lines))
+            await self.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"Error in /search: {e}")
@@ -1581,14 +1660,15 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         if not decisions:
             message = "No decisions recorded yet."
+            await self.send_message(update.effective_chat.id, message)
         else:
-            message = "*Recent Decisions:*\n\n"
+            message = "<b>Recent Decisions:</b>\n\n"
             for i, decision in enumerate(decisions, 1):
-                desc = decision.get("description", "")[:100]
+                desc = _escape_html(decision.get("description", ""))[:100]
                 timestamp = decision.get("transcript_timestamp", "")
-                message += f"{i}. {desc}\n   _(ref: ~{timestamp})_\n\n"
+                message += f"{i}. {desc}\n   <i>(ref: ~{timestamp})</i>\n\n"
 
-        await self.send_message(update.effective_chat.id, message)
+            await self.send_message(update.effective_chat.id, message, parse_mode="HTML")
 
     async def _handle_questions(
         self,
@@ -1606,14 +1686,15 @@ When you receive approval requests, use the buttons to approve, request changes,
 
         if not questions:
             message = "No open questions at the moment."
+            await self.send_message(update.effective_chat.id, message)
         else:
-            message = "*Open Questions:*\n\n"
+            message = "<b>Open Questions:</b>\n\n"
             for i, q in enumerate(questions, 1):
-                question = q.get("question", "")[:100]
-                raised_by = q.get("raised_by", "Unknown")
-                message += f"{i}. {question}\n   _Raised by: {raised_by}_\n\n"
+                question = _escape_html(q.get("question", ""))[:100]
+                raised_by = _escape_html(q.get("raised_by", "Unknown"))
+                message += f"{i}. {question}\n   <i>Raised by: {raised_by}</i>\n\n"
 
-        await self.send_message(update.effective_chat.id, message)
+            await self.send_message(update.effective_chat.id, message, parse_mode="HTML")
 
     async def _handle_retract(
         self,
@@ -1807,7 +1888,7 @@ When you receive approval requests, use the buttons to approve, request changes,
         # reported 2026-04-11).
         chat_id = update.effective_chat.id
         try:
-            await self.send_message(chat_id, "Starting debrief...", parse_mode=None)
+            await self.send_message(chat_id, "One sec...", parse_mode=None)
         except Exception as ack_err:
             logger.error(f"Debrief ack send failed: {ack_err}", exc_info=True)
 
@@ -1857,7 +1938,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             from processors.debrief import start_debrief
 
             result = await start_debrief(user_id="eyal")
-            response = result.get("response", "Starting debrief...")
+            response = result.get("response", "One sec...")
             session_id = result.get("session_id")
         except Exception as fatal:
             logger.error(
@@ -1952,7 +2033,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             return
 
         await self.send_message(
-            update.effective_chat.id, "Computing Sheets diff..."
+            update.effective_chat.id, "Checking for changes..."
         )
 
         try:
@@ -2244,7 +2325,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             )
 
         elif action == "review_approve":
-            await query.edit_message_text("Approved! Distributing...")
+            await query.edit_message_text("Done — distributing now.")
             result = await confirm_review(session_id, approved=True)
 
             if result.get("action") == "gantt_failed":
@@ -2456,8 +2537,6 @@ When you receive approval requests, use the buttons to approve, request changes,
             return
 
         # Process the debrief message
-        await self.send_message(chat_id, "Processing...")
-
         result = await process_debrief_message(
             session_id=session_id,
             user_message=message_text,
@@ -2666,8 +2745,8 @@ When you receive approval requests, use the buttons to approve, request changes,
                     action = "approve" if "approve" in lower_msg else "reject"
                     await self.send_message(
                         update.effective_chat.id,
-                        "Processing your approval..." if action == "approve"
-                        else "Rejecting...",
+                        "On it." if action == "approve"
+                        else "Got it — rejecting.",
                     )
                     try:
                         result = await process_response(
@@ -2973,7 +3052,7 @@ When you receive approval requests, use the buttons to approve, request changes,
         if action == "approve":
             # Delete orphan multi-part messages (all except the button message)
             await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
-            await query.edit_message_text("Approved! Distributing to team...")
+            await query.edit_message_text("Done — distributing now.")
             conversation_memory.clear(str(self.eyal_chat_id))
 
             try:
@@ -3017,7 +3096,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             # through the same cascading-reject logic. This is critical because
             # the old inline path only flipped approval_status and left tasks/
             # decisions/embeddings as orphans in the DB.
-            await query.edit_message_text("Rejecting...")
+            await query.edit_message_text("Got it — rejecting.")
             try:
                 from guardrails.approval_flow import process_response
                 result = await process_response(
@@ -3615,7 +3694,7 @@ When you receive approval requests, use the buttons to approve, request changes,
         """
         chat_id = update.effective_chat.id
 
-        await self.send_message(chat_id, "Processing your edits...")
+        await self.send_message(chat_id, "Applying your edits...")
 
         try:
             from guardrails.approval_flow import process_response
@@ -3674,7 +3753,7 @@ When you receive approval requests, use the buttons to approve, request changes,
             await self._send_debrief_confirmation(chat_id, result)
 
         elif action == "debrief_approve":
-            await query.edit_message_text("Approved! Injecting items...")
+            await query.edit_message_text("Done — injecting now.")
             result = await confirm_debrief(session_id, approved=True)
             context.user_data.pop("debrief_session_id", None)
             self._active_interactive_session = None

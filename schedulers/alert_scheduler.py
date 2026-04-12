@@ -110,7 +110,7 @@ class AlertScheduler:
 
         message = format_alerts_message(alerts)
         if message:
-            await telegram_bot.send_to_eyal(message)
+            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
 
             supabase_client.log_action(
                 action="proactive_alerts_sent",
