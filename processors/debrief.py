@@ -123,10 +123,10 @@ async def start_debrief(
             # Resume same-day session
             items_count = len(existing.get("items_captured", []))
             remaining = existing.get("calendar_events_remaining", [])
-            response = f"Welcome back to your debrief. You have {items_count} items captured so far."
+            response = f"Picking up where we left off — {items_count} items so far."
             if remaining:
-                response += f"\n\nWe still haven't covered: {', '.join(remaining)}"
-            response += "\n\nWhat else happened today?"
+                response += f"\n\nStill haven't touched on: {', '.join(remaining)}"
+            response += "\n\nWhat else?"
             return {
                 "response": response,
                 "session_id": existing["id"],
@@ -201,7 +201,7 @@ async def start_debrief(
         logger.debug(f"Pending prep check in debrief failed: {e}")
 
     # Build greeting
-    greeting = "Let's do your end-of-day debrief."
+    greeting = "Ready for your end-of-day wrap-up."
     if uncovered_events:
         greeting += f"\n\nI see these meetings today without transcripts:\n"
         for event in uncovered_events:
@@ -532,7 +532,7 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
     if not approved:
         supabase_client.update_debrief_session(session_id, status="cancelled")
         return {
-            "response": "Debrief cancelled. Nothing was saved.",
+            "response": "Cancelled — nothing saved.",
             "action": "debrief_cancelled",
         }
 
@@ -560,7 +560,7 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
         supabase_client.update_debrief_session(session_id, status="approved")
 
         return {
-            "response": f"Debrief approved and saved. {result.get('summary', '')}",
+            "response": f"All saved. {result.get('summary', '')}",
             "action": "debrief_approved",
             "injected": result,
         }
@@ -814,9 +814,11 @@ def _build_debrief_context(
 
 def _format_extraction_summary(items: list[dict]) -> str:
     """
-    Format extraction items as a clean summary for Telegram.
+    Format extraction items as a natural-language summary for Telegram.
 
-    Groups items by type. Caps at 3500 chars for Telegram limits.
+    1-4 items per type: prose sentence(s).
+    5+ items per type: natural count then compact numbered list.
+    Caps at 3500 chars for Telegram limits.
     """
     if not items:
         return "No items captured."
@@ -826,34 +828,63 @@ def _format_extraction_summary(items: list[dict]) -> str:
         t = item.get("type", "information")
         by_type.setdefault(t, []).append(item)
 
-    type_labels = {
-        "task": "Tasks",
-        "decision": "Decisions",
-        "information": "Information",
-        "gantt_update": "Gantt Updates",
-    }
+    # Natural number words for small counts
+    _num_word = {1: "One", 2: "Two", 3: "Three", 4: "Four"}
 
-    lines = [f"Debrief Summary ({len(items)} items):\n"]
+    def _item_desc(item: dict) -> str:
+        title = item.get("title", item.get("description", ""))
+        title = title[:80] if title else "Untitled"
+        assignee = item.get("assignee", item.get("speaker", ""))
+        sensitive = " (sensitive)" if item.get("sensitive") else ""
+        if assignee:
+            return f"{assignee} to {title.lower()}{sensitive}" if item.get("type") == "task" else f"{title} — {assignee}{sensitive}"
+        return f"{title}{sensitive}"
 
-    for item_type, label in type_labels.items():
-        group = by_type.get(item_type, [])
-        if not group:
-            continue
-        lines.append(f"{label} ({len(group)}):")
+    def _format_group_prose(group: list[dict], type_name: str) -> str:
+        """Format 1-4 items as a prose sentence."""
+        count = len(group)
+        count_word = _num_word.get(count, str(count))
+        noun = type_name if count > 1 else type_name.rstrip("s")
+        descs = [_item_desc(item) for item in group]
+        if count == 1:
+            return f"{count_word} {noun}: {descs[0]}."
+        items_text = ", ".join(descs[:-1]) + f", and {descs[-1]}"
+        return f"{count_word} {type_name} — {items_text}."
+
+    def _format_group_list(group: list[dict], type_name: str) -> str:
+        """Format 5+ items as a count header + numbered list."""
+        count = len(group)
+        lines = [f"{count} {type_name}:"]
         for i, item in enumerate(group, 1):
             title = item.get("title", item.get("description", ""))
             title = title[:80] if title else "Untitled"
             assignee = item.get("assignee", item.get("speaker", ""))
             suffix = f" — {assignee}" if assignee else ""
-            sensitive = " [SENSITIVE]" if item.get("sensitive") else ""
+            sensitive = " (sensitive)" if item.get("sensitive") else ""
             lines.append(f"  {i}. {title}{suffix}{sensitive}")
-        lines.append("")
+        return "\n".join(lines)
 
-    result = "\n".join(lines)
+    type_config = [
+        ("task", "tasks"),
+        ("decision", "decisions"),
+        ("gantt_update", "Gantt updates"),
+        ("information", "notes"),
+    ]
 
-    # Truncate for Telegram
+    parts = ["Here's what I got:\n"]
+    for item_type, type_name in type_config:
+        group = by_type.get(item_type, [])
+        if not group:
+            continue
+        if len(group) <= 4:
+            parts.append(_format_group_prose(group, type_name))
+        else:
+            parts.append(_format_group_list(group, type_name))
+
+    result = "\n\n".join(parts)
+
     if len(result) > 3500:
-        result = result[:3500] + "\n\n... (truncated)"
+        result = result[:3500] + "\n\n(...)"
 
     return result
 

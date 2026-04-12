@@ -160,32 +160,23 @@ def format_alerts_message(alerts: list[dict]) -> str:
     if not alerts:
         return ""
 
-    lines = ["*Operational Alerts*\n"]
+    # Sort: high first, then medium, then low
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    sorted_alerts = sorted(alerts, key=lambda a: severity_order.get(a.get("severity", "low"), 2))
 
-    # Group by severity
-    high = [a for a in alerts if a.get("severity") == "high"]
-    medium = [a for a in alerts if a.get("severity") == "medium"]
-    low = [a for a in alerts if a.get("severity") == "low"]
-
-    if high:
-        lines.append("*!!! HIGH PRIORITY*")
-        for a in high:
-            lines.append(f"  - {a.get('title', '')}")
-            if a.get("details"):
-                lines.append(f"    {a['details'][:100]}")
-        lines.append("")
-
-    if medium:
-        lines.append("*!! MEDIUM*")
-        for a in medium:
-            lines.append(f"  - {a.get('title', '')}")
-        lines.append("")
-
-    if low:
-        lines.append("*! LOW*")
-        for a in low:
-            lines.append(f"  - {a.get('title', '')}")
-        lines.append("")
+    lines = ["<b>Heads up</b>\n"]
+    for a in sorted_alerts:
+        severity = a.get("severity", "low")
+        title = a.get("title", "")
+        details = a.get("details", "")
+        if severity == "high":
+            detail_str = f" — {details[:100]}" if details else ""
+            lines.append(f"🔴 {title}{detail_str}")
+        elif severity == "medium":
+            detail_str = f" — {details[:100]}" if details else ""
+            lines.append(f"🟡 {title}{detail_str}")
+        else:
+            lines.append(title)
 
     return "\n".join(lines)
 

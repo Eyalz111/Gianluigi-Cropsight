@@ -31,7 +31,7 @@ class TestMorningBriefSystemState:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "System State:</b> all clear" in result
+        assert "System: all clear" in result
 
     def test_format_with_rejected_meetings(self):
         """When rejected meetings exist, show detailed breakdown."""
@@ -50,7 +50,7 @@ class TestMorningBriefSystemState:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "Rejected meetings with orphan data: 2" in result
+        assert "2 rejected meetings" in result
         assert "all clear" not in result
 
     def test_format_with_errors(self):
@@ -70,7 +70,7 @@ class TestMorningBriefSystemState:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "Errors in 24h: 5" in result
+        assert "5 errors in 24h" in result
 
     def test_format_with_stale_watcher(self):
         """Stale watcher should NOT be all-clear."""
@@ -89,7 +89,7 @@ class TestMorningBriefSystemState:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "Watcher: stale" in result
+        assert "watcher stale" in result
 
     def test_format_pending_queue_shows_but_still_clean(self):
         """Pending approvals queue is displayed but doesn't count as error."""
@@ -108,7 +108,7 @@ class TestMorningBriefSystemState:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "Pending approvals: 3" in result
+        assert "3 pending approvals" in result
 
 
 # =============================================================================

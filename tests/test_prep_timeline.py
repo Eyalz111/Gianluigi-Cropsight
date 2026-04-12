@@ -96,6 +96,7 @@ class TestCreateOutlineForMeeting:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._reminders_sent = set()
         scheduler._pending_prep_timers = {}
 
@@ -137,6 +138,7 @@ class TestCreateOutlineForMeeting:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._reminders_sent = set()
         scheduler._pending_prep_timers = {}
 
@@ -156,6 +158,7 @@ class TestCreateOutlineForMeeting:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._reminders_sent = set()
         scheduler._pending_prep_timers = {}
 
@@ -239,6 +242,7 @@ class TestReconstructPrepTimers:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._pending_prep_timers = {}
 
         future_time = (datetime.now(timezone.utc) + timedelta(hours=20)).isoformat()
@@ -275,6 +279,7 @@ class TestReconstructPrepTimers:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._pending_prep_timers = {}
 
         past_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
@@ -300,6 +305,7 @@ class TestReconstructPrepTimers:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._pending_prep_timers = {}
 
         with patch(SUPABASE_PATCH) as mock_db:
@@ -433,6 +439,7 @@ class TestCheckAndGeneratePreps:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._reminders_sent = set()
         scheduler._pending_prep_timers = {}
         scheduler.prep_hours_before = 24
@@ -484,6 +491,7 @@ class TestCheckAndGeneratePreps:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._reminders_sent = set()
         scheduler._pending_prep_timers = {}
         scheduler.prep_hours_before = 24
@@ -514,6 +522,7 @@ class TestCheckAndGeneratePreps:
 
         scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
         scheduler._prep_generated = set()
+        scheduler._prep_in_progress = set()
         scheduler._reminders_sent = set()
         scheduler._pending_prep_timers = {}
         scheduler.prep_hours_before = 24
@@ -588,26 +597,6 @@ class TestAutoGenerate:
 
             mock_gen.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_emergency_bg_gen_checks_status(self):
-        """Emergency background gen should check if still pending."""
-        from schedulers.meeting_prep_scheduler import MeetingPrepScheduler
-
-        scheduler = MeetingPrepScheduler.__new__(MeetingPrepScheduler)
-
-        with patch(SUPABASE_PATCH) as mock_db, \
-             patch("schedulers.meeting_prep_scheduler.generate_meeting_prep_from_outline",
-                   new_callable=AsyncMock) as mock_gen, \
-             patch(TELEGRAM_PATCH) as mock_tg:
-
-            # Eyal already responded — status changed
-            mock_db.get_pending_approval.return_value = {
-                "status": "generated",
-            }
-
-            await scheduler._emergency_background_generate("outline-123", "Test")
-
-            mock_gen.assert_not_called()
 
 
 # =============================================================================

@@ -284,17 +284,12 @@ class TaskReminderScheduler:
         # Priority emoji
         priority_emoji = {"H": "!!!", "M": "!!", "L": "!"}.get(priority, "!!")
 
-        message = (
-            f"*OVERDUE TASK* {priority_emoji}\n\n"
-            f"*Task:* {task_desc}\n"
-            f"*Assignee:* {assignee}\n"
-            f"*Days Overdue:* {days_overdue}\n"
-        )
+        message = f"<b>{task_desc}</b> is {days_overdue} days overdue ({assignee})."
 
         if source:
-            message += f"*From Meeting:* {source}\n"
+            message += f"\nFrom: {source}"
 
-        message += f"\nTap a button or reply with an update:"
+        message += "\nTap a button or reply with an update."
 
         # Resolve DB task_id so button handlers can update by id directly,
         # surviving instance restarts (no in-memory map dependency).
@@ -332,7 +327,8 @@ class TaskReminderScheduler:
         if assignee_telegram:
             await telegram_bot.send_message(
                 chat_id=assignee_telegram,
-                text=message
+                text=message,
+                parse_mode="HTML",
             )
 
         # Send to Eyal WITH inline buttons
@@ -340,7 +336,7 @@ class TaskReminderScheduler:
             msg = await telegram_bot.app.bot.send_message(
                 chat_id=telegram_bot.eyal_chat_id,
                 text=message,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=keyboard,
             )
             # Store message_id → short_id for free-text reply detection
@@ -349,7 +345,7 @@ class TaskReminderScheduler:
         except Exception as e:
             logger.error(f"Failed to send overdue reminder with buttons: {e}")
             # Fallback: send without buttons
-            await telegram_bot.send_to_eyal(message)
+            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
 
         logger.info(f"Sent overdue reminder for: {task_desc}")
         return True
@@ -368,21 +364,15 @@ class TaskReminderScheduler:
         task_desc = task.get("task", "Unknown task")
         priority = task.get("priority", "M")
 
-        priority_emoji = {"H": "!!!", "M": "!!", "L": "!"}.get(priority, "!!")
-
-        message = (
-            f"*Task Due Today* {priority_emoji}\n\n"
-            f"*Task:* {task_desc}\n"
-            f"*Assignee:* {assignee}\n"
-            f"\nPlease complete this task today!"
-        )
+        message = f"<b>{task_desc}</b> is due today ({assignee})."
 
         # Send to assignee
         assignee_telegram = self._get_telegram_id(assignee)
         if assignee_telegram:
             await telegram_bot.send_message(
                 chat_id=assignee_telegram,
-                text=message
+                text=message,
+                parse_mode="HTML",
             )
 
         logger.info(f"Sent due-today reminder for: {task_desc}")
@@ -409,19 +399,15 @@ class TaskReminderScheduler:
 
         day_word = "day" if days_until == 1 else "days"
 
-        message = (
-            f"*Upcoming Deadline*\n\n"
-            f"*Task:* {task_desc}\n"
-            f"*Assignee:* {assignee}\n"
-            f"*Due:* {deadline} ({days_until} {day_word})\n"
-        )
+        message = f"<b>{task_desc}</b> is due {deadline} — {days_until} {day_word} from now ({assignee})."
 
         # Send to assignee
         assignee_telegram = self._get_telegram_id(assignee)
         if assignee_telegram:
             await telegram_bot.send_message(
                 chat_id=assignee_telegram,
-                text=message
+                text=message,
+                parse_mode="HTML",
             )
 
         logger.info(f"Sent due-soon reminder for: {task_desc}")

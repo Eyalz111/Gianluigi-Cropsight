@@ -62,6 +62,8 @@ class MeetingPrepScheduler:
         self._running = False
         # Track events we've already created outlines for (in-memory cache)
         self._prep_generated: set[str] = set()
+        # Track events currently being processed (cleared on failure via finally)
+        self._prep_in_progress: set[str] = set()
         # Track reminders sent (in-memory, rebuilt on startup)
         self._reminders_sent: set[str] = set()
         # Pending prep timers: approval_id -> list of asyncio.Task
@@ -160,9 +162,9 @@ class MeetingPrepScheduler:
             event_id = event.get("id", "")
             title = event.get("title", "untitled")
 
-            # Skip if already processed or has existing outline
-            if event_id in self._prep_generated or event_id in existing_event_ids:
-                logger.info("  Skipping '%s' — already has outline", title)
+            # Skip if already processed, in progress, or has existing outline
+            if event_id in self._prep_generated or event_id in self._prep_in_progress or event_id in existing_event_ids:
+                logger.info("  Skipping '%s' — already has outline or in progress", title)
                 continue
 
             # Check if CropSight meeting
@@ -178,6 +180,7 @@ class MeetingPrepScheduler:
 
             logger.info("  Processing event — %d attendees, CropSight=True (id=%s)", len(attendees), event_id[:12])
 
+            self._prep_in_progress.add(event_id)
             try:
                 result = await self._create_outline_for_meeting(event)
                 results.append(result)
@@ -193,6 +196,8 @@ class MeetingPrepScheduler:
                     "status": "error",
                     "error": str(e),
                 })
+            finally:
+                self._prep_in_progress.discard(event_id)
 
         return results
 
@@ -411,32 +416,6 @@ class MeetingPrepScheduler:
             "prep_approval_id": prep_approval_id,
         }
 
-    async def _emergency_background_generate(self, approval_id: str, title: str) -> None:
-        """Background generation for emergency mode. Runs in parallel with outline."""
-        try:
-            # Small delay to let the outline be sent first
-            await asyncio.sleep(5)
-
-            # Check if still pending (Eyal may have responded)
-            row = supabase_client.get_pending_approval(approval_id)
-            if not row or row.get("status") != "pending":
-                logger.info(f"Emergency gen cancelled — {approval_id} no longer pending")
-                return
-
-            logger.info(f"Emergency background generation starting for '{title}'")
-            result = await generate_meeting_prep_from_outline(approval_id)
-
-            if result.get("status") == "success":
-                await telegram_bot.send_to_eyal(
-                    f"⚡ Emergency prep for '{title}' generated automatically. "
-                    f"Check your pending approvals."
-                )
-
-        except asyncio.CancelledError:
-            logger.info(f"Emergency gen cancelled for {approval_id}")
-        except Exception as e:
-            logger.error(f"Emergency background gen failed for {approval_id}: {e}")
-
     def _schedule_prep_timers(self, approval_id: str, mode: str, hours_until: float) -> None:
         """Schedule reminder and auto-generate timers based on timeline mode."""
         tasks = []
@@ -501,8 +480,6 @@ class MeetingPrepScheduler:
                     name=f"autogen_{approval_id}",
                 )
                 tasks.append(task)
-
-        # emergency mode: background gen is handled separately in _create_outline_for_meeting
 
         if tasks:
             self._pending_prep_timers[approval_id] = tasks

@@ -165,7 +165,7 @@ class TestFormatMorningBrief:
             "stats": {"email_scans": 1, "constant_items": 0, "calendar_events": 0},
         }
         result = format_morning_brief(brief)
-        assert "investor correspondence" in result
+        assert "Investor emails" in result
         # Must not contain any raw email address or subject
         assert "@" not in result
         assert "Subject" not in result
@@ -208,8 +208,8 @@ class TestFormatMorningBrief:
             "stats": {"email_scans": len(items), "constant_items": 0},
         }
         result = format_morning_brief(brief)
-        assert len(result) <= 4100  # 4000 + truncation suffix
-        assert "truncated" in result
+        assert len(result) <= 3900  # 3800 + continuation marker
+        assert "(...)" in result
 
 
 # =========================================================================

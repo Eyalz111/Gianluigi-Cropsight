@@ -63,9 +63,9 @@ class TestMorningBriefPrepOutlines:
         }
 
         text = format_morning_brief(brief)
-        assert "Pending Prep Outlines (2)" in text
         assert "Tech Review" in text
         assert "Business Sync" in text
+        assert "prep pending" in text
 
     @pytest.mark.asyncio
     async def test_no_pending_preps_no_section(self):

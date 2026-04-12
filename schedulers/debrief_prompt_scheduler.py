@@ -94,9 +94,8 @@ class DebriefPromptScheduler:
         from services.supabase_client import supabase_client
 
         message = (
-            "<b>End of day</b> \u2014 anything to add?\n\n"
-            "Reply with /debrief to start a session, "
-            "or just type updates and I'll process them."
+            "End of day \u2014 anything worth capturing?\n\n"
+            "Start with /debrief, or just tell me what happened."
         )
 
         try:
