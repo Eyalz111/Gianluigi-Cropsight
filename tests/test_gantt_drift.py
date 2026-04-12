@@ -285,7 +285,7 @@ class TestMorningBriefNewSections:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "Task Urgency" in result
+        assert "Needs attention" in result
         assert "Send proposal" in result
         assert "Eyal" in result
 
@@ -304,7 +304,7 @@ class TestMorningBriefNewSections:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "Gantt Milestones" in result
+        assert "Milestones" in result
         assert "PoC completion" in result
         assert "2w away" in result
 
@@ -323,7 +323,7 @@ class TestMorningBriefNewSections:
             "scan_ids": [],
         }
         result = format_morning_brief(brief)
-        assert "Drift Alerts" in result
+        assert "Needs attention" in result
         assert "75%" in result
 
     def test_empty_sections_omitted(self):

@@ -288,9 +288,9 @@ class TestStatusCommand:
             await bot._handle_status(update, context)
 
         msg = bot.send_message.call_args[0][1]
-        assert "Gianluigi Status" in msg
-        assert "Meetings processed: 2" in msg
-        assert "Documents ingested: 1" in msg
+        assert "System snapshot" in msg
+        assert "2 meetings processed" in msg
+        assert "1 documents ingested" in msg
         assert "development" in msg
 
 
