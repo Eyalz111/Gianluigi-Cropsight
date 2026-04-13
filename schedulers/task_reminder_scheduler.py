@@ -127,6 +127,42 @@ class TaskReminderScheduler:
         self._running = False
         logger.info("Task reminder scheduler stopped")
 
+    def _get_explicit_task_keys(self) -> set[tuple[str, str]]:
+        """
+        Return the set of (title_lower, assignee_lower) for all approved tasks
+        whose deadline_confidence is 'EXPLICIT'. Used to filter sheet-sourced
+        reminder candidates down to tasks whose deadlines Eyal or a participant
+        actually committed to — INFERRED and NONE deadlines are suppressed
+        because their dates are LLM guesses and too noisy to interrupt with.
+
+        The reminder scheduler reads from Google Sheets (source of truth for
+        visible tasks), so the filter is done in Python here rather than in
+        the sheet query.
+        """
+        try:
+            rows = (
+                supabase_client.client.table("tasks")
+                .select("title, assignee")
+                .eq("approval_status", "approved")
+                .eq("deadline_confidence", "EXPLICIT")
+                .limit(10000)
+                .execute()
+            )
+            return {
+                (
+                    (r.get("title") or "").strip().lower(),
+                    (r.get("assignee") or "").strip().lower(),
+                )
+                for r in (rows.data or [])
+            }
+        except Exception as e:
+            logger.warning(
+                f"Failed to fetch EXPLICIT task keys; falling back to no-filter: {e}"
+            )
+            # Safety: if DB lookup fails, keep pre-v2.3 behavior (remind on
+            # every deadlined task). Better over-notify than go silent.
+            return set()
+
     async def _check_and_send_reminders(self) -> dict:
         """
         Check all tasks and send appropriate reminders.
@@ -142,6 +178,13 @@ class TaskReminderScheduler:
         if not tasks:
             logger.debug("No tasks found")
             return {"reminders_sent": 0}
+
+        # v2.3: filter to EXPLICIT-confidence deadlines only. Empty set means
+        # either no EXPLICIT tasks exist yet, or the DB lookup failed — in the
+        # latter case we fall back to not filtering (logged warning) to avoid
+        # silently dropping every reminder on a transient Supabase blip.
+        explicit_keys = self._get_explicit_task_keys()
+        filter_active = bool(explicit_keys)
 
         today = datetime.now(_ISRAEL_TZ).date()
         lookback_cutoff = today - timedelta(days=settings.ALERT_LOOKBACK_DAYS)
@@ -170,6 +213,18 @@ class TaskReminderScheduler:
             deadline_str = task.get("deadline", "")
             if not deadline_str:
                 continue
+
+            # v2.3: skip tasks whose DB row lacks an EXPLICIT deadline_confidence.
+            # Match by (title, assignee) lowercase tuple against the DB snapshot
+            # taken at the start of this check. filter_active=False means the DB
+            # lookup failed — fall through to pre-v2.3 behavior.
+            if filter_active:
+                key = (
+                    (task.get("task") or "").strip().lower(),
+                    (task.get("assignee") or "").strip().lower(),
+                )
+                if key not in explicit_keys:
+                    continue
 
             try:
                 deadline = datetime.strptime(deadline_str, "%Y-%m-%d").date()
@@ -315,12 +370,21 @@ class TaskReminderScheduler:
         # resolution failed at send time.
         callback_key = db_task_id if db_task_id else short_id
 
-        # Build inline keyboard
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Done", callback_data=f"taskdone:{callback_key}"),
-            InlineKeyboardButton("+1 Week", callback_data=f"taskdelay:{callback_key}"),
-            InlineKeyboardButton("Discuss", callback_data=f"taskdiscuss:{callback_key}"),
-        ]])
+        # Build inline keyboard.
+        # Row 1 (existing): status + scheduling actions.
+        # Row 2 (v2.3 PR 5): clear a bad/obsolete deadline in one tap. Clearing
+        # sets deadline_confidence='NONE' so the task drops out of reminder
+        # scope until a fresh EXPLICIT deadline is committed.
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Done", callback_data=f"taskdone:{callback_key}"),
+                InlineKeyboardButton("+1 Week", callback_data=f"taskdelay:{callback_key}"),
+                InlineKeyboardButton("Discuss", callback_data=f"taskdiscuss:{callback_key}"),
+            ],
+            [
+                InlineKeyboardButton("Clear date", callback_data=f"deadline_clear:{callback_key}"),
+            ],
+        ])
 
         # Send to assignee (no buttons — buttons only for Eyal)
         assignee_telegram = self._get_telegram_id(assignee)

@@ -195,6 +195,10 @@ def _check_overdue_clusters() -> list[dict]:
     alerts = []
     overdue_tasks = supabase_client.get_tasks(status="overdue")
     overdue_tasks = [t for t in overdue_tasks if _within_lookback(t, settings.ALERT_LOOKBACK_DAYS)]
+    # v2.3: only cluster-alert on deadlines explicitly committed to.
+    # INFERRED deadlines are LLM guesses — don't escalate "3 overdue" when
+    # 2 of those were never actually committed to a date.
+    overdue_tasks = [t for t in overdue_tasks if t.get("deadline_confidence") == "EXPLICIT"]
 
     if not overdue_tasks:
         return alerts
@@ -242,6 +246,8 @@ def _check_overdue_escalation() -> list[dict]:
     alerts = []
     overdue_tasks = supabase_client.get_tasks(status="overdue")
     overdue_tasks = [t for t in overdue_tasks if _within_lookback(t, settings.ALERT_LOOKBACK_DAYS)]
+    # v2.3: only escalate individual tasks with an EXPLICIT deadline.
+    overdue_tasks = [t for t in overdue_tasks if t.get("deadline_confidence") == "EXPLICIT"]
 
     if not overdue_tasks:
         return alerts

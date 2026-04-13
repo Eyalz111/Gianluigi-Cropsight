@@ -1415,11 +1415,12 @@ class MCPServer:
             name="get_topic_thread",
             description=(
                 "[TOPICS] Get the evolution of a topic/project across meetings. "
-                "Returns chronological narrative of how the topic was discussed "
-                "and what decisions were made over time."
+                "Returns structured state (current status, stakeholders, open "
+                "items, last decision, key facts) alongside the prose narrative. "
+                "Set include_state=False for the pre-v2.3 narrative-only payload."
             ),
         )
-        async def get_topic_thread(topic_name: str) -> dict:
+        async def get_topic_thread(topic_name: str, include_state: bool = True) -> dict:
             try:
                 from processors.topic_threading import (
                     _find_thread_by_name,
@@ -1446,7 +1447,15 @@ class MCPServer:
                     narrative = await generate_topic_evolution(thread["id"])
                     full["evolution_summary"] = narrative
 
-                mcp_auth.log_call("get_topic_thread", {"topic": topic_name})
+                # v2.3 PR 4: include state_json by default. state_json may be
+                # null for threads that have not been backfilled and have not
+                # received a new mention since the feature shipped — surface
+                # the null gracefully rather than hiding the field.
+                if not include_state:
+                    full.pop("state_json", None)
+                    full.pop("state_updated_at", None)
+
+                mcp_auth.log_call("get_topic_thread", {"topic": topic_name, "include_state": include_state})
                 return _success(full)
 
             except Exception as e:
@@ -1461,15 +1470,28 @@ class MCPServer:
             name="list_topic_threads",
             description=(
                 "[TOPICS] List all topic threads with meeting counts. "
-                "Shows which projects/topics are being actively discussed."
+                "Shows which projects/topics are being actively discussed. "
+                "Set include_state=True to include the structured state_json "
+                "per thread (heavier payload)."
             ),
         )
-        async def list_topic_threads(status: str | None = None) -> dict:
+        async def list_topic_threads(
+            status: str | None = None,
+            include_state: bool = False,
+        ) -> dict:
             try:
                 from processors.topic_threading import list_active_threads
 
                 threads = list_active_threads(status=status)
-                mcp_auth.log_call("list_topic_threads", {"status": status})
+                # v2.3 PR 4: the base list_active_threads already returns
+                # state_json (SELECT *). Strip it by default to keep the
+                # list payload light; caller opts in explicitly.
+                if not include_state:
+                    for t in threads:
+                        t.pop("state_json", None)
+                        t.pop("state_updated_at", None)
+
+                mcp_auth.log_call("list_topic_threads", {"status": status, "include_state": include_state})
                 return _success(threads)
 
             except Exception as e:
@@ -2328,6 +2350,19 @@ class MCPServer:
                         details={"signal_id": signal_id},
                         triggered_by="eyal",
                     )
+                    # v2.3 PR 3: observation log
+                    try:
+                        _sc.log_approval_observation(
+                            content_type="intelligence_signal",
+                            action="rejected",
+                            original_content={
+                                "title": signal.get("title"),
+                                "week_number": signal.get("week_number"),
+                            },
+                            context={"signal_id": signal_id},
+                        )
+                    except Exception as e:
+                        logger.warning(f"[observation] signal reject log failed (non-fatal): {e}")
                     mcp_auth.log_call(
                         "approve_intelligence_signal",
                         {"signal_id": signal_id, "cancel": True},
@@ -2337,6 +2372,19 @@ class MCPServer:
                 # Approve and distribute
                 _sc.update_pending_approval(signal_id, status="approved")
                 _sc.update_intelligence_signal(signal_id, {"status": "approved"})
+                # v2.3 PR 3: observation log
+                try:
+                    _sc.log_approval_observation(
+                        content_type="intelligence_signal",
+                        action="approved",
+                        final_content={
+                            "title": signal.get("title"),
+                            "week_number": signal.get("week_number"),
+                        },
+                        context={"signal_id": signal_id},
+                    )
+                except Exception as e:
+                    logger.warning(f"[observation] signal approve log failed (non-fatal): {e}")
 
                 from processors.intelligence_signal_agent import (
                     distribute_intelligence_signal,
@@ -2481,6 +2529,80 @@ class MCPServer:
                 logger.error(f"add_competitor error: {e}")
                 mcp_auth.log_call(
                     "add_competitor",
+                    success=False,
+                    error=str(e),
+                )
+                return _error(str(e))
+
+        # 44. get_approval_stats (read) — v2.3 PR 3
+        @mcp.tool(
+            name="get_approval_stats",
+            description=(
+                "[SYSTEM] Approval pattern stats from the observation log. "
+                "Shows approval / edit / rejection counts and rates grouped by "
+                "content_type for the last N days. Useful for understanding "
+                "Gianluigi's accuracy over time and where Eyal tends to edit "
+                "vs accept unchanged."
+            ),
+        )
+        async def get_approval_stats(days: int = 30) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+                from datetime import datetime, timedelta, timezone
+
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+                rows = (
+                    _sc.client.table("approval_observations")
+                    .select("content_type, action, edit_distance_pct")
+                    .gte("created_at", cutoff)
+                    .limit(10000)
+                    .execute()
+                    .data
+                    or []
+                )
+
+                # Group by (content_type, action)
+                by_type: dict[str, dict] = {}
+                for r in rows:
+                    ct = r.get("content_type", "unknown")
+                    act = r.get("action", "unknown")
+                    bucket = by_type.setdefault(ct, {
+                        "approved": 0,
+                        "edited": 0,
+                        "rejected": 0,
+                        "avg_edit_distance": None,
+                        "_edit_distances": [],
+                    })
+                    if act in bucket:
+                        bucket[act] += 1
+                    if act == "edited" and r.get("edit_distance_pct") is not None:
+                        bucket["_edit_distances"].append(r["edit_distance_pct"])
+
+                # Compute rates + avg edit distance
+                summary = []
+                for ct, b in sorted(by_type.items()):
+                    total = b["approved"] + b["edited"] + b["rejected"]
+                    eds = b.pop("_edit_distances")
+                    avg_ed = round(sum(eds) / len(eds), 3) if eds else None
+                    b["avg_edit_distance"] = avg_ed
+                    b["total"] = total
+                    b["approve_rate"] = round(b["approved"] / total, 3) if total else 0.0
+                    b["edit_rate"] = round(b["edited"] / total, 3) if total else 0.0
+                    b["reject_rate"] = round(b["rejected"] / total, 3) if total else 0.0
+                    summary.append({"content_type": ct, **b})
+
+                mcp_auth.log_call("get_approval_stats", {"days": days})
+                return _success({
+                    "days": days,
+                    "total_observations": len(rows),
+                    "by_content_type": summary,
+                })
+
+            except Exception as e:
+                logger.error(f"get_approval_stats error: {e}")
+                mcp_auth.log_call(
+                    "get_approval_stats",
                     success=False,
                     error=str(e),
                 )

@@ -839,6 +839,7 @@ class SupabaseClient:
         transcript_timestamp: str | None = None,
         status: str = "pending",
         category: str | None = None,
+        deadline_confidence: str = "NONE",
     ) -> dict:
         """
         Create a new task.
@@ -852,6 +853,10 @@ class SupabaseClient:
             transcript_timestamp: Source citation (optional).
             status: Initial status (default: 'pending').
             category: Task category (e.g., 'Product & Tech', 'BD & Sales').
+            deadline_confidence: 'EXPLICIT' | 'INFERRED' | 'NONE'. Controls
+                whether reminders + proactive alerts fire. Default 'NONE' means
+                the task has no deadline at all. Callers that set a deadline
+                must also set this to 'EXPLICIT' or 'INFERRED'.
 
         Returns:
             Created task record.
@@ -865,6 +870,7 @@ class SupabaseClient:
             "transcript_timestamp": transcript_timestamp,
             "status": status,
             "category": category,
+            "deadline_confidence": deadline_confidence,
         }
 
         result = self.client.table("tasks").insert(data).execute()
@@ -914,6 +920,7 @@ class SupabaseClient:
                 "status": "pending",
                 "category": t.get("category"),
                 "label": t.get("label"),
+                "deadline_confidence": t.get("deadline_confidence", "NONE"),
             }
             for t in valid_tasks
         ]
@@ -1039,6 +1046,113 @@ class SupabaseClient:
         if not result.data:
             raise ValueError(f"Task {task_id} not found or not updated")
         logger.info(f"Updated task {task_id}: {list(updates.keys())}")
+        return result.data[0]
+
+    def log_approval_observation(
+        self,
+        content_type: str,
+        action: str,
+        content_id: str | None = None,
+        original_content: dict | None = None,
+        final_content: dict | None = None,
+        context: dict | None = None,
+    ) -> None:
+        """
+        Log a single approval-decision observation.
+
+        Fire-and-forget: never raises, never interrupts the calling flow. The
+        approval flow (meetings, Gantt proposals, intelligence signals, meeting
+        prep, quick inject, sheets sync, deadline edits) calls this AFTER its
+        primary action succeeds. A DB failure here must not roll back the
+        approval — observations are strictly non-critical telemetry.
+
+        Args:
+            content_type: 'meeting_summary' | 'gantt_proposal' |
+                'intelligence_signal' | 'meeting_prep' | 'sheets_sync' |
+                'quick_inject' | 'deadline_update' | ... (open set)
+            action: 'approved' | 'edited' | 'rejected'. Enforced by the
+                CHECK constraint on the table — pass anything else and the
+                insert fails (logged as warning, not raised).
+            content_id: UUID of the underlying record when one exists.
+                Polymorphic across tables (no FK), so pass the id of the
+                meeting / proposal / signal / prep that was decided on.
+            original_content: What Gianluigi proposed. For 'edited' actions,
+                this is what the edit distance is computed against.
+            final_content: What Eyal accepted (None for 'rejected').
+            context: Free-bag metadata — meeting_title, sensitivity,
+                item_count, etc. Queried later for pattern analysis.
+
+        edit_distance_pct is computed automatically when both original and
+        final content are provided and action=='edited'. It's a
+        character-level 1 - SequenceMatcher ratio (0.0 = identical,
+        1.0 = completely different), useful for spotting which content types
+        get heavy-handed edits vs. minor tweaks.
+        """
+        edit_distance_pct = None
+        if original_content is not None and final_content is not None and action == "edited":
+            from difflib import SequenceMatcher
+            orig_str = str(original_content)
+            final_str = str(final_content)
+            if orig_str:
+                ratio = SequenceMatcher(None, orig_str, final_str).ratio()
+                edit_distance_pct = round(1.0 - ratio, 3)
+
+        try:
+            self.client.table("approval_observations").insert({
+                "content_type": content_type,
+                "action": action,
+                "content_id": content_id,
+                "original_content": original_content,
+                "final_content": final_content,
+                "edit_distance_pct": edit_distance_pct,
+                "context": context or {},
+            }).execute()
+        except Exception as e:
+            logger.warning(
+                f"[observation] failed to log {content_type}/{action}: {e}"
+            )
+            # Never propagate — observations are telemetry, not load-bearing.
+
+    def update_task_deadline(
+        self,
+        task_id: str,
+        deadline: date | None,
+        confidence: str = "EXPLICIT",
+    ) -> dict:
+        """
+        Update a task's deadline with explicit confidence tagging.
+
+        Used by Telegram inline buttons and any manual deadline edit where
+        the user actively chose the new date — always defaults to 'EXPLICIT'
+        since the choice is deliberate. Clearing a deadline (deadline=None)
+        should set confidence='NONE'.
+
+        Args:
+            task_id: UUID of the task to update.
+            deadline: New deadline, or None to clear.
+            confidence: 'EXPLICIT' | 'INFERRED' | 'NONE'. Default 'EXPLICIT'.
+
+        Returns:
+            Updated task record.
+
+        Raises:
+            ValueError: If the task does not exist. Callers must catch.
+        """
+        updates = {
+            "deadline": self._serialize_datetime(deadline),
+            "deadline_confidence": confidence,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        result = (
+            self.client.table("tasks")
+            .update(updates)
+            .eq("id", task_id)
+            .eq("approval_status", "approved")
+            .execute()
+        )
+        if not result.data:
+            raise ValueError(f"Task {task_id} not found or not approved")
+        logger.info(f"Updated task {task_id} deadline: {deadline} ({confidence})")
         return result.data[0]
 
     # =========================================================================

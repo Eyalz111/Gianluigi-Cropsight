@@ -64,6 +64,7 @@ def run_qa_check() -> dict:
     report["checks"]["approved_with_pending_children"] = _check_approved_meetings_with_pending_children(report["issues"])
     report["checks"]["rls_coverage"] = _check_rls_coverage(report["issues"])
     report["checks"]["duplicate_tasks"] = _check_duplicate_tasks(report["issues"])
+    report["checks"]["topic_state_staleness"] = _check_topic_state_staleness(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -550,6 +551,65 @@ def _check_rls_coverage(issues: list[str]) -> dict:
             f"Fix: ALTER TABLE <name> ENABLE ROW LEVEL SECURITY for each, "
             f"then update scripts/migrate_rls_security_v2.sql."
         )
+
+    return result
+
+
+def _check_topic_state_staleness(issues: list[str]) -> dict:
+    """
+    v2.3 PR 4 — metadata-only daily sweep.
+
+    For every active topic_thread with last_updated more than 30 days old,
+    flip its state_json.current_status to 'stale'. No LLM call — this is a
+    cheap maintenance pass that keeps the morning brief's "Needs attention"
+    surfacing accurate without blocking on Haiku.
+
+    A topic becomes 'stale' when it hasn't been mentioned in a new meeting
+    for 30 days. Re-activation happens naturally on the next update_topic_state
+    call (which will overwrite the status based on the new meeting's content).
+
+    Does NOT raise issues — staleness is expected churn, not a defect. Returns
+    the count of threads flipped so the daily report shows the sweep ran.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    result = {"threads_scanned": 0, "threads_marked_stale": 0}
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+        rows = (
+            supabase_client.client.table("topic_threads")
+            .select("id, state_json, last_updated")
+            .eq("status", "active")
+            .not_.is_("state_json", "null")
+            .lt("last_updated", cutoff)
+            .limit(500)
+            .execute()
+        )
+        result["threads_scanned"] = len(rows.data or [])
+
+        for row in (rows.data or []):
+            state = row.get("state_json") or {}
+            if state.get("current_status") == "stale":
+                continue  # already marked
+            state["current_status"] = "stale"
+            try:
+                supabase_client.client.table("topic_threads").update({
+                    "state_json": state,
+                }).eq("id", row["id"]).execute()
+                result["threads_marked_stale"] += 1
+            except Exception as e:
+                logger.warning(f"[topic_state] stale flip failed for {row.get('id')}: {e}")
+
+        if result["threads_marked_stale"]:
+            logger.info(
+                f"[topic_state] staleness sweep: {result['threads_marked_stale']} "
+                f"threads flipped to stale (of {result['threads_scanned']} scanned)"
+            )
+
+    except Exception as e:
+        logger.warning(f"_check_topic_state_staleness failed: {e}")
+        result["error"] = str(e)
 
     return result
 

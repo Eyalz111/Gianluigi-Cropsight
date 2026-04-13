@@ -40,13 +40,18 @@ class TestOverdueClusters:
             assert result == []
 
     def test_three_or_more_triggers_alert(self):
-        """3+ overdue tasks for one assignee should trigger alert."""
+        """3+ overdue tasks for one assignee should trigger alert.
+
+        v2.3: deadline_confidence='EXPLICIT' is required to pass the filter
+        that was added to `_check_overdue_clusters` — INFERRED and NONE
+        deadlines are LLM guesses and suppressed from cluster alerts.
+        """
         recent = datetime.now().isoformat()
         with patch("processors.proactive_alerts.supabase_client") as mock_db:
             mock_db.get_tasks.return_value = [
-                {"assignee": "Eyal", "title": "Task 1", "status": "overdue", "created_at": recent},
-                {"assignee": "Eyal", "title": "Task 2", "status": "overdue", "created_at": recent},
-                {"assignee": "Eyal", "title": "Task 3", "status": "overdue", "created_at": recent},
+                {"assignee": "Eyal", "title": "Task 1", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
+                {"assignee": "Eyal", "title": "Task 2", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
+                {"assignee": "Eyal", "title": "Task 3", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
             ]
             result = _check_overdue_clusters()
             assert len(result) == 1
@@ -66,16 +71,20 @@ class TestOverdueClusters:
             assert result == []
 
     def test_groups_by_assignee(self):
-        """Should alert separately for each assignee with 3+."""
+        """Should alert separately for each assignee with 3+.
+
+        v2.3: all fixture tasks carry deadline_confidence='EXPLICIT' to pass
+        the PR 2 filter — see test_three_or_more_triggers_alert for rationale.
+        """
         recent = datetime.now().isoformat()
         with patch("processors.proactive_alerts.supabase_client") as mock_db:
             mock_db.get_tasks.return_value = [
-                {"assignee": "Eyal", "title": "T1", "status": "overdue", "created_at": recent},
-                {"assignee": "Eyal", "title": "T2", "status": "overdue", "created_at": recent},
-                {"assignee": "Eyal", "title": "T3", "status": "overdue", "created_at": recent},
-                {"assignee": "Paolo", "title": "T4", "status": "overdue", "created_at": recent},
-                {"assignee": "Paolo", "title": "T5", "status": "overdue", "created_at": recent},
-                {"assignee": "Paolo", "title": "T6", "status": "overdue", "created_at": recent},
+                {"assignee": "Eyal", "title": "T1", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
+                {"assignee": "Eyal", "title": "T2", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
+                {"assignee": "Eyal", "title": "T3", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
+                {"assignee": "Paolo", "title": "T4", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
+                {"assignee": "Paolo", "title": "T5", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
+                {"assignee": "Paolo", "title": "T6", "status": "overdue", "created_at": recent, "deadline_confidence": "EXPLICIT"},
             ]
             result = _check_overdue_clusters()
             assert len(result) == 2

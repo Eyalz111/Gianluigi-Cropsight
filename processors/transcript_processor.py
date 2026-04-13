@@ -517,6 +517,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "title": "Task description — see TASK EXTRACTION RULES below",
             "assignee": "Name",
             "deadline": "YYYY-MM-DD or null",
+            "deadline_confidence": "EXPLICIT | INFERRED | NONE — see EXTRACTION INSTRUCTIONS point 2",
             "priority": "H/M/L",
             "category": "Product & Tech / BD & Sales / Legal & Compliance / Finance & Fundraising / Operations & HR / Strategy & Research",
             "transcript_timestamp": "MM:SS",

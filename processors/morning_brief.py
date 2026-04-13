@@ -318,12 +318,76 @@ async def compile_morning_brief() -> dict:
                 "type": "task_urgency",
                 "title": "Task Urgency",
                 "items": [
-                    {"title": t.get("title", "")[:80], "assignee": t.get("assignee", ""), "deadline": t.get("deadline", "")}
+                    {
+                        "title": t.get("title", "")[:80],
+                        "assignee": t.get("assignee", ""),
+                        "deadline": t.get("deadline", ""),
+                        "deadline_confidence": t.get("deadline_confidence", "NONE"),
+                    }
                     for t in overdue_high
                 ],
             })
     except Exception as e:
         logger.debug(f"Task urgency for morning brief failed: {e}")
+
+    # 11b. v2.3 PR 4 — Blocked / stale topic surfacing
+    # Surface up to 3 topic threads whose structured state_json shows either
+    # current_status='blocked' or (last_activity_date >14 days AND meeting_count>3).
+    # Hard cap of 3 forces triage — if 6 topics are blocked we don't spam.
+    try:
+        from datetime import date as _date, timedelta as _td
+
+        state_rows = (
+            supabase_client.client.table("topic_threads")
+            .select("id, topic_name, meeting_count, state_json")
+            .not_.is_("state_json", "null")
+            .limit(200)
+            .execute()
+        )
+        today = _date.today()
+        stale_cutoff = today - _td(days=14)
+
+        blocked = []
+        stale = []
+        for row in (state_rows.data or []):
+            state = row.get("state_json") or {}
+            status = state.get("current_status")
+            if status == "blocked":
+                blocked.append({
+                    "topic_name": row.get("topic_name", ""),
+                    "summary": state.get("summary", "")[:160],
+                    "kind": "blocked",
+                })
+                continue
+            if (row.get("meeting_count") or 0) > 3:
+                last = state.get("last_activity_date")
+                if last:
+                    try:
+                        last_d = _date.fromisoformat(str(last)[:10])
+                        if last_d < stale_cutoff:
+                            days_idle = (today - last_d).days
+                            stale.append({
+                                "topic_name": row.get("topic_name", ""),
+                                "summary": state.get("summary", "")[:160],
+                                "days_idle": days_idle,
+                                "last_activity_date": str(last),
+                                "kind": "stale",
+                            })
+                    except (ValueError, TypeError):
+                        pass
+
+        # Sort stale by days_idle desc (most stale first)
+        stale.sort(key=lambda x: x["days_idle"], reverse=True)
+        # Prefer blocked over stale in the hard cap of 3
+        topic_items = (blocked + stale)[:3]
+        if topic_items:
+            sections.append({
+                "type": "topic_state",
+                "title": "Topic state",
+                "items": topic_items,
+            })
+    except Exception as e:
+        logger.debug(f"Topic state surfacing failed: {e}")
 
     # 12. Gantt Milestones This Week + Drift Alerts (Phase 5)
     try:
@@ -511,7 +575,26 @@ def format_morning_brief(brief: dict) -> str:
         elif section_type == "task_urgency":
             for item in section.get("items", []):
                 assignee = f" ({item['assignee']})" if item.get("assignee") else ""
-                attention_items.append(f"  🟡 {item['title']}{assignee} — due {item.get('deadline', '?')}")
+                deadline_str = item.get("deadline", "?")
+                # v2.3: ~ prefix signals INFERRED deadline (LLM guess, not a
+                # verbatim commitment). Keep the task visible but flag the
+                # date's reliability.
+                if item.get("deadline_confidence") == "INFERRED" and deadline_str != "?":
+                    deadline_str = f"~{deadline_str}"
+                attention_items.append(f"  🟡 {item['title']}{assignee} — due {deadline_str}")
+
+        elif section_type == "topic_state":
+            # v2.3 PR 4: surface blocked / stale topics (hard cap of 3 items
+            # enforced at gathering time in morning_brief.py). Blocked uses
+            # 🔴, stale uses 🟡 — same severity language as alerts.
+            for item in section.get("items", []):
+                name = item.get("topic_name", "")
+                if item.get("kind") == "blocked":
+                    summary = item.get("summary") or "blocked"
+                    attention_items.append(f"  🔴 {name}: blocked — {summary}")
+                else:  # stale
+                    days = item.get("days_idle", "?")
+                    attention_items.append(f"  🟡 {name}: no activity in {days}d")
 
         elif section_type == "drift_alerts":
             for item in section.get("items", []):

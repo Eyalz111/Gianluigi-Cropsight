@@ -462,6 +462,27 @@ def apply_sheets_to_db(diff: dict) -> dict:
         )
         logger.info(f"Sheets sync applied: {applied}")
 
+        # v2.3 PR 3: observation log — every sync-apply is an approval decision
+        # (Eyal explicitly chose to commit the diff). Total > 0 gate avoids
+        # logging no-op syncs.
+        try:
+            supabase_client.log_approval_observation(
+                content_type="sheets_sync",
+                action="approved",
+                final_content={"applied": applied, "total": total},
+                context={
+                    "task_changes": {
+                        "modified": len(diff.get("tasks", {}).get("modified", [])),
+                        "created": len(diff.get("tasks", {}).get("sheets_only", [])),
+                    },
+                    "decision_changes": {
+                        "modified": len(diff.get("decisions", {}).get("modified", [])),
+                    },
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[observation] sheets_sync log failed (non-fatal): {e}")
+
     return applied
 
 

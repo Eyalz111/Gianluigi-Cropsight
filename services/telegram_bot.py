@@ -3212,6 +3212,14 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         elif action in ("taskdone", "taskdelay", "taskdiscuss"):
             await self._handle_task_action(query, action, meeting_id)
 
+        # ── v2.3 PR 5: Clear-date inline action ───────────────────
+        # The +1 week button reuses the pre-v2.3 'taskdelay' callback —
+        # that handler already updates both DB and Sheets, and is now
+        # augmented to set deadline_confidence='EXPLICIT' + log an
+        # approval_observation (see _handle_task_action below).
+        elif action == "deadline_clear":
+            await self._handle_deadline_clear(query, meeting_id)
+
     async def _handle_task_action(
         self,
         query,
@@ -3302,11 +3310,34 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             logger.info(f"Task marked done via Telegram button: {task_text[:50]}")
 
         elif action == "taskdelay":
+            # v2.3 PR 5: the +1 week button must now also stamp the task's
+            # deadline_confidence as EXPLICIT (Eyal actively chose this date).
+            # Without this, PR 2's EXPLICIT-only reminder filter would suppress
+            # all future reminders for this task even though the date was just
+            # manually set.
+            old_deadline = task_info.get("deadline", "")
             new_deadline = await self._execute_task_update_from_reminder(
-                task_info, delay_days=7
+                task_info,
+                delay_days=7,
+                deadline_confidence="EXPLICIT",
             )
+            # Fire-and-forget observation log
+            try:
+                task_db_id = task_info.get("task_id")
+                if task_db_id:
+                    supabase_client.log_approval_observation(
+                        content_type="deadline_update",
+                        action="edited",
+                        content_id=task_db_id,
+                        original_content={"deadline": old_deadline},
+                        final_content={"deadline": new_deadline},
+                        context={"action": "plus_week", "task_title": task_text[:80]},
+                    )
+            except Exception as e:
+                logger.warning(f"[observation] taskdelay log failed (non-fatal): {e}")
+            # Voice-aligned confirmation (no "DB + Sheets updated." system-speak)
             await query.edit_message_text(
-                f"Delayed: {task_text[:60]}\n\nNew deadline: {new_deadline}. DB + Sheets updated."
+                f"Pushed to {new_deadline} — {task_text[:60]}"
             )
             await query.answer("Delayed by 1 week")
             logger.info(f"Task delayed +7 days via Telegram button: {task_text[:50]}")
@@ -3356,11 +3387,110 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 except Exception as alert_err:
                     logger.error(f"Alert on discuss failure also failed: {alert_err}")
 
+    # --------------------------------------------------------------
+    # v2.3 PR 5: deadline inline-button handlers
+    # --------------------------------------------------------------
+
+    async def _resolve_task_for_deadline_button(
+        self,
+        callback_key: str,
+    ) -> dict | None:
+        """
+        Resolve a deadline-button callback_key to a DB task dict.
+
+        Accepts either a UUID (36 chars, 4 dashes) or a legacy short_id
+        (e.g. 't12' from the reminder scheduler's in-memory map). Returns
+        None if the task cannot be found — callers present a voice-aligned
+        fallback message.
+        """
+        from services.supabase_client import supabase_client
+        from schedulers.task_reminder_scheduler import task_reminder_scheduler
+
+        is_uuid = len(callback_key) == 36 and callback_key.count("-") == 4
+        task_id: str | None = None
+
+        if is_uuid:
+            task_id = callback_key
+        else:
+            info = task_reminder_scheduler.task_action_map.get(callback_key) or {}
+            task_id = info.get("task_id")
+
+        if not task_id:
+            return None
+
+        try:
+            result = (
+                supabase_client.client.table("tasks")
+                .select("*")
+                .eq("id", task_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.warning(f"deadline button task lookup failed for {task_id}: {e}")
+            return None
+
+    async def _handle_deadline_clear(self, query, callback_key: str) -> None:
+        """Clear a task deadline entirely; stamp confidence as NONE."""
+        from services.supabase_client import supabase_client
+
+        task = await self._resolve_task_for_deadline_button(callback_key)
+        if not task:
+            await query.answer()
+            try:
+                await query.edit_message_text("Can't find that task.")
+            except Exception:
+                pass
+            return
+
+        old_deadline = task.get("deadline")
+        task_id = task["id"]
+        try:
+            supabase_client.update_task_deadline(
+                task_id=task_id,
+                deadline=None,
+                confidence="NONE",
+            )
+        except Exception as e:
+            logger.error(f"deadline_clear failed for {task_id}: {e}")
+            await query.answer()
+            try:
+                await query.edit_message_text("Couldn't update — try again?")
+            except Exception:
+                pass
+            return
+
+        try:
+            supabase_client.log_approval_observation(
+                content_type="deadline_update",
+                action="edited",
+                content_id=task_id,
+                original_content={"deadline": old_deadline},
+                final_content={"deadline": None},
+                context={"action": "clear", "task_title": task.get("title", "")[:80]},
+            )
+        except Exception as e:
+            logger.warning(f"[observation] deadline_clear log failed (non-fatal): {e}")
+
+        title = task.get("title", "Task")[:60]
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                f"Date cleared — {title}",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"edit_message_text on clear failed: {e}")
+
+        logger.info(f"Deadline cleared via button: {task_id}")
+
     async def _execute_task_update_from_reminder(
         self,
         task_info: dict,
         status: str | None = None,
         delay_days: int | None = None,
+        deadline_confidence: str | None = None,
     ) -> str | None:
         """
         Execute a task update from a reminder button or free-text reply.
@@ -3399,6 +3529,10 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             updates["status"] = status
         if new_deadline:
             updates["deadline"] = new_deadline
+        if deadline_confidence:
+            # v2.3 PR 5 — stamp confidence alongside the deadline change so
+            # the task rejoins the reminder path (PR 2 filters to EXPLICIT).
+            updates["deadline_confidence"] = deadline_confidence
         if not updates:
             return new_deadline
 

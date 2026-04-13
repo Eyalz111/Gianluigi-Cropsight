@@ -975,6 +975,68 @@ async def process_response(
             # safety-net check catches any meeting left in a mixed state.
             _promote_children_to_approved(meeting_id)
 
+            # v2.3 PR 4: refresh topic-state summaries for every topic thread
+            # this meeting touched. Post-approval only (mirrors T3.1 gating —
+            # we don't want to update state from rejected meetings). Belt-
+            # and-braces fire-and-forget: update_topic_state has its own
+            # try/except internally, but we ALSO wrap the whole loop here so
+            # a DB error fetching mentions can't break the approval flow.
+            try:
+                from processors.topic_threading import update_topic_state
+                mentions = (
+                    supabase_client.client.table("topic_thread_mentions")
+                    .select("topic_id")
+                    .eq("meeting_id", meeting_id)
+                    .execute()
+                )
+                topic_ids = list({
+                    row["topic_id"] for row in (mentions.data or []) if row.get("topic_id")
+                })
+                if topic_ids:
+                    # Need decisions / tasks / open_questions for this meeting
+                    # to pass into the state update. Use the pending_info
+                    # content if available (authoritative post-edit), else
+                    # fall back to DB.
+                    meeting_decisions = (pending_info or {}).get("content", {}).get("decisions", [])
+                    meeting_tasks = (pending_info or {}).get("content", {}).get("tasks", [])
+                    meeting_questions = (pending_info or {}).get("content", {}).get("open_questions", [])
+                    for topic_id in topic_ids:
+                        await update_topic_state(
+                            topic_id=topic_id,
+                            meeting_id=meeting_id,
+                            decisions=meeting_decisions,
+                            tasks=meeting_tasks,
+                            open_questions=meeting_questions,
+                        )
+                    logger.info(
+                        f"[topic_state] post-approval update for meeting {meeting_id} "
+                        f"touched {len(topic_ids)} topic threads"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[topic_state] post-approval update loop failed for {meeting_id}: {e}"
+                )
+                # never raise — approval flow must complete
+
+        # v2.3 PR 3: log approval observation. Single call covers all
+        # content_type branches below — placed here so early-returning
+        # branches (prep, digest, gantt, brief, review) are also captured.
+        # Fire-and-forget: log_approval_observation swallows exceptions
+        # internally, so even a DB outage can't break the approval path.
+        try:
+            supabase_client.log_approval_observation(
+                content_type=content_type,
+                action="approved",
+                content_id=meeting_id if content_type == "meeting_summary" else None,
+                final_content=(pending_info or {}).get("content", {}),
+                context={
+                    "meeting_id": meeting_id,
+                    "sensitivity": (meeting or {}).get("sensitivity") if not is_non_meeting else None,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[observation] approve log failed (non-fatal): {e}")
+
         if content_type == "meeting_prep":
             if not pending_info:
                 # Content was submitted from another process (lost on restart)
@@ -1145,6 +1207,25 @@ async def process_response(
         }
 
     elif action == "reject":
+        # v2.3 PR 3: log reject observation BEFORE cascade (the cascade
+        # removes pending_info content, so we capture what was rejected
+        # while it's still readable).
+        try:
+            reject_ctype = (
+                pending_info["type"] if pending_info
+                else ("meeting_prep" if meeting_id.startswith("prep-")
+                      else "meeting_summary")
+            )
+            supabase_client.log_approval_observation(
+                content_type=reject_ctype,
+                action="rejected",
+                content_id=meeting_id if reject_ctype == "meeting_summary" else None,
+                original_content=(pending_info or {}).get("content", {}),
+                context={"meeting_id": meeting_id},
+            )
+        except Exception as e:
+            logger.warning(f"[observation] reject log failed (non-fatal): {e}")
+
         # Cascading reject: delete the meeting + all extracted child data
         # (tasks, decisions, embeddings, etc.) from DB, then rebuild Sheets.
         # See _reject_meeting_cascade() for details.
@@ -1251,6 +1332,24 @@ async def process_response(
             logger.info(
                 f"Edit applied to {meeting_id}, version {prev_version + 1}"
             )
+
+            # v2.3 PR 3: log edit observation. edit_distance_pct is computed
+            # inside log_approval_observation from the before/after content.
+            try:
+                supabase_client.log_approval_observation(
+                    content_type=resubmit_content_type,
+                    action="edited",
+                    content_id=meeting_id if resubmit_content_type == "meeting_summary" else None,
+                    original_content=(pending_info or {}).get("content", {}),
+                    final_content=updated_content,
+                    context={
+                        "meeting_id": meeting_id,
+                        "edit_version": prev_version + 1,
+                        "edit_instructions": (edits[:500] if isinstance(edits, str) else str(edits)[:500]),
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"[observation] edit log failed (non-fatal): {e}")
 
             # Resubmit for approval with edited content
             await submit_for_approval(

@@ -404,6 +404,18 @@ EXTRACTION INSTRUCTIONS:
 2. Extract all ACTION ITEMS / TASKS
    - Identify the assignee (who is responsible)
    - Note any deadline mentioned (explicit or implied)
+   - For each task with a deadline, classify deadline_confidence:
+     * "EXPLICIT" — a specific date, week number, or timeframe was stated
+       verbatim by a participant. Examples: "by March 15", "before W22",
+       "next Tuesday", "end of this week", "in two weeks".
+     * "INFERRED" — no date was stated but context implies urgency or timing.
+       Examples: the task follows a milestone, it was described as "urgent",
+       it relates to an imminent meeting.
+     * "NONE" — no timing signal whatsoever. This is the default for tasks
+       without a deadline. Do not invent a deadline for these.
+     IMPORTANT: When in doubt, use INFERRED or NONE. Never promote a vague
+     impression to EXPLICIT. Only mark EXPLICIT when you can point to a
+     specific utterance in the transcript.
    - Assign priority: H (high), M (medium), L (low)
    - Classify into one of these categories:
      * "Product & Tech" — development, engineering, platform, infrastructure

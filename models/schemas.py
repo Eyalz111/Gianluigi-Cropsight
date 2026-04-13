@@ -106,6 +106,22 @@ class ApprovalStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class DeadlineConfidence(str, Enum):
+    """How confident we are that a task's deadline is real.
+
+    EXPLICIT — a participant stated a specific date/timeframe verbatim
+               ("by March 15", "before W22", "next Tuesday"). Trustworthy,
+               notification-worthy.
+    INFERRED — no date was stated; the LLM guessed from context. Too noisy
+               to fire reminders on, but still shown in read paths with a
+               visual marker (~prefix).
+    NONE     — no timing signal at all. Default.
+    """
+    EXPLICIT = "EXPLICIT"
+    INFERRED = "INFERRED"
+    NONE = "NONE"
+
+
 class TaskCategory(str, Enum):
     """Category of a task for organizational alignment."""
     PRODUCT_TECH = "Product & Tech"
@@ -120,6 +136,54 @@ class QuestionStatus(str, Enum):
     """Status of an open question."""
     OPEN = "open"
     RESOLVED = "resolved"
+
+
+class TopicStatus(str, Enum):
+    """Current status of a topic thread.
+
+    Used inside TopicState.current_status to drive the morning brief's
+    "Needs attention" surfacing — blocked and stale topics get flagged.
+    """
+    ACTIVE = "active"                    # progressing normally
+    BLOCKED = "blocked"                  # waiting on external action
+    PENDING_DECISION = "pending_decision"  # open decision point
+    STALE = "stale"                      # no mention in 30+ days
+    CLOSED = "closed"                    # explicitly resolved
+
+
+class OpenItem(BaseModel):
+    """A single unresolved item attached to a topic state."""
+    kind: str                            # 'task' | 'question' | 'blocker'
+    description: str
+    owner: str | None = None
+    source_meeting_id: str | None = None
+
+
+class LastDecision(BaseModel):
+    """The most recent decision made on a topic."""
+    text: str
+    date: str                            # ISO date
+    meeting_id: str | None = None        # LLM sometimes lacks a specific meeting_id
+    meeting_title: str | None = None
+
+
+class TopicState(BaseModel):
+    """
+    Structured, continuously-updated state for a topic thread.
+
+    Stored as the state_json column on topic_threads. Populated incrementally
+    by update_topic_state() (Haiku) after each meeting mention, plus a
+    one-time Sonnet backfill for legacy threads. Sits alongside the
+    evolution_summary prose narrative — both are queryable via MCP.
+    """
+    current_status: TopicStatus = TopicStatus.ACTIVE
+    summary: str = ""                    # 2-3 sentence current-state narrative
+    stakeholders: list[str] = Field(default_factory=list)
+    open_items: list[OpenItem] = Field(default_factory=list)
+    last_decision: LastDecision | None = None
+    key_facts: list[str] = Field(default_factory=list)
+    last_activity_date: str | None = None  # ISO date
+    version: int = 1                     # bumped on each update
 
 
 # =============================================================================
@@ -162,6 +226,7 @@ class Task(BaseModel):
     assignee: str
     category: TaskCategory | None = None
     deadline: date | None = None
+    deadline_confidence: DeadlineConfidence = DeadlineConfidence.NONE
     status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
     transcript_timestamp: str | None = None

@@ -727,6 +727,25 @@ async def _inject_debrief_items(
     if counts["information"]:
         summary_parts.append(f"{counts['information']} info items")
 
+    # v2.3 PR 3: log approval observation. Quick-inject and full-debrief are
+    # both CEO-authored content explicitly confirmed by Eyal — treat them as
+    # 'approved' observations. session_id distinguishes the flow: None means
+    # quick_inject (single message), else full debrief session.
+    try:
+        supabase_client.log_approval_observation(
+            content_type="quick_inject" if session_id is None else "debrief",
+            action="approved",
+            content_id=meeting_id,
+            final_content={"counts": counts, "item_count": len(items)},
+            context={
+                "session_id": session_id,
+                "source_date": source_date,
+                "meeting_id": meeting_id,
+            },
+        )
+    except Exception as e:
+        logger.warning(f"[observation] debrief log failed (non-fatal): {e}")
+
     return {
         "summary": f"Injected: {', '.join(summary_parts)}." if summary_parts else "No items to inject.",
         "counts": counts,

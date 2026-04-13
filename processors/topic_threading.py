@@ -98,6 +98,228 @@ async def link_meeting_to_topics(
     return linked_threads
 
 
+async def update_topic_state(
+    topic_id: str,
+    meeting_id: str,
+    decisions: list[dict],
+    tasks: list[dict],
+    open_questions: list[dict] | None = None,
+) -> dict | None:
+    """
+    Incrementally update a topic thread's structured state_json.
+
+    Called post-approval (mirrors T3.1 approval_status gating) for each topic
+    thread that this meeting touched. Uses Haiku to merge the previous state
+    with this meeting's new context into a fresh TopicState JSON, validates
+    against the schema, and writes back.
+
+    Fire-and-forget semantics: on any failure (LLM error, malformed JSON,
+    DB write failure), logs a warning and returns None. The previous state
+    stays intact. Never raises — the approval flow must continue even if
+    state updates fail.
+
+    Args:
+        topic_id: UUID of the topic_threads row.
+        meeting_id: UUID of the meeting that just touched this topic.
+        decisions: Extracted decisions for this topic from this meeting.
+        tasks: Extracted tasks for this topic from this meeting.
+        open_questions: Optional open questions from this meeting.
+
+    Returns:
+        The new state_json dict on success, None on failure.
+    """
+    import json
+    from core.llm import call_llm
+    from models.schemas import TopicState
+
+    try:
+        # Load existing thread + mentions for context
+        thread_row = (
+            supabase_client.client.table("topic_threads")
+            .select("*")
+            .eq("id", topic_id)
+            .limit(1)
+            .execute()
+        )
+        if not thread_row.data:
+            logger.warning(f"[topic_state] thread {topic_id} not found")
+            return None
+        thread = thread_row.data[0]
+        prev_state = thread.get("state_json") or {}
+
+        # Load meeting metadata
+        meeting_row = (
+            supabase_client.client.table("meetings")
+            .select("id, title, date, summary")
+            .eq("id", meeting_id)
+            .limit(1)
+            .execute()
+        )
+        meeting = meeting_row.data[0] if meeting_row.data else {}
+
+        # Narrow to items matching this topic. Topic name is stored on
+        # topic_threads; the canonical form lives in topic_name. Decisions
+        # and tasks were linked via _create_mention() using `label` or the
+        # canonical name — match case-insensitively here.
+        topic_name_lower = (thread.get("topic_name") or "").lower()
+
+        def _is_topic_item(item: dict) -> bool:
+            label = (item.get("label") or "").lower()
+            return label == topic_name_lower or topic_name_lower in label or label in topic_name_lower
+
+        topic_decisions = [d for d in decisions if _is_topic_item(d)]
+        topic_tasks = [t for t in tasks if _is_topic_item(t)]
+        topic_questions = [q for q in (open_questions or []) if _is_topic_item(q)]
+
+        # Build Haiku prompt
+        prompt = _build_topic_state_prompt(
+            topic_name=thread.get("topic_name", ""),
+            previous_state=prev_state,
+            meeting=meeting,
+            decisions=topic_decisions,
+            tasks=topic_tasks,
+            open_questions=topic_questions,
+        )
+
+        response, _usage = call_llm(
+            prompt=prompt,
+            model=settings.model_simple,  # Haiku — incremental update, cheap
+            max_tokens=600,
+            call_site="topic_state_update",
+        )
+
+        # Parse + validate
+        new_state_dict = _parse_topic_state_json(response)
+        if not new_state_dict:
+            logger.warning(
+                f"[topic_state] malformed Haiku JSON for {topic_id}; keeping previous state"
+            )
+            return None
+
+        # Bump version
+        new_state_dict["version"] = int(prev_state.get("version", 0)) + 1
+
+        # Validate via Pydantic — rejects malformed shapes
+        try:
+            validated = TopicState(**new_state_dict).model_dump(mode="json")
+        except Exception as e:
+            logger.warning(
+                f"[topic_state] schema validation failed for {topic_id}: {e}; keeping previous"
+            )
+            return None
+
+        # Write back
+        supabase_client.client.table("topic_threads").update({
+            "state_json": validated,
+            "state_updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", topic_id).execute()
+
+        logger.info(
+            f"[topic_state] updated {topic_id} ({thread.get('topic_name')}) "
+            f"v{validated.get('version')} status={validated.get('current_status')}"
+        )
+        return validated
+
+    except Exception as e:
+        logger.warning(f"[topic_state] update_topic_state failed for {topic_id}: {e}")
+        return None
+
+
+def _build_topic_state_prompt(
+    topic_name: str,
+    previous_state: dict,
+    meeting: dict,
+    decisions: list[dict],
+    tasks: list[dict],
+    open_questions: list[dict],
+) -> str:
+    """Build the Haiku prompt for incremental topic-state updates."""
+    import json
+
+    def _summarize(items: list[dict], fields: list[str]) -> str:
+        if not items:
+            return "(none)"
+        lines = []
+        for item in items[:10]:
+            parts = [f"{f}={item.get(f, '')}" for f in fields if item.get(f)]
+            lines.append(" | ".join(parts))
+        return "\n".join(f"  - {ln}" for ln in lines) if lines else "(none)"
+
+    prev_json = json.dumps(previous_state, indent=2) if previous_state else "(empty — new topic or first update)"
+    meeting_date = str(meeting.get("date", ""))[:10]
+    meeting_title = meeting.get("title", "Unknown")
+
+    return f"""You maintain structured state for a CropSight topic thread.
+
+Topic: {topic_name}
+
+Previous state (may be empty for a new topic):
+{prev_json}
+
+New meeting just happened:
+- Date: {meeting_date}
+- Title: {meeting_title}
+- Decisions on this topic:
+{_summarize(decisions, ["description", "rationale"])}
+- Tasks on this topic:
+{_summarize(tasks, ["title", "assignee", "deadline", "priority"])}
+- Open questions on this topic:
+{_summarize(open_questions, ["question", "raised_by"])}
+
+Update the topic state. Return ONLY valid JSON matching this shape:
+
+{{
+  "current_status": "active" | "blocked" | "pending_decision" | "stale" | "closed",
+  "summary": "2-3 sentence current-state narrative",
+  "stakeholders": ["names of people actively involved"],
+  "open_items": [
+    {{"kind": "task"|"question"|"blocker", "description": "...", "owner": "name or null", "source_meeting_id": "uuid or null"}}
+  ],
+  "last_decision": {{"text": "...", "date": "YYYY-MM-DD", "meeting_id": "...", "meeting_title": "..."}} or null,
+  "key_facts": ["durable facts about this topic — milestones, targets, structural decisions"],
+  "last_activity_date": "YYYY-MM-DD"
+}}
+
+Rules:
+- Preserve key_facts from previous state unless explicitly contradicted by the new meeting.
+- Replace last_decision only if this meeting made a new decision on this topic.
+- Remove open_items from previous state that were resolved in this meeting.
+- Add new open_items from this meeting's tasks and open questions.
+- Set current_status = 'blocked' if a blocker was explicitly mentioned, 'pending_decision' if an open question dominates, 'closed' if the topic was explicitly resolved, else 'active'.
+- Keep summary to 2-3 sentences, focus on current state not history.
+- Set last_activity_date to this meeting's date.
+- Return ONLY the JSON object. No prose, no code fences, no explanation."""
+
+
+def _parse_topic_state_json(response: str) -> dict | None:
+    """Extract JSON from the Haiku response, tolerating code fences."""
+    import json
+    import re
+
+    if not response:
+        return None
+    # Try direct parse first
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
+    # Strip code fences
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", response)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+    # Last resort: find the outermost JSON object
+    obj_match = re.search(r"\{[\s\S]*\}", response)
+    if obj_match:
+        try:
+            return json.loads(obj_match.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 async def generate_topic_evolution(topic_id: str, max_sensitivity_level: int = 4) -> str:
     """
     Generate a chronological narrative of how a topic evolved across meetings.

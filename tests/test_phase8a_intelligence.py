@@ -285,7 +285,12 @@ class TestOverdueEscalationAlerts:
     """Tests for _check_overdue_escalation in proactive_alerts.py."""
 
     def test_generates_alert_for_critical_tasks(self):
-        """Should generate alerts for tasks at high/critical escalation tier."""
+        """Should generate alerts for tasks at high/critical escalation tier.
+
+        v2.3: deadline_confidence='EXPLICIT' required to pass the new
+        filter in _check_overdue_escalation — INFERRED and NONE deadlines
+        (LLM guesses) are suppressed from individual-task escalation.
+        """
         today = datetime.now().date()
         overdue_20d = (today - timedelta(days=20)).isoformat()
 
@@ -293,6 +298,7 @@ class TestOverdueEscalationAlerts:
             mock_sc.get_tasks.return_value = [
                 {"id": "t1", "title": "Old task", "assignee": "Roye",
                  "priority": "H", "status": "overdue", "deadline": overdue_20d,
+                 "deadline_confidence": "EXPLICIT",
                  "created_at": datetime.now().isoformat()},
             ]
 
