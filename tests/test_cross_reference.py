@@ -45,6 +45,52 @@ class TestDeduplicateTasks:
             assert len(result["updates"]) == 0
 
     @pytest.mark.asyncio
+    async def test_label_preserved_through_dedup_no_existing(self):
+        """Regression guard for v2.3.1 Franciacorta label-NULL bug.
+        Labels on extracted tasks must survive deduplicate_tasks unmodified."""
+        with patch("processors.cross_reference.supabase_client") as mock_db:
+            mock_db.get_tasks = MagicMock(return_value=[])
+            from processors.cross_reference import deduplicate_tasks
+
+            new_tasks = [
+                {"title": "AWS setup", "assignee": "Roye", "category": "Product & Tech",
+                 "label": "Infrastructure"},
+                {"title": "Investor deck", "assignee": "Eyal", "category": "Finance & Fundraising",
+                 "label": "Pre-Seed Fundraising"},
+            ]
+            result = await deduplicate_tasks(new_tasks, "meeting-1", "")
+            labels_out = {t["label"] for t in result["new_tasks"]}
+            assert labels_out == {"Infrastructure", "Pre-Seed Fundraising"}
+
+    @pytest.mark.asyncio
+    async def test_label_preserved_through_dedup_with_classification(self):
+        """Same regression guard but exercising the classification path."""
+        with (
+            patch("processors.cross_reference.supabase_client") as mock_db,
+            patch("processors.cross_reference.call_llm") as mock_llm,
+        ):
+            mock_db.get_tasks = MagicMock(return_value=[
+                {"id": "task-1", "title": "Existing", "assignee": "Roye",
+                 "category": "Product & Tech", "status": "pending"},
+            ])
+            mock_llm.return_value = (
+                '{"classifications": [{"new_task_index": "A", "type": "NEW", "existing_task_id": null, "new_status": null, "evidence": null, "reason": "different work"}, {"new_task_index": "B", "type": "NEW", "existing_task_id": null, "new_status": null, "evidence": null, "reason": "different work"}]}',
+                {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            )
+            from processors.cross_reference import deduplicate_tasks
+
+            new_tasks = [
+                {"title": "AWS setup", "assignee": "Roye", "category": "Product & Tech",
+                 "label": "Infrastructure"},
+                {"title": "Investor deck", "assignee": "Eyal", "category": "Finance & Fundraising",
+                 "label": "Pre-Seed Fundraising"},
+            ]
+            result = await deduplicate_tasks(new_tasks, "meeting-2", "")
+            assert len(result["new_tasks"]) == 2
+            labels_out = {t["label"] for t in result["new_tasks"]}
+            assert labels_out == {"Infrastructure", "Pre-Seed Fundraising"}
+
+    @pytest.mark.asyncio
     async def test_empty_new_tasks(self):
         """When no new tasks are provided, result should be empty."""
         from processors.cross_reference import deduplicate_tasks

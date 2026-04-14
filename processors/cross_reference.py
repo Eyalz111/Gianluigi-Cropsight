@@ -200,6 +200,21 @@ Return JSON:
             genuinely_new.append(task)
 
     result["new_tasks"] = genuinely_new
+
+    # Label-preservation audit (v2.3.1): before-vs-after label coverage.
+    # The Franciacorta post-deploy review flagged 5 task rows landing in DB
+    # with label=NULL despite topic_threading seeing labels. deduplicate_tasks
+    # passes dicts by reference, so drops would be upstream — but this log
+    # line gives us a precise place to diagnose if it happens again.
+    in_labeled = sum(1 for t in new_tasks if (t.get("label") or "").strip())
+    out_labeled = sum(1 for t in genuinely_new if (t.get("label") or "").strip())
+    if in_labeled and out_labeled < in_labeled:
+        logger.warning(
+            f"deduplicate_tasks: label coverage regressed "
+            f"({in_labeled} in → {out_labeled} out). Investigate — "
+            f"new_tasks dicts should pass through unchanged."
+        )
+
     return result
 
 

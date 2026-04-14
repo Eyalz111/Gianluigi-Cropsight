@@ -561,8 +561,10 @@ class SupabaseClient:
                 row["options_considered"] = d["options_considered"]
             if d.get("confidence"):
                 row["confidence"] = d["confidence"]
-            if d.get("label"):
-                row["label"] = d["label"]
+            # Phase 9A: label is part of the core schema — always write,
+            # even empty string. NULL in DB breaks downstream filtering by
+            # topic label (v2.4 agentic retrieval depends on it).
+            row["label"] = d.get("label")
             # Default review_date: 30 days from meeting
             if d.get("review_date"):
                 row["review_date"] = d["review_date"]
@@ -924,6 +926,16 @@ class SupabaseClient:
             }
             for t in valid_tasks
         ]
+
+        # v2.3.1 label-coverage audit — surface the Franciacorta bug (task
+        # rows landing with label=NULL despite topic_threading seeing them).
+        # Warn so we can grep logs on the next production run.
+        labeled = sum(1 for d in data if (d.get("label") or "").strip())
+        if labeled < len(data):
+            logger.warning(
+                f"create_tasks_batch: {len(data) - labeled}/{len(data)} tasks "
+                f"have NULL/empty label (meeting {meeting_id}). Upstream drop?"
+            )
 
         result = self.client.table("tasks").insert(data).execute()
         logger.info(f"Created {len(result.data)} tasks for meeting {meeting_id}")
