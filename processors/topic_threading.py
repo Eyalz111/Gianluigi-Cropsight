@@ -184,15 +184,18 @@ async def update_topic_state(
         response, _usage = call_llm(
             prompt=prompt,
             model=settings.model_simple,  # Haiku — incremental update, cheap
-            max_tokens=600,
+            max_tokens=1500,  # post-initial-deploy fix: 600 truncated real payloads
             call_site="topic_state_update",
         )
 
         # Parse + validate
         new_state_dict = _parse_topic_state_json(response)
         if not new_state_dict:
+            # Log the raw head of the response so future parse failures can be
+            # diagnosed without a diagnostic reproduction.
             logger.warning(
-                f"[topic_state] malformed Haiku JSON for {topic_id}; keeping previous state"
+                f"[topic_state] malformed Haiku JSON for {topic_id}; keeping previous state. "
+                f"Raw response head: {response[:200]!r}"
             )
             return None
 
