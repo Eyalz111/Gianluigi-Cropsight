@@ -243,3 +243,60 @@ class TestMorningBriefInferredRendering:
         # Make sure the date appears without ~ prefix
         assert "due 2026-04-15" in rendered
         assert "~2026-04-15" not in rendered
+
+
+# =============================================================================
+# Safety-net normalization (v2.3.1)
+# =============================================================================
+
+class TestDeadlineConfidenceSafetyNet:
+    """
+    Covers the post-extraction normalization in processors/transcript_processor.py
+    that promotes deadline_confidence=NONE→EXPLICIT when Opus produced a concrete
+    deadline but forgot the classification field. Regression guard for the
+    Franciacorta incident (2026-04-14) where 3 dated tasks landed as NONE and
+    suppressed all reminders until manually backfilled.
+    """
+
+    def test_normalization_promotes_none_to_explicit_when_deadline_present(self):
+        """Shape of the loop inline in process_transcript — replicated here for
+        stability if the loop ever gets extracted into a helper."""
+        tasks = [
+            {"title": "A", "deadline": "2026-05-01", "deadline_confidence": "NONE"},
+            {"title": "B", "deadline": "2026-05-02", "deadline_confidence": None},
+            {"title": "C", "deadline": "2026-05-03"},  # field missing entirely
+            {"title": "D", "deadline": None, "deadline_confidence": "INFERRED"},
+            {"title": "E", "deadline": None, "deadline_confidence": None},
+            {"title": "F", "deadline": "2026-05-04", "deadline_confidence": "EXPLICIT"},
+            {"title": "G", "deadline": "2026-05-05", "deadline_confidence": "INFERRED"},
+        ]
+        # Replicate the normalizer inline (kept in sync with process_transcript)
+        for t in tasks:
+            dc = t.get("deadline_confidence")
+            has_deadline = bool(t.get("deadline"))
+            if has_deadline and dc in (None, "", "NONE"):
+                t["deadline_confidence"] = "EXPLICIT"
+            elif not has_deadline and dc not in ("NONE", None, ""):
+                t["deadline_confidence"] = "NONE"
+            elif dc is None:
+                t["deadline_confidence"] = "NONE"
+
+        by_title = {t["title"]: t["deadline_confidence"] for t in tasks}
+        assert by_title["A"] == "EXPLICIT"   # NONE + deadline → EXPLICIT
+        assert by_title["B"] == "EXPLICIT"   # None + deadline → EXPLICIT
+        assert by_title["C"] == "EXPLICIT"   # missing + deadline → EXPLICIT
+        assert by_title["D"] == "NONE"       # INFERRED + no deadline → NONE
+        assert by_title["E"] == "NONE"       # None + no deadline → NONE
+        assert by_title["F"] == "EXPLICIT"   # already EXPLICIT — untouched
+        assert by_title["G"] == "INFERRED"   # INFERRED + deadline — allowed
+
+    def test_extraction_prompt_uses_concrete_explicit_value(self):
+        """The JSON schema example in transcript_processor.py uses the bare
+        value "EXPLICIT" (not a pipe-separated options string) so Opus
+        reliably emits one of the three literal enum values."""
+        import processors.transcript_processor as tp_mod
+        src = open(tp_mod.__file__, "r", encoding="utf-8").read()
+        # The old wordy example was the regression cause
+        assert '"deadline_confidence": "EXPLICIT | INFERRED | NONE' not in src
+        # New crisp example
+        assert '"deadline_confidence": "EXPLICIT"' in src

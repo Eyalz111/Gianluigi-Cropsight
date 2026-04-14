@@ -182,6 +182,26 @@ async def process_transcript(
     dedup = cross_ref_results.get("dedup", {})
     tasks_to_store = dedup.get("new_tasks", extracted.get("tasks", []))
 
+    # Deadline-confidence safety net: if Opus forgot the field but gave us a
+    # concrete deadline, the DEADLINE rule in the prompt guarantees the date
+    # came from a participant utterance — promote to EXPLICIT so reminders
+    # fire. Mirror on null deadline → NONE. (See memory:
+    # project_v2_3_post_deploy_findings.md Priority 2.5.)
+    for _t in tasks_to_store:
+        dc = _t.get("deadline_confidence")
+        has_deadline = bool(_t.get("deadline"))
+        if has_deadline and dc in (None, "", "NONE"):
+            _t["deadline_confidence"] = "EXPLICIT"
+            logger.info(
+                f"deadline_confidence safety net: task '{_t.get('title', '')[:40]}' "
+                f"had deadline={_t.get('deadline')} but confidence={dc!r} — promoted to EXPLICIT"
+            )
+        elif not has_deadline and dc not in ("NONE", None, ""):
+            # Task has no deadline but some non-NONE confidence — normalize to NONE
+            _t["deadline_confidence"] = "NONE"
+        elif dc is None:
+            _t["deadline_confidence"] = "NONE"
+
     # Store extracted data (with deduplicated tasks)
     await store_meeting_data(
         meeting_id=meeting_id,
@@ -517,7 +537,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "title": "Task description — see TASK EXTRACTION RULES below",
             "assignee": "Name",
             "deadline": "YYYY-MM-DD or null",
-            "deadline_confidence": "EXPLICIT | INFERRED | NONE — see EXTRACTION INSTRUCTIONS point 2",
+            "deadline_confidence": "EXPLICIT",
             "priority": "H/M/L",
             "category": "Product & Tech / BD & Sales / Legal & Compliance / Finance & Fundraising / Operations & HR / Strategy & Research",
             "transcript_timestamp": "MM:SS",
@@ -565,6 +585,11 @@ ACTION ITEM EXTRACTION RULES:
 - CONSOLIDATION: Combine related sub-tasks into one higher-level action item. If multiple items serve the same deliverable, merge them. Aim for 3-7 action items per meeting, not 10-15.
   Example: "set up AWS account", "configure IAM roles", "prepare budget" → "Prepare AWS infrastructure (account, IAM, budget)"
 - DEADLINE: Only set a deadline if the transcript explicitly mentions a specific date, day of the week, or relative timeframe (e.g., "by Friday", "next week", "March 30"). "ASAP", "soon", "as early as possible" are NOT deadlines — set to null. Do NOT infer deadlines from context or urgency.
+- DEADLINE_CONFIDENCE: EVERY task MUST have this field set to one of three literal strings:
+  * "EXPLICIT" — a participant stated a specific date, day, week number, or short timeframe verbatim ("by March 15", "next Tuesday", "end of this week", "before W22", "in two weeks"). Use EXPLICIT whenever the task has a non-null deadline that came from a participant utterance.
+  * "INFERRED" — no date was stated but you set a deadline anyway based on context (milestone pressure, urgency signals, imminent meeting). Rare — prefer NONE.
+  * "NONE" — no deadline signal at all. This is mandatory when deadline is null, and is the correct default when you are unsure.
+  Rule of thumb: if deadline is non-null, deadline_confidence is almost always EXPLICIT. If deadline is null, deadline_confidence is NONE. Never leave this field missing — downstream reminders depend on it.
 - DEDUPLICATION: Never extract the same action as two separate items. If someone says "I'll do X" and is later formally assigned X, extract only once.
 - ASSIGNEE: Only assign to a specific person if the transcript makes it clear who is responsible. If unclear, set "assignee" to "" (empty string). Do NOT use "team", "everyone", or "TBD".
 - EXISTING TASK AWARENESS: If the prompt includes an EXISTING OPEN TASKS section, reference it. When the discussion clearly refers to an existing task, do NOT extract it as new. Instead, use the "existing_task_match" field to link it:
