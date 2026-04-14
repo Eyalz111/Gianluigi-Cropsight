@@ -82,6 +82,49 @@ class PersonalEmailScanner:
             self._build_service()
         return self._service
 
+    def _execute_with_retry(self, request_factory, max_retries: int = 3, base_delay: float = 1.0):
+        """
+        Execute a Gmail API request with retry on transient errors.
+
+        Mirrors services/gmail.py::_execute_with_retry. On broken pipe /
+        connection reset, null the service so the next request_factory()
+        call builds a fresh httplib2 transport.
+        """
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                return request_factory().execute()
+            except (ConnectionError, TimeoutError, OSError) as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Personal Gmail API retry {attempt + 1}/{max_retries}: "
+                        f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                    )
+                    self._service = None
+                    time.sleep(delay)
+                else:
+                    raise
+            except Exception as e:
+                error_str = str(e).lower()
+                if any(k in error_str for k in (
+                    "broken pipe", "connection reset", "transport",
+                    "503", "429", "500", "502", "504",
+                )):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            f"Personal Gmail API transient retry {attempt + 1}/{max_retries}: "
+                            f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                        )
+                        self._service = None
+                        time.sleep(delay)
+                    else:
+                        raise
+                else:
+                    raise
+
     async def run_daily_scan(self) -> dict:
         """
         Run daily scan of Eyal's personal Gmail.
@@ -274,21 +317,25 @@ class PersonalEmailScanner:
         """Fetch messages using format='metadata' (headers + snippet, no body)."""
         max_results = max_results or settings.EMAIL_MAX_SCAN_RESULTS
         try:
-            result = self.service.users().messages().list(
-                userId="me",
-                q=f"after:{since}",
-                maxResults=max_results,
-            ).execute()
+            result = self._execute_with_retry(
+                lambda: self.service.users().messages().list(
+                    userId="me",
+                    q=f"after:{since}",
+                    maxResults=max_results,
+                )
+            )
 
             message_ids = result.get("messages", [])
             messages = []
             for msg_ref in message_ids[:max_results]:
-                msg = self.service.users().messages().get(
-                    userId="me",
-                    id=msg_ref["id"],
-                    format="metadata",
-                    metadataHeaders=["From", "To", "Subject", "Date"],
-                ).execute()
+                msg = self._execute_with_retry(
+                    lambda mid=msg_ref["id"]: self.service.users().messages().get(
+                        userId="me",
+                        id=mid,
+                        format="metadata",
+                        metadataHeaders=["From", "To", "Subject", "Date"],
+                    )
+                )
                 messages.append(msg)
 
             return messages
@@ -299,11 +346,13 @@ class PersonalEmailScanner:
     def _get_full_body_sync(self, message_id: str) -> str:
         """Fetch full body only for relevant emails (second-stage fetch)."""
         try:
-            msg = self.service.users().messages().get(
-                userId="me",
-                id=message_id,
-                format="full",
-            ).execute()
+            msg = self._execute_with_retry(
+                lambda: self.service.users().messages().get(
+                    userId="me",
+                    id=message_id,
+                    format="full",
+                )
+            )
 
             payload = msg.get("payload", {})
             return self._extract_body_text(payload)

@@ -40,7 +40,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 from config.settings import settings
-from core.retry import retry
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +72,58 @@ class GoogleDriveService:
         if self._service is None:
             self._service = self._build_service()
         return self._service
+
+    def _execute_with_retry(self, request_factory, max_retries: int = 3, base_delay: float = 1.0):
+        """
+        Execute a Google Drive API request with retry on transient errors.
+
+        Mirrors services/google_sheets.py::_execute_with_retry. On broken
+        pipe / connection reset / transport failure, null the service so
+        the next `request_factory()` call builds a fresh service with a
+        fresh httplib2 transport. Cloud Run idle-then-wake cycles leave
+        stale sockets in the connection pool; this pattern heals them.
+
+        Caller passes a ZERO-ARG callable that constructs and returns the
+        API request (e.g. `lambda: self.service.files().list(...)`) so
+        the request is rebuilt against the fresh service after rebuild.
+
+        Retries on: ConnectionError, TimeoutError, OSError (incl.
+        BrokenPipeError), and HTTP 5xx / rate-limit errors.
+        """
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                return request_factory().execute()
+            except (ConnectionError, TimeoutError, OSError) as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Drive API retry {attempt + 1}/{max_retries}: "
+                        f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                    )
+                    self._service = None  # Force rebuild — stale socket
+                    time.sleep(delay)
+                else:
+                    raise
+            except Exception as e:
+                error_str = str(e).lower()
+                if any(k in error_str for k in (
+                    "broken pipe", "connection reset", "transport",
+                    "503", "429", "500", "502", "504",
+                )):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            f"Drive API transient error retry {attempt + 1}/{max_retries}: "
+                            f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                        )
+                        self._service = None
+                        time.sleep(delay)
+                    else:
+                        raise
+                else:
+                    raise  # Non-transient (4xx, auth, etc.) — don't retry
 
     def _build_service(self):
         """Build the Google Drive API service with OAuth2 credentials."""
@@ -153,13 +204,15 @@ class GoogleDriveService:
 
             query = " and ".join(query_parts)
 
-            results = self.service.files().list(
-                q=query,
-                spaces="drive",
-                fields="files(id, name, createdTime, mimeType, webViewLink)",
-                orderBy="createdTime desc",
-                pageSize=50,
-            ).execute()
+            results = self._execute_with_retry(
+                lambda: self.service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id, name, createdTime, mimeType, webViewLink)",
+                    orderBy="createdTime desc",
+                    pageSize=50,
+                )
+            )
 
             files = results.get("files", [])
 
@@ -199,13 +252,15 @@ class GoogleDriveService:
 
             query = " and ".join(query_parts)
 
-            results = self.service.files().list(
-                q=query,
-                spaces="drive",
-                fields="files(id, name, createdTime, mimeType, webViewLink, size)",
-                orderBy="createdTime desc",
-                pageSize=50,
-            ).execute()
+            results = self._execute_with_retry(
+                lambda: self.service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id, name, createdTime, mimeType, webViewLink, size)",
+                    orderBy="createdTime desc",
+                    pageSize=50,
+                )
+            )
 
             files = results.get("files", [])
 
@@ -241,19 +296,46 @@ class GoogleDriveService:
             logger.error(f"Error downloading file bytes {file_id} (after retries): {e}")
             return b""
 
-    @retry(max_attempts=3, backoff=2.0, base_delay=2.0)
     async def _download_file_bytes_with_retry(self, file_id: str) -> bytes:
-        """Inner download with retry on transient errors (BrokenPipeError, ConnectionError, etc.)."""
-        request = self.service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
+        """
+        Download bytes with retry on transient errors.
 
-        raw_bytes = fh.getvalue()
-        logger.info(f"Downloaded file bytes {file_id}: {len(raw_bytes)} bytes")
-        return raw_bytes
+        On OSError/BrokenPipeError, nulls self._service so the next
+        attempt builds a fresh httplib2 transport. See _execute_with_retry
+        for the rationale.
+        """
+        import asyncio
+        max_attempts = 3
+        base_delay = 2.0
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                request = self.service.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                raw_bytes = fh.getvalue()
+                logger.info(f"Downloaded file bytes {file_id}: {len(raw_bytes)} bytes")
+                return raw_bytes
+            except (ConnectionError, TimeoutError, OSError) as e:
+                last_exc = e
+                if attempt < max_attempts - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Drive download retry {attempt + 1}/{max_attempts}: "
+                        f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                    )
+                    self._service = None  # Force rebuild — stale socket
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"Drive download failed after {max_attempts} attempts: "
+                        f"{type(e).__name__}: {e}"
+                    )
+        assert last_exc is not None
+        raise last_exc
 
     def mark_document_processed(self, file_id: str) -> None:
         """
@@ -283,33 +365,61 @@ class GoogleDriveService:
             logger.error(f"Error downloading file {file_id} (after retries): {e}")
             return ""
 
-    @retry(max_attempts=3, backoff=2.0, base_delay=2.0)
     async def _download_file_with_retry(self, file_id: str) -> str:
-        """Inner download with retry on transient errors (BrokenPipeError, ConnectionError, etc.)."""
-        # Get file metadata to check type
-        metadata = await self.get_file_metadata(file_id)
-        mime_type = metadata.get("mimeType", "")
+        """
+        Download text with retry on transient errors.
 
-        # Handle Google Docs - export as plain text
-        if mime_type == "application/vnd.google-apps.document":
-            request = self.service.files().export_media(
-                fileId=file_id,
-                mimeType="text/plain"
-            )
-        else:
-            # Regular file - download content
-            request = self.service.files().get_media(fileId=file_id)
+        On OSError/BrokenPipeError, nulls self._service so the next
+        attempt builds a fresh httplib2 transport. See _execute_with_retry
+        for the rationale.
+        """
+        import asyncio
+        max_attempts = 3
+        base_delay = 2.0
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                # Get file metadata to check type
+                metadata = await self.get_file_metadata(file_id)
+                mime_type = metadata.get("mimeType", "")
 
-        # Download content
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
+                # Handle Google Docs - export as plain text
+                if mime_type == "application/vnd.google-apps.document":
+                    request = self.service.files().export_media(
+                        fileId=file_id,
+                        mimeType="text/plain"
+                    )
+                else:
+                    # Regular file - download content
+                    request = self.service.files().get_media(fileId=file_id)
 
-        content = fh.getvalue().decode("utf-8", errors="ignore")
-        logger.info(f"Downloaded file {file_id}: {len(content)} chars")
-        return content
+                # Download content
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+
+                content = fh.getvalue().decode("utf-8", errors="ignore")
+                logger.info(f"Downloaded file {file_id}: {len(content)} chars")
+                return content
+            except (ConnectionError, TimeoutError, OSError) as e:
+                last_exc = e
+                if attempt < max_attempts - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Drive download retry {attempt + 1}/{max_attempts}: "
+                        f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                    )
+                    self._service = None  # Force rebuild — stale socket
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"Drive download failed after {max_attempts} attempts: "
+                        f"{type(e).__name__}: {e}"
+                    )
+        assert last_exc is not None
+        raise last_exc
 
     async def get_file_metadata(self, file_id: str) -> dict:
         """
@@ -322,10 +432,12 @@ class GoogleDriveService:
             File metadata dict.
         """
         try:
-            file = self.service.files().get(
-                fileId=file_id,
-                fields="id, name, mimeType, createdTime, modifiedTime, webViewLink, size"
-            ).execute()
+            file = self._execute_with_retry(
+                lambda: self.service.files().get(
+                    fileId=file_id,
+                    fields="id, name, mimeType, createdTime, modifiedTime, webViewLink, size",
+                )
+            )
             return file
         except Exception as e:
             logger.error(f"Error getting file metadata: {e}")
