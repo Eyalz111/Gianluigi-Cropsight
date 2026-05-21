@@ -140,10 +140,16 @@ class TestServerBuild:
         # v2.3 PR 3: observation stats
         expected_tools.append("get_approval_stats")
 
+        # v2.5 PR1: knowledge shadow-diff summary (cutover support)
+        expected_tools.append("get_shadow_diff_summary")
+
+        # v2.5 PR10: knowledge consolidation proposals
+        expected_tools.extend(["get_knowledge_proposals", "approve_knowledge_proposal"])
+
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 44
+        assert len(tool_names) == 47
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

@@ -505,6 +505,151 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
+        # 7b. get_shadow_diff_summary (v2.5 knowledge cutover support)
+        # ============================================================
+        @mcp.tool(
+            name="get_shadow_diff_summary",
+            description=(
+                "[KNOWLEDGE] Aggregate recent knowledge-foundation shadow runs to "
+                "support the read-back cutover decision. Returns per-pass run counts, "
+                "total task additions vs regressions, average added cost/latency, and "
+                "how many recent meetings had a regression (a task the live path had "
+                "but the shadow dropped). Use to decide when >=10 clean meetings are met."
+            ),
+        )
+        async def get_shadow_diff_summary(limit: int = 50) -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                from config.settings import settings
+
+                rows = (
+                    supabase_client.client.table("audit_log")
+                    .select("*")
+                    .like("action", "shadow_%")
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                    .data
+                    or []
+                )
+
+                per_pass: dict[str, int] = {}
+                tasks_added = 0
+                tasks_removed = 0
+                regression_meetings = 0
+                costs: list[float] = []
+                latencies: list[float] = []
+
+                for r in rows:
+                    pass_name = (r.get("action") or "shadow_?").replace("shadow_", "", 1)
+                    per_pass[pass_name] = per_pass.get(pass_name, 0) + 1
+                    details = r.get("details") or {}
+                    diff = details.get("diff") or {}
+                    tasks_added += len(diff.get("tasks_added") or [])
+                    removed = diff.get("tasks_removed") or []
+                    tasks_removed += len(removed)
+                    if removed:
+                        regression_meetings += 1
+                    if details.get("cost_usd") is not None:
+                        costs.append(details["cost_usd"])
+                    if details.get("latency_s") is not None:
+                        latencies.append(details["latency_s"])
+
+                def _avg(xs: list[float]) -> float | None:
+                    return round(sum(xs) / len(xs), 4) if xs else None
+
+                summary = {
+                    "runs": len(rows),
+                    "per_pass": per_pass,
+                    "tasks_added_total": tasks_added,
+                    "tasks_removed_total": tasks_removed,
+                    "regression_meetings": regression_meetings,
+                    "avg_cost_usd": _avg(costs),
+                    "avg_latency_s": _avg(latencies),
+                    "cost_ceiling_usd": settings.KNOWLEDGE_READBACK_COST_CEILING_USD,
+                    "latency_budget_s": settings.KNOWLEDGE_READBACK_LATENCY_BUDGET_S,
+                }
+                mcp_auth.log_call("get_shadow_diff_summary", {"limit": limit})
+                return _success({"summary": summary, "recent": rows[:10]})
+
+            except Exception as e:
+                logger.error(f"get_shadow_diff_summary error: {e}")
+                mcp_auth.log_call("get_shadow_diff_summary", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 7c. Knowledge proposals (v2.5 PR10 — topic merges / assignments)
+        # ============================================================
+        @mcp.tool(
+            name="get_knowledge_proposals",
+            description=(
+                "[KNOWLEDGE] List pending topic-consolidation proposals (merges and "
+                "area assignments) from the weekly clustering pass. Review these, then "
+                "act with approve_knowledge_proposal."
+            ),
+        )
+        async def get_knowledge_proposals() -> dict:
+            try:
+                from services.supabase_client import supabase_client
+
+                rows = supabase_client.get_pending_approvals_by_status("pending") or []
+                proposals = [
+                    {"proposal_id": r.get("approval_id"), "type": r.get("content_type"),
+                     **(r.get("content") or {})}
+                    for r in rows
+                    if r.get("content_type") in ("topic_merge", "topic_assign")
+                ]
+                mcp_auth.log_call("get_knowledge_proposals", {"count": len(proposals)})
+                return _success(proposals)
+            except Exception as e:
+                logger.error(f"get_knowledge_proposals error: {e}")
+                mcp_auth.log_call("get_knowledge_proposals", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="approve_knowledge_proposal",
+            description=(
+                "[KNOWLEDGE] Act on a topic-consolidation proposal. decision='approve' "
+                "applies the merge/assignment (the losing topic is CLOSED, never "
+                "deleted, and history is preserved); decision='reject' discards it. "
+                "Use the proposal_id from get_knowledge_proposals."
+            ),
+        )
+        async def approve_knowledge_proposal(proposal_id: str, decision: str = "approve") -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                from processors.topic_clustering import apply_topic_proposal
+
+                pending = supabase_client.get_pending_approval(proposal_id)
+                if not pending:
+                    return _error(f"Proposal {proposal_id} not found")
+                content = pending.get("content") or {}
+
+                if decision == "approve":
+                    result = apply_topic_proposal(content)
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action(
+                        "knowledge_proposal_approved",
+                        details={"proposal_id": proposal_id, **content, "result": result},
+                        triggered_by="eyal",
+                    )
+                    mcp_auth.log_call("approve_knowledge_proposal", {"proposal_id": proposal_id, "decision": "approve"})
+                    return _success({"decision": "approved", "result": result})
+
+                supabase_client.delete_pending_approval(proposal_id)
+                supabase_client.log_action(
+                    "knowledge_proposal_rejected",
+                    details={"proposal_id": proposal_id, **content},
+                    triggered_by="eyal",
+                )
+                mcp_auth.log_call("approve_knowledge_proposal", {"proposal_id": proposal_id, "decision": "reject"})
+                return _success({"decision": "rejected"})
+            except Exception as e:
+                logger.error(f"approve_knowledge_proposal error: {e}")
+                mcp_auth.log_call("approve_knowledge_proposal", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
         # 8. deal_ops (composite — replaces deprecated get_commitments)
         # ============================================================
         @mcp.tool(

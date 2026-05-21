@@ -351,6 +351,30 @@ async def start_services() -> None:
     else:
         logger.info("  Intelligence signal scheduler disabled (INTELLIGENCE_SIGNAL_ENABLED=false)")
 
+    # Start knowledge nightly consolidation scheduler (v2.5 PR7/8)
+    if settings.KNOWLEDGE_NIGHTLY_ENABLED and init_status.get("supabase"):
+        from schedulers.knowledge_nightly_scheduler import knowledge_nightly_scheduler
+        logger.info("  Starting knowledge nightly scheduler...")
+        knowledge_nightly_task = asyncio.create_task(
+            knowledge_nightly_scheduler.start(),
+            name="knowledge_nightly_scheduler"
+        )
+        tasks.append(knowledge_nightly_task)
+    else:
+        logger.info("  Knowledge nightly scheduler disabled (KNOWLEDGE_NIGHTLY_ENABLED=false)")
+
+    # Start knowledge weekly synthesis scheduler (v2.5 PR9/10)
+    if settings.KNOWLEDGE_WEEKLY_ENABLED and init_status.get("supabase"):
+        from schedulers.knowledge_weekly_scheduler import knowledge_weekly_scheduler
+        logger.info("  Starting knowledge weekly scheduler...")
+        knowledge_weekly_task = asyncio.create_task(
+            knowledge_weekly_scheduler.start(),
+            name="knowledge_weekly_scheduler"
+        )
+        tasks.append(knowledge_weekly_task)
+    else:
+        logger.info("  Knowledge weekly scheduler disabled (KNOWLEDGE_WEEKLY_ENABLED=false)")
+
     logger.info("=" * 50)
     logger.info("  Gianluigi is ready!")
     logger.info("=" * 50)
