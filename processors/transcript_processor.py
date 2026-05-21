@@ -94,29 +94,49 @@ async def process_transcript(
         participants = sorted(parsed["speakers"])
         logger.info(f"Auto-detected participants: {participants}")
 
-    # Step 2: Classify sensitivity (from title)
+    # Step 2: Classify sensitivity BEFORE extraction (v2.5 #b). The read-back
+    # filter must gate on the FINAL tier, not the title-only tier — and these
+    # passes read the transcript text, which is already available here.
     sensitivity = classify_sensitivity({"title": meeting_title})
-
-    # Step 3: Send to Claude for structured extraction
-    extracted = await extract_structured_data(
-        transcript=file_content,
-        meeting_title=meeting_title,
-        participants=participants,
-        meeting_date=meeting_date,
-        duration_minutes=duration_minutes,
-    )
-
-    # Step 4: Secondary sensitivity check (from content)
     content_sensitivity = classify_sensitivity_from_content(file_content)
     if content_sensitivity == "ceo":
         sensitivity = "ceo"
-
-    # Step 4b: LLM fallback classification (Haiku) — catches nuanced cases
     if sensitivity == "founders":
         llm_sensitivity = classify_sensitivity_llm(file_content)
         if llm_sensitivity == "ceo":
             sensitivity = "ceo"
             logger.info("LLM classified meeting as ceo (keywords missed)")
+
+    # Step 3: Structured extraction, with the v2.5 knowledge read-back loop
+    # (shadow-compares by default; ships the baseline until cutover).
+    extracted = await _extract_with_readback(
+        transcript=file_content,
+        meeting_title=meeting_title,
+        participants=participants,
+        meeting_date=meeting_date,
+        duration_minutes=duration_minutes,
+        sensitivity=sensitivity,
+    )
+
+    # Step 3b: Post-extraction sensitivity safety net (v2.5 #3) — re-check the
+    # EXTRACTED items; if they reveal CEO-tier content the pre-extraction passes
+    # missed, upgrade the tier (which blocks downward distribution).
+    if sensitivity != "ceo":
+        try:
+            extracted_text = " ".join(
+                [d.get("description", "") for d in extracted.get("decisions", [])]
+                + [t.get("title", "") for t in extracted.get("tasks", [])]
+            )
+            if extracted_text.strip() and classify_sensitivity_llm(extracted_text) == "ceo":
+                sensitivity = "ceo"
+                logger.info("Post-extraction safety net upgraded meeting to ceo")
+        except Exception as e:
+            logger.warning(f"Post-extraction sensitivity check failed (non-fatal): {e}")
+
+    # Step 3c: Completeness check (v2.5 PR4) — surface items the extraction
+    # missed, before cross-reference dedup absorbs them. Shadow-logs by default;
+    # merges into the shipped output only after cutover.
+    extracted = await _apply_completeness_check(file_content, meeting_title, extracted)
 
     # Step 5: Validate tone of discussion summary
     tone_issues = validate_summary_tone(extracted.get("discussion_summary", ""))
@@ -418,12 +438,35 @@ def estimate_duration(utterances: list[dict]) -> int:
     return duration_minutes
 
 
+def _consolidation_rule() -> str:
+    """The action-item consolidation instruction (v2.5 PR5 muzzle toggle).
+
+    Default keeps the "aim for 3-7 items" cap. When EXTRACTION_MUZZLE_REMOVED is
+    set (post read-back cutover), drop the numeric cap and prioritize
+    completeness while still merging genuinely same-deliverable sub-tasks. Flip
+    only after >=10 clean shadow meetings show the completeness/dedup chain
+    absorbs the extra volume.
+    """
+    if settings.EXTRACTION_MUZZLE_REMOVED:
+        return (
+            "- CONSOLIDATION: Merge ONLY sub-tasks that serve the exact same "
+            "deliverable. Otherwise capture every distinct commitment — never drop "
+            "or over-merge items to hit a target count. Completeness over brevity."
+        )
+    return (
+        "- CONSOLIDATION: Combine related sub-tasks into one higher-level action "
+        "item. If multiple items serve the same deliverable, merge them. Aim for "
+        "3-7 action items per meeting, not 10-15."
+    )
+
+
 async def extract_structured_data(
     transcript: str,
     meeting_title: str,
     participants: list[str],
     meeting_date: str,
     duration_minutes: int | None = None,
+    knowledge_context: str | None = None,
 ) -> dict:
     """
     Use Claude to extract structured data from transcript.
@@ -498,6 +541,7 @@ async def extract_structured_data(
         team_roles=team_roles,
         existing_tasks=existing_tasks,
         meeting_history_context=meeting_history_context,
+        knowledge_context=knowledge_context,
     )
 
     # Build canonical project names for label normalization (dynamic from DB)
@@ -512,6 +556,9 @@ async def extract_structured_data(
         canonical_names = ", ".join(names_with_aliases) if names_with_aliases else '"No canonical projects defined"'
     except Exception:
         canonical_names = '"Moldova Pilot", "Pre-Seed Fundraising", "SatYield Accuracy Model"'
+
+    # v2.5 PR5: the "aim for 3-7 items" cap is the extraction "muzzle" — toggled.
+    consolidation_rule = _consolidation_rule()
 
     # Use a structured extraction approach with JSON output
     extraction_system = """You are an expert meeting analyst. Extract structured information from meeting transcripts.
@@ -582,7 +629,7 @@ ACTION ITEM EXTRACTION RULES:
 - BAD: "Write accuracy abstract"
 - GOOD: "Write 1-page accuracy abstract documenting model performance benchmarks — needed before the client meeting"
 - Include the business context from the conversation, not just the bare action.
-- CONSOLIDATION: Combine related sub-tasks into one higher-level action item. If multiple items serve the same deliverable, merge them. Aim for 3-7 action items per meeting, not 10-15.
+{consolidation_rule}
   Example: "set up AWS account", "configure IAM roles", "prepare budget" → "Prepare AWS infrastructure (account, IAM, budget)"
 - DEADLINE: Only set a deadline if the transcript explicitly mentions a specific date, day of the week, or relative timeframe (e.g., "by Friday", "next week", "March 30"). "ASAP", "soon", "as early as possible" are NOT deadlines — set to null. Do NOT infer deadlines from context or urgency.
 - DEADLINE_CONFIDENCE: EVERY task MUST have this field set to one of three literal strings:
@@ -635,7 +682,7 @@ Meetings may be in Hebrew, English, or mixed. Regardless of language:
 - Keep company/organization names as-is
 - If a Hebrew term has no clear English equivalent, transliterate and add brief explanation
 
-Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names)
+Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names).replace("{consolidation_rule}", consolidation_rule)
 
     # Retry with exponential backoff for transient errors (529 overloaded, 500, etc.)
     max_retries = 4
@@ -701,6 +748,134 @@ Apply all tone guardrails: no emotional characterizations, professional language
         "stakeholders": [],
         "discussion_summary": "Extraction failed after all retries",
     }
+
+
+async def _extract_with_readback(
+    transcript: str,
+    meeting_title: str,
+    participants: list[str],
+    meeting_date: str,
+    duration_minutes: int | None,
+    sensitivity: str,
+) -> dict:
+    """
+    Run extraction with the v2.5 knowledge read-back loop.
+
+    - SHADOW_MODE (default): run the baseline (shipped) extraction + a
+      knowledge-augmented one; log the diff to audit_log; return the BASELINE
+      so shipped output is unchanged.
+    - READBACK_ENABLED and not shadow (post-cutover): return the augmented
+      extraction.
+    - Neither flag: plain baseline (pre-v2.5 behavior).
+
+    The augmented run is best-effort — any failure is non-fatal and the
+    baseline is returned.
+    """
+    shadow = settings.KNOWLEDGE_SHADOW_MODE
+    readback = settings.KNOWLEDGE_READBACK_ENABLED
+
+    knowledge_context = None
+    if shadow or readback:
+        try:
+            from processors.knowledge_readback import build_knowledge_context
+            knowledge_context = await build_knowledge_context(
+                meeting_title, participants, sensitivity
+            )
+        except Exception as e:
+            logger.warning(f"[readback] context build failed (non-fatal): {e}")
+            knowledge_context = None
+
+    # Post-cutover: ship the augmented extraction directly.
+    if readback and not shadow:
+        return await extract_structured_data(
+            transcript, meeting_title, participants, meeting_date,
+            duration_minutes, knowledge_context=knowledge_context,
+        )
+
+    # Baseline is what we ship.
+    baseline = await extract_structured_data(
+        transcript, meeting_title, participants, meeting_date, duration_minutes,
+    )
+
+    # Shadow: also run the augmented extraction, log the diff, discard it.
+    if shadow and knowledge_context:
+        try:
+            import time
+            t0 = time.monotonic()
+            augmented = await extract_structured_data(
+                transcript, meeting_title, participants, meeting_date,
+                duration_minutes, knowledge_context=knowledge_context,
+            )
+            latency = time.monotonic() - t0
+            from core.shadow_run import log_shadow
+            log_shadow(
+                "extraction", live=baseline, shadow=augmented,
+                latency_s=latency, extra={"meeting_title": meeting_title},
+            )
+        except Exception as e:
+            logger.warning(f"[readback] shadow extraction failed (non-fatal): {e}")
+
+    return baseline
+
+
+async def _apply_completeness_check(
+    transcript: str,
+    meeting_title: str,
+    extracted: dict,
+) -> dict:
+    """
+    v2.5 PR4 completeness check, gated by the same flags as read-back.
+
+    - SHADOW_MODE: compute the items extraction missed, log the diff to
+      audit_log, ship the extraction UNCHANGED.
+    - READBACK_ENABLED and not shadow (cutover): merge the additions into the
+      extraction so they flow into cross-reference (which dedups them).
+    - Neither flag: no-op.
+
+    Best-effort — never raises.
+    """
+    shadow = settings.KNOWLEDGE_SHADOW_MODE
+    readback = settings.KNOWLEDGE_READBACK_ENABLED
+    if not (shadow or readback):
+        return extracted
+
+    try:
+        from processors.completeness_check import find_missing_items
+
+        open_titles: list[str] = []
+        try:
+            open_titles = [
+                (t.get("title") or "")
+                for t in supabase_client.get_tasks(status="pending", limit=50)
+            ]
+        except Exception:
+            pass
+
+        additions = find_missing_items(transcript, extracted, open_titles, meeting_title)
+        add_tasks = additions.get("tasks") or []
+        add_decisions = additions.get("decisions") or []
+        if not add_tasks and not add_decisions:
+            return extracted
+
+        augmented = {
+            **extracted,
+            "tasks": (extracted.get("tasks") or []) + add_tasks,
+            "decisions": (extracted.get("decisions") or []) + add_decisions,
+        }
+
+        if readback and not shadow:
+            return augmented  # cutover: additions flow into cross-reference dedup
+
+        # Shadow: log what we'd add, ship unchanged.
+        from core.shadow_run import log_shadow
+        log_shadow(
+            "completeness", live=extracted, shadow=augmented,
+            extra={"meeting_title": meeting_title},
+        )
+        return extracted
+    except Exception as e:
+        logger.warning(f"[completeness] apply failed (non-fatal): {e}")
+        return extracted
 
 
 def _parse_extraction_response(response_text: str) -> dict:
