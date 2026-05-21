@@ -150,7 +150,7 @@ async def update_topic_state(
         # Load meeting metadata
         meeting_row = (
             supabase_client.client.table("meetings")
-            .select("id, title, date, summary")
+            .select("id, title, date, summary, sensitivity")
             .eq("id", meeting_id)
             .limit(1)
             .execute()
@@ -221,6 +221,11 @@ async def update_topic_state(
             f"[topic_state] updated {topic_id} ({thread.get('topic_name')}) "
             f"v{validated.get('version')} status={validated.get('current_status')}"
         )
+
+        # v2.5 PR6: keep the richer brief_json current from this state + write
+        # knowledge links (fire-and-forget — never break the approval flow).
+        _sync_brief_from_state(thread, validated, meeting, topic_decisions, topic_tasks)
+
         return validated
 
     except Exception as e:
@@ -321,6 +326,103 @@ def _parse_topic_state_json(response: str) -> dict | None:
         except json.JSONDecodeError:
             pass
     return None
+
+
+_TIER_ORDER = {"public": 1, "team": 2, "founders": 3, "ceo": 4}
+
+
+def _max_tier(a: str | None, b: str | None) -> str:
+    """Most-restrictive of two sensitivity tiers (default founders)."""
+    a = (a or "founders").lower()
+    b = (b or "founders").lower()
+    return a if _TIER_ORDER.get(a, 3) >= _TIER_ORDER.get(b, 3) else b
+
+
+def _sync_brief_from_state(
+    thread: dict,
+    state: dict,
+    meeting: dict,
+    topic_decisions: list[dict],
+    topic_tasks: list[dict],
+) -> None:
+    """
+    v2.5 PR6 — keep brief_json current from the freshly-computed state, and
+    write knowledge links. No extra LLM call: it merges the Haiku-computed
+    state into the existing (Sonnet-synthesized) brief, preserving the rich
+    fields (risks, next_actions, multi-source facts) and refreshing the
+    current-state fields. Fire-and-forget — never raises into approval.
+    """
+    try:
+        from models.schemas import TopicBrief
+
+        topic_id = thread["id"]
+        tier = (meeting.get("sensitivity") or "founders")
+        existing = thread.get("brief_json") or {}
+
+        citation = {
+            "source_type": "meeting",
+            "source_id": meeting.get("id"),
+            "meeting_title": meeting.get("title"),
+            "date": str(meeting.get("date", ""))[:10] or None,
+            "sensitivity": tier,
+        }
+
+        # Facts: keep existing, append new key_facts (deduped) tagged with this
+        # meeting's tier (per-fact sensitivity).
+        existing_facts = list(existing.get("facts", []))
+        existing_texts = {f.get("text") for f in existing_facts}
+        for kf in state.get("key_facts", []):
+            if kf and kf not in existing_texts:
+                existing_facts.append({"text": kf, "sensitivity": tier, "citation": citation})
+
+        # Recent decisions: prepend the new last_decision (keep up to 5).
+        recent = list(existing.get("recent_decisions", []))
+        ld = state.get("last_decision")
+        if ld and ld.get("text"):
+            recent = [ld] + [d for d in recent if d.get("text") != ld.get("text")]
+        recent = recent[:5]
+
+        stakeholders = list({*existing.get("stakeholders", []), *state.get("stakeholders", [])})
+
+        brief = {
+            "narrative": state.get("summary") or existing.get("narrative", ""),
+            "facts": existing_facts,
+            "current_status": state.get("current_status", existing.get("current_status", "active")),
+            "open_items": state.get("open_items", existing.get("open_items", [])),
+            "stakeholders": stakeholders,
+            "recent_decisions": recent,
+            "risks": existing.get("risks", []),
+            "next_actions": existing.get("next_actions", []),
+            "citations": existing.get("citations", []),
+            "sensitivity": _max_tier(existing.get("sensitivity"), tier),
+            "last_synthesized_at": existing.get("last_synthesized_at"),
+            "version": int(existing.get("version", 0)) + 1,
+        }
+        validated = TopicBrief(**brief).model_dump(mode="json")
+        supabase_client.update_topic_brief(topic_id, validated)
+
+        # Links: belongs_to (topic -> area) + advances (decision/task -> topic).
+        area_id = thread.get("area_id")
+        meeting_id = meeting.get("id")
+        if area_id:
+            supabase_client.create_knowledge_link(
+                "topic", topic_id, "area", area_id, "belongs_to",
+                created_by="auto", source_meeting_id=meeting_id,
+            )
+        for d in topic_decisions:
+            if d.get("id"):
+                supabase_client.create_knowledge_link(
+                    "decision", d["id"], "topic", topic_id, "advances",
+                    created_by="auto", source_meeting_id=meeting_id,
+                )
+        for t in topic_tasks:
+            if t.get("id"):
+                supabase_client.create_knowledge_link(
+                    "task", t["id"], "topic", topic_id, "advances",
+                    created_by="auto", source_meeting_id=meeting_id,
+                )
+    except Exception as e:
+        logger.warning(f"[topic_brief] sync failed for {thread.get('id')}: {e}")
 
 
 async def generate_topic_evolution(topic_id: str, max_sensitivity_level: int = 4) -> str:
