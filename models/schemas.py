@@ -187,6 +187,89 @@ class TopicState(BaseModel):
 
 
 # =============================================================================
+# Knowledge Foundation (v2.5) — Area/Topic briefs + typed links (graph-lite)
+# =============================================================================
+
+class LinkType(str, Enum):
+    """Typed relationships in the knowledge graph-lite layer (knowledge_links)."""
+    BELONGS_TO = "belongs_to"      # topic -> area; sub-topic -> topic
+    SUPERSEDES = "supersedes"      # decision -> decision; topic -> topic (merge winner)
+    ADVANCES = "advances"          # task -> topic; milestone -> area/topic
+    BLOCKS = "blocks"              # topic -> topic; task -> task
+    RELATES_TO = "relates_to"      # loose association
+    DERIVED_FROM = "derived_from"  # brief fact -> source
+
+
+class BriefCitation(BaseModel):
+    """Provenance for a fact in a topic/area brief. Sensitivity follows data."""
+    source_type: str = "meeting"          # 'meeting' | 'document' | 'email' | 'injection'
+    source_id: str | None = None
+    meeting_title: str | None = None
+    date: str | None = None               # ISO date
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
+
+
+class BriefFact(BaseModel):
+    """A single fact in a brief, tagged with its source sensitivity tier.
+
+    Per-fact tagging lets a brief be rendered at any audience tier later
+    (e.g. filter out CEO facts for a FOUNDERS view) instead of collapsing the
+    whole brief to the max tier. See V2.5_STRATEGY.md sensitivity note (#6).
+    """
+    text: str
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
+    citation: BriefCitation | None = None
+
+
+class TopicBrief(BaseModel):
+    """Living brief for a topic thread (stored as topic_threads.brief_json).
+
+    Richer successor to TopicState. Runs in parallel with state_json during
+    shadow-run; state_json is deprecated only after cutover + 4 weeks clean.
+    """
+    narrative: str = ""                                   # FOUNDERS-safe current-state prose
+    facts: list[BriefFact] = Field(default_factory=list)  # fact-tagged store (per-fact tier)
+    current_status: TopicStatus = TopicStatus.ACTIVE
+    open_items: list[OpenItem] = Field(default_factory=list)
+    stakeholders: list[str] = Field(default_factory=list)
+    recent_decisions: list[LastDecision] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    citations: list[BriefCitation] = Field(default_factory=list)
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS       # max tier across facts (quick gate)
+    last_synthesized_at: str | None = None                # ISO timestamp
+    version: int = 1
+
+
+class AreaBrief(BaseModel):
+    """Living brief for an Area/sphere (stored as areas.brief_json).
+
+    Aggregates child topic briefs into a strategic view.
+    """
+    narrative: str = ""
+    topic_summaries: list[str] = Field(default_factory=list)
+    cross_topic_patterns: list[str] = Field(default_factory=list)
+    strategic_state: str = ""
+    facts: list[BriefFact] = Field(default_factory=list)
+    citations: list[BriefCitation] = Field(default_factory=list)
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
+    last_synthesized_at: str | None = None
+    version: int = 1
+
+
+class KnowledgeLink(BaseModel):
+    """A typed relationship in the knowledge_links table (graph-lite)."""
+    from_type: str                        # 'topic' | 'area' | 'decision' | 'task' | 'meeting' | 'milestone'
+    from_id: str
+    to_type: str
+    to_id: str
+    link_type: LinkType
+    confidence: float | None = None       # 0..1 (LLM-inferred); None for deterministic links
+    source_meeting_id: str | None = None
+    created_by: str = "auto"              # 'auto' | 'eyal' | 'backfill'
+
+
+# =============================================================================
 # Core Models
 # =============================================================================
 

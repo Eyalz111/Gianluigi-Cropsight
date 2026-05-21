@@ -201,6 +201,7 @@ class TestSupabaseGetTasksCategory:
         # sequence of .eq("approval_status", ...).eq("category", ...) works.
         mock_chain = MagicMock()
         mock_chain.eq.return_value = mock_chain
+        mock_chain.is_.return_value = mock_chain  # v2.5: get_tasks now filters valid_to IS NULL
         mock_chain.order.return_value = mock_chain
         mock_chain.limit.return_value = mock_chain
         mock_chain.execute.return_value = MagicMock(data=[])

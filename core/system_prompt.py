@@ -332,6 +332,7 @@ def get_summary_extraction_prompt(
     team_roles: str | None = None,
     existing_tasks: list[dict] | None = None,
     meeting_history_context: str | None = None,
+    knowledge_context: str | None = None,
 ) -> str:
     """
     Build the prompt for extracting structured data from a transcript.
@@ -386,6 +387,18 @@ Reference this context when classifying tasks as UPDATE vs NEW, and when
 detecting decision supersessions or follow-ups from previous discussions.
 """
 
+    # Accumulated knowledge read-back (v2.5 PR3) — evolving topic briefs +
+    # semantically related past discussion, sensitivity-filtered upstream.
+    knowledge_section = ""
+    if knowledge_context:
+        knowledge_section = f"""
+KNOWLEDGE BASE (evolving briefs + related past discussion for this meeting's topics):
+{knowledge_context}
+Use this to classify tasks/decisions as UPDATE vs NEW, to detect when a decision
+SUPERSEDES a prior one, and to AVOID re-surfacing items already closed. This is
+context only — never extract an item that is not actually supported by THIS transcript.
+"""
+
     return f"""Analyze the following meeting transcript and extract structured information.
 
 MEETING CONTEXT:
@@ -393,7 +406,7 @@ MEETING CONTEXT:
 - Date: {meeting_date}
 - Participants: {participants_str}
 - Duration: {duration_str}
-{team_section}{history_section}{tasks_section}
+{team_section}{history_section}{knowledge_section}{tasks_section}
 
 EXTRACTION INSTRUCTIONS:
 1. Extract all KEY DECISIONS made during the meeting
