@@ -375,6 +375,18 @@ async def start_services() -> None:
     else:
         logger.info("  Knowledge weekly scheduler disabled (KNOWLEDGE_WEEKLY_ENABLED=false)")
 
+    # Start Tasks reconcile scheduler (v3 outputs re-architecture)
+    if settings.RECONCILE_ENABLED and init_status.get("supabase"):
+        from schedulers.reconcile_scheduler import reconcile_scheduler
+        logger.info("  Starting reconcile scheduler...")
+        reconcile_task = asyncio.create_task(
+            reconcile_scheduler.start(),
+            name="reconcile_scheduler"
+        )
+        tasks.append(reconcile_task)
+    else:
+        logger.info("  Reconcile scheduler disabled (RECONCILE_ENABLED=false)")
+
     logger.info("=" * 50)
     logger.info("  Gianluigi is ready!")
     logger.info("=" * 50)

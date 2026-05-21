@@ -146,10 +146,13 @@ class TestServerBuild:
         # v2.5 PR10: knowledge consolidation proposals
         expected_tools.extend(["get_knowledge_proposals", "approve_knowledge_proposal"])
 
+        # v3 PR5: task-update proposals + manual-flag control
+        expected_tools.extend(["get_task_proposals", "approve_task_proposal", "clear_manual_flag"])
+
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 47
+        assert len(tool_names) == 50
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):
