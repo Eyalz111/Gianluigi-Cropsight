@@ -543,3 +543,199 @@ def format_sync_summary(diff: dict) -> str:
         return ""
 
     return "  • " + "\n  • ".join(parts) + "\n  Reply /sync to review and apply"
+
+
+# =============================================================================
+# Reconcile engine (v3 outputs re-architecture)
+# =============================================================================
+# DB is the source of truth; the Sheet is an editable downstream view.
+#   - CONTENT columns (title/label/category/source/created) are one-way DB->Sheet.
+#   - ACTION fields (status/deadline/priority/assignee) are reconciled with
+#     "manual wins & sticks" via a per-task SNAPSHOT (Sheet-now vs snapshot
+#     attributes an edit to Eyal). Identity is the task UUID in column J,
+#     resolved live at write time. Rule 2 (inference proposes, never clobbers a
+#     sticky field) lives in the inference callers (cross_reference), not here.
+# =============================================================================
+
+_ACTION_FIELDS = ("status", "deadline", "priority", "assignee")
+# action field -> google_sheets TASK_COLUMNS key
+_ACTION_SHEET_KEY = {
+    "status": "status", "deadline": "deadline", "priority": "priority", "assignee": "owner",
+}
+# content db-field -> (TASK_COLUMNS key, get_all_tasks dict key)
+_CONTENT_MAP = {"title": ("task", "task"), "label": ("label", "label"), "category": ("category", "category")}
+# DB-only tasks in these statuses get re-added to the Sheet (done/archived are not resurrected)
+_READD_STATUSES = ("pending", "in_progress", "overdue")
+
+
+async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> dict:
+    """
+    Reconcile the Tasks sheet against the DB (v3 engine).
+
+    - Pull Eyal's action-field edits (Sheet-now != snapshot) to the DB + mark
+      them sticky (Rule 1); a deadline he types becomes EXPLICIT.
+    - Refresh the Sheet from the DB for content + non-edited action fields
+      (Rule 4), preserving cells he just changed.
+    - Rewrite the per-task snapshot LAST, on success (Rule 3).
+    - Sheet rows with no UUID -> create in DB + write the UUID back to col J.
+    - DB-only open tasks -> re-added to the Sheet (never treated as deletes, #2).
+
+    shadow / dry_run -> compute + log, no Sheet/DB/snapshot writes. Returns a summary.
+    """
+    from services.google_sheets import sheets_service, TASK_COLUMNS
+
+    if shadow is None:
+        shadow = getattr(settings, "RECONCILE_SHADOW_MODE", True)
+    write_allowed = not (dry_run or shadow)
+    tab = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+
+    try:
+        sheet_tasks = await sheets_service.get_all_tasks()
+    except Exception as e:
+        logger.error(f"[reconcile] could not read Sheet: {e}")
+        return {"error": str(e)}
+    db_tasks = supabase_client.get_tasks(status=None, limit=1000, include_pending=True)
+    snapshots = supabase_client.get_sheet_snapshots()
+
+    db_by_id = {t["id"]: t for t in db_tasks if t.get("id")}
+    sheet_by_id, creates = {}, []
+    for st in sheet_tasks:
+        sid = str(st.get("id") or "").strip()
+        if sid:
+            sheet_by_id[sid] = st
+        elif str(st.get("task") or "").strip():
+            creates.append(st)
+
+    summary = {"matched": 0, "pulled": 0, "pushed": 0, "created": 0, "readded": 0,
+               "shadow": shadow, "dry_run": dry_run}
+    db_updates: dict[str, dict] = {}   # task_id -> {field: value}
+    manual_marks: list[tuple] = []     # (task_id, field)
+    cell_writes: list[dict] = []       # {"range": ..., "values": [[v]]}
+    snapshot_writes: list[tuple] = []  # (task_id, row, status, deadline, priority, assignee)
+
+    def _cell(col_key, row, value):
+        if row:
+            cell_writes.append({
+                "range": f"'{tab}'!{TASK_COLUMNS[col_key]}{row}",
+                "values": [[value if value is not None else ""]],
+            })
+
+    # --- matched tasks (UUID in both) ---
+    for sid, st in sheet_by_id.items():
+        dt = db_by_id.get(sid)
+        if not dt:
+            continue  # Sheet UUID the DB doesn't know (superseded/removed) — leave it
+        summary["matched"] += 1
+        row = st.get("row_number")
+        snap = snapshots.get(sid) or {}
+        upd, final = {}, {}
+        for field in _ACTION_FIELDS:
+            sheet_val, snap_val, db_val = st.get(field), snap.get(field), dt.get(field)
+            if _normalize(sheet_val) != _normalize(snap_val):
+                upd[field] = sheet_val or None          # Eyal edited (Rule 1)
+                manual_marks.append((sid, field))
+                summary["pulled"] += 1
+                final[field] = sheet_val
+            elif _normalize(db_val) != _normalize(sheet_val):
+                _cell(_ACTION_SHEET_KEY[field], row, db_val)  # DB advanced -> refresh (Rule 4)
+                summary["pushed"] += 1
+                final[field] = db_val
+            else:
+                final[field] = sheet_val
+        for db_key, (col_key, sheet_key) in _CONTENT_MAP.items():
+            if _normalize(st.get(sheet_key)) != _normalize(dt.get(db_key)):
+                _cell(col_key, row, dt.get(db_key))       # content: one-way DB -> Sheet
+                summary["pushed"] += 1
+        if upd:
+            db_updates[sid] = upd
+        snapshot_writes.append((sid, row, final["status"], final["deadline"],
+                                final["priority"], final["assignee"]))
+
+    # --- Sheet rows with no UUID -> create in DB + write UUID back ---
+    for st in creates:
+        summary["created"] += 1
+        if not write_allowed:
+            continue
+        try:
+            created = supabase_client.create_task(
+                title=st.get("task", ""), assignee=st.get("assignee", ""),
+                priority=st.get("priority") or "M", deadline=st.get("deadline") or None,
+                status=st.get("status") or "pending", category=st.get("category") or None,
+                deadline_confidence="EXPLICIT" if st.get("deadline") else "NONE",
+            )
+            new_id = created.get("id")
+            if new_id and st.get("row_number"):
+                _cell("id", st["row_number"], new_id)
+                snapshot_writes.append((new_id, st["row_number"], st.get("status"),
+                                        st.get("deadline"), st.get("priority"), st.get("assignee")))
+        except Exception as e:
+            logger.warning(f"[reconcile] create from Sheet row failed: {e}")
+
+    # --- DB-only open tasks -> re-add to Sheet (never delete, #2) ---
+    readd_rows = []
+    for tid, dt in db_by_id.items():
+        if tid in sheet_by_id:
+            continue
+        if (dt.get("status") or "pending") not in _READD_STATUSES:
+            continue  # don't resurrect done/archived tasks
+        summary["readded"] += 1
+        meeting_info = dt.get("meetings") if isinstance(dt.get("meetings"), dict) else {}
+        readd_rows.append({
+            "priority": dt.get("priority", "M"), "label": dt.get("label", ""),
+            "task": dt.get("title", ""), "assignee": dt.get("assignee", ""),
+            "deadline": str(dt.get("deadline") or ""), "status": dt.get("status", "pending"),
+            "category": dt.get("category", ""),
+            "source_meeting": dt.get("source_meeting") or (meeting_info or {}).get("title", ""),
+            "created_date": str(dt.get("created_at", ""))[:10], "id": tid,
+        })
+
+    if shadow or dry_run:
+        logger.info(f"[reconcile][{'shadow' if shadow else 'dry-run'}] {summary}")
+        try:
+            supabase_client.log_action("shadow_reconcile" if shadow else "reconcile_dryrun",
+                                       details=summary, triggered_by="auto")
+        except Exception:
+            pass
+        return summary
+
+    # --- APPLY (write_allowed) ---
+    # 1. DB action-field pulls + sticky marks.
+    for tid, upd in db_updates.items():
+        try:
+            if "deadline" in upd and upd["deadline"]:
+                upd["deadline_confidence"] = "EXPLICIT"
+            supabase_client.update_task(tid, **upd)
+            for (mtid, mfield) in manual_marks:
+                if mtid == tid:
+                    supabase_client.mark_task_field_manual(tid, mfield, "sheet_edit")
+        except Exception as e:
+            logger.warning(f"[reconcile] DB update failed for {tid}: {e}")
+    # 2. Re-add DB-only rows (batched; carries the UUID into col J).
+    if readd_rows:
+        try:
+            await sheets_service.add_tasks_batch(readd_rows)
+        except Exception as e:
+            logger.warning(f"[reconcile] re-add batch failed: {e}")
+    # 3. Single batched Sheet write for all cell refreshes + create-id write-backs.
+    if cell_writes:
+        try:
+            sheets_service.service.spreadsheets().values().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={"valueInputOption": "RAW", "data": cell_writes},
+            ).execute()
+        except Exception as e:
+            logger.error(f"[reconcile] batched Sheet write failed: {e}")
+            return {**summary, "error": "sheet_write_failed"}  # do NOT rewrite snapshot
+    # 4. Rewrite snapshots LAST (with a light retry so a transient miss doesn't
+    #    leave a stale snapshot that re-attributes the change next cycle, #5).
+    for (tid, row, sstatus, sdeadline, spriority, sassignee) in snapshot_writes:
+        ok = supabase_client.upsert_sheet_snapshot(tid, row, sstatus, sdeadline, spriority, sassignee)
+        if not ok:
+            supabase_client.upsert_sheet_snapshot(tid, row, sstatus, sdeadline, spriority, sassignee)
+
+    try:
+        supabase_client.log_action("reconcile_applied", details=summary, triggered_by="auto")
+    except Exception:
+        pass
+    logger.info(f"[reconcile] applied: {summary}")
+    return summary
