@@ -580,6 +580,7 @@ class SupabaseClient:
         topic: str | None = None,
         limit: int = 100,
         include_pending: bool = False,
+        include_superseded: bool = False,
     ) -> list[dict]:
         """
         List decisions with optional filtering.
@@ -605,6 +606,10 @@ class SupabaseClient:
         # that doesn't explicitly opt into pending gets the right behavior.
         if not include_pending:
             query = query.eq("approval_status", "approved")
+
+        # Bi-temporal (v2.5): hide superseded rows by default. See get_tasks note.
+        if not include_superseded:
+            query = query.is_("valid_to", "null")
 
         if meeting_id:
             query = query.eq("meeting_id", meeting_id)
@@ -949,6 +954,7 @@ class SupabaseClient:
         include_overdue: bool = True,
         limit: int = 100,
         include_pending: bool = False,
+        include_superseded: bool = False,
     ) -> list[dict]:
         """
         Get tasks with optional filtering.
@@ -976,6 +982,12 @@ class SupabaseClient:
         # that doesn't explicitly opt into pending gets the right behavior.
         if not include_pending:
             query = query.eq("approval_status", "approved")
+
+        # Bi-temporal (v2.5): hide superseded rows by default. Columns added in
+        # scripts/migrate_phase_v25_knowledge.sql; default-open (valid_to NULL) so
+        # all existing rows pass. Requires that migration to be applied first.
+        if not include_superseded:
+            query = query.is_("valid_to", "null")
 
         if assignee:
             query = query.ilike("assignee", assignee)
@@ -3753,6 +3765,204 @@ class SupabaseClient:
             logger.error(f"Error matching label '{label}': {e}")
             return None
 
+    # =========================================================================
+    # Knowledge Foundation (v2.5) — areas, topic briefs, typed links (graph-lite)
+    # =========================================================================
+
+    def get_areas(self, status: str = "active") -> list[dict]:
+        """Get all Areas (Layer 3.5 sphere briefs); current (non-superseded) only."""
+        try:
+            query = self.client.table("areas").select("*").is_("valid_to", "null")
+            if status:
+                query = query.eq("status", status)
+            result = query.order("name").execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting areas: {e}")
+            return []
+
+    def add_area(
+        self,
+        name: str,
+        description: str = "",
+        gantt_section: str | None = None,
+    ) -> dict | None:
+        """Add an Area. Idempotent on name (UNIQUE) — returns existing on conflict."""
+        try:
+            existing = self.client.table("areas").select("*").eq("name", name).execute()
+            if existing.data:
+                return existing.data[0]
+            result = self.client.table("areas").insert({
+                "name": name,
+                "description": description,
+                "gantt_section": gantt_section,
+                "status": "active",
+            }).execute()
+            if result.data:
+                logger.info(f"Created area: {name}")
+                return result.data[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error adding area '{name}': {e}")
+            return None
+
+    def update_area_brief(self, area_id: str, brief_json: dict) -> bool:
+        """Write the AreaBrief JSON + bump brief_updated_at."""
+        try:
+            from datetime import datetime, timezone
+            self.client.table("areas").update({
+                "brief_json": brief_json,
+                "brief_updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", area_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating area brief '{area_id}': {e}")
+            return False
+
+    def get_topic_thread(self, topic_id: str) -> dict | None:
+        """Fetch a single topic_threads row by id."""
+        try:
+            result = self.client.table("topic_threads").select("*").eq("id", topic_id).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error getting topic thread '{topic_id}': {e}")
+            return None
+
+    def update_topic_brief(self, topic_id: str, brief_json: dict) -> bool:
+        """Write the TopicBrief JSON + bump brief_updated_at (leaves state_json untouched)."""
+        try:
+            from datetime import datetime, timezone
+            self.client.table("topic_threads").update({
+                "brief_json": brief_json,
+                "brief_updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", topic_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating topic brief '{topic_id}': {e}")
+            return False
+
+    def set_topic_area(self, topic_id: str, area_id: str | None) -> bool:
+        """Assign a topic thread to an Area (or clear with None)."""
+        try:
+            self.client.table("topic_threads").update(
+                {"area_id": area_id}
+            ).eq("id", topic_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error setting topic area '{topic_id}': {e}")
+            return False
+
+    def create_knowledge_link(
+        self,
+        from_type: str,
+        from_id: str,
+        to_type: str,
+        to_id: str,
+        link_type: str,
+        confidence: float | None = None,
+        source_meeting_id: str | None = None,
+        created_by: str = "auto",
+    ) -> dict | None:
+        """Create a typed link (graph-lite). Skips exact-duplicate current links."""
+        try:
+            dupe = (
+                self.client.table("knowledge_links")
+                .select("id")
+                .eq("from_type", from_type).eq("from_id", from_id)
+                .eq("to_type", to_type).eq("to_id", to_id)
+                .eq("link_type", link_type)
+                .is_("valid_to", "null")
+                .execute()
+            )
+            if dupe.data:
+                return dupe.data[0]
+            data = {
+                "from_type": from_type, "from_id": from_id,
+                "to_type": to_type, "to_id": to_id,
+                "link_type": link_type, "created_by": created_by,
+            }
+            if confidence is not None:
+                data["confidence"] = confidence
+            if source_meeting_id:
+                data["source_meeting_id"] = source_meeting_id
+            result = self.client.table("knowledge_links").insert(data).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                f"Error creating knowledge link {from_type}->{to_type} ({link_type}): {e}"
+            )
+            return None
+
+    def get_knowledge_links(
+        self,
+        from_type: str | None = None,
+        from_id: str | None = None,
+        to_type: str | None = None,
+        to_id: str | None = None,
+        link_type: str | None = None,
+        current_only: bool = True,
+    ) -> list[dict]:
+        """Query typed links with optional filters. current_only hides superseded links."""
+        try:
+            query = self.client.table("knowledge_links").select("*")
+            if from_type:
+                query = query.eq("from_type", from_type)
+            if from_id:
+                query = query.eq("from_id", from_id)
+            if to_type:
+                query = query.eq("to_type", to_type)
+            if to_id:
+                query = query.eq("to_id", to_id)
+            if link_type:
+                query = query.eq("link_type", link_type)
+            if current_only:
+                query = query.is_("valid_to", "null")
+            result = query.order("created_at", desc=True).execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting knowledge links: {e}")
+            return []
+
+    def supersede_knowledge_link(self, link_id: str) -> bool:
+        """Mark a link as no longer valid (bi-temporal close, never deleted)."""
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            self.client.table("knowledge_links").update(
+                {"valid_to": now, "superseded_at": now}
+            ).eq("id", link_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error superseding knowledge link '{link_id}': {e}")
+            return False
+
+    def supersede_decision(self, decision_id: str, superseded_by: str | None = None) -> bool:
+        """Bi-temporally close a decision (hidden from default reads, kept for history)."""
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            update = {"valid_to": now, "superseded_at": now}
+            if superseded_by:
+                update["superseded_by"] = superseded_by
+            self.client.table("decisions").update(update).eq("id", decision_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error superseding decision '{decision_id}': {e}")
+            return False
+
+    def supersede_task(self, task_id: str, superseded_by: str | None = None) -> bool:
+        """Bi-temporally close a task (hidden from default reads, kept for history)."""
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            update = {"valid_to": now, "superseded_at": now}
+            if superseded_by:
+                update["superseded_by"] = superseded_by
+            self.client.table("tasks").update(update).eq("id", task_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error superseding task '{task_id}': {e}")
+            return False
 
     # =========================================================================
     # Intelligence Signal Methods

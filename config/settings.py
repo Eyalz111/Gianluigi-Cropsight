@@ -488,6 +488,47 @@ class Settings(BaseSettings):
         description="ElevenLabs voice ID for signal narration (default: Sarah)"
     )
 
+    # ==========================================================================
+    # Knowledge Foundation (v2.5) — all default OFF; shadow-run by default.
+    # See V2.5_STRATEGY.md and the Phase 1 plan.
+    # ==========================================================================
+    KNOWLEDGE_SHADOW_MODE: bool = Field(
+        default=False,
+        description="Run knowledge read-back in SHADOW: extract twice (baseline+augmented), LOG the diff to audit_log, ship the baseline. Doubles extraction cost while on — turn True to start the shadow window (ideally after synthesis), False to pause. Never alters shipped output."
+    )
+    KNOWLEDGE_READBACK_ENABLED: bool = Field(
+        default=False,
+        description="Inject retrieved topic/area briefs + RAG into the extraction prompt. Flip True only after >=10 clean shadow meetings."
+    )
+    EXTRACTION_MUZZLE_REMOVED: bool = Field(
+        default=False,
+        description="Remove the 'aim for 3-7 action items' consolidation cap from extraction. Separate from read-back (different blast radius)."
+    )
+    KNOWLEDGE_NIGHTLY_ENABLED: bool = Field(
+        default=False, description="Enable nightly knowledge-consolidation scheduler"
+    )
+    KNOWLEDGE_NIGHTLY_HOUR: int = Field(
+        default=3, description="IST hour for nightly knowledge consolidation"
+    )
+    KNOWLEDGE_WEEKLY_ENABLED: bool = Field(
+        default=False, description="Enable weekly knowledge-synthesis + reflection scheduler"
+    )
+    KNOWLEDGE_WEEKLY_DAY: int = Field(
+        default=6, description="Day of week for weekly synthesis (0=Mon, 6=Sun)"
+    )
+    KNOWLEDGE_WEEKLY_HOUR: int = Field(
+        default=4, description="IST hour for weekly knowledge synthesis"
+    )
+    KNOWLEDGE_CLUSTER_ENABLED: bool = Field(
+        default=False, description="Enable semantic topic/area clustering -> proposals (Eyal approves)"
+    )
+    KNOWLEDGE_READBACK_COST_CEILING_USD: float = Field(
+        default=0.05, description="Per-meeting added-cost budget for read-back; warn at 1x, trip per-meeting fallback at 2x"
+    )
+    KNOWLEDGE_READBACK_LATENCY_BUDGET_S: float = Field(
+        default=15.0, description="Per-meeting added-latency budget (seconds) for read-back; monitored, not blocking"
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""
