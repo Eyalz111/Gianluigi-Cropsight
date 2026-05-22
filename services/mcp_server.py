@@ -732,6 +732,124 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
+        # 7e. Gantt curated knowledge-view (v3 chunk 2)
+        # ============================================================
+        @mcp.tool(
+            name="tag_gantt_row",
+            description=(
+                "[GANTT] Tag a Gantt row to a topic (writes the hidden topic-id tag + "
+                "upserts the gantt_rows record). Use to map a curated lane to a topic."
+            ),
+        )
+        async def tag_gantt_row(sheet_name: str, row: int, topic_id: str, area_id: str = "", owner: str = "") -> dict:
+            try:
+                from services.gantt_rows import write_row_tag
+                from services.supabase_client import supabase_client
+                ok = await write_row_tag(sheet_name, row, topic_id)
+                if ok:
+                    supabase_client.upsert_gantt_row({
+                        "sheet_name": sheet_name, "topic_id": topic_id,
+                        "area_id": area_id or None, "owner": owner or None, "display_order": row,
+                    })
+                mcp_auth.log_call("tag_gantt_row", {"sheet": sheet_name, "row": row, "topic_id": topic_id})
+                return _success({"tagged": ok, "sheet": sheet_name, "row": row, "topic_id": topic_id})
+            except Exception as e:
+                logger.error(f"tag_gantt_row error: {e}")
+                mcp_auth.log_call("tag_gantt_row", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="list_gantt_tag_proposals",
+            description="[GANTT] List pending Gantt row->topic tagging proposals for review.",
+        )
+        async def list_gantt_tag_proposals() -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                rows = supabase_client.get_pending_approvals_by_status("pending") or []
+                props = [{"proposal_id": r.get("approval_id"), **(r.get("content") or {})}
+                         for r in rows if r.get("content_type") == "gantt_tag_mapping"]
+                mcp_auth.log_call("list_gantt_tag_proposals", {"count": len(props)})
+                return _success(props)
+            except Exception as e:
+                logger.error(f"list_gantt_tag_proposals error: {e}")
+                mcp_auth.log_call("list_gantt_tag_proposals", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="approve_gantt_tag_mapping",
+            description=(
+                "[GANTT] Apply an approved (optionally edited) row->topic tag mapping. "
+                "Pass the proposal_id from list_gantt_tag_proposals; optionally pass an "
+                "edited candidates list to override."
+            ),
+        )
+        async def approve_gantt_tag_mapping(proposal_id: str, candidates: list | None = None) -> dict:
+            try:
+                from processors.gantt_tagging import apply_row_tags
+                from services.supabase_client import supabase_client
+                pending = supabase_client.get_pending_approval(proposal_id)
+                if not pending:
+                    return _error(f"Proposal {proposal_id} not found")
+                content = pending.get("content") or {}
+                sheet_name = content.get("sheet_name")
+                mapping = candidates if candidates is not None else content.get("candidates", [])
+                result = await apply_row_tags(sheet_name, mapping)
+                supabase_client.delete_pending_approval(proposal_id)
+                mcp_auth.log_call("approve_gantt_tag_mapping", {"proposal_id": proposal_id, **result})
+                return _success({"sheet": sheet_name, **result})
+            except Exception as e:
+                logger.error(f"approve_gantt_tag_mapping error: {e}")
+                mcp_auth.log_call("approve_gantt_tag_mapping", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="refresh_gantt",
+            description=(
+                "[GANTT] On-demand Gantt refresh: status rollup (per sheet) + timeframe "
+                "read-back. apply=False previews (no writes). Honors GANTT_SHADOW_MODE "
+                "(nothing written even on apply=True while shadow is on)."
+            ),
+        )
+        async def refresh_gantt(apply: bool = False) -> dict:
+            try:
+                from guardrails.gantt_guard import _load_schema
+                from processors.gantt_status import rollup_gantt_status
+                from processors.sheets_sync import reconcile_gantt
+                sheets = sorted({r["sheet_name"] for r in _load_schema()
+                                 if r.get("sheet_name") and not r["sheet_name"].startswith("_")})
+                rollups = [await rollup_gantt_status(s, shadow=not apply or None) for s in sheets]
+                recon = await reconcile_gantt(dry_run=not apply)
+                mcp_auth.log_call("refresh_gantt", {"apply": apply})
+                return _success({"status": "applied" if (apply and not recon.get("shadow")) else "preview",
+                                 "rollups": rollups, "reconcile": recon})
+            except Exception as e:
+                logger.error(f"refresh_gantt error: {e}")
+                mcp_auth.log_call("refresh_gantt", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="clear_gantt_override",
+            description=(
+                "[GANTT] Clear a sticky override on a Gantt row (field: status | timeframe) "
+                "so rollup/reconcile can update it again. Identify the row by sheet + topic_id."
+            ),
+        )
+        async def clear_gantt_override(sheet_name: str, topic_id: str, field: str) -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                rows = supabase_client.get_gantt_rows(sheet_name)
+                gid = next((r["id"] for r in rows if r.get("topic_id") == topic_id), None)
+                if not gid:
+                    return _error("Gantt row not found for that sheet + topic")
+                ok = supabase_client.clear_gantt_manual_flag(gid, field)
+                mcp_auth.log_call("clear_gantt_override", {"sheet": sheet_name, "topic_id": topic_id, "field": field})
+                return _success({"cleared": ok, "field": field})
+            except Exception as e:
+                logger.error(f"clear_gantt_override error: {e}")
+                mcp_auth.log_call("clear_gantt_override", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
         # 8. deal_ops (composite — replaces deprecated get_commitments)
         # ============================================================
         @mcp.tool(
