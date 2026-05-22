@@ -4060,6 +4060,131 @@ class SupabaseClient:
             return False
 
     # =========================================================================
+    # Gantt reconcile helpers (v3 chunk 2 — curated knowledge-view)
+    # =========================================================================
+
+    _GANTT_MANUAL_FIELDS = ("status", "timeframe")
+
+    def get_gantt_rows(self, sheet_name: str | None = None, include_superseded: bool = False) -> list:
+        """Current curated Gantt rows (topic-tagged), optionally for one sheet."""
+        try:
+            q = self.client.table("gantt_rows").select("*")
+            if not include_superseded:
+                q = q.is_("valid_to", "null")
+            if sheet_name:
+                q = q.eq("sheet_name", sheet_name)
+            return q.execute().data or []
+        except Exception as e:
+            logger.error(f"Error getting gantt rows: {e}")
+            return []
+
+    def get_gantt_snapshots(self, sheet_name: str | None = None) -> dict:
+        """Last-synced timeframe snapshot per gantt row, keyed by gantt_row_id."""
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", "gantt_row")
+                .execute()
+                .data
+                or []
+            )
+            return {r["gantt_row_id"]: r for r in rows if r.get("gantt_row_id")}
+        except Exception as e:
+            logger.error(f"Error getting gantt snapshots: {e}")
+            return {}
+
+    def upsert_gantt_snapshot(
+        self, gantt_row_id: str, sheet_row: int | None,
+        week_start: int | None, week_end: int | None,
+    ) -> bool:
+        """Write/refresh the timeframe snapshot for a gantt row (one per row)."""
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "gantt_row_id": gantt_row_id,
+                "entity_type": "gantt_row",
+                "sheet_row": sheet_row,
+                "week_start": week_start,
+                "week_end": week_end,
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("gantt_row_id", gantt_row_id)
+                .eq("entity_type", "gantt_row")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "gantt_row_id", gantt_row_id
+                ).eq("entity_type", "gantt_row").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting gantt snapshot for '{gantt_row_id}': {e}")
+            return False
+
+    def mark_gantt_field_manual(self, gantt_row_id: str, field: str, source: str) -> bool:
+        """Flag a gantt-row field manual (sticky). field in status/timeframe."""
+        if field not in self._GANTT_MANUAL_FIELDS:
+            logger.warning(f"mark_gantt_field_manual: unknown field '{field}'")
+            return False
+        try:
+            from datetime import datetime, timezone
+            self.client.table("gantt_rows").update({
+                f"manual_{field}": True,
+                "manual_set_at": datetime.now(timezone.utc).isoformat(),
+                "manual_set_source": source,
+            }).eq("id", gantt_row_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking gantt field manual ({gantt_row_id}.{field}): {e}")
+            return False
+
+    def clear_gantt_manual_flag(self, gantt_row_id: str, field: str) -> bool:
+        """Clear a sticky gantt-row flag so rollup/reconcile can write again."""
+        if field not in self._GANTT_MANUAL_FIELDS:
+            logger.warning(f"clear_gantt_manual_flag: unknown field '{field}'")
+            return False
+        try:
+            self.client.table("gantt_rows").update(
+                {f"manual_{field}": False}
+            ).eq("id", gantt_row_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing gantt manual flag ({gantt_row_id}.{field}): {e}")
+            return False
+
+    def upsert_gantt_row(self, data: dict) -> dict:
+        """Insert/update a curated gantt row keyed by (sheet_name, topic_id)."""
+        try:
+            from datetime import datetime, timezone
+            data = {**data, "updated_at": datetime.now(timezone.utc).isoformat()}
+            existing = []
+            if data.get("topic_id") and data.get("sheet_name"):
+                existing = (
+                    self.client.table("gantt_rows")
+                    .select("id")
+                    .eq("sheet_name", data["sheet_name"])
+                    .eq("topic_id", data["topic_id"])
+                    .is_("valid_to", "null")
+                    .execute()
+                    .data
+                    or []
+                )
+            if existing:
+                self.client.table("gantt_rows").update(data).eq("id", existing[0]["id"]).execute()
+                return {"id": existing[0]["id"], **data}
+            res = self.client.table("gantt_rows").insert(data).execute()
+            return res.data[0] if res.data else {}
+        except Exception as e:
+            logger.error(f"Error upserting gantt row: {e}")
+            return {}
+
+    # =========================================================================
     # Intelligence Signal Methods
     # =========================================================================
 
