@@ -76,9 +76,9 @@ def _llm_match_area(area_name, lanes, topics) -> dict:
     topic_block = "\n".join(f"[{t['id']}] {t['topic_name']} — {_brief_snippet(t)}" for t in topics)
     prompt = (
         f"AREA: {area_name}. Each Gantt LANE holds work-items; each TOPIC is a workstream. "
-        "For each lane, list the topic IDs whose work that lane covers — match by MEANING, not "
-        "shared words (the Gantt uses shorthand). A topic may appear under multiple lanes; a lane "
-        "covers 0-N topics.\n\n"
+        "For each lane, list the **3-5 CORE topic IDs that lane PRIMARILY covers** — its main work. "
+        "Match by MEANING, not shared words (the Gantt uses shorthand). Omit tangential/loose matches; "
+        "a lane covers 0-5 topics.\n\n"
         f"LANES:\n{lane_block}\n\nTOPICS:\n{topic_block}\n\n"
         'Return ONLY JSON: {"<lane>": ["<topic_id>", ...]}'
     )
@@ -148,7 +148,7 @@ def apply_lane_links(proposals: list[dict]) -> dict:
                 supabase_client.create_knowledge_link(
                     from_type="gantt_row", from_id=p["gantt_row_id"],
                     to_type="topic", to_id=c["topic_id"],
-                    link_type="gantt_covers", confidence=c.get("score"))
+                    link_type="gantt_covers", created_by="eyal")
                 n += 1
             except Exception as e:
                 logger.warning(f"link create failed: {e}")
