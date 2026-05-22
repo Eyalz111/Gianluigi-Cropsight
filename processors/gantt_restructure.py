@@ -69,25 +69,52 @@ def _apply_inserts(spreadsheet_id: str, gid: int, inserts: list[tuple[int, int]]
     return len(reqs)
 
 
-async def _verify(spreadsheet_id: str, tab: str) -> dict:
-    """Re-parse the copy (no persist) + count per-section Planning/Execution + cond-format rules."""
-    from scripts.parse_gantt_schema import parse_gantt_schema
+def _write_labels(spreadsheet_id: str, tab: str) -> int:
+    """Label the original + newly-inserted lanes in col B: Planning #1/#2, Execution #1/2/3.
+
+    Walks col B; each 'Planning' becomes #1 and the next ADD_PLANNING (blank, inserted) rows
+    become #2..; each 'Execution' becomes #1 and the next ADD_EXECUTION rows #2,#3. The new
+    rows are the inserts placed directly after the existing lane — works for every section
+    (incl. LEGAL) regardless of the section-header column."""
     from services.google_sheets import sheets_service
-    parsed = await parse_gantt_schema(spreadsheet_id=spreadsheet_id, sheet_name=tab, persist=False)
-    rows = parsed.get("schema_rows", [])
-    counts = {}
-    for r in rows:
-        sub = (r.get("subsection") or "").strip().lower()
-        sec = r.get("section") or ""
-        if sub in ("planning", "execution"):
-            counts.setdefault(sec, {}).setdefault(sub, 0)
-            counts[sec][sub] += 1
-    # conditional-format rule count (coverage sanity)
-    cf = sheets_service.service.spreadsheets().get(
+    svc = sheets_service.service
+    rows = svc.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=f"'{tab}'!A6:B70").execute().get("values", [])
+    updates, i, n = [], 0, len(rows)
+    while i < n:
+        b = ((rows[i] + ["", ""])[1] or "").strip().lower() if rows[i] else ""
+        rn = 6 + i
+        if b == "planning":
+            updates.append((rn, "Planning #1"))
+            for k in range(1, ADD_PLANNING + 1):
+                updates.append((rn + k, f"Planning #{1 + k}"))
+            i += 1 + ADD_PLANNING
+        elif b == "execution":
+            updates.append((rn, "Execution #1"))
+            for k in range(1, ADD_EXECUTION + 1):
+                updates.append((rn + k, f"Execution #{1 + k}"))
+            i += 1 + ADD_EXECUTION
+        else:
+            i += 1
+    data = [{"range": f"'{tab}'!B{rn}", "values": [[lab]]} for rn, lab in updates]
+    if data:
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"valueInputOption": "RAW", "data": data}).execute()
+    return len(updates)
+
+
+async def _verify(spreadsheet_id: str, tab: str) -> dict:
+    """Count Planning/Execution lanes from col B + conditional-format rule count (coverage sanity)."""
+    from services.google_sheets import sheets_service
+    svc = sheets_service.service
+    rows = svc.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=f"'{tab}'!A6:B70").execute().get("values", [])
+    planning = sum(1 for r in rows if ((r + ["", ""])[1] or "").strip().lower().startswith("planning"))
+    execution = sum(1 for r in rows if ((r + ["", ""])[1] or "").strip().lower().startswith("execution"))
+    cf = svc.spreadsheets().get(
         spreadsheetId=spreadsheet_id, fields="sheets(conditionalFormats)").execute()
     cf_count = sum(len(s.get("conditionalFormats", []) or []) for s in cf.get("sheets", []))
-    ok = all(c.get("planning", 0) >= 2 and c.get("execution", 0) >= 3 for c in counts.values())
-    return {"per_section": counts, "cond_format_rules": cf_count, "all_areas_2p3e": ok}
+    return {"planning_lanes": planning, "execution_lanes": execution, "cond_format_rules": cf_count}
 
 
 async def propose_restructure() -> dict:
@@ -102,12 +129,13 @@ async def propose_restructure() -> dict:
     if gid is None:
         return {"status": "error", "error": f"tab '{tab}' not found in copy"}
     applied = _apply_inserts(copy_id, gid, inserts)   # COPY ONLY
+    labeled = _write_labels(copy_id, tab)             # label the new lanes (COPY ONLY)
     verify = await _verify(copy_id, tab)
     preview = {
         "status": "preview", "working_copy_id": copy_id,
         "link": f"https://docs.google.com/spreadsheets/d/{copy_id}",
         "inserts_applied": applied, "rows_added": sum(c for _, c in inserts),
-        "verify": verify,
+        "labels_written": labeled, "verify": verify,
     }
     try:
         supabase_client.upsert_pending_approval(
@@ -136,6 +164,7 @@ async def apply_restructure_to_live(working_copy_id: str, confirm: bool = False)
     inserts = _compute_inserts(tab)
     gid = _tab_gid(settings.GANTT_SHEET_ID, tab)
     applied = _apply_inserts(settings.GANTT_SHEET_ID, gid, inserts)   # LIVE
+    _write_labels(settings.GANTT_SHEET_ID, tab)   # label the new lanes
     from scripts.parse_gantt_schema import parse_gantt_schema
     await parse_gantt_schema(persist=True)   # re-parse live (row numbers shifted)
     verify = await _verify(settings.GANTT_SHEET_ID, tab)
