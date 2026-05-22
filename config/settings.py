@@ -544,6 +544,25 @@ class Settings(BaseSettings):
         default=2, description="IST hour for the pre-nightly reconcile (must be < KNOWLEDGE_NIGHTLY_HOUR so the DB is correct before nightly reads tasks)"
     )
 
+    # ==========================================================================
+    # Gantt redesign (v3 chunk 2) — curated knowledge-view of the Gantt.
+    # ==========================================================================
+    GANTT_RECONCILE_ENABLED: bool = Field(
+        default=False, description="Enable the pre-weekly-digest Gantt status rollup + timeframe reconcile"
+    )
+    GANTT_SHADOW_MODE: bool = Field(
+        default=True, description="Gantt rollup/reconcile computes + logs but does NOT write the sheet/snapshot. Keep True until cutover (duplicated sheet first)."
+    )
+    GANTT_PREDIGEST_HOUR: int = Field(
+        default=13, description="IST hour to refresh the Gantt (must be < WEEKLY_DIGEST_HOUR so the digest reads a fresh Gantt)"
+    )
+    GANTT_TAG_COLUMN: str = Field(
+        default="DZ", description="Hidden column holding each Gantt row's topic UUID (must sit past the last week column on every sheet)"
+    )
+    GANTT_CUTOVER_PREVIEW: bool = Field(
+        default=True, description="During cutover, DM Eyal a preview of the pre-digest Gantt write (reply STOP to cancel); drop after 3 clean cycles"
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""
