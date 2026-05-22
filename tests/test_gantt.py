@@ -110,7 +110,7 @@ class TestReconcileGantt:
             {"sheet_name": "2026-2027", "topic_id": "topic-A", "id": "gA"},
             {"sheet_name": "2026-2027", "topic_id": "topic-B", "id": "gB"},
         ])
-        monkeypatch.setattr(sc, "get_gantt_snapshots", lambda *a, **k: {})
+        monkeypatch.setattr(sc, "get_gantt_row_snapshots", lambda *a, **k: {})
         marks = []
         monkeypatch.setattr(sc, "mark_gantt_field_manual", lambda *a, **k: marks.append(a) or True)
         monkeypatch.setattr(sc, "upsert_gantt_snapshot", lambda *a, **k: True)

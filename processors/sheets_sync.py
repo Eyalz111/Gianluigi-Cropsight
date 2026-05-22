@@ -773,7 +773,7 @@ async def reconcile_gantt(dry_run: bool = False, shadow: bool | None = None) -> 
     })
     db_rows = {(r["sheet_name"], r["topic_id"]): r
                for r in supabase_client.get_gantt_rows() if r.get("topic_id")}
-    snaps = supabase_client.get_gantt_snapshots()
+    snaps = supabase_client.get_gantt_row_snapshots()
 
     summary = {"sheets": [], "pulled": 0, "flagged_multigap": 0, "untagged_in_db": 0,
                "shadow": shadow, "dry_run": dry_run}

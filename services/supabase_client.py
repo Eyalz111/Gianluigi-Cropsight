@@ -4078,8 +4078,11 @@ class SupabaseClient:
             logger.error(f"Error getting gantt rows: {e}")
             return []
 
-    def get_gantt_snapshots(self, sheet_name: str | None = None) -> dict:
-        """Last-synced timeframe snapshot per gantt row, keyed by gantt_row_id."""
+    def get_gantt_row_snapshots(self, sheet_name: str | None = None) -> dict:
+        """Last-synced timeframe snapshot per gantt row, keyed by gantt_row_id.
+
+        (Named distinctly from get_gantt_snapshots(proposal_id), which reads the
+        older gantt_snapshots proposal-rollback table.)"""
         try:
             rows = (
                 self.client.table("sheet_snapshots")
