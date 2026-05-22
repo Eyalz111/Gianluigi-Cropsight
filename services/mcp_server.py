@@ -848,6 +848,100 @@ class MCPServer:
                 mcp_auth.log_call("clear_gantt_override", success=False, error=str(e))
                 return _error(str(e))
 
+        @mcp.tool(
+            name="propose_gantt_restructure",
+            description=(
+                "[GANTT] Make a working COPY of the live Gantt and add +1 Planning / +2 Execution "
+                "rows per Area ON THE COPY (-> 2 Planning + 3 Execution), verify formulas + "
+                "conditional-formatting, and return the copy link to review. NEVER touches the live "
+                "board. Gated by GANTT_RESTRUCTURE_ENABLED."
+            ),
+        )
+        async def propose_gantt_restructure() -> dict:
+            try:
+                from processors.gantt_restructure import propose_restructure
+                res = await propose_restructure()
+                mcp_auth.log_call("propose_gantt_restructure", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"propose_gantt_restructure error: {e}")
+                mcp_auth.log_call("propose_gantt_restructure", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="apply_gantt_restructure_to_live",
+            description=(
+                "[GANTT] CUTOVER: apply the same +1 Planning/+2 Execution inserts to the LIVE Gantt. "
+                "Requires confirm=True AND GANTT_RESTRUCTURE_ENABLED; backs up first, idempotent "
+                "(aborts if already done), re-parses schema. Only after reviewing the working copy."
+            ),
+        )
+        async def apply_gantt_restructure_to_live(working_copy_id: str, confirm: bool = False) -> dict:
+            try:
+                from processors.gantt_restructure import apply_restructure_to_live
+                res = await apply_restructure_to_live(working_copy_id, confirm=confirm)
+                mcp_auth.log_call("apply_gantt_restructure_to_live", {"confirm": confirm})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"apply_gantt_restructure_to_live error: {e}")
+                mcp_auth.log_call("apply_gantt_restructure_to_live", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="propose_gantt_links",
+            description=(
+                "[GANTT] Shadow dry-run: propose lane->topic links (knowledge_links 'gantt_covers') "
+                "by semantic matching, grouped by Area with each lane's content beside its candidate "
+                "topics. No writes — the go/no-go table to review before approving."
+            ),
+        )
+        async def propose_gantt_links() -> dict:
+            try:
+                from processors.gantt_linkage import propose_lane_links
+                res = propose_lane_links(persist_preview=True)
+                mcp_auth.log_call("propose_gantt_links", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"propose_gantt_links error: {e}")
+                mcp_auth.log_call("propose_gantt_links", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="approve_gantt_link_mapping",
+            description=(
+                "[GANTT] Apply the proposed lane->topic links as knowledge_links 'gantt_covers' "
+                "(DB-only, never the board). Run propose_gantt_links first to review."
+            ),
+        )
+        async def approve_gantt_link_mapping() -> dict:
+            try:
+                from processors.gantt_linkage import build_link_proposals, apply_lane_links
+                res = apply_lane_links(build_link_proposals()["proposals"])
+                mcp_auth.log_call("approve_gantt_link_mapping", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"approve_gantt_link_mapping error: {e}")
+                mcp_auth.log_call("approve_gantt_link_mapping", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="get_gantt_nudges",
+            description=(
+                "[GANTT] Compute the current brief<->board divergence nudges (shadow; no writes). "
+                "Returns the ranked nudge list (severity >=2, capped) for review."
+            ),
+        )
+        async def get_gantt_nudges() -> dict:
+            try:
+                from processors.gantt_nudge import compute_gantt_nudges
+                res = compute_gantt_nudges(shadow=True)
+                mcp_auth.log_call("get_gantt_nudges", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"get_gantt_nudges error: {e}")
+                mcp_auth.log_call("get_gantt_nudges", success=False, error=str(e))
+                return _error(str(e))
+
         # ============================================================
         # 8. deal_ops (composite — replaces deprecated get_commitments)
         # ============================================================

@@ -562,6 +562,19 @@ class Settings(BaseSettings):
     GANTT_CUTOVER_PREVIEW: bool = Field(
         default=True, description="During cutover, DM Eyal a preview of the pre-digest Gantt write (reply STOP to cancel); drop after 3 clean cycles"
     )
+    # v3 revised (improve EXISTING Gantt): restructure (add rows), linkage, nudges, high-bar pops
+    GANTT_RESTRUCTURE_ENABLED: bool = Field(
+        default=False, description="Enable the copy+add-rows engine (+1 Planning/+2 Execution per area). Cutover to live also requires confirm=True. Copy-first, never auto."
+    )
+    GANTT_LINKAGE_ENABLED: bool = Field(
+        default=False, description="Enable per-lane->topics linkage proposals (knowledge_links 'gantt_covers'); proposal-only, DB-only"
+    )
+    GANTT_NUDGE_ENABLED: bool = Field(
+        default=False, description="Surface the weekly 'Gantt updates' nudges (brief<->board divergence) in the weekly review"
+    )
+    GANTT_ALERT_ENABLED: bool = Field(
+        default=False, description="Enable the rare high-bar Telegram pop for critical+blocked+board-active Gantt divergences (cooldown 1/topic/week)"
+    )
 
     @property
     def model_extraction(self) -> str:

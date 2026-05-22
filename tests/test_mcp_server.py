@@ -155,10 +155,16 @@ class TestServerBuild:
             "refresh_gantt", "clear_gantt_override",
         ])
 
+        # v3 chunk 2 REVISED: improve existing Gantt — restructure + linkage + nudges
+        expected_tools.extend([
+            "propose_gantt_restructure", "apply_gantt_restructure_to_live",
+            "propose_gantt_links", "approve_gantt_link_mapping", "get_gantt_nudges",
+        ])
+
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 55
+        assert len(tool_names) == 60
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

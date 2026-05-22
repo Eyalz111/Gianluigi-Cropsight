@@ -115,3 +115,34 @@ def test_linkage_apply_uses_gantt_covers(monkeypatch):
         {"gantt_row_id": "g1", "candidates": [{"topic_id": "t1"}, {"topic_id": "t2"}]}])
     assert res["links_created"] == 2
     assert all(c["link_type"] == "gantt_covers" and c["from_type"] == "gantt_row" for c in calls)
+
+
+# ----------------------------------------------------------------------------
+# gantt_restructure — insert builder: bottom-to-top, +1 plan/+2 exec, copy-targeted
+# ----------------------------------------------------------------------------
+def test_restructure_inserts_bottom_to_top(monkeypatch):
+    import processors.gantt_restructure as gr
+    monkeypatch.setattr(gr.supabase_client, "get_gantt_rows", lambda *a, **k: [
+        {"lane_type": "planning", "lane_index": 1, "display_order": 19},
+        {"lane_type": "execution", "lane_index": 1, "display_order": 20},
+        {"lane_type": "planning", "lane_index": 1, "display_order": 24},
+        {"lane_type": "execution", "lane_index": 1, "display_order": 25},
+        {"lane_type": "meetings", "lane_index": 1, "display_order": 21},  # untouched
+    ])
+    inserts = gr._compute_inserts("X")
+    starts = [s for s, _ in inserts]
+    assert starts == sorted(starts, reverse=True)        # bottom-to-top
+    counts = dict(inserts)
+    assert counts[19] == 1 and counts[24] == 1           # +1 planning
+    assert counts[20] == 2 and counts[25] == 2           # +2 execution
+    assert 21 not in counts                              # meetings untouched
+
+
+def test_apply_inserts_targets_given_sheet_not_live(monkeypatch):
+    import processors.gantt_restructure as gr
+    import services.google_sheets as gsvc
+    fake = MagicMock()
+    monkeypatch.setattr(gsvc, "sheets_service", fake)
+    gr._apply_inserts("COPY-ID", 999, [(20, 2)])
+    bu = fake.service.spreadsheets.return_value.batchUpdate
+    assert bu.call_args.kwargs["spreadsheetId"] == "COPY-ID"  # never the live board
