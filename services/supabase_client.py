@@ -4002,10 +4002,12 @@ class SupabaseClient:
                 "task_id": task_id,
                 "entity_type": "task",
                 "sheet_row": sheet_row,
-                "status": status,
-                "deadline": deadline,
-                "priority": priority,
-                "assignee": assignee,
+                # Coerce empty strings to NULL — Sheet cells come back as "" for
+                # blanks, and the DATE column (deadline) rejects "" (22007).
+                "status": (status or None),
+                "deadline": (deadline or None),
+                "priority": (priority or None),
+                "assignee": (assignee or None),
                 "snapshot_at": datetime.now(timezone.utc).isoformat(),
             }
             existing = (
