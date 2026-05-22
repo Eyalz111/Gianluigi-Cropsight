@@ -126,18 +126,12 @@ class ReconcileScheduler:
                 pass
 
     async def _run_gantt(self) -> None:
-        """Pre-digest Gantt pass: status rollup (per sheet) then timeframe read-back."""
+        """Pre-digest Gantt pass: read-back (board -> knowledge, DB-only) + nudges. Never paints the board."""
         async def _work():
-            from guardrails.gantt_guard import _load_schema
-            from processors.gantt_status import rollup_gantt_status
-            from processors.sheets_sync import reconcile_gantt
-            sheets = sorted({
-                r["sheet_name"] for r in _load_schema()
-                if r.get("sheet_name") and not r["sheet_name"].startswith("_")
-            })
-            for s in sheets:
-                await rollup_gantt_status(s)
-            await reconcile_gantt()
+            from processors.gantt_readback import reconcile_gantt_lanes
+            from processors.gantt_nudge import compute_gantt_nudges
+            await reconcile_gantt_lanes()      # board -> knowledge (DB-only, manual-wins)
+            compute_gantt_nudges()             # brief<->board divergence -> nudges
         await asyncio.wait_for(_work(), timeout=_GANTT_TIMEOUT_S)
 
 

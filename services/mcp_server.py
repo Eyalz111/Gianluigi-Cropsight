@@ -805,23 +805,22 @@ class MCPServer:
         @mcp.tool(
             name="refresh_gantt",
             description=(
-                "[GANTT] On-demand Gantt refresh: status rollup (per sheet) + timeframe "
-                "read-back. apply=False previews (no writes). Honors GANTT_SHADOW_MODE "
-                "(nothing written even on apply=True while shadow is on)."
+                "[GANTT] On-demand Gantt refresh: read-back (board -> knowledge layer, DB-only, "
+                "manual-wins) + brief<->board nudges. NEVER writes the board. apply=False = shadow "
+                "preview; apply=True writes only to the knowledge layer (gantt_rows) + nudges, "
+                "honoring GANTT_SHADOW_MODE."
             ),
         )
         async def refresh_gantt(apply: bool = False) -> dict:
             try:
-                from guardrails.gantt_guard import _load_schema
-                from processors.gantt_status import rollup_gantt_status
-                from processors.sheets_sync import reconcile_gantt
-                sheets = sorted({r["sheet_name"] for r in _load_schema()
-                                 if r.get("sheet_name") and not r["sheet_name"].startswith("_")})
-                rollups = [await rollup_gantt_status(s, shadow=not apply or None) for s in sheets]
-                recon = await reconcile_gantt(dry_run=not apply)
+                from processors.gantt_readback import reconcile_gantt_lanes
+                from processors.gantt_nudge import compute_gantt_nudges
+                shadow = not apply
+                recon = await reconcile_gantt_lanes(shadow=shadow)
+                nudges = compute_gantt_nudges(shadow=shadow)
                 mcp_auth.log_call("refresh_gantt", {"apply": apply})
-                return _success({"status": "applied" if (apply and not recon.get("shadow")) else "preview",
-                                 "rollups": rollups, "reconcile": recon})
+                return _success({"status": "applied" if apply else "preview",
+                                 "read_back": recon, "nudges": nudges})
             except Exception as e:
                 logger.error(f"refresh_gantt error: {e}")
                 mcp_auth.log_call("refresh_gantt", success=False, error=str(e))
