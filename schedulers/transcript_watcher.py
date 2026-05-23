@@ -33,7 +33,7 @@ from config.settings import settings
 
 _ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from services.google_drive import drive_service
-from services.telegram_bot import telegram_bot
+from services.orchestrator.spine import comms_spine
 from services.supabase_client import supabase_client
 from processors.transcript_processor import process_transcript
 from config.team import TEAM_MEMBERS
@@ -215,7 +215,7 @@ class TranscriptWatcher:
         if is_cropsight is None:
             # Uncertain - ask Eyal
             logger.info(f"Uncertain meeting, asking Eyal: {file_name}")
-            await ask_eyal_about_meeting(event, telegram_bot)
+            await ask_eyal_about_meeting(event, comms_spine)
             # Store for later processing when Eyal responds
             self._pending_classifications[file_id] = {
                 "file": file,
