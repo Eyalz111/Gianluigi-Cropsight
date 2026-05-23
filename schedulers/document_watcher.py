@@ -234,7 +234,7 @@ class DocumentWatcher:
             result: Processing result dict.
         """
         try:
-            from services.telegram_bot import telegram_bot
+            from services.orchestrator.spine import comms_spine
 
             doc_type = result.get("document_type", "other")
             chunks = result.get("chunk_count", 0)
@@ -249,7 +249,7 @@ class DocumentWatcher:
             if summary_preview:
                 message += f"\n{summary_preview}"
 
-            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            await comms_spine.send_to_eyal(message, parse_mode="HTML")
         except Exception as e:
             logger.warning(f"Failed to notify about document ingestion: {e}")
 

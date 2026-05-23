@@ -59,12 +59,12 @@ class PersonalEmailScanner:
                 # Token refresh failed — alert Eyal and degrade gracefully
                 logger.error(f"Personal Gmail OAuth refresh failed: {e}")
                 try:
-                    from services.telegram_bot import telegram_bot
+                    from services.orchestrator.spine import comms_spine
                     import asyncio
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         asyncio.create_task(
-                            telegram_bot.send_to_eyal(
+                            comms_spine.send_to_eyal(
                                 f"Personal Gmail OAuth token refresh failed: {type(e).__name__}. "
                                 f"Run scripts/reauth_google.py to re-authenticate."
                             )

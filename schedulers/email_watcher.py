@@ -277,9 +277,9 @@ class EmailWatcher:
 
             # Send confirmation to Eyal's Telegram DM
             try:
-                from services.telegram_bot import telegram_bot
+                from services.orchestrator.spine import comms_spine
                 if settings.TELEGRAM_EYAL_CHAT_ID:
-                    await telegram_bot.send_message(
+                    await comms_spine.send_message(
                         chat_id=settings.TELEGRAM_EYAL_CHAT_ID,
                         text=f"Email approval received: {action} (ref:{ref_prefix})",
                     )
