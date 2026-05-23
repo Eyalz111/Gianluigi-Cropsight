@@ -146,15 +146,47 @@ async def propose_restructure() -> dict:
     return preview
 
 
+def _reapply_legal_fix(tab: str) -> int:
+    """Restore the LEGAL section after a re-parse. Its header text sits in col B, so the
+    parser mis-files it as a Fundraising subsection; re-mark the header + re-attribute its
+    rows (up to the next real section header). Idempotent."""
+    sc = supabase_client.client
+    rows = [r for r in (sc.table("gantt_schema").select("row_number,section,subsection,notes")
+            .eq("sheet_name", tab).execute().data or []) if r.get("row_number")]
+    hdr = next((r for r in rows if "legal" in (r.get("subsection") or "").lower()
+                and "finance" in (r.get("subsection") or "").lower()), None)
+    if not hdr:
+        return 0
+    R = hdr["row_number"]
+    next_hdr = min((r["row_number"] for r in rows
+                    if r["row_number"] > R and (r.get("notes") or "").startswith("section_header")),
+                   default=10 ** 9)
+    sc.table("gantt_schema").update(
+        {"section": "LEGAL, CORPORATE & FINANCE", "subsection": None,
+         "notes": "section_header", "protected": True}
+    ).eq("sheet_name", tab).eq("row_number", R).execute()
+    moved = 1
+    for r in rows:
+        if R < r["row_number"] < next_hdr:
+            sc.table("gantt_schema").update({"section": "LEGAL, CORPORATE & FINANCE"}).eq(
+                "sheet_name", tab).eq("row_number", r["row_number"]).execute()
+            moved += 1
+    logger.info(f"[gantt_restructure] re-applied LEGAL schema fix at row {R} ({moved} rows)")
+    return moved
+
+
 async def apply_restructure_to_live(working_copy_id: str, confirm: bool = False) -> dict:
     """Cutover: apply the SAME inserts to the LIVE board. Gated, backup-first, idempotent."""
     if not confirm or not getattr(settings, "GANTT_RESTRUCTURE_ENABLED", False):
         return {"status": "blocked", "hint": "requires confirm=True AND GANTT_RESTRUCTURE_ENABLED"}
     tab = settings.GANTT_MAIN_TAB
-    # idempotency: if any area already has a 2nd planning/execution lane, abort
-    lanes = supabase_client.get_gantt_rows(tab)
-    if any(r.get("lane_type") in ("planning", "execution") and (r.get("lane_index") or 0) >= 2 for r in lanes):
-        return {"status": "already_cut_over", "hint": "live board already has extra lanes"}
+    # idempotency: abort if the board already carries the restructure signature ('Planning #2'
+    # labels). NB: pre-existing area extras (Marketing, Finance & Admin) are NOT the signature.
+    from services.google_sheets import sheets_service
+    bvals = sheets_service.service.spreadsheets().values().get(
+        spreadsheetId=settings.GANTT_SHEET_ID, range=f"'{tab}'!B6:B70").execute().get("values", [])
+    if any("planning #2" in ((r or [""])[0] or "").lower() for r in bvals):
+        return {"status": "already_cut_over", "hint": "live board already has 'Planning #2' lanes"}
 
     from services.gantt_manager import gantt_manager
     backup = await gantt_manager.backup_full_gantt()
@@ -167,6 +199,7 @@ async def apply_restructure_to_live(working_copy_id: str, confirm: bool = False)
     _write_labels(settings.GANTT_SHEET_ID, tab)   # label the new lanes
     from scripts.parse_gantt_schema import parse_gantt_schema
     await parse_gantt_schema(persist=True)   # re-parse live (row numbers shifted)
+    _reapply_legal_fix(tab)                  # re-parse re-mis-files LEGAL (col-B header) -> restore it
     verify = await _verify(settings.GANTT_SHEET_ID, tab)
     result = {"status": "applied", "inserts_applied": applied, "backup_file_id": backup.get("file_id"),
               "verify": verify, "reseed_hint": "run scripts/seed_gantt_lanes.py --apply to refresh the lane mirror"}
