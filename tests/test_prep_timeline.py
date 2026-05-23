@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 SUPABASE_PATCH = "schedulers.meeting_prep_scheduler.supabase_client"
 CALENDAR_PATCH = "schedulers.meeting_prep_scheduler.calendar_service"
-TELEGRAM_PATCH = "schedulers.meeting_prep_scheduler.telegram_bot"
+TELEGRAM_PATCH = "schedulers.meeting_prep_scheduler.comms_spine"
 
 
 def _make_event(event_id="evt1", title="Tech Review", hours_ahead=20):

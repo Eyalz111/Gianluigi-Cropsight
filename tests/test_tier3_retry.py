@@ -221,7 +221,7 @@ class TestFormatAfterApproval:
         with patch.object(approval_flow, "sheets_service", fake_sheets), \
              patch.object(approval_flow, "supabase_client") as mock_sb, \
              patch.object(approval_flow, "gmail_service") as mock_gmail, \
-             patch.object(approval_flow, "telegram_bot") as mock_tg, \
+             patch.object(approval_flow, "comms_spine") as mock_tg, \
              patch.object(approval_flow, "drive_service") as mock_drive:
             mock_sb.get_meeting = MagicMock(return_value={
                 "id": "test-meeting",
@@ -284,7 +284,7 @@ class TestFormatAfterApproval:
         with patch.object(approval_flow, "sheets_service", fake_sheets), \
              patch.object(approval_flow, "supabase_client") as mock_sb, \
              patch.object(approval_flow, "gmail_service") as mock_gmail, \
-             patch.object(approval_flow, "telegram_bot") as mock_tg, \
+             patch.object(approval_flow, "comms_spine") as mock_tg, \
              patch.object(approval_flow, "drive_service") as mock_drive:
             mock_sb.get_meeting = MagicMock(return_value={
                 "id": "test-meeting",
@@ -347,7 +347,7 @@ class TestFormatAfterApproval:
         with patch.object(approval_flow, "sheets_service", fake_sheets), \
              patch.object(approval_flow, "supabase_client") as mock_sb, \
              patch.object(approval_flow, "gmail_service") as mock_gmail, \
-             patch.object(approval_flow, "telegram_bot") as mock_tg, \
+             patch.object(approval_flow, "comms_spine") as mock_tg, \
              patch.object(approval_flow, "drive_service") as mock_drive:
             mock_sb.get_meeting = MagicMock(return_value={
                 "id": "test-meeting",
