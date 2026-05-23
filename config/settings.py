@@ -496,6 +496,10 @@ class Settings(BaseSettings):
         default=False,
         description="Route INBOUND Telegram messages through the orchestration spine (services/orchestrator). The outbound facade is a verbatim pass-through regardless of this flag; this gates only the inbound rerouting so it can be toggled/rolled back independently of voice intake. Default off."
     )
+    VOICE_INTAKE_ENABLED: bool = Field(
+        default=False,
+        description="Enable Telegram voice-note intake: STT via ElevenLabs Scribe -> the existing quick-injection confirm flow. Un-gates ELEVENLABS_API_KEY for STT independently of the video flag (see elevenlabs_client.stt_available). Default off."
+    )
 
     # ==========================================================================
     # Knowledge Foundation (v2.5) — all default OFF; shadow-run by default.
