@@ -479,7 +479,7 @@ class TestApprovalFlowCrossReference:
     async def test_submit_for_approval_includes_cross_ref(self):
         """submit_for_approval should pass cross_reference to send_approval_request."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,

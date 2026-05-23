@@ -490,7 +490,7 @@ class TestDistributeApprovedReview:
 
         with patch("guardrails.approval_flow.drive_service", mock_drive), \
              patch("guardrails.approval_flow.gmail_service", mock_gmail), \
-             patch("guardrails.approval_flow.telegram_bot", mock_bot), \
+             patch("guardrails.approval_flow.comms_spine", mock_bot), \
              patch("guardrails.approval_flow.supabase_client", mock_db), \
              patch("guardrails.approval_flow.settings") as mock_settings, \
              patch.dict("sys.modules", {
@@ -536,7 +536,7 @@ class TestDistributeApprovedReview:
 
         with patch("guardrails.approval_flow.drive_service", mock_drive), \
              patch("guardrails.approval_flow.gmail_service", mock_gmail), \
-             patch("guardrails.approval_flow.telegram_bot", mock_bot), \
+             patch("guardrails.approval_flow.comms_spine", mock_bot), \
              patch("guardrails.approval_flow.supabase_client", mock_db), \
              patch("guardrails.approval_flow.settings") as mock_settings, \
              patch.dict("sys.modules", {

@@ -29,7 +29,7 @@ class TestSubmitStakeholderForApprovalNew:
                 "guardrails.approval_flow.sheets_service"
             ) as mock_sheets,
             patch(
-                "guardrails.approval_flow.telegram_bot"
+                "guardrails.approval_flow.comms_spine"
             ) as mock_telegram,
             patch(
                 "guardrails.approval_flow.supabase_client"
@@ -95,7 +95,7 @@ class TestSubmitStakeholderForApprovalExisting:
                 "guardrails.approval_flow.sheets_service"
             ) as mock_sheets,
             patch(
-                "guardrails.approval_flow.telegram_bot"
+                "guardrails.approval_flow.comms_spine"
             ) as mock_telegram,
             patch(
                 "guardrails.approval_flow.supabase_client"
