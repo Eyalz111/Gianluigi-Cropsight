@@ -489,6 +489,15 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Comms / Voice (beat #1) — orchestration spine + voice intake. Default OFF.
+    # See V2.5_STRATEGY.md §6 (human-assistant comms layer).
+    # ==========================================================================
+    ORCHESTRATION_SPINE_ENABLED: bool = Field(
+        default=False,
+        description="Route INBOUND Telegram messages through the orchestration spine (services/orchestrator). The outbound facade is a verbatim pass-through regardless of this flag; this gates only the inbound rerouting so it can be toggled/rolled back independently of voice intake. Default off."
+    )
+
+    # ==========================================================================
     # Knowledge Foundation (v2.5) — all default OFF; shadow-run by default.
     # See V2.5_STRATEGY.md and the Phase 1 plan.
     # ==========================================================================
