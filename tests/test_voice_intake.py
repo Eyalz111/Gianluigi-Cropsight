@@ -13,6 +13,15 @@ from services.telegram_bot import telegram_bot
 EYAL = "8190904141"
 
 
+@pytest.fixture(autouse=True)
+def _stub_audit_log():
+    """Stub supabase_client so voice_stt telemetry never hits the real DB in tests."""
+    with patch("services.supabase_client.supabase_client") as db:
+        db.log_action = MagicMock(return_value={"id": "log-test"})
+        db.get_active_debrief_session = MagicMock(return_value=None)
+        yield db
+
+
 def _voice_update(duration, file_size, user_id=EYAL, msg_id=5, file_id="vf"):
     voice = MagicMock()
     voice.duration = duration
@@ -155,7 +164,7 @@ async def test_voicecap_yes_transcribes():
     ):
         await telegram_bot._handle_callback_query(update, context)
 
-    tr.assert_awaited_once_with(int(EYAL), "f1", 7, "eyal")
+    tr.assert_awaited_once_with(int(EYAL), "f1", 7, "eyal", 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -228,4 +237,30 @@ async def test_handle_voice_normal_note_routes_to_transcribe():
         el.stt_available.return_value = True
         db.get_active_debrief_session.return_value = None
         await telegram_bot._handle_voice(update, context)
-    tr.assert_awaited_once_with(EYAL, "vf", 5, "eyal")
+    tr.assert_awaited_once_with(EYAL, "vf", 5, "eyal", duration_s=12)
+
+
+async def test_transcribe_and_route_logs_stt_telemetry(_stub_audit_log):
+    async def fake(event):
+        event.raw_transcript = "ship it"
+        return {"action": "quick_injection_confirm", "extracted_items": []}
+
+    spine = MagicMock()
+    spine.handle_inbound = AsyncMock(side_effect=fake)
+    with patch.object(telegram_bot, "_app", _file_returning(b"ogg")), patch.object(
+        telegram_bot, "send_message", AsyncMock()
+    ), patch.object(
+        telegram_bot, "_send_quick_injection_confirmation", AsyncMock()
+    ), patch("services.orchestrator.spine.comms_spine", spine):
+        await telegram_bot._transcribe_and_route("123", "f", 9, "eyal", duration_s=42)
+
+    _stub_audit_log.log_action.assert_called_once()
+    kwargs = _stub_audit_log.log_action.call_args.kwargs
+    assert kwargs["action"] == "voice_stt"
+    assert kwargs["triggered_by"] == "eyal"
+    d = kwargs["details"]
+    assert d["duration_s"] == 42
+    assert d["chars"] == len("ship it")
+    assert d["audio_bytes"] == 3
+    assert "latency_ms" in d
+    assert d["est_cost_usd"] == round(42 / 3600 * 0.40, 5)

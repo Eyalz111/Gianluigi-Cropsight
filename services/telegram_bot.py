@@ -2708,6 +2708,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             context.user_data["pending_long_voice"] = {
                 "file_id": voice.file_id,
                 "message_id": msg_id,
+                "duration": duration,
             }
             mins = max(1, round(duration / 60))
             keyboard = InlineKeyboardMarkup([[
@@ -2722,12 +2723,18 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             return
 
         user_id = self._get_user_id(user.id) or "unknown"
-        await self._transcribe_and_route(chat_id, voice.file_id, msg_id, user_id)
+        await self._transcribe_and_route(
+            chat_id, voice.file_id, msg_id, user_id, duration_s=duration
+        )
 
     async def _transcribe_and_route(
-        self, chat_id, file_id: str, message_id, user_id: str
+        self, chat_id, file_id: str, message_id, user_id: str, duration_s: int = 0
     ) -> None:
         """Download a voice file, transcribe + route via the spine, render the result."""
+        import time
+
+        from services.supabase_client import supabase_client
+
         await self.send_message(chat_id, "Transcribing...")
         try:
             tg_file = await self.app.bot.get_file(file_id)
@@ -2751,9 +2758,33 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             audio_mime="audio/ogg",
             message_id=str(message_id),
         )
+        t0 = time.monotonic()
         result = await comms_spine.handle_inbound(event)
+        latency_ms = int((time.monotonic() - t0) * 1000)
 
-        if result.get("action") == "stt_failed":
+        # Telemetry to audit_log — sync (never await supabase_client), non-fatal.
+        # ElevenLabs Scribe is $0.40/hr; latency_ms is end-to-end (STT + routing) =
+        # the time Eyal waits. est_cost_usd is the STT cost (duration-based).
+        transcript = event.raw_transcript or ""
+        action = result.get("action", "")
+        try:
+            supabase_client.log_action(
+                action="voice_stt_failed" if action == "stt_failed" else "voice_stt",
+                details={
+                    "latency_ms": latency_ms,
+                    "audio_bytes": len(audio),
+                    "duration_s": duration_s,
+                    "chars": len(transcript),
+                    "transcript": transcript[:2000],
+                    "est_cost_usd": round(duration_s / 3600 * 0.40, 5),
+                    "result_action": action,
+                },
+                triggered_by="eyal",
+            )
+        except Exception as e:
+            logger.warning(f"voice_stt telemetry failed: {e}")
+
+        if action == "stt_failed":
             await self.send_message(
                 chat_id,
                 result.get("response", "I couldn't transcribe that - resend or type it."),
@@ -3185,6 +3216,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     pending["file_id"],
                     pending["message_id"],
                     self._get_user_id(query.from_user.id) or "unknown",
+                    pending.get("duration", 0),
                 )
             else:
                 await query.edit_message_text("Okay, discarded that voice note.")
