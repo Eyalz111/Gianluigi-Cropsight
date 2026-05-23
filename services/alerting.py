@@ -64,9 +64,9 @@ async def send_system_alert(
 
         # Lazy import to avoid circular imports
         try:
-            from services.telegram_bot import telegram_bot
+            from services.orchestrator.spine import comms_spine
 
-            await telegram_bot.send_to_eyal(alert_text)
+            await comms_spine.send_to_eyal(alert_text)
         except Exception as send_err:
             logger.critical(
                 f"CANNOT SEND ALERT TO TELEGRAM: {send_err} | Original: {message}"
