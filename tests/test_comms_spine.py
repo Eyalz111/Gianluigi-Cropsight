@@ -189,3 +189,64 @@ async def test_send_raises_for_unimplemented_channel():
 async def test_send_raises_for_voice_out_modality():
     with pytest.raises(NotImplementedError):
         await comms_spine.send(to="123", text="hi", modality=Modality.VOICE)
+
+
+# ---------------------------------------------------------------------------
+# PR C — the inbound-text routing seam in TelegramBot._route_inbound_text.
+# ---------------------------------------------------------------------------
+async def test_route_inbound_text_uses_spine_when_flag_on():
+    from services.telegram_bot import telegram_bot
+    from config.settings import settings
+
+    fake = {"action": "none", "response": "ok"}
+    spine = MagicMock()
+    spine.handle_inbound = AsyncMock(return_value=fake)
+    history = [{"role": "user", "content": "earlier"}]
+
+    with patch.object(settings, "ORCHESTRATION_SPINE_ENABLED", True), patch(
+        "services.orchestrator.spine.comms_spine", spine
+    ):
+        result = await telegram_bot._route_inbound_text(
+            message_text="what's overdue?",
+            user_id="eyal",
+            history=history,
+            chat_id="123",
+            message_id="42",
+        )
+
+    assert result == fake
+    spine.handle_inbound.assert_awaited_once()
+    event = spine.handle_inbound.call_args[0][0]
+    assert event.channel == Channel.TELEGRAM
+    assert event.modality == Modality.TEXT
+    assert event.text == "what's overdue?"
+    assert event.sender_id == "eyal"
+    assert event.chat_id == "123"
+    assert event.message_id == "42"
+    assert event.conversation_history == history
+
+
+async def test_route_inbound_text_uses_agent_when_flag_off():
+    from services.telegram_bot import telegram_bot
+    from config.settings import settings
+
+    fake = {"action": "none", "response": "ok"}
+    agent = MagicMock()
+    agent.process_message = AsyncMock(return_value=fake)
+    history = [{"role": "user", "content": "earlier"}]
+
+    with patch.object(settings, "ORCHESTRATION_SPINE_ENABLED", False), patch(
+        "core.agent.gianluigi_agent", agent
+    ):
+        result = await telegram_bot._route_inbound_text(
+            message_text="what's overdue?",
+            user_id="eyal",
+            history=history,
+            chat_id="123",
+            message_id="42",
+        )
+
+    assert result == fake
+    agent.process_message.assert_awaited_once_with(
+        user_message="what's overdue?", user_id="eyal", conversation_history=history
+    )

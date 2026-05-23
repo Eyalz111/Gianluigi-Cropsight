@@ -2617,6 +2617,45 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
     # Message Handlers
     # =========================================================================
 
+    async def _route_inbound_text(
+        self,
+        message_text: str,
+        user_id: str,
+        history: list,
+        chat_id: str | int,
+        message_id: str | None,
+    ) -> dict:
+        """Dispatch an inbound text message to the brain (flag-gated seam).
+
+        When ORCHESTRATION_SPINE_ENABLED, route through the comms spine — the single
+        inbound entry shared with voice — which normalizes the event, calls the brain,
+        and returns the agent result dict. Otherwise call the agent directly. Either
+        way the caller renders the same dict, so this is behavior-preserving while the
+        flag is off.
+        """
+        if settings.ORCHESTRATION_SPINE_ENABLED:
+            from services.orchestrator.spine import comms_spine
+            from services.orchestrator.events import Channel, InboundEvent, Modality
+
+            return await comms_spine.handle_inbound(
+                InboundEvent(
+                    channel=Channel.TELEGRAM,
+                    modality=Modality.TEXT,
+                    sender_id=user_id,
+                    chat_id=chat_id,
+                    text=message_text,
+                    message_id=message_id,
+                    conversation_history=history,
+                )
+            )
+        from core.agent import gianluigi_agent
+
+        return await gianluigi_agent.process_message(
+            user_message=message_text,
+            user_id=user_id,
+            conversation_history=history,
+        )
+
     async def _handle_message(
         self,
         update: Update,
@@ -2800,9 +2839,6 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             "Thinking..."
         )
 
-        # Import here to avoid circular imports
-        from core.agent import gianluigi_agent
-
         user_id = self._get_user_id(user.id) or "unknown"
         chat_id_str = str(update.effective_chat.id)
 
@@ -2810,10 +2846,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         history = conversation_memory.get_history(chat_id_str)
 
         try:
-            result = await gianluigi_agent.process_message(
-                user_message=message_text,
+            result = await self._route_inbound_text(
+                message_text=message_text,
                 user_id=user_id,
-                conversation_history=history,
+                history=history,
+                chat_id=update.effective_chat.id,
+                message_id=str(update.message.message_id) if update.message else None,
             )
 
             # Handle quick injection confirmation
