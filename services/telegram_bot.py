@@ -441,6 +441,12 @@ class TelegramBot:
             CallbackQueryHandler(self._handle_callback_query)
         )
 
+        # Voice notes -> STT -> the same brain as text (comms/voice beat #1).
+        # VOICE and TEXT filters are disjoint, so order vs the text handler is safe.
+        self.app.add_handler(
+            MessageHandler(filters.VOICE, self._handle_voice)
+        )
+
         # Add message handler for general text (must be last)
         self.app.add_handler(
             MessageHandler(
@@ -2574,8 +2580,17 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         self,
         chat_id: int | str,
         result: dict,
+        *,
+        raw_transcript: str | None = None,
+        source_message_id: int | str | None = None,
     ) -> None:
-        """Send quick injection summary with Inject/Dismiss buttons."""
+        """Send quick injection summary with Inject/Dismiss buttons.
+
+        For voice-originated injections, raw_transcript is shown as a collapsed
+        safety-net line (so Eyal can catch a mis-transcription that the items don't
+        reveal) and stored — with the Telegram message id — in the session's
+        raw_messages for provenance.
+        """
         from datetime import date as date_cls
         from services.supabase_client import supabase_client
 
@@ -2588,6 +2603,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             item_type = item.get("type", "info")
             title = item.get("title", item.get("description", ""))[:80]
             summary_lines.append(f"  {i}. [{item_type}] {title}")
+        if raw_transcript:
+            summary_lines.append("")
+            summary_lines.append(f'heard: "{raw_transcript[:200]}"')
 
         summary = "\n".join(summary_lines)
 
@@ -2596,11 +2614,14 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # (get_active_debrief_session only returns status="in_progress").
         today_str = date_cls.today().isoformat()
         session = supabase_client.create_debrief_session(today_str)
-        supabase_client.update_debrief_session(
-            session["id"],
-            items_captured=items,
-            status="confirming",
-        )
+        update_kwargs = {"items_captured": items, "status": "confirming"}
+        if raw_transcript:
+            update_kwargs["raw_messages"] = [{
+                "role": "voice",
+                "transcript": raw_transcript,
+                "telegram_message_id": source_message_id,
+            }]
+        supabase_client.update_debrief_session(session["id"], **update_kwargs)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2612,6 +2633,148 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         await self.send_message(
             chat_id, summary, parse_mode=None, reply_markup=keyboard,
         )
+
+    # =========================================================================
+    # Voice intake (comms/voice beat #1)
+    # =========================================================================
+
+    async def _handle_voice(self, update, context) -> None:
+        """Handle a Telegram voice note: STT -> the same brain as a text message.
+
+        Eyal-only for beat #1. Flag-gated via VOICE_INTAKE_ENABLED
+        (elevenlabs_client.stt_available). Defers if a stateful session is active,
+        and confirms before spending STT on an unusually long note.
+        """
+        user = update.effective_user
+        if not user or str(user.id) != str(self.eyal_chat_id):
+            return  # voice intake is Eyal-only for beat #1
+
+        from services.elevenlabs_client import elevenlabs_client
+
+        if not elevenlabs_client.stt_available():
+            await self.send_message(update.effective_chat.id, "Voice intake is off.")
+            return
+
+        voice = update.message.voice
+        msg_id = update.message.message_id
+        chat_id = update.effective_chat.id
+
+        # Dedupe — Telegram can redeliver an update; avoid a double STT spend / double
+        # card. In-memory per-user set: assumes a single Cloud Run instance (we run
+        # min=max=1) and is NOT restart-safe. Failure mode is benign (one extra card).
+        seen = context.user_data.setdefault("_voice_seen", set())
+        if msg_id in seen:
+            return
+        seen.add(msg_id)
+
+        # Don't bypass presentation-layer state: if a stateful session is active, ask
+        # Eyal to type for now (voice during a session is a later beat).
+        if self._active_interactive_session == "weekly_review":
+            await self.send_message(
+                chat_id,
+                "You're mid weekly-review - type your reply for now "
+                "(voice during a session is coming).",
+            )
+            return
+        from services.supabase_client import supabase_client
+
+        active = supabase_client.get_active_debrief_session()
+        if active and active.get("status") == "in_progress":
+            await self.send_message(
+                chat_id,
+                "You're mid-debrief - type your reply for now "
+                "(voice during a debrief is coming).",
+            )
+            return
+
+        # Caps (known from the Voice metadata, before download).
+        hard_max = 20 * 1024 * 1024  # Telegram getFile ceiling
+        soft_secs = 5 * 60
+        soft_bytes = 8 * 1024 * 1024
+        duration = voice.duration or 0
+        file_size = voice.file_size or 0
+
+        if file_size and file_size > hard_max:
+            await self.send_message(
+                chat_id,
+                "That note's too long for me to fetch (20 MB max). "
+                "Send a shorter one or type it.",
+            )
+            return
+
+        if duration > soft_secs or (file_size and file_size > soft_bytes):
+            # Confirm before spending STT — guards the phone-in-pocket / accidental
+            # meeting-recording case (cost won't catch it; this protects attention).
+            context.user_data["pending_long_voice"] = {
+                "file_id": voice.file_id,
+                "message_id": msg_id,
+            }
+            mins = max(1, round(duration / 60))
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Transcribe anyway", callback_data="voicecap:yes"),
+                InlineKeyboardButton("Cancel", callback_data="voicecap:no"),
+            ]])
+            await self.send_message(
+                chat_id,
+                f"That's ~{mins} min - longer than a usual note. Transcribe anyway?",
+                reply_markup=keyboard,
+            )
+            return
+
+        user_id = self._get_user_id(user.id) or "unknown"
+        await self._transcribe_and_route(chat_id, voice.file_id, msg_id, user_id)
+
+    async def _transcribe_and_route(
+        self, chat_id, file_id: str, message_id, user_id: str
+    ) -> None:
+        """Download a voice file, transcribe + route via the spine, render the result."""
+        await self.send_message(chat_id, "Transcribing...")
+        try:
+            tg_file = await self.app.bot.get_file(file_id)
+            audio = bytes(await tg_file.download_as_bytearray())
+        except Exception as e:
+            logger.error(f"Voice download failed: {e}")
+            await self.send_message(
+                chat_id, "I couldn't fetch that voice note - resend it?"
+            )
+            return
+
+        from services.orchestrator.spine import comms_spine
+        from services.orchestrator.events import Channel, InboundEvent, Modality
+
+        event = InboundEvent(
+            channel=Channel.TELEGRAM,
+            modality=Modality.VOICE,
+            sender_id=user_id,
+            chat_id=chat_id,
+            audio_bytes=audio,
+            audio_mime="audio/ogg",
+            message_id=str(message_id),
+        )
+        result = await comms_spine.handle_inbound(event)
+
+        if result.get("action") == "stt_failed":
+            await self.send_message(
+                chat_id,
+                result.get("response", "I couldn't transcribe that - resend or type it."),
+            )
+            return
+
+        if result.get("action") == "quick_injection_confirm":
+            await self._send_quick_injection_confirmation(
+                chat_id,
+                result,
+                raw_transcript=event.raw_transcript,
+                source_message_id=message_id,
+            )
+            return
+
+        # Question answered (or any other action) — reply with the text, plus a small
+        # "heard" footer so Eyal can spot a mis-transcription.
+        response = result.get("response", "")
+        if event.raw_transcript:
+            response = f'{response}\n\n(heard: "{event.raw_transcript[:200]}")'
+        await self.send_message(chat_id, response, parse_mode=None)
 
     # =========================================================================
     # Message Handlers
@@ -3011,6 +3174,21 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         # Import here to avoid circular imports
         from services.supabase_client import supabase_client
+
+        # ---- Voice soft-cap confirm (comms/voice beat #1) ----
+        if action == "voicecap":
+            pending = context.user_data.pop("pending_long_voice", None)
+            if meeting_id == "yes" and pending:
+                await query.edit_message_text("On it, transcribing...")
+                await self._transcribe_and_route(
+                    query.message.chat_id,
+                    pending["file_id"],
+                    pending["message_id"],
+                    self._get_user_id(query.from_user.id) or "unknown",
+                )
+            else:
+                await query.edit_message_text("Okay, discarded that voice note.")
+            return
 
         # ---- Prep outline callbacks (Phase 5) ----
         if action in ("prep_generate", "prep_focus", "prep_reclassify", "prep_skip"):
