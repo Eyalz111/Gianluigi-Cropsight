@@ -818,7 +818,7 @@ class TestSessionExpiry:
     async def test_orphan_sweep_expires_old_sessions(self):
         """Orphan cleanup should expire sessions older than 48h."""
         with patch("schedulers.orphan_cleanup_scheduler.supabase_client") as mock_db, \
-             patch("schedulers.orphan_cleanup_scheduler.telegram_bot") as mock_tg:
+             patch("schedulers.orphan_cleanup_scheduler.comms_spine") as mock_tg:
             # Setup: orphan cleanup's _run_cleanup
             mock_db.client.table.return_value.update.return_value.in_.return_value.lt.return_value.execute.return_value = MagicMock(data=[{"id": "old-1"}])
             mock_db.get_stale_pending_approvals.return_value = []

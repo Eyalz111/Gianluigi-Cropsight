@@ -244,7 +244,7 @@ class TestAlertScheduler:
 
         with patch("schedulers.alert_scheduler.generate_alerts") as mock_gen, \
              patch("schedulers.alert_scheduler.format_alerts_message") as mock_fmt, \
-             patch("schedulers.alert_scheduler.telegram_bot") as mock_tg, \
+             patch("schedulers.alert_scheduler.comms_spine") as mock_tg, \
              patch("schedulers.alert_scheduler.supabase_client") as mock_db:
 
             mock_gen.return_value = [{"type": "test", "severity": "low", "title": "Test"}]
@@ -264,7 +264,7 @@ class TestAlertScheduler:
 
         with patch("schedulers.alert_scheduler.generate_alerts") as mock_gen, \
              patch("schedulers.alert_scheduler.format_alerts_message") as mock_fmt, \
-             patch("schedulers.alert_scheduler.telegram_bot") as mock_tg, \
+             patch("schedulers.alert_scheduler.comms_spine") as mock_tg, \
              patch("schedulers.alert_scheduler.supabase_client") as mock_db:
 
             mock_gen.return_value = [{"type": "test", "severity": "high", "title": "Alert!"}]
