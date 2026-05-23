@@ -43,6 +43,14 @@ class ElevenLabsClient:
             and settings.ELEVENLABS_API_KEY
         )
 
+    def tts_available(self) -> bool:
+        """Check if voice-OUT TTS is enabled (comms/voice beat #4).
+
+        Independent of the video flag — gated on VOICE_OUT_ENABLED + the key, mirroring
+        stt_available. Lets Gianluigi speak replies without enabling the video pipeline.
+        """
+        return bool(settings.VOICE_OUT_ENABLED and settings.ELEVENLABS_API_KEY)
+
     async def text_to_speech(
         self,
         text: str,
@@ -64,8 +72,8 @@ class ElevenLabsClient:
         Returns:
             MP3 audio bytes, or None on failure.
         """
-        if not self.is_available():
-            logger.warning("ElevenLabs not available (disabled or no API key)")
+        if not (self.is_available() or self.tts_available()):
+            logger.warning("ElevenLabs TTS not available (no flag enabled or no API key)")
             return None
 
         voice = voice_id or settings.ELEVENLABS_VOICE_ID
