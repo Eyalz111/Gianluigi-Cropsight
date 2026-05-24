@@ -2044,30 +2044,38 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         )
 
         try:
-            from processors.sheets_sync import (
-                compute_sheets_diff,
-                format_diff_preview,
-                apply_sheets_to_db,
-            )
+            # v3: route through the reconcile engine (dry-run preview).
+            from processors.sheets_sync import reconcile_tasks
 
-            diff = await compute_sheets_diff()
+            summary = await reconcile_tasks(dry_run=True)
+            if summary.get("error"):
+                await self.send_to_eyal(f"Sync error: {summary['error']}")
+                return
 
-            if not diff.get("has_changes"):
+            pulled = summary.get("pulled", 0)
+            pushed = summary.get("pushed", 0)
+            created = summary.get("created", 0)
+            readded = summary.get("readded", 0)
+            if not (pulled or pushed or created or readded):
                 await self.send_to_eyal("Sheets and DB are in sync. No changes needed.")
                 return
 
-            # Store diff for approval callback
-            context.user_data["pending_sync_diff"] = diff
-
-            preview = format_diff_preview(diff)
-            keyboard = [
-                [
-                    InlineKeyboardButton("Apply changes", callback_data="sync_apply:confirm"),
-                    InlineKeyboardButton("Cancel", callback_data="sync_apply:cancel"),
-                ],
+            lines = [
+                "<b>Reconcile preview</b> (nothing applied yet):",
+                f"  • {pulled} of your Sheet edit(s) → DB",
+                f"  • {pushed} DB update(s) → Sheet",
+                f"  • {created} new task(s) from Sheet",
+                f"  • {readded} task(s) re-added to Sheet",
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await self.send_to_eyal(preview, reply_markup=reply_markup, parse_mode="HTML")
+            if settings.RECONCILE_SHADOW_MODE:
+                lines.append("\n⚠️ Shadow mode is ON — Apply will still write nothing until it's off.")
+            keyboard = [[
+                InlineKeyboardButton("Apply", callback_data="sync_apply:confirm"),
+                InlineKeyboardButton("Cancel", callback_data="sync_apply:cancel"),
+            ]]
+            await self.send_to_eyal(
+                "\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
+            )
 
         except Exception as e:
             logger.error(f"Sheets sync failed: {e}")
@@ -3320,25 +3328,24 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # ---- Sheets sync callbacks (Phase 11 C7) ----
         if action == "sync_apply":
             if meeting_id == "confirm":
-                diff = context.user_data.pop("pending_sync_diff", None)
-                if not diff:
-                    await query.edit_message_text("Sync session expired. Run /sync again.")
+                from processors.sheets_sync import reconcile_tasks
+                summary = await reconcile_tasks(dry_run=False)  # v3 engine recomputes fresh
+                if summary.get("error"):
+                    await query.edit_message_text(f"Sync error: {summary['error']}")
                     return
-                from processors.sheets_sync import apply_sheets_to_db
-                result = apply_sheets_to_db(diff)
-                total = sum(result.values())
-                lines = [f"Sync applied — {total} changes:"]
-                if result.get("tasks_updated"):
-                    lines.append(f"  • {result['tasks_updated']} tasks updated")
-                if result.get("tasks_created"):
-                    lines.append(f"  • {result['tasks_created']} tasks added")
-                if result.get("decisions_updated"):
-                    lines.append(f"  • {result['decisions_updated']} decisions updated")
-                if result.get("decisions_created"):
-                    lines.append(f"  • {result['decisions_created']} decisions added")
-                await query.edit_message_text("\n".join(lines))
+                if summary.get("shadow"):
+                    await query.edit_message_text(
+                        "Reconcile is in SHADOW mode — nothing written. "
+                        "Set RECONCILE_SHADOW_MODE=false to apply."
+                    )
+                    return
+                await query.edit_message_text(
+                    f"Sync applied — {summary.get('pulled', 0)} edit(s)→DB, "
+                    f"{summary.get('pushed', 0)} DB→Sheet, "
+                    f"{summary.get('created', 0)} created, "
+                    f"{summary.get('readded', 0)} re-added."
+                )
             else:
-                context.user_data.pop("pending_sync_diff", None)
                 await query.edit_message_text("Sync cancelled.")
             return
 
@@ -3881,6 +3888,15 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 supabase_client.update_task(resolved_task_id, **updates)
                 db_ok = True
                 logger.info(f"Updated task in DB: {resolved_task_id} -> {updates}")
+                # v3 reconcile: a Telegram button press is Eyal's deliberate action,
+                # so mark the touched action fields sticky. Inference can then only
+                # propose against them; the next reconcile rewrites the snapshot.
+                for _f in ("status", "deadline"):
+                    if _f in updates:
+                        try:
+                            supabase_client.mark_task_field_manual(resolved_task_id, _f, "telegram")
+                        except Exception:
+                            pass
             else:
                 db_error = (
                     f"No matching DB task for '{task_text[:60]}' ({assignee}) "

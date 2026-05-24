@@ -650,6 +650,88 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
+        # 7d. Task-update proposals + manual-flag control (v3 reconcile)
+        # ============================================================
+        @mcp.tool(
+            name="get_task_proposals",
+            description=(
+                "[TASKS] List pending task-update proposals — changes Gianluigi inferred "
+                "(from a meeting/file) for a field you've manually set (sticky). Review, "
+                "then act with approve_task_proposal."
+            ),
+        )
+        async def get_task_proposals() -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                rows = supabase_client.get_pending_approvals_by_status("pending") or []
+                props = [
+                    {"proposal_id": r.get("approval_id"), **(r.get("content") or {})}
+                    for r in rows if r.get("content_type") == "task_update_proposal"
+                ]
+                mcp_auth.log_call("get_task_proposals", {"count": len(props)})
+                return _success(props)
+            except Exception as e:
+                logger.error(f"get_task_proposals error: {e}")
+                mcp_auth.log_call("get_task_proposals", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="approve_task_proposal",
+            description=(
+                "[TASKS] Act on a task-update proposal. decision='approve' applies the "
+                "proposed field value (keeps it sticky); decision='reject' discards it. "
+                "Use the proposal_id from get_task_proposals."
+            ),
+        )
+        async def approve_task_proposal(proposal_id: str, decision: str = "approve") -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                pending = supabase_client.get_pending_approval(proposal_id)
+                if not pending:
+                    return _error(f"Proposal {proposal_id} not found")
+                c = pending.get("content") or {}
+                tid, field, proposed = c.get("task_id"), c.get("field"), c.get("proposed")
+                if decision == "approve" and tid and field:
+                    upd = {field: proposed}
+                    if field == "deadline":
+                        upd["deadline_confidence"] = "EXPLICIT"
+                    supabase_client.update_task(tid, **upd)
+                    supabase_client.mark_task_field_manual(tid, field, "eyal_mcp")
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action("task_proposal_approved",
+                                               details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
+                    mcp_auth.log_call("approve_task_proposal", {"proposal_id": proposal_id, "decision": "approve"})
+                    return _success({"decision": "approved", "task_id": tid, "field": field, "value": proposed})
+                supabase_client.delete_pending_approval(proposal_id)
+                supabase_client.log_action("task_proposal_rejected",
+                                           details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
+                mcp_auth.log_call("approve_task_proposal", {"proposal_id": proposal_id, "decision": "reject"})
+                return _success({"decision": "rejected"})
+            except Exception as e:
+                logger.error(f"approve_task_proposal error: {e}")
+                mcp_auth.log_call("approve_task_proposal", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="clear_manual_flag",
+            description=(
+                "[TASKS] Clear the sticky 'manually set' flag on a task field "
+                "(status/deadline/priority/assignee) so Gianluigi's inference can update it "
+                "again. Use when a manual override is no longer needed."
+            ),
+        )
+        async def clear_manual_flag(task_id: str, field: str) -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                ok = supabase_client.clear_manual_flag(task_id, field)
+                mcp_auth.log_call("clear_manual_flag", {"task_id": task_id, "field": field})
+                return _success({"cleared": ok, "task_id": task_id, "field": field})
+            except Exception as e:
+                logger.error(f"clear_manual_flag error: {e}")
+                mcp_auth.log_call("clear_manual_flag", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
         # 8. deal_ops (composite — replaces deprecated get_commitments)
         # ============================================================
         @mcp.tool(
@@ -2342,59 +2424,31 @@ class MCPServer:
         @mcp.tool(
             name="sync_from_sheets",
             description=(
-                "[SHEETS] Compare Google Sheets edits against the DB and optionally apply. "
-                "Call with apply=False first to preview changes. "
-                "Call with apply=True to apply (Sheets wins for conflicts). "
-                "Use when Eyal has manually edited the Tasks or Decisions sheet."
+                "[SHEETS] Reconcile the Tasks sheet against the DB (v3 column-ownership "
+                "engine). apply=False previews (computes + logs, no writes). apply=True "
+                "reconciles: pulls your action-field edits (status/deadline/priority/owner) "
+                "to the DB and marks them sticky, refreshes the Sheet from the DB, matches "
+                "by task UUID. If RECONCILE_SHADOW_MODE is on, nothing is written even on "
+                "apply=True (flip it off to go live)."
             ),
         )
         async def sync_from_sheets(apply: bool = False) -> dict:
             try:
-                from processors.sheets_sync import (
-                    compute_sheets_diff,
-                    format_diff_preview,
-                    apply_sheets_to_db,
-                )
+                from processors.sheets_sync import reconcile_tasks
 
-                diff = await compute_sheets_diff()
-
-                if not diff.get("has_changes"):
-                    mcp_auth.log_call("sync_from_sheets", {"apply": apply})
-                    return _success({
-                        "status": "in_sync",
-                        "message": "Sheets and DB are in sync. No changes needed.",
-                    })
-
-                if not apply:
-                    # Preview mode
-                    preview = format_diff_preview(diff)
-                    summary = {
-                        "tasks_modified": len(diff["tasks"]["modified"]),
-                        "tasks_sheets_only": len(diff["tasks"]["sheets_only"]),
-                        "tasks_db_only": len(diff["tasks"]["db_only"]),
-                        "tasks_in_sync": diff["tasks"]["in_sync"],
-                        "decisions_modified": len(diff["decisions"]["modified"]),
-                        "decisions_sheets_only": len(diff["decisions"]["sheets_only"]),
-                        "decisions_db_only": len(diff["decisions"]["db_only"]),
-                        "decisions_in_sync": diff["decisions"]["in_sync"],
-                    }
-                    mcp_auth.log_call("sync_from_sheets", {"apply": False})
-                    return _success({
-                        "status": "changes_detected",
-                        "preview": preview,
-                        "summary": summary,
-                        "message": "Call sync_from_sheets(apply=True) to apply these changes.",
-                    })
-
-                # Apply mode
-                result = apply_sheets_to_db(diff)
-                mcp_auth.log_call("sync_from_sheets", {"apply": True, "result": result})
+                summary = await reconcile_tasks(dry_run=not apply)
+                mcp_auth.log_call("sync_from_sheets", {"apply": apply})
+                if isinstance(summary, dict) and summary.get("error"):
+                    return _error(summary["error"])
+                applied = bool(apply) and not summary.get("shadow") and not summary.get("dry_run")
                 return _success({
-                    "status": "applied",
-                    "result": result,
-                    "message": f"Sync applied: {sum(result.values())} changes.",
+                    "status": "applied" if applied else "preview",
+                    "summary": summary,
+                    "note": (
+                        "Reconcile is in SHADOW mode — nothing was written. "
+                        "Set RECONCILE_SHADOW_MODE=false to apply."
+                    ) if summary.get("shadow") else None,
                 })
-
             except Exception as e:
                 logger.error(f"sync_from_sheets error: {e}")
                 mcp_auth.log_call("sync_from_sheets", success=False, error=str(e))

@@ -263,6 +263,34 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"Sheets sync check for morning brief failed: {e}")
 
+    # 8b. Task-update proposals (v3 reconcile) — Gianluigi inferred a change to a
+    # field you've manually set; surfaced for your call. Capped to stay tractable.
+    try:
+        from services.supabase_client import supabase_client as _sc
+        _pending = _sc.get_pending_approvals_by_status("pending") or []
+        _tprops = [r for r in _pending if r.get("content_type") == "task_update_proposal"]
+        if _tprops:
+            _shown = _tprops[:5]
+            _lines = [
+                f"{len(_tprops)} task update(s) need your call"
+                + (" (showing 5)" if len(_tprops) > 5 else "") + ":"
+            ]
+            for r in _shown:
+                c = r.get("content") or {}
+                label = (c.get("title") or c.get("task_id") or "")[:45]
+                _lines.append(
+                    f"  • {c.get('field', '?')} → {c.get('proposed', '?')} "
+                    f"on '{label}' (from {c.get('source', 'meeting')})"
+                )
+            _lines.append("  Review via get_task_proposals / approve_task_proposal")
+            sections.append({
+                "type": "task_proposals",
+                "title": "Task Proposals",
+                "summary": "\n".join(_lines),
+            })
+    except Exception as e:
+        logger.debug(f"Task proposals check for morning brief failed: {e}")
+
     # 9. Operational continuity context (Phase 12 A1) — always include baseline
     try:
         from processors.meeting_continuity import (

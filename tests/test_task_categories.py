@@ -261,11 +261,13 @@ class TestSheetsTaskTrackerColumns:
         assert TASK_TRACKER_HEADERS[1] == "Label"
         assert TASK_TRACKER_HEADERS[2] == "Task"
 
-    def test_columns_has_nine_entries(self):
-        """Should now have 9 columns."""
-        from services.google_sheets import TASK_TRACKER_HEADERS
+    def test_columns_has_ten_entries_with_id(self):
+        """v3 reconcile appended the UUID 'ID' column at the end (10 total)."""
+        from services.google_sheets import TASK_TRACKER_HEADERS, TASK_COLUMNS
 
-        assert len(TASK_TRACKER_HEADERS) == 9
+        assert len(TASK_TRACKER_HEADERS) == 10
+        assert TASK_TRACKER_HEADERS[9] == "ID"
+        assert TASK_COLUMNS["id"] == "J"  # appended; A-I positions unchanged
 
 
 # =============================================================================

@@ -3965,6 +3965,101 @@ class SupabaseClient:
             return False
 
     # =========================================================================
+    # Reconcile / sheet-sync helpers (v3 outputs re-architecture)
+    # =========================================================================
+
+    _MANUAL_FIELDS = ("status", "deadline", "priority", "assignee")
+
+    def get_sheet_snapshots(self, entity_type: str = "task") -> dict:
+        """Last-synced action-field snapshot per task, keyed by task_id."""
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", entity_type)
+                .execute()
+                .data
+                or []
+            )
+            return {r["task_id"]: r for r in rows if r.get("task_id")}
+        except Exception as e:
+            logger.error(f"Error getting sheet snapshots: {e}")
+            return {}
+
+    def upsert_sheet_snapshot(
+        self,
+        task_id: str,
+        sheet_row: int | None,
+        status: str | None,
+        deadline: str | None,
+        priority: str | None,
+        assignee: str | None,
+    ) -> bool:
+        """Write/refresh the current snapshot row for a task (one per task)."""
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "task_id": task_id,
+                "entity_type": "task",
+                "sheet_row": sheet_row,
+                # Coerce empty strings to NULL — Sheet cells come back as "" for
+                # blanks, and the DATE column (deadline) rejects "" (22007).
+                "status": (status or None),
+                "deadline": (deadline or None),
+                "priority": (priority or None),
+                "assignee": (assignee or None),
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("task_id", task_id)
+                .eq("entity_type", "task")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "task_id", task_id
+                ).eq("entity_type", "task").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting sheet snapshot for '{task_id}': {e}")
+            return False
+
+    def mark_task_field_manual(self, task_id: str, field: str, source: str) -> bool:
+        """Flag an action field as manually set (sticky). field in status/deadline/priority/assignee."""
+        if field not in self._MANUAL_FIELDS:
+            logger.warning(f"mark_task_field_manual: unknown field '{field}'")
+            return False
+        try:
+            from datetime import datetime, timezone
+            self.client.table("tasks").update({
+                f"manual_{field}": True,
+                "manual_set_at": datetime.now(timezone.utc).isoformat(),
+                "manual_set_source": source,
+            }).eq("id", task_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking task field manual ({task_id}.{field}): {e}")
+            return False
+
+    def clear_manual_flag(self, task_id: str, field: str) -> bool:
+        """Clear a sticky flag so inference can write the field again."""
+        if field not in self._MANUAL_FIELDS:
+            logger.warning(f"clear_manual_flag: unknown field '{field}'")
+            return False
+        try:
+            self.client.table("tasks").update(
+                {f"manual_{field}": False}
+            ).eq("id", task_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing manual flag ({task_id}.{field}): {e}")
+            return False
+
+    # =========================================================================
     # Intelligence Signal Methods
     # =========================================================================
 

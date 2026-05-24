@@ -253,6 +253,7 @@ TASK_COLUMNS = {
     "category": "G",       # Product & Tech, BD & Sales, etc.
     "source_meeting": "H", # Meeting where task originated
     "created": "I",        # Creation date
+    "id": "J",             # Task UUID — robust Sheet<->DB identity (v3 reconcile)
 }
 
 # Column indices (0-based) for formatting operations
@@ -274,7 +275,7 @@ DECISION_COL_INDEX = {k: ord(v) - ord("A") for k, v in DECISION_COLUMNS.items()}
 # Header labels for sheet display (order matches column mapping)
 TASK_TRACKER_HEADERS = [
     "Priority", "Label", "Task", "Owner", "Deadline",
-    "Status", "Category", "Source Meeting", "Created",
+    "Status", "Category", "Source Meeting", "Created", "ID",
 ]
 
 DECISION_TRACKER_HEADERS = [
@@ -614,7 +615,7 @@ class GoogleSheetsService:
         tab_name = settings.TASK_TRACKER_TAB_NAME or "Tasks"
         rows = await self._read_sheet_range(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            range_name=f"'{tab_name}'!A:I"
+            range_name=f"'{tab_name}'!A:J"
         )
 
         if not rows or len(rows) < 2:
@@ -639,6 +640,7 @@ class GoogleSheetsService:
                 "status": row[TASK_COL_INDEX["status"]],
                 "category": row[TASK_COL_INDEX["category"]],
                 "created_date": row[TASK_COL_INDEX["created"]],
+                "id": row[TASK_COL_INDEX["id"]],
             })
 
         return tasks
@@ -820,6 +822,7 @@ class GoogleSheetsService:
                     t.get("category", ""),
                     source,
                     created,
+                    t.get("id", ""),
                 ])
 
             # Clear the tab and write fresh data
@@ -1148,6 +1151,7 @@ class GoogleSheetsService:
                 task.get("category", ""),
                 task.get("source_meeting", ""),
                 created,
+                task.get("id", ""),
             ])
 
         return await self._append_rows(
@@ -2078,14 +2082,14 @@ class GoogleSheetsService:
             tab_name = settings.TASK_TRACKER_TAB_NAME or "Tasks"
             rows = await self._read_sheet_range(
                 sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                range_name=f"'{tab_name}'!A1:I1"
+                range_name=f"'{tab_name}'!A1:J1"
             )
 
             if not rows:
                 # Add headers
                 await self._write_sheet_range(
                     sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                    range_name=f"'{tab_name}'!A1:I1",
+                    range_name=f"'{tab_name}'!A1:J1",
                     values=[TASK_TRACKER_HEADERS]
                 )
                 logger.info("Created Task Tracker headers")
