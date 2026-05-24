@@ -570,6 +570,20 @@ class TelegramBot:
             True if message was sent successfully.
         """
         try:
+            # Voice-OUT (beat #4): attach an on-demand "Listen" button to substantive prose
+            # sent to Eyal's DM (tap -> TTS the message, send audio). `is True` (not truthy)
+            # so mocked-settings tests never trip it. Skips short acks, messages that already
+            # carry buttons (cards/approvals), and the team group.
+            if (
+                settings.VOICE_OUT_ENABLED is True
+                and reply_markup is None
+                and str(chat_id) == str(self.eyal_chat_id)
+                and len(text or "") >= 60  # skip short acks; substantive prose only
+            ):
+                reply_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\U0001f50a Listen", callback_data="listen:1")]]
+                )
+
             # Split long messages (Telegram limit is 4096 chars).
             # Send overflow parts first, buttons only on the last part.
             # Tier 3.4: _bot_send_message wraps the network call in @retry.
@@ -3181,6 +3195,57 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             except Exception as dm_err:
                 logger.error(f"Could not DM Eyal about handler error: {dm_err}")
 
+    async def _handle_listen_callback(self, query) -> None:
+        """Voice-out (beat #4): TTS the message the Listen button is under, send as audio.
+
+        Stateless — the callback already carries the message text. The dispatcher has
+        already answered the query (stops the spinner), so feedback here uses send_message.
+        Reads up to ~600 chars (long briefs read as a headline); telemetry to audit_log.
+        """
+        import time
+
+        from services.elevenlabs_client import elevenlabs_client
+        from services.supabase_client import supabase_client
+
+        chat_id = query.message.chat_id
+        text = (query.message.text or "").strip()
+        if not text:
+            await self.send_message(chat_id, "Nothing to read here.")
+            return
+        if not elevenlabs_client.tts_available():
+            await self.send_message(chat_id, "Voice replies are off.")
+            return
+
+        spoken = text[:600]  # cap (~45s); long messages read as a headline
+        t0 = time.monotonic()
+        audio = await elevenlabs_client.text_to_speech(
+            spoken, voice_id=settings.ELEVENLABS_VOICE_ID_GIANLUIGI
+        )
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if not audio:
+            await self.send_message(chat_id, "Sorry - I couldn't generate the audio.")
+            return
+        try:
+            await self.app.bot.send_audio(chat_id=chat_id, audio=audio, title="Gianluigi")
+        except Exception as e:
+            logger.error(f"Voice-out send_audio failed: {e}")
+            await self.send_message(chat_id, "Sorry - I couldn't send the audio.")
+            return
+
+        try:
+            supabase_client.log_action(
+                action="voice_tts",
+                details={
+                    "latency_ms": latency_ms,
+                    "chars": len(spoken),
+                    "audio_bytes": len(audio),
+                    "est_cost_usd": round(len(spoken) / 1000 * 0.30, 5),
+                },
+                triggered_by="eyal",
+            )
+        except Exception as e:
+            logger.warning(f"voice_tts telemetry failed: {e}")
+
     async def _handle_callback_query(
         self,
         update: Update,
@@ -3205,6 +3270,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         # Import here to avoid circular imports
         from services.supabase_client import supabase_client
+
+        # ---- Voice-out: "Listen" -> TTS this message and send audio (beat #4) ----
+        if action == "listen":
+            await self._handle_listen_callback(query)
+            return
 
         # ---- Voice soft-cap confirm (comms/voice beat #1) ----
         if action == "voicecap":
