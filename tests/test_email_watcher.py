@@ -41,8 +41,14 @@ def mock_settings_for_email_watcher():
     mock_settings.EMBEDDING_API_KEY = "test-embedding-key"
     mock_settings.OPENAI_API_KEY = "test-openai-key"
     mock_settings.EMAIL_CHECK_INTERVAL = 300
+    mock_settings.CONVERSATION_TTL_MINUTES = 60  # int — ConversationMemory prune math
+    mock_settings.CONVERSATION_MAX_MESSAGES = 20  # int — ConversationMemory cap
 
-    with patch("config.settings.settings", mock_settings):
+    # Also bind the module-level `settings` email_watcher captured at import time:
+    # sibling test files that replace config.settings.settings can leak a foreign
+    # mock into schedulers.email_watcher.settings, so re-bind it here to stay robust.
+    with patch("config.settings.settings", mock_settings), \
+         patch("schedulers.email_watcher.settings", mock_settings):
         yield mock_settings
 
 

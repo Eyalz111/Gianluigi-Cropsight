@@ -191,54 +191,54 @@ class TestV1Settings:
     def test_gantt_settings_default_empty(self):
         with patch.dict("os.environ", {}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.GANTT_SHEET_ID == ""
             assert s.GANTT_BACKUP_FOLDER_ID == ""
 
     def test_email_intelligence_defaults(self):
         with patch.dict("os.environ", {}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.EYAL_PERSONAL_EMAIL == ""
             assert s.PERSONAL_CONTACTS_BLOCKLIST == ""
 
     def test_mcp_defaults(self):
         with patch.dict("os.environ", {}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.MCP_AUTH_TOKEN == ""
             assert s.MCP_PORT == 8080
 
     def test_weekly_review_default(self):
         with patch.dict("os.environ", {}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.WEEKLY_REVIEW_CALENDAR_TITLE == "CropSight: Weekly Review with Gianluigi"
 
     def test_reports_defaults(self):
         with patch.dict("os.environ", {}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.REPORTS_BASE_URL == ""
             assert s.REPORTS_SECRET_TOKEN == ""
 
     def test_drive_folder_defaults(self):
         with patch.dict("os.environ", {}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.WEEKLY_REPORTS_FOLDER_ID == ""
             assert s.GANTT_SLIDES_FOLDER_ID == ""
 
     def test_blocklist_property_empty(self):
         with patch.dict("os.environ", {}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.personal_contacts_blocklist_list == []
 
     def test_blocklist_property_parses(self):
         with patch.dict("os.environ", {"PERSONAL_CONTACTS_BLOCKLIST": "a@b.com, c@d.com, "}, clear=False):
             from config.settings import Settings
-            s = Settings()
+            s = Settings(_env_file=None)
             assert s.personal_contacts_blocklist_list == ["a@b.com", "c@d.com"]
 
 

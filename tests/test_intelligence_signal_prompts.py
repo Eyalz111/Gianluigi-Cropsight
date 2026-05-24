@@ -207,7 +207,8 @@ class TestFormatEmailHtml:
         assert "<!DOCTYPE html>" in html
         assert "CropSight Intelligence Signal" in html
         assert "Week 14" in html
-        assert "https://example.com" in html
+        # Drive doc link intentionally NOT rendered — report is attached as .docx
+        # (Gmail shows Drive URLs as duplicate attachments). See format_email_html.
 
     def test_uses_teaser_not_full_content(self):
         html = format_email_html(
@@ -232,7 +233,7 @@ class TestFormatEmailHtml:
             audio_link="https://audio.example.com",
         )
 
-        assert "https://example.com" in html
+        # Drive doc link intentionally NOT rendered (attached as .docx); video/audio links are
         assert "https://video.example.com" in html
         assert "https://audio.example.com" in html
 
@@ -245,6 +246,6 @@ class TestFormatEmailPlain:
         )
 
         assert "market moved 5%" in plain
-        assert "https://example.com/doc" in plain
+        # Drive doc link intentionally NOT rendered (attached as .docx)
         assert "Full report attached" in plain
         assert "Gianluigi" in plain
