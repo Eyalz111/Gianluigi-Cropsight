@@ -196,7 +196,7 @@ class TestSubmitForApprovalPersistence:
         """submit_for_approval should call upsert_pending_approval."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
@@ -235,7 +235,7 @@ class TestSubmitForApprovalPersistence:
         """In auto_review mode, submit should set auto_publish_at timestamp."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
@@ -296,7 +296,7 @@ class TestProcessResponsePersistence:
 
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
             patch("guardrails.approval_flow.cancel_auto_publish"),
             patch("guardrails.approval_flow.distribute_approved_content", new_callable=AsyncMock) as mock_dist,
@@ -335,7 +335,7 @@ class TestProcessResponsePersistence:
 
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
             patch("guardrails.approval_flow.cancel_auto_publish"),
         ):

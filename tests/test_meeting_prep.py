@@ -724,7 +724,7 @@ class TestPreMeetingReminder:
     async def test_reminder_sends_when_pending(self):
         """Reminder should send when outline is still pending."""
         with patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db, \
-             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg:
+             patch("schedulers.meeting_prep_scheduler.comms_spine") as mock_tg:
 
             mock_db.get_pending_approval.return_value = {
                 "status": "pending",
@@ -749,7 +749,7 @@ class TestPreMeetingReminder:
     async def test_reminder_skipped_when_not_pending(self):
         """Reminder should not send when outline is already generated."""
         with patch("schedulers.meeting_prep_scheduler.supabase_client") as mock_db, \
-             patch("schedulers.meeting_prep_scheduler.telegram_bot") as mock_tg:
+             patch("schedulers.meeting_prep_scheduler.comms_spine") as mock_tg:
 
             mock_db.get_pending_approval.return_value = {
                 "status": "generated",

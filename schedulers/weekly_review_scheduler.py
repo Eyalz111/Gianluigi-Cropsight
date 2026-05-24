@@ -249,8 +249,8 @@ class WeeklyReviewScheduler:
                     supabase_client.update_weekly_review_session(
                         session["id"], status="cancelled"
                     )
-                    from services.telegram_bot import telegram_bot
-                    await telegram_bot.send_to_eyal(
+                    from services.orchestrator.spine import comms_spine
+                    await comms_spine.send_to_eyal(
                         "Weekly review event was removed from calendar. Session cancelled."
                     )
                 return
@@ -258,7 +258,7 @@ class WeeklyReviewScheduler:
             logger.warning(f"Calendar re-verify failed, proceeding: {e}")
 
         from services.supabase_client import supabase_client
-        from services.telegram_bot import telegram_bot
+        from services.orchestrator.spine import comms_spine
 
         session = supabase_client.get_active_weekly_review_session()
         if not session:
@@ -289,7 +289,7 @@ class WeeklyReviewScheduler:
             "\nOr use /review here as fallback."
         )
 
-        await telegram_bot.send_to_eyal(message, parse_mode=None)
+        await comms_spine.send_to_eyal(message, parse_mode=None)
         logger.info(f"Weekly review notification sent for W{week_number}")
 
     async def _check_fallback_needed(self) -> None:
@@ -323,8 +323,8 @@ class WeeklyReviewScheduler:
             triggered_by="auto",
         )
 
-        from services.telegram_bot import telegram_bot
-        await telegram_bot.send_to_eyal(
+        from services.orchestrator.spine import comms_spine
+        await comms_spine.send_to_eyal(
             "No weekly review event found on your calendar today.\n"
             "Open Claude.ai (CropSight Ops project) to start your review.\n"
             "Or use /review here as fallback.",

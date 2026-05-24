@@ -24,7 +24,7 @@ from config.settings import settings
 
 _ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from services.supabase_client import supabase_client
-from services.telegram_bot import telegram_bot
+from services.orchestrator.spine import comms_spine
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ class OrphanCleanupScheduler:
         # Send consolidated notification if anything found
         if notifications:
             message = self._format_notification(notifications)
-            await telegram_bot.send_to_eyal(message)
+            await comms_spine.send_to_eyal(message)
 
         # Log to audit trail
         supabase_client.log_action(

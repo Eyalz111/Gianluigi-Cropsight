@@ -1,16 +1,18 @@
 """
-ElevenLabs text-to-speech client for Intelligence Signal video narration.
+ElevenLabs client — text-to-speech + speech-to-text, via the v1 API (httpx async).
 
-Built disabled — only active when both INTELLIGENCE_SIGNAL_VIDEO_ENABLED=True
-and ELEVENLABS_API_KEY is set.
-
-Uses the ElevenLabs v1 text-to-speech API with httpx async client.
+TTS (Intelligence Signal video narration) is gated by INTELLIGENCE_SIGNAL_VIDEO_ENABLED
++ ELEVENLABS_API_KEY (see is_available). STT (Scribe — Telegram voice-note intake,
+comms/voice beat #1) is gated only by VOICE_INTAKE_ENABLED + ELEVENLABS_API_KEY
+(see stt_available); it is independent of the video flag.
 
 Usage:
     from services.elevenlabs_client import elevenlabs_client
 
     if elevenlabs_client.is_available():
         audio_bytes = await elevenlabs_client.text_to_speech("Hello world")
+    if elevenlabs_client.stt_available():
+        text = await elevenlabs_client.speech_to_text(ogg_bytes)
 """
 
 import logging
@@ -23,6 +25,7 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1/text-to-speech"
+ELEVENLABS_STT_API_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 
 
 class ElevenLabsClient:
@@ -105,6 +108,74 @@ class ElevenLabsClient:
             return None
         except Exception as e:
             logger.error(f"ElevenLabs TTS failed: {e}")
+            return None
+
+    def stt_available(self) -> bool:
+        """Check if ElevenLabs STT (Scribe) is enabled and configured.
+
+        Independent of the video flag — voice intake only needs the API key.
+        """
+        return bool(settings.VOICE_INTAKE_ENABLED and settings.ELEVENLABS_API_KEY)
+
+    async def speech_to_text(
+        self,
+        audio_bytes: bytes,
+        *,
+        mime_type: str = "audio/ogg",
+        language_code: str | None = None,
+        model_id: str = "scribe_v2",
+    ) -> Optional[str]:
+        """
+        Transcribe audio to text via ElevenLabs Scribe.
+
+        Args:
+            audio_bytes: Raw audio. Telegram voice notes are OGG/Opus — Scribe
+                accepts them directly, so no transcoding is needed.
+            mime_type: MIME type of the audio (default audio/ogg).
+            language_code: Optional ISO-639 hint; None lets Scribe auto-detect
+                (handles Hebrew / English / code-switching).
+            model_id: Scribe model ("scribe_v2" = current best; "scribe_v1" fallback).
+
+        Returns:
+            The transcribed text, or None on failure / empty input.
+        """
+        if not settings.ELEVENLABS_API_KEY:
+            logger.warning("ElevenLabs STT unavailable (no API key)")
+            return None
+        if not audio_bytes:
+            return None
+
+        headers = {"xi-api-key": settings.ELEVENLABS_API_KEY}
+        data = {"model_id": model_id}
+        if language_code:
+            data["language_code"] = language_code
+        files = {"file": ("voice.ogg", audio_bytes, mime_type)}
+
+        try:
+            # STT on a minute-plus note can be slow — more headroom than TTS.
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    ELEVENLABS_STT_API_URL, headers=headers, data=data, files=files
+                )
+
+                if response.status_code == 429:
+                    logger.warning("ElevenLabs STT rate limited")
+                    return None
+
+                response.raise_for_status()
+
+                text = (response.json() or {}).get("text")
+                if text:
+                    logger.info(
+                        f"ElevenLabs STT: {len(audio_bytes)} bytes -> {len(text)} chars"
+                    )
+                return text or None
+
+        except httpx.TimeoutException:
+            logger.error("ElevenLabs STT timeout")
+            return None
+        except Exception as e:
+            logger.error(f"ElevenLabs STT failed: {e}")
             return None
 
 

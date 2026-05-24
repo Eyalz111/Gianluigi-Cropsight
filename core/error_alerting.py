@@ -63,13 +63,13 @@ async def alert_critical_error(
 
     # Send Telegram notification
     try:
-        from services.telegram_bot import telegram_bot
+        from services.orchestrator.spine import comms_spine
 
         message = f"Gianluigi error: <b>{component}</b>\n\n{error_message[:500]}"
         if meeting_id:
             message += f"\n\nMeeting: {meeting_id}"
 
-        await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+        await comms_spine.send_to_eyal(message, parse_mode="HTML")
         logger.info(f"Critical error alert sent for {component}")
     except Exception as e:
         logger.error(f"Failed to send error alert via Telegram: {e}")

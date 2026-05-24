@@ -314,14 +314,14 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
         return {"status": "error", "error": "Email send failed"}
 
     # Telegram confirmation
-    from services.telegram_bot import telegram_bot
+    from services.orchestrator.spine import comms_spine
 
     confirm_parts = [
         f"Intelligence Signal W{week_number} distributed to {len(recipients)} recipients.",
     ]
     if video_link:
         confirm_parts.append("Video + audio podcast available in Drive.")
-    await telegram_bot.send_to_eyal(
+    await comms_spine.send_to_eyal(
         "\n".join(confirm_parts),
         parse_mode="HTML",
     )
@@ -569,11 +569,11 @@ async def _submit_for_approval(
         watchlist_changes=watchlist_changes,
     )
 
-    from services.telegram_bot import telegram_bot
+    from services.orchestrator.spine import comms_spine
 
     # send_to_eyal swallows exceptions and returns False. Check the return
     # value so a silently-failed ping doesn't vanish without a reminder.
-    sent = await telegram_bot.send_to_eyal(notification, parse_mode="HTML")
+    sent = await comms_spine.send_to_eyal(notification, parse_mode="HTML")
     if not sent:
         logger.error(
             f"HTML approval notification failed for {signal_id}; "
@@ -588,7 +588,7 @@ async def _submit_for_approval(
             f"(HTML render failed — plain text fallback. "
             f"Open {drive_link} and approve via CropSight Ops.)"
         )
-        sent = await telegram_bot.send_to_eyal(plain, parse_mode=None)
+        sent = await comms_spine.send_to_eyal(plain, parse_mode=None)
         if not sent:
             logger.error(
                 f"Plain-text approval notification ALSO failed for {signal_id}. "
@@ -1061,9 +1061,9 @@ def _set_error_status(signal_id: str, error_message: str) -> None:
 async def _alert_synthesis_failure(signal_id: str, error: str) -> None:
     """Send Telegram alert on synthesis failure."""
     try:
-        from services.telegram_bot import telegram_bot
+        from services.orchestrator.spine import comms_spine
 
-        await telegram_bot.send_to_eyal(
+        await comms_spine.send_to_eyal(
             f"Intelligence Signal {signal_id} synthesis failed: {error}",
             parse_mode="HTML",
         )
