@@ -33,7 +33,8 @@ async def main() -> int:
     from datetime import datetime, date
     from services.supabase_client import supabase_client
     from services.google_sheets import sheets_service
-    from services.telegram_bot import telegram_bot
+    from services.telegram_bot import telegram_bot  # kept for app/_init_app/eyal_chat_id
+    from services.orchestrator.spine import comms_spine
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     # Initialize the Telegram bot just enough to send messages
@@ -108,7 +109,7 @@ async def main() -> int:
         ]])
 
         try:
-            await telegram_bot.app.bot.send_message(
+            await comms_spine.send_raw(
                 chat_id=telegram_bot.eyal_chat_id,
                 text=message,
                 parse_mode="Markdown",

@@ -32,7 +32,8 @@ from typing import Any
 from config.settings import settings
 from services.google_calendar import calendar_service
 from services.supabase_client import supabase_client
-from services.telegram_bot import telegram_bot
+from services.telegram_bot import telegram_bot  # kept for wait_until_ready (bot lifecycle)
+from services.orchestrator.spine import comms_spine
 from guardrails.calendar_filter import is_cropsight_meeting
 from guardrails.approval_flow import submit_for_approval
 from processors.meeting_type_matcher import classify_meeting_type
@@ -221,7 +222,7 @@ class MeetingPrepScheduler:
                     title = event_data.get("title", "Unknown")
                     supabase_client.update_pending_approval(approval_id, status="expired")
                     self._cancel_prep_timers(approval_id)
-                    await telegram_bot.send_to_eyal(
+                    await comms_spine.send_to_eyal(
                         f"📅 {title} was removed from calendar — prep cancelled."
                     )
                     supabase_client.log_action(
@@ -257,7 +258,7 @@ class MeetingPrepScheduler:
                             self._cancel_prep_timers(approval_id)
                             self._schedule_prep_timers(approval_id, new_mode, new_hours)
 
-                            await telegram_bot.send_to_eyal(
+                            await comms_spine.send_to_eyal(
                                 f"📅 {title} rescheduled — timeline updated to {new_mode} mode."
                             )
                             logger.info(f"Outline {approval_id} rescheduled: {new_mode}")
@@ -327,7 +328,7 @@ class MeetingPrepScheduler:
         )
 
         # Send outline to Eyal via Telegram with interactive buttons
-        await telegram_bot.send_prep_outline(outline, approval_id, confidence=confidence)
+        await comms_spine.send_prep_outline(outline, approval_id, confidence=confidence)
 
         # Schedule timers based on mode
         self._schedule_prep_timers(approval_id, mode, hours_until)
@@ -516,7 +517,7 @@ class MeetingPrepScheduler:
             event = content.get("outline", {}).get("event", content.get("event", {}))
             title = event.get("title", "Unknown")
 
-            await telegram_bot.send_to_eyal(
+            await comms_spine.send_to_eyal(
                 f"🔔 Reminder: prep outline for '{title}' is still pending. "
                 f"Tap Generate, add focus, or skip."
             )
@@ -550,7 +551,7 @@ class MeetingPrepScheduler:
             result = await generate_meeting_prep_from_outline(approval_id)
 
             if result.get("status") == "success":
-                await telegram_bot.send_to_eyal(
+                await comms_spine.send_to_eyal(
                     f"⏰ Auto-generated prep for '{title}' (no response received). "
                     f"Check your pending approvals."
                 )

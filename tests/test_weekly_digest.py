@@ -670,7 +670,7 @@ class TestWeeklyDigestSchedulerTrigger:
         """Should fire _generate_and_distribute on Sunday at 18:00."""
         with patch("schedulers.weekly_digest_scheduler.generate_weekly_digest") as mock_gen, \
              patch("schedulers.weekly_digest_scheduler.drive_service") as mock_drive, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("schedulers.weekly_digest_scheduler.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.supabase_client") as mock_af_db, \
@@ -791,7 +791,7 @@ class TestDuplicatePrevention:
         """Should generate when a new week starts."""
         with patch("schedulers.weekly_digest_scheduler.generate_weekly_digest") as mock_gen, \
              patch("schedulers.weekly_digest_scheduler.drive_service") as mock_drive, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("schedulers.weekly_digest_scheduler.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.supabase_client") as mock_af_db, \
@@ -840,7 +840,7 @@ class TestDuplicatePrevention:
         """Should update _last_digest_week after successful generation."""
         with patch("schedulers.weekly_digest_scheduler.generate_weekly_digest") as mock_gen, \
              patch("schedulers.weekly_digest_scheduler.drive_service") as mock_drive, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("schedulers.weekly_digest_scheduler.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.supabase_client") as mock_af_db, \

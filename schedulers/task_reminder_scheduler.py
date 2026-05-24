@@ -32,7 +32,8 @@ _ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from config.team import CROPSIGHT_TEAM_EMAILS, TEAM_TELEGRAM_IDS
 from services.google_sheets import sheets_service
 from services.supabase_client import supabase_client
-from services.telegram_bot import telegram_bot
+from services.telegram_bot import telegram_bot  # kept for eyal_chat_id
+from services.orchestrator.spine import comms_spine
 
 logger = logging.getLogger(__name__)
 
@@ -389,7 +390,7 @@ class TaskReminderScheduler:
         # Send to assignee (no buttons — buttons only for Eyal)
         assignee_telegram = self._get_telegram_id(assignee)
         if assignee_telegram:
-            await telegram_bot.send_message(
+            await comms_spine.send_message(
                 chat_id=assignee_telegram,
                 text=message,
                 parse_mode="HTML",
@@ -397,7 +398,7 @@ class TaskReminderScheduler:
 
         # Send to Eyal WITH inline buttons
         try:
-            msg = await telegram_bot.app.bot.send_message(
+            msg = await comms_spine.send_raw(
                 chat_id=telegram_bot.eyal_chat_id,
                 text=message,
                 parse_mode="HTML",
@@ -409,7 +410,7 @@ class TaskReminderScheduler:
         except Exception as e:
             logger.error(f"Failed to send overdue reminder with buttons: {e}")
             # Fallback: send without buttons
-            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            await comms_spine.send_to_eyal(message, parse_mode="HTML")
 
         logger.info(f"Sent overdue reminder for: {task_desc}")
         return True
@@ -433,7 +434,7 @@ class TaskReminderScheduler:
         # Send to assignee
         assignee_telegram = self._get_telegram_id(assignee)
         if assignee_telegram:
-            await telegram_bot.send_message(
+            await comms_spine.send_message(
                 chat_id=assignee_telegram,
                 text=message,
                 parse_mode="HTML",
@@ -468,7 +469,7 @@ class TaskReminderScheduler:
         # Send to assignee
         assignee_telegram = self._get_telegram_id(assignee)
         if assignee_telegram:
-            await telegram_bot.send_message(
+            await comms_spine.send_message(
                 chat_id=assignee_telegram,
                 text=message,
                 parse_mode="HTML",
@@ -512,7 +513,7 @@ class TaskReminderScheduler:
                 lines.append(f"  ... and {len(summary['due_today']) - 5} more")
 
         message = "\n".join(lines)
-        await telegram_bot.send_to_eyal(message)
+        await comms_spine.send_to_eyal(message)
 
         logger.info("Sent daily task summary to Eyal")
         return True
@@ -631,7 +632,7 @@ class TaskReminderScheduler:
             lines.append(f"  - {assignee}: {count}")
 
         message = "\n".join(lines)
-        await telegram_bot.send_to_eyal(message)
+        await comms_spine.send_to_eyal(message)
 
         logger.info("Sent weekly task summary to Eyal")
         return True

@@ -246,7 +246,7 @@ class TestOrphanCleanupFullRun:
         mock_result.data = []
 
         with patch("schedulers.orphan_cleanup_scheduler.supabase_client") as mock_db, \
-             patch("schedulers.orphan_cleanup_scheduler.telegram_bot") as mock_tg:
+             patch("schedulers.orphan_cleanup_scheduler.comms_spine") as mock_tg:
             mock_db.get_stale_pending_approvals.return_value = []
             mock_db.get_orphan_embedding_ids.return_value = []
             mock_db.client.table.return_value.select.return_value \
@@ -285,7 +285,7 @@ class TestOrphanCleanupFullRun:
         mock_result.data = []
 
         with patch("schedulers.orphan_cleanup_scheduler.supabase_client") as mock_db, \
-             patch("schedulers.orphan_cleanup_scheduler.telegram_bot"):
+             patch("schedulers.orphan_cleanup_scheduler.comms_spine"):
             mock_db.get_stale_pending_approvals.return_value = []
             mock_db.get_orphan_embedding_ids.return_value = []
             mock_db.client.table.return_value.select.return_value \

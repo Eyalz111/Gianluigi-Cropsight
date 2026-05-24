@@ -142,7 +142,7 @@ class TestExpirePrepOutline:
         future_time = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
 
         with patch("guardrails.approval_flow.supabase_client") as mock_db, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("processors.meeting_prep.generate_meeting_prep_from_outline",
                    new_callable=AsyncMock) as mock_gen:
@@ -176,7 +176,7 @@ class TestExpirePrepOutline:
         past_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
 
         with patch("guardrails.approval_flow.supabase_client") as mock_db, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.settings") as mock_settings:
 
             mock_db.expire_pending_approvals.return_value = [{
@@ -206,7 +206,7 @@ class TestExpirePrepOutline:
         old_time = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
 
         with patch("guardrails.approval_flow.supabase_client") as mock_db, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.settings") as mock_settings:
 
             mock_db.expire_pending_approvals.return_value = []
@@ -237,7 +237,7 @@ class TestExpirePrepOutline:
         recent_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
 
         with patch("guardrails.approval_flow.supabase_client") as mock_db, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.settings") as mock_settings:
 
             mock_db.expire_pending_approvals.return_value = []

@@ -489,6 +489,27 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Comms / Voice (beat #1) — orchestration spine + voice intake. Default OFF.
+    # See V2.5_STRATEGY.md §6 (human-assistant comms layer).
+    # ==========================================================================
+    ORCHESTRATION_SPINE_ENABLED: bool = Field(
+        default=False,
+        description="Route INBOUND Telegram messages through the orchestration spine (services/orchestrator). The outbound facade is a verbatim pass-through regardless of this flag; this gates only the inbound rerouting so it can be toggled/rolled back independently of voice intake. Default off."
+    )
+    VOICE_INTAKE_ENABLED: bool = Field(
+        default=False,
+        description="Enable Telegram voice-note intake: STT via ElevenLabs Scribe -> the existing quick-injection confirm flow. Un-gates ELEVENLABS_API_KEY for STT independently of the video flag (see elevenlabs_client.stt_available). Default off."
+    )
+    VOICE_OUT_ENABLED: bool = Field(
+        default=False,
+        description="Enable voice-OUT: a 'Listen' button on Gianluigi's substantive replies to Eyal; tapping it TTSs the message (ElevenLabs) and sends an inline audio player. Un-gates the key for TTS independently of the video flag (see elevenlabs_client.tts_available). Default off."
+    )
+    ELEVENLABS_VOICE_ID_GIANLUIGI: str = Field(
+        default="RbNTU8eTHcsao6T0f1ve",
+        description="Gianluigi's speaking voice for voice-OUT (Stephen - Well-spoken, British; chosen via the beat-#4 audition, handles EN + HE on eleven_v3). Separate from ELEVENLABS_VOICE_ID (video narration) so the speaking voice can diverge."
+    )
+
+    # ==========================================================================
     # Knowledge Foundation (v2.5) — all default OFF; shadow-run by default.
     # See V2.5_STRATEGY.md and the Phase 1 plan.
     # ==========================================================================

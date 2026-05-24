@@ -156,7 +156,7 @@ class TestAutoPublishAfterDelay:
         with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.process_response", new_callable=AsyncMock) as mock_process, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow._pending_auto_publishes", {"meeting-auto-1": MagicMock()}):
 
             mock_db.get_meeting = MagicMock(return_value=mock_meeting)
@@ -196,7 +196,7 @@ class TestAutoPublishAfterDelay:
         with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock), \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.process_response", new_callable=AsyncMock) as mock_process, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg:
+             patch("guardrails.approval_flow.comms_spine") as mock_tg:
 
             mock_db.get_meeting = MagicMock(return_value=mock_meeting)
             mock_tg.send_to_eyal = AsyncMock()

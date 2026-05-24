@@ -758,8 +758,8 @@ class QAScheduler:
                 # Only send standalone Telegram message if there are issues
                 if report.get("issues"):
                     try:
-                        from services.telegram_bot import telegram_bot
-                        await telegram_bot.send_to_eyal(formatted)
+                        from services.orchestrator.spine import comms_spine
+                        await comms_spine.send_to_eyal(formatted)
                         logger.info("QA report sent to Eyal (issues found)")
                     except Exception as e:
                         logger.error(f"Failed to send QA report: {e}")

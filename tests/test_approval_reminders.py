@@ -32,7 +32,7 @@ def mock_supabase():
 
 @pytest.fixture
 def mock_telegram():
-    with patch("guardrails.approval_flow.telegram_bot") as mock:
+    with patch("guardrails.approval_flow.comms_spine") as mock:
         mock.send_approval_request = AsyncMock(return_value=True)
         mock.send_to_eyal = AsyncMock(return_value=True)
         yield mock
