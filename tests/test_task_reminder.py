@@ -234,3 +234,39 @@ class TestDuplicateReminderPrevention:
 
         # Day 2 - fresh set
         assert task_id not in reminders_day2
+
+
+class TestReminderDedupReconstruction:
+    """Restart-safety: rebuild today's sent-reminder set from audit_log on startup."""
+
+    def test_mark_reminded_persists_and_tracks(self):
+        from schedulers.task_reminder_scheduler import TaskReminderScheduler
+
+        scheduler = TaskReminderScheduler(check_interval=60)
+        with patch("schedulers.task_reminder_scheduler.supabase_client") as mock_sc:
+            scheduler._mark_reminded("Task X:Eyal")
+
+        assert "Task X:Eyal" in scheduler._reminders_sent_today
+        mock_sc.log_action.assert_called_once()
+        assert mock_sc.log_action.call_args.kwargs["action"] == "task_reminder_sent"
+        assert mock_sc.log_action.call_args.kwargs["details"]["task_key"] == "Task X:Eyal"
+
+    def test_reconstructs_today_only(self):
+        from datetime import timezone
+        from schedulers.task_reminder_scheduler import TaskReminderScheduler, _ISRAEL_TZ
+
+        now_il = datetime.now(_ISRAEL_TZ)
+        today_utc = now_il.astimezone(timezone.utc).isoformat()
+        old_utc = (now_il - timedelta(days=2)).astimezone(timezone.utc).isoformat()
+
+        scheduler = TaskReminderScheduler(check_interval=60)
+        with patch("schedulers.task_reminder_scheduler.supabase_client") as mock_sc:
+            mock_sc.get_audit_log.return_value = [
+                {"created_at": today_utc, "details": {"task_key": "Task A:Eyal"}},
+                {"created_at": today_utc, "details": {"task_key": "Task B:Roye"}},
+                {"created_at": old_utc, "details": {"task_key": "Task C:Eyal"}},
+            ]
+            scheduler._reconstruct_reminders_sent_today()
+
+        assert scheduler._reminders_sent_today == {"Task A:Eyal", "Task B:Roye"}
+        assert scheduler._last_reminder_date == now_il.strftime("%Y-%m-%d")

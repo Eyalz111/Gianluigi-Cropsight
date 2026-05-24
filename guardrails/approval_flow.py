@@ -124,16 +124,21 @@ async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None
     _pending_auto_publishes.pop(meeting_id, None)
 
 
-async def _send_approval_reminder(meeting_id: str, hours: int, content_type: str) -> None:
+async def _send_approval_reminder(
+    meeting_id: str, hours: int, content_type: str, delay_seconds: float | None = None
+) -> None:
     """
     Send a gentle Telegram reminder that an approval is waiting.
 
     Args:
         meeting_id: Approval ID to check.
-        hours: How many hours have passed (for the message).
+        hours: How many hours have passed (used in the message text).
         content_type: Type of content awaiting approval.
+        delay_seconds: Override the wait (defaults to hours*3600). Used by
+            reconstruct_approval_reminders to schedule the *remaining* time
+            after a restart instead of the full window.
     """
-    await asyncio.sleep(hours * 3600)
+    await asyncio.sleep(delay_seconds if delay_seconds is not None else hours * 3600)
 
     # Check if still pending
     row = supabase_client.get_pending_approval(meeting_id)
@@ -389,6 +394,71 @@ async def reconstruct_auto_publish_timers() -> int:
             logger.error(f"Failed to reconstruct timer for {approval_id}: {e}")
 
     logger.info(f"Reconstructed {count} auto-publish timers")
+    return count
+
+
+async def reconstruct_approval_reminders() -> int:
+    """
+    Reconstruct approval-reminder timers from persistent state on startup.
+
+    Reminders fire at fixed offsets (settings.approval_reminder_hours_list) after
+    an approval's created_at. In-memory tasks are lost on a Cloud Run cycle, so
+    on boot we re-derive each pending approval's reminder schedule from created_at
+    and reschedule only the offsets still in the future (with their remaining
+    delay). Offsets already in the past are skipped — their window has elapsed.
+
+    Returns:
+        Number of approvals that got at least one reminder rescheduled.
+    """
+    if not settings.APPROVAL_REMINDER_ENABLED:
+        return 0
+
+    hours_list = settings.approval_reminder_hours_list
+    if not hours_list:
+        return 0
+
+    rows = supabase_client.get_pending_approvals_for_reminders()
+    if not rows:
+        logger.info("No approval reminders to reconstruct")
+        return 0
+
+    count = 0
+    now = datetime.now().astimezone()
+
+    for row in rows:
+        approval_id = row.get("approval_id")
+        created_at_str = row.get("created_at")
+        if not approval_id or not created_at_str:
+            continue
+        content_type = row.get("content_type", "meeting_summary")
+
+        try:
+            created_at = datetime.fromisoformat(created_at_str)
+            if created_at.tzinfo is None:
+                created_at = created_at.astimezone()
+        except (ValueError, TypeError):
+            continue
+
+        tasks = []
+        for hours in hours_list:
+            fire_at = created_at + timedelta(hours=hours)
+            remaining = (fire_at - now).total_seconds()
+            if remaining <= 0:
+                continue  # this reminder's window already elapsed
+            task = asyncio.create_task(
+                _send_approval_reminder(
+                    approval_id, hours, content_type, delay_seconds=remaining
+                ),
+                name=f"reminder_{approval_id}_{hours}h",
+            )
+            tasks.append(task)
+
+        if tasks:
+            cancel_approval_reminders(approval_id)  # avoid dupes if re-run
+            _pending_reminders[approval_id] = tasks
+            count += 1
+
+    logger.info(f"Reconstructed approval reminders for {count} pending item(s)")
     return count
 
 

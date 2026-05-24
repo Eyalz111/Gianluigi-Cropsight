@@ -122,6 +122,56 @@ class TestSendApprovalReminder:
         mock_telegram.send_to_eyal.assert_not_called()
 
 
+class TestReconstructApprovalReminders:
+    @pytest.mark.asyncio
+    async def test_reschedules_future_offsets(self, mock_settings, mock_supabase, mock_telegram):
+        from datetime import datetime, timezone
+        from guardrails.approval_flow import (
+            reconstruct_approval_reminders, _pending_reminders, cancel_approval_reminders,
+        )
+        # created 1h ago; reminders at 2h and 6h are both still in the future
+        created = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        mock_supabase.get_pending_approvals_for_reminders.return_value = [
+            {"approval_id": "rec-1", "created_at": created, "content_type": "meeting_summary"},
+        ]
+        with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock):
+            count = await reconstruct_approval_reminders()
+            assert count == 1
+            assert len(_pending_reminders["rec-1"]) == 2  # 2h and 6h both remain
+            cancel_approval_reminders("rec-1")
+
+    @pytest.mark.asyncio
+    async def test_skips_past_offsets(self, mock_settings, mock_supabase, mock_telegram):
+        from datetime import datetime, timezone
+        from guardrails.approval_flow import (
+            reconstruct_approval_reminders, _pending_reminders, cancel_approval_reminders,
+        )
+        # created 3h ago; the 2h reminder window has elapsed, only the 6h remains
+        created = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        mock_supabase.get_pending_approvals_for_reminders.return_value = [
+            {"approval_id": "rec-2", "created_at": created, "content_type": "meeting_summary"},
+        ]
+        with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock):
+            count = await reconstruct_approval_reminders()
+            assert count == 1
+            assert len(_pending_reminders["rec-2"]) == 1  # only the 6h offset
+            cancel_approval_reminders("rec-2")
+
+    @pytest.mark.asyncio
+    async def test_disabled_returns_zero(self, mock_settings, mock_supabase, mock_telegram):
+        mock_settings.APPROVAL_REMINDER_ENABLED = False
+        from guardrails.approval_flow import reconstruct_approval_reminders
+        count = await reconstruct_approval_reminders()
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_no_pending_returns_zero(self, mock_settings, mock_supabase, mock_telegram):
+        from guardrails.approval_flow import reconstruct_approval_reminders
+        mock_supabase.get_pending_approvals_for_reminders.return_value = []
+        count = await reconstruct_approval_reminders()
+        assert count == 0
+
+
 class TestApprovalExpiry:
     @pytest.mark.asyncio
     async def test_expire_stale_approvals_sends_notification(self, mock_settings, mock_supabase, mock_telegram):

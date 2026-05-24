@@ -642,6 +642,25 @@ class TestEmailWatcherLifecycle:
         assert hasattr(email_watcher, "start")
         assert hasattr(email_watcher, "stop")
 
+    @pytest.mark.asyncio
+    async def test_reconstructs_processed_ids_on_start(self, mock_settings_for_email_watcher):
+        """start() should rebuild _processed_ids from persisted email_scans (restart-safety)."""
+        from schedulers.email_watcher import EmailWatcher
+
+        watcher = EmailWatcher(check_interval=1)
+
+        async def stop_after(*args, **kwargs):
+            watcher._running = False
+
+        with patch("schedulers.email_watcher.supabase_client") as mock_supa, \
+             patch("schedulers.email_watcher.gmail_service"), \
+             patch("schedulers.email_watcher.asyncio.sleep", new_callable=AsyncMock):
+            mock_supa.get_recent_scanned_email_ids.return_value = ["m1", "m2", "m3"]
+            watcher._check_inbox = AsyncMock(side_effect=stop_after)
+            await watcher.start()
+
+        assert watcher._processed_ids == {"m1", "m2", "m3"}
+
 
 # =============================================================================
 # Tests for email address extraction
