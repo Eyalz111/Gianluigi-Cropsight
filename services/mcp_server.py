@@ -1,7 +1,7 @@
 """
 MCP server for Gianluigi — Claude.ai as CEO dashboard.
 
-Provides 43 tools (read + write + composite) as thin wrappers around existing brain functions.
+Provides 45 tools (read + write + composite) as thin wrappers around existing brain functions.
 Uses the official MCP Python SDK with SSE transport on port 8080, sharing
 the port with health check and report endpoints.
 
@@ -85,7 +85,7 @@ def _sanitize_records(records: list[dict], exclude_fields: set | None = None) ->
 
 class MCPServer:
     """
-    MCP server with SSE transport, auth middleware, and 33 tools (23 read + 10 write) tools.
+    MCP server with SSE transport, auth middleware, and 45 tools (read + write + composite).
 
     Extends the health server's port (8080) by replacing the aiohttp server
     with a Starlette app that serves both health endpoints and MCP SSE.
@@ -120,7 +120,12 @@ class MCPServer:
                 "6. For weekly reviews, call start_weekly_review() to begin, then "
                 "confirm_weekly_review(session_id) when Eyal approves.\n"
                 "7. Use create_task() and update_task() to manage tasks. "
-                "Always confirm changes with Eyal before executing."
+                "Always confirm changes with Eyal before executing.\n"
+                "8. Pending proposals (knowledge topic merges/assignments, task-field "
+                "updates, Gantt row->topic tags) are listed by get_proposals(type?) and "
+                "acted on with decide_proposal(proposal_id, decision). Gantt write "
+                "operations (tag/refresh/restructure/links/update) go through the "
+                "gantt_ops(action, ...) composite; read views are get_gantt_status(view)."
             ),
             transport_security=TransportSecuritySettings(
                 enable_dns_rebinding_protection=False,
@@ -202,11 +207,11 @@ class MCPServer:
                 return JSONResponse({"error": "Internal error"}, status_code=500)
 
     # ------------------------------------------------------------------
-    # MCP Tools (35 tools: 25 read + 10 write)
+    # MCP Tools (45 tools: read + write + composite)
     # ------------------------------------------------------------------
 
     def _register_tools(self, mcp: FastMCP) -> None:
-        """Register all 35 MCP tools on the FastMCP instance."""
+        """Register all 45 MCP tools on the FastMCP instance."""
 
         # ============================================================
         # 1. get_system_context — Onboarding tool
@@ -578,140 +583,140 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 7c. Knowledge proposals (v2.5 PR10 — topic merges / assignments)
+        # 7c. get_proposals + decide_proposal (composite — replaces
+        #     get_knowledge_proposals / get_task_proposals /
+        #     list_gantt_tag_proposals + their approve_* siblings)
         # ============================================================
         @mcp.tool(
-            name="get_knowledge_proposals",
+            name="get_proposals",
             description=(
-                "[KNOWLEDGE] List pending topic-consolidation proposals (merges and "
-                "area assignments) from the weekly clustering pass. Review these, then "
-                "act with approve_knowledge_proposal."
+                "[PROPOSALS] List pending proposals awaiting your decision — knowledge "
+                "topic merges/assignments, task-field updates, Gantt row->topic tags. "
+                "Optional type filter: knowledge|task|gantt_tag. Act on one with "
+                "decide_proposal."
             ),
         )
-        async def get_knowledge_proposals() -> dict:
+        async def get_proposals(type: str | None = None) -> dict:
             try:
                 from services.supabase_client import supabase_client
 
                 rows = supabase_client.get_pending_approvals_by_status("pending") or []
+
+                if type == "knowledge":
+                    types = ("topic_merge", "topic_assign")
+                elif type == "task":
+                    types = ("task_update_proposal",)
+                elif type == "gantt_tag":
+                    types = ("gantt_tag_mapping",)
+                else:
+                    types = None  # all pending proposals
+
                 proposals = [
                     {"proposal_id": r.get("approval_id"), "type": r.get("content_type"),
                      **(r.get("content") or {})}
                     for r in rows
-                    if r.get("content_type") in ("topic_merge", "topic_assign")
+                    if types is None or r.get("content_type") in types
                 ]
-                mcp_auth.log_call("get_knowledge_proposals", {"count": len(proposals)})
+                mcp_auth.log_call("get_proposals", {"type": type, "count": len(proposals)})
                 return _success(proposals)
             except Exception as e:
-                logger.error(f"get_knowledge_proposals error: {e}")
-                mcp_auth.log_call("get_knowledge_proposals", success=False, error=str(e))
+                logger.error(f"get_proposals error: {e}")
+                mcp_auth.log_call("get_proposals", {"type": type}, success=False, error=str(e))
                 return _error(str(e))
 
         @mcp.tool(
-            name="approve_knowledge_proposal",
+            name="decide_proposal",
             description=(
-                "[KNOWLEDGE] Act on a topic-consolidation proposal. decision='approve' "
-                "applies the merge/assignment (the losing topic is CLOSED, never "
-                "deleted, and history is preserved); decision='reject' discards it. "
-                "Use the proposal_id from get_knowledge_proposals."
+                "[PROPOSALS] Decide a pending proposal (knowledge/task/gantt_tag) by its "
+                "proposal_id from get_proposals. decision='approve' applies it, 'reject' "
+                "discards it. Optional edits overrides the proposed payload (gantt_tag "
+                "mappings)."
             ),
         )
-        async def approve_knowledge_proposal(proposal_id: str, decision: str = "approve") -> dict:
+        async def decide_proposal(
+            proposal_id: str,
+            decision: str = "approve",
+            edits: list | None = None,
+        ) -> dict:
             try:
                 from services.supabase_client import supabase_client
-                from processors.topic_clustering import apply_topic_proposal
 
                 pending = supabase_client.get_pending_approval(proposal_id)
                 if not pending:
                     return _error(f"Proposal {proposal_id} not found")
-                content = pending.get("content") or {}
+                content_type = pending.get("content_type")
 
-                if decision == "approve":
-                    result = apply_topic_proposal(content)
+                # --- knowledge: topic merge / assignment ---
+                if content_type in ("topic_merge", "topic_assign"):
+                    from processors.topic_clustering import apply_topic_proposal
+
+                    content = pending.get("content") or {}
+
+                    if decision == "approve":
+                        result = apply_topic_proposal(content)
+                        supabase_client.delete_pending_approval(proposal_id)
+                        supabase_client.log_action(
+                            "knowledge_proposal_approved",
+                            details={"proposal_id": proposal_id, **content, "result": result},
+                            triggered_by="eyal",
+                        )
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "approve"})
+                        return _success({"decision": "approved", "result": result})
+
                     supabase_client.delete_pending_approval(proposal_id)
                     supabase_client.log_action(
-                        "knowledge_proposal_approved",
-                        details={"proposal_id": proposal_id, **content, "result": result},
+                        "knowledge_proposal_rejected",
+                        details={"proposal_id": proposal_id, **content},
                         triggered_by="eyal",
                     )
-                    mcp_auth.log_call("approve_knowledge_proposal", {"proposal_id": proposal_id, "decision": "approve"})
-                    return _success({"decision": "approved", "result": result})
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
+                    return _success({"decision": "rejected"})
 
-                supabase_client.delete_pending_approval(proposal_id)
-                supabase_client.log_action(
-                    "knowledge_proposal_rejected",
-                    details={"proposal_id": proposal_id, **content},
-                    triggered_by="eyal",
-                )
-                mcp_auth.log_call("approve_knowledge_proposal", {"proposal_id": proposal_id, "decision": "reject"})
-                return _success({"decision": "rejected"})
-            except Exception as e:
-                logger.error(f"approve_knowledge_proposal error: {e}")
-                mcp_auth.log_call("approve_knowledge_proposal", success=False, error=str(e))
-                return _error(str(e))
-
-        # ============================================================
-        # 7d. Task-update proposals + manual-flag control (v3 reconcile)
-        # ============================================================
-        @mcp.tool(
-            name="get_task_proposals",
-            description=(
-                "[TASKS] List pending task-update proposals — changes Gianluigi inferred "
-                "(from a meeting/file) for a field you've manually set (sticky). Review, "
-                "then act with approve_task_proposal."
-            ),
-        )
-        async def get_task_proposals() -> dict:
-            try:
-                from services.supabase_client import supabase_client
-                rows = supabase_client.get_pending_approvals_by_status("pending") or []
-                props = [
-                    {"proposal_id": r.get("approval_id"), **(r.get("content") or {})}
-                    for r in rows if r.get("content_type") == "task_update_proposal"
-                ]
-                mcp_auth.log_call("get_task_proposals", {"count": len(props)})
-                return _success(props)
-            except Exception as e:
-                logger.error(f"get_task_proposals error: {e}")
-                mcp_auth.log_call("get_task_proposals", success=False, error=str(e))
-                return _error(str(e))
-
-        @mcp.tool(
-            name="approve_task_proposal",
-            description=(
-                "[TASKS] Act on a task-update proposal. decision='approve' applies the "
-                "proposed field value (keeps it sticky); decision='reject' discards it. "
-                "Use the proposal_id from get_task_proposals."
-            ),
-        )
-        async def approve_task_proposal(proposal_id: str, decision: str = "approve") -> dict:
-            try:
-                from services.supabase_client import supabase_client
-                pending = supabase_client.get_pending_approval(proposal_id)
-                if not pending:
-                    return _error(f"Proposal {proposal_id} not found")
-                c = pending.get("content") or {}
-                tid, field, proposed = c.get("task_id"), c.get("field"), c.get("proposed")
-                if decision == "approve" and tid and field:
-                    upd = {field: proposed}
-                    if field == "deadline":
-                        upd["deadline_confidence"] = "EXPLICIT"
-                    supabase_client.update_task(tid, **upd)
-                    supabase_client.mark_task_field_manual(tid, field, "eyal_mcp")
+                # --- task-field update ---
+                if content_type == "task_update_proposal":
+                    c = pending.get("content") or {}
+                    tid, field, proposed = c.get("task_id"), c.get("field"), c.get("proposed")
+                    if decision == "approve" and tid and field:
+                        upd = {field: proposed}
+                        if field == "deadline":
+                            upd["deadline_confidence"] = "EXPLICIT"
+                        supabase_client.update_task(tid, **upd)
+                        supabase_client.mark_task_field_manual(tid, field, "eyal_mcp")
+                        supabase_client.delete_pending_approval(proposal_id)
+                        supabase_client.log_action("task_proposal_approved",
+                                                   details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "approve"})
+                        return _success({"decision": "approved", "task_id": tid, "field": field, "value": proposed})
                     supabase_client.delete_pending_approval(proposal_id)
-                    supabase_client.log_action("task_proposal_approved",
+                    supabase_client.log_action("task_proposal_rejected",
                                                details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
-                    mcp_auth.log_call("approve_task_proposal", {"proposal_id": proposal_id, "decision": "approve"})
-                    return _success({"decision": "approved", "task_id": tid, "field": field, "value": proposed})
-                supabase_client.delete_pending_approval(proposal_id)
-                supabase_client.log_action("task_proposal_rejected",
-                                           details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
-                mcp_auth.log_call("approve_task_proposal", {"proposal_id": proposal_id, "decision": "reject"})
-                return _success({"decision": "rejected"})
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
+                    return _success({"decision": "rejected"})
+
+                # --- gantt row->topic tag mapping ---
+                if content_type == "gantt_tag_mapping":
+                    from processors.gantt_tagging import apply_row_tags
+
+                    content = pending.get("content") or {}
+                    sheet_name = content.get("sheet_name")
+                    mapping = edits if edits is not None else content.get("candidates", [])
+                    result = await apply_row_tags(sheet_name, mapping)
+                    supabase_client.delete_pending_approval(proposal_id)
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, **result})
+                    return _success({"sheet": sheet_name, **result})
+
+                return _error(
+                    f"decide_proposal does not handle content_type {content_type!r}; "
+                    "use the dedicated tool"
+                )
             except Exception as e:
-                logger.error(f"approve_task_proposal error: {e}")
-                mcp_auth.log_call("approve_task_proposal", success=False, error=str(e))
+                logger.error(f"decide_proposal error: {e}")
+                mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id}, success=False, error=str(e))
                 return _error(str(e))
 
+        # ============================================================
+        # 7d. Task manual-flag control (v3 reconcile)
+        # ============================================================
         @mcp.tool(
             name="clear_manual_flag",
             description=(
@@ -732,214 +737,231 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 7e. Gantt curated knowledge-view (v3 chunk 2)
+        # 7e. gantt_ops (composite — Gantt write operations; replaces
+        #     tag_gantt_row / clear_gantt_override / refresh_gantt /
+        #     propose_gantt_restructure / apply_gantt_restructure_to_live /
+        #     propose_gantt_links / approve_gantt_link_mapping /
+        #     propose_gantt_update / approve_gantt_proposal)
         # ============================================================
         @mcp.tool(
-            name="tag_gantt_row",
+            name="gantt_ops",
             description=(
-                "[GANTT] Tag a Gantt row to a topic (writes the hidden topic-id tag + "
-                "upserts the gantt_rows record). Use to map a curated lane to a topic."
+                "[GANTT] Gantt write operations (composite). action: tag_row | "
+                "clear_override | refresh | propose_restructure | apply_restructure "
+                "(needs confirm=True) | propose_links | approve_links | propose_update | "
+                "approve_proposal. See each action's params."
             ),
         )
-        async def tag_gantt_row(sheet_name: str, row: int, topic_id: str, area_id: str = "", owner: str = "") -> dict:
+        async def gantt_ops(
+            action: str,
+            sheet_name: str = "",
+            row: int = 0,
+            topic_id: str = "",
+            area_id: str = "",
+            owner: str = "",
+            field: str = "",
+            apply: bool = False,
+            working_copy_id: str = "",
+            confirm: bool = False,
+            changes: list | None = None,
+            reason: str = "",
+            proposal_id: str = "",
+        ) -> dict:
             try:
-                from services.gantt_rows import write_row_tag
-                from services.supabase_client import supabase_client
-                ok = await write_row_tag(sheet_name, row, topic_id)
-                if ok:
-                    supabase_client.upsert_gantt_row({
-                        "sheet_name": sheet_name, "topic_id": topic_id,
-                        "area_id": area_id or None, "owner": owner or None, "display_order": row,
+                # --- tag_row → tag_gantt_row(sheet_name, row, topic_id, area_id, owner) ---
+                if action == "tag_row":
+                    from services.gantt_rows import write_row_tag
+                    from services.supabase_client import supabase_client
+                    ok = await write_row_tag(sheet_name, row, topic_id)
+                    if ok:
+                        supabase_client.upsert_gantt_row({
+                            "sheet_name": sheet_name, "topic_id": topic_id,
+                            "area_id": area_id or None, "owner": owner or None, "display_order": row,
+                        })
+                    mcp_auth.log_call("gantt_ops", {"action": "tag_row", "sheet": sheet_name, "row": row, "topic_id": topic_id})
+                    return _success({"tagged": ok, "sheet": sheet_name, "row": row, "topic_id": topic_id})
+
+                # --- clear_override → clear_gantt_override(sheet_name, topic_id, field) ---
+                if action == "clear_override":
+                    from services.supabase_client import supabase_client
+                    rows = supabase_client.get_gantt_rows(sheet_name)
+                    gid = next((r["id"] for r in rows if r.get("topic_id") == topic_id), None)
+                    if not gid:
+                        return _error("Gantt row not found for that sheet + topic")
+                    ok = supabase_client.clear_gantt_manual_flag(gid, field)
+                    mcp_auth.log_call("gantt_ops", {"action": "clear_override", "sheet": sheet_name, "topic_id": topic_id, "field": field})
+                    return _success({"cleared": ok, "field": field})
+
+                # --- refresh → refresh_gantt(apply) ---
+                if action == "refresh":
+                    from processors.gantt_readback import reconcile_gantt_lanes
+                    from processors.gantt_nudge import compute_gantt_nudges
+                    shadow = not apply
+                    recon = await reconcile_gantt_lanes(shadow=shadow)
+                    nudges = compute_gantt_nudges(shadow=shadow)
+                    mcp_auth.log_call("gantt_ops", {"action": "refresh", "apply": apply})
+                    return _success({"status": "applied" if apply else "preview",
+                                     "read_back": recon, "nudges": nudges})
+
+                # --- propose_restructure → propose_gantt_restructure() ---
+                if action == "propose_restructure":
+                    from processors.gantt_restructure import propose_restructure
+                    res = await propose_restructure()
+                    mcp_auth.log_call("gantt_ops", {"action": "propose_restructure"})
+                    return _success(res)
+
+                # --- apply_restructure → apply_gantt_restructure_to_live(working_copy_id, confirm) ---
+                if action == "apply_restructure":
+                    from processors.gantt_restructure import apply_restructure_to_live
+                    res = await apply_restructure_to_live(working_copy_id, confirm=confirm)
+                    mcp_auth.log_call("gantt_ops", {"action": "apply_restructure", "confirm": confirm})
+                    return _success(res)
+
+                # --- propose_links → propose_gantt_links() ---
+                if action == "propose_links":
+                    from processors.gantt_linkage import propose_lane_links
+                    res = propose_lane_links(persist_preview=True)
+                    mcp_auth.log_call("gantt_ops", {"action": "propose_links"})
+                    return _success(res)
+
+                # --- approve_links → approve_gantt_link_mapping() ---
+                if action == "approve_links":
+                    from processors.gantt_linkage import build_link_proposals, apply_lane_links
+                    res = apply_lane_links(build_link_proposals()["proposals"])
+                    mcp_auth.log_call("gantt_ops", {"action": "approve_links"})
+                    return _success(res)
+
+                # --- propose_update → propose_gantt_update(changes, reason) ---
+                if action == "propose_update":
+                    from services.gantt_manager import gantt_manager
+                    from services.supabase_client import supabase_client as _sc
+
+                    changes_list = changes or []
+                    # Add reason to each change if provided at top level
+                    if reason:
+                        for c in changes_list:
+                            if not c.get("reason"):
+                                c["reason"] = reason
+
+                    result = await gantt_manager.propose_gantt_update(
+                        changes=changes_list,
+                        source="mcp",
+                    )
+
+                    status = result.get("status", "")
+
+                    if status == "rejected":
+                        mcp_auth.log_call("gantt_ops", {"action": "propose_update", "status": "rejected"})
+                        return _error(
+                            f"Proposal rejected: {result.get('errors', [])}"
+                        )
+
+                    if status == "needs_confirmation":
+                        # Conflicts — return details for Claude to explain
+                        conflicts = result.get("conflicts", [])
+                        conflict_details = []
+                        for c in conflicts:
+                            conflict_details.append(
+                                f"{c.get('section')} → {c.get('subsection')} (W{c.get('week')}): "
+                                f"current='{c.get('existing_content')}', "
+                                f"proposed='{c.get('proposed_content')}'"
+                            )
+                        mcp_auth.log_call("gantt_ops", {"action": "propose_update", "status": "needs_confirmation"})
+                        return _success({
+                            "status": "needs_confirmation",
+                            "conflicts": conflict_details,
+                            "message": (
+                                "Some cells already have content. Present each conflict "
+                                "to Eyal and ask whether to replace or append."
+                            ),
+                        })
+
+                    # Success — proposal created
+                    new_proposal_id = result.get("proposal_id", "")
+
+                    _sc.log_action(
+                        action="gantt_proposal_created",
+                        details={
+                            "proposal_id": new_proposal_id,
+                            "changes_count": len(changes_list),
+                            "source": "mcp",
+                        },
+                        triggered_by="eyal",
+                    )
+
+                    mcp_auth.log_call("gantt_ops", {"action": "propose_update", "proposal_id": new_proposal_id})
+                    return _success({
+                        "status": "pending",
+                        "proposal_id": new_proposal_id,
+                        "changes_count": len(result.get("changes", [])),
+                        "message": (
+                            "Proposal created. Present the changes to Eyal and "
+                            "call gantt_ops(action='approve_proposal', proposal_id=...) when approved."
+                        ),
                     })
-                mcp_auth.log_call("tag_gantt_row", {"sheet": sheet_name, "row": row, "topic_id": topic_id})
-                return _success({"tagged": ok, "sheet": sheet_name, "row": row, "topic_id": topic_id})
-            except Exception as e:
-                logger.error(f"tag_gantt_row error: {e}")
-                mcp_auth.log_call("tag_gantt_row", success=False, error=str(e))
-                return _error(str(e))
 
-        @mcp.tool(
-            name="list_gantt_tag_proposals",
-            description="[GANTT] List pending Gantt row->topic tagging proposals for review.",
-        )
-        async def list_gantt_tag_proposals() -> dict:
-            try:
-                from services.supabase_client import supabase_client
-                rows = supabase_client.get_pending_approvals_by_status("pending") or []
-                props = [{"proposal_id": r.get("approval_id"), **(r.get("content") or {})}
-                         for r in rows if r.get("content_type") == "gantt_tag_mapping"]
-                mcp_auth.log_call("list_gantt_tag_proposals", {"count": len(props)})
-                return _success(props)
-            except Exception as e:
-                logger.error(f"list_gantt_tag_proposals error: {e}")
-                mcp_auth.log_call("list_gantt_tag_proposals", success=False, error=str(e))
-                return _error(str(e))
+                # --- approve_proposal → approve_gantt_proposal(proposal_id) ---
+                if action == "approve_proposal":
+                    from services.gantt_manager import gantt_manager
+                    from services.supabase_client import supabase_client as _sc
 
-        @mcp.tool(
-            name="approve_gantt_tag_mapping",
-            description=(
-                "[GANTT] Apply an approved (optionally edited) row->topic tag mapping. "
-                "Pass the proposal_id from list_gantt_tag_proposals; optionally pass an "
-                "edited candidates list to override."
-            ),
-        )
-        async def approve_gantt_tag_mapping(proposal_id: str, candidates: list | None = None) -> dict:
-            try:
-                from processors.gantt_tagging import apply_row_tags
-                from services.supabase_client import supabase_client
-                pending = supabase_client.get_pending_approval(proposal_id)
-                if not pending:
-                    return _error(f"Proposal {proposal_id} not found")
-                content = pending.get("content") or {}
-                sheet_name = content.get("sheet_name")
-                mapping = candidates if candidates is not None else content.get("candidates", [])
-                result = await apply_row_tags(sheet_name, mapping)
-                supabase_client.delete_pending_approval(proposal_id)
-                mcp_auth.log_call("approve_gantt_tag_mapping", {"proposal_id": proposal_id, **result})
-                return _success({"sheet": sheet_name, **result})
-            except Exception as e:
-                logger.error(f"approve_gantt_tag_mapping error: {e}")
-                mcp_auth.log_call("approve_gantt_tag_mapping", success=False, error=str(e))
-                return _error(str(e))
+                    try:
+                        result = await gantt_manager.execute_approved_proposal(proposal_id)
 
-        @mcp.tool(
-            name="refresh_gantt",
-            description=(
-                "[GANTT] On-demand Gantt refresh: read-back (board -> knowledge layer, DB-only, "
-                "manual-wins) + brief<->board nudges. NEVER writes the board. apply=False = shadow "
-                "preview; apply=True writes only to the knowledge layer (gantt_rows) + nudges, "
-                "honoring GANTT_SHADOW_MODE."
-            ),
-        )
-        async def refresh_gantt(apply: bool = False) -> dict:
-            try:
-                from processors.gantt_readback import reconcile_gantt_lanes
-                from processors.gantt_nudge import compute_gantt_nudges
-                shadow = not apply
-                recon = await reconcile_gantt_lanes(shadow=shadow)
-                nudges = compute_gantt_nudges(shadow=shadow)
-                mcp_auth.log_call("refresh_gantt", {"apply": apply})
-                return _success({"status": "applied" if apply else "preview",
-                                 "read_back": recon, "nudges": nudges})
-            except Exception as e:
-                logger.error(f"refresh_gantt error: {e}")
-                mcp_auth.log_call("refresh_gantt", success=False, error=str(e))
-                return _error(str(e))
+                        status = result.get("status", "")
+                        if status == "error":
+                            return _error(result.get("error", "Execution failed"))
 
-        @mcp.tool(
-            name="clear_gantt_override",
-            description=(
-                "[GANTT] Clear a sticky override on a Gantt row (field: status | timeframe) "
-                "so rollup/reconcile can update it again. Identify the row by sheet + topic_id."
-            ),
-        )
-        async def clear_gantt_override(sheet_name: str, topic_id: str, field: str) -> dict:
-            try:
-                from services.supabase_client import supabase_client
-                rows = supabase_client.get_gantt_rows(sheet_name)
-                gid = next((r["id"] for r in rows if r.get("topic_id") == topic_id), None)
-                if not gid:
-                    return _error("Gantt row not found for that sheet + topic")
-                ok = supabase_client.clear_gantt_manual_flag(gid, field)
-                mcp_auth.log_call("clear_gantt_override", {"sheet": sheet_name, "topic_id": topic_id, "field": field})
-                return _success({"cleared": ok, "field": field})
-            except Exception as e:
-                logger.error(f"clear_gantt_override error: {e}")
-                mcp_auth.log_call("clear_gantt_override", success=False, error=str(e))
-                return _error(str(e))
+                        # Build human-readable change descriptions
+                        changes_applied = []
+                        for c in result.get("changes_applied", result.get("changes", [])):
+                            desc = (
+                                f"{c.get('section', '')} → {c.get('subsection', '')}: "
+                                f"'{c.get('old_value', '')}' → '{c.get('new_value', '')}' "
+                                f"(W{c.get('week', '?')})"
+                            )
+                            changes_applied.append(desc)
 
-        @mcp.tool(
-            name="propose_gantt_restructure",
-            description=(
-                "[GANTT] Make a working COPY of the live Gantt and add +1 Planning / +2 Execution "
-                "rows per Area ON THE COPY (-> 2 Planning + 3 Execution), verify formulas + "
-                "conditional-formatting, and return the copy link to review. NEVER touches the live "
-                "board. Gated by GANTT_RESTRUCTURE_ENABLED."
-            ),
-        )
-        async def propose_gantt_restructure() -> dict:
-            try:
-                from processors.gantt_restructure import propose_restructure
-                res = await propose_restructure()
-                mcp_auth.log_call("propose_gantt_restructure", {})
-                return _success(res)
-            except Exception as e:
-                logger.error(f"propose_gantt_restructure error: {e}")
-                mcp_auth.log_call("propose_gantt_restructure", success=False, error=str(e))
-                return _error(str(e))
+                        _sc.log_action(
+                            action="gantt_proposal_executed",
+                            details={
+                                "proposal_id": proposal_id,
+                                "changes_count": len(changes_applied),
+                                "source": "mcp",
+                            },
+                            triggered_by="eyal",
+                        )
 
-        @mcp.tool(
-            name="apply_gantt_restructure_to_live",
-            description=(
-                "[GANTT] CUTOVER: apply the same +1 Planning/+2 Execution inserts to the LIVE Gantt. "
-                "Requires confirm=True AND GANTT_RESTRUCTURE_ENABLED; backs up first, idempotent "
-                "(aborts if already done), re-parses schema. Only after reviewing the working copy."
-            ),
-        )
-        async def apply_gantt_restructure_to_live(working_copy_id: str, confirm: bool = False) -> dict:
-            try:
-                from processors.gantt_restructure import apply_restructure_to_live
-                res = await apply_restructure_to_live(working_copy_id, confirm=confirm)
-                mcp_auth.log_call("apply_gantt_restructure_to_live", {"confirm": confirm})
-                return _success(res)
-            except Exception as e:
-                logger.error(f"apply_gantt_restructure_to_live error: {e}")
-                mcp_auth.log_call("apply_gantt_restructure_to_live", success=False, error=str(e))
-                return _error(str(e))
+                        mcp_auth.log_call("gantt_ops", {"action": "approve_proposal", "proposal_id": proposal_id})
+                        return _success({
+                            "executed": True,
+                            "proposal_id": proposal_id,
+                            "changes_applied": changes_applied,
+                            "snapshot_id": result.get("snapshot_id", ""),
+                            "message": f"Applied {len(changes_applied)} Gantt changes. Snapshot saved for rollback.",
+                        })
+                    except Exception as e:
+                        logger.error(f"gantt_ops approve_proposal error: {e}")
+                        mcp_auth.log_call("gantt_ops", {"action": "approve_proposal"}, success=False, error=str(e))
+                        try:
+                            from services.alerting import send_system_alert, AlertSeverity
+                            await send_system_alert(
+                                AlertSeverity.CRITICAL, "gantt_execution",
+                                f"Gantt proposal execution failed: {e}", error=e,
+                            )
+                        except Exception:
+                            pass
+                        return _error(str(e))
 
-        @mcp.tool(
-            name="propose_gantt_links",
-            description=(
-                "[GANTT] Shadow dry-run: propose lane->topic links (knowledge_links 'gantt_covers') "
-                "by semantic matching, grouped by Area with each lane's content beside its candidate "
-                "topics. No writes — the go/no-go table to review before approving."
-            ),
-        )
-        async def propose_gantt_links() -> dict:
-            try:
-                from processors.gantt_linkage import propose_lane_links
-                res = propose_lane_links(persist_preview=True)
-                mcp_auth.log_call("propose_gantt_links", {})
-                return _success(res)
-            except Exception as e:
-                logger.error(f"propose_gantt_links error: {e}")
-                mcp_auth.log_call("propose_gantt_links", success=False, error=str(e))
-                return _error(str(e))
+                return _error(
+                    f"Unknown action '{action}'. Valid: tag_row, clear_override, refresh, "
+                    "propose_restructure, apply_restructure, propose_links, approve_links, "
+                    "propose_update, approve_proposal"
+                )
 
-        @mcp.tool(
-            name="approve_gantt_link_mapping",
-            description=(
-                "[GANTT] Apply the proposed lane->topic links as knowledge_links 'gantt_covers' "
-                "(DB-only, never the board). Run propose_gantt_links first to review."
-            ),
-        )
-        async def approve_gantt_link_mapping() -> dict:
-            try:
-                from processors.gantt_linkage import build_link_proposals, apply_lane_links
-                res = apply_lane_links(build_link_proposals()["proposals"])
-                mcp_auth.log_call("approve_gantt_link_mapping", {})
-                return _success(res)
             except Exception as e:
-                logger.error(f"approve_gantt_link_mapping error: {e}")
-                mcp_auth.log_call("approve_gantt_link_mapping", success=False, error=str(e))
-                return _error(str(e))
-
-        @mcp.tool(
-            name="get_gantt_nudges",
-            description=(
-                "[GANTT] Compute the current brief<->board divergence nudges (shadow; no writes). "
-                "Returns the ranked nudge list (severity >=2, capped) for review."
-            ),
-        )
-        async def get_gantt_nudges() -> dict:
-            try:
-                from processors.gantt_nudge import compute_gantt_nudges
-                res = compute_gantt_nudges(shadow=True)
-                mcp_auth.log_call("get_gantt_nudges", {})
-                return _success(res)
-            except Exception as e:
-                logger.error(f"get_gantt_nudges error: {e}")
-                mcp_auth.log_call("get_gantt_nudges", success=False, error=str(e))
+                logger.error(f"gantt_ops error: {e}")
+                mcp_auth.log_call("gantt_ops", {"action": action}, success=False, error=str(e))
                 return _error(str(e))
 
         # ============================================================
@@ -1184,18 +1206,23 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 12. get_gantt_status
+        # 12. get_gantt_status (composite read — replaces get_gantt_horizon /
+        #     get_gantt_metrics / get_gantt_nudges)
         # ============================================================
         @mcp.tool(
             name="get_gantt_status",
             description=(
-                "[GANTT] Get current Gantt chart status. Default: current week data. "
-                "Set view='now_next_later' for a prioritized Now/Next/Later view."
+                "[GANTT] Read the Gantt chart. view='status' (default): current week data "
+                "(optional week=N). view='now_next_later': prioritized Now/Next/Later view. "
+                "view='horizon': upcoming milestones/transitions (weeks_ahead). "
+                "view='metrics': velocity, slippage, milestone risk. "
+                "view='nudges': brief<->board divergence nudges (shadow; no writes)."
             ),
         )
         async def get_gantt_status(
+            view: str = "status",
             week: int | None = None,
-            view: str | None = None,
+            weeks_ahead: int = 8,
         ) -> dict:
             try:
                 if view == "now_next_later":
@@ -1203,6 +1230,24 @@ class MCPServer:
                     nnl = await generate_now_next_later()
                     mcp_auth.log_call("get_gantt_status", {"view": "now_next_later"})
                     return _success(nnl, source="gantt_intelligence")
+
+                if view == "horizon":
+                    from services.gantt_manager import gantt_manager
+                    horizon = await gantt_manager.get_gantt_horizon(weeks_ahead=weeks_ahead)
+                    mcp_auth.log_call("get_gantt_status", {"view": "horizon", "weeks_ahead": weeks_ahead})
+                    return _success(horizon, source="google_sheets")
+
+                if view == "metrics":
+                    from processors.gantt_intelligence import compute_gantt_metrics
+                    metrics = await compute_gantt_metrics()
+                    mcp_auth.log_call("get_gantt_status", {"view": "metrics"})
+                    return _success(metrics, source="gantt_intelligence")
+
+                if view == "nudges":
+                    from processors.gantt_nudge import compute_gantt_nudges
+                    res = compute_gantt_nudges(shadow=True)
+                    mcp_auth.log_call("get_gantt_status", {"view": "nudges"})
+                    return _success(res)
 
                 from services.gantt_manager import gantt_manager
 
@@ -1213,28 +1258,6 @@ class MCPServer:
             except Exception as e:
                 logger.error(f"get_gantt_status error: {e}")
                 mcp_auth.log_call("get_gantt_status", success=False, error=str(e))
-                return _error(str(e))
-
-        # ============================================================
-        # 13. get_gantt_horizon
-        # ============================================================
-        @mcp.tool(
-            name="get_gantt_horizon",
-            description="[GANTT] Get upcoming milestones and transitions from the Gantt chart.",
-        )
-        async def get_gantt_horizon(
-            weeks_ahead: int = 8,
-        ) -> dict:
-            try:
-                from services.gantt_manager import gantt_manager
-
-                horizon = await gantt_manager.get_gantt_horizon(weeks_ahead=weeks_ahead)
-                mcp_auth.log_call("get_gantt_horizon", {"weeks_ahead": weeks_ahead})
-                return _success(horizon, source="google_sheets")
-
-            except Exception as e:
-                logger.error(f"get_gantt_horizon error: {e}")
-                mcp_auth.log_call("get_gantt_horizon", success=False, error=str(e))
                 return _error(str(e))
 
         # ============================================================
@@ -1999,28 +2022,8 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
+        # get_gantt_metrics folded into get_gantt_status(view="metrics")
         # ============================================================
-        # 25. get_gantt_metrics (read) — Phase 9C
-        # ============================================================
-        @mcp.tool(
-            name="get_gantt_metrics",
-            description=(
-                "[GANTT] Get computed Gantt metrics: velocity (cells completed vs active), "
-                "slippage ratio (blocked/total), and milestone risk scores."
-            ),
-        )
-        async def get_gantt_metrics() -> dict:
-            try:
-                from processors.gantt_intelligence import compute_gantt_metrics
-
-                metrics = await compute_gantt_metrics()
-                mcp_auth.log_call("get_gantt_metrics")
-                return _success(metrics, source="gantt_intelligence")
-
-            except Exception as e:
-                logger.error(f"get_gantt_metrics error: {e}")
-                mcp_auth.log_call("get_gantt_metrics", success=False, error=str(e))
-                return _error(str(e))
 
         # ============================================================
         # 26. update_task (write) — Phase 8a
@@ -2391,161 +2394,9 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
-        # 25. propose_gantt_update (write)
+        # propose_gantt_update + approve_gantt_proposal folded into
+        # gantt_ops(action="propose_update" | "approve_proposal")
         # ============================================================
-        @mcp.tool(
-            name="propose_gantt_update",
-            description=(
-                "[GANTT] Propose changes to the operational Gantt chart. Creates a proposal "
-                "for Eyal's approval — changes are NOT applied until approved via "
-                "approve_gantt_proposal(). "
-                "Changes schema: [{section, subsection, week (int), value, reason?}]. "
-                "OWNER PREFIX RULE: Every cell value MUST include an owner prefix "
-                "like [R], [E], [P], [Y], [E/R], [ALL], [TBD]. "
-                "Example: [{\"section\": \"Product & Technology\", "
-                "\"subsection\": \"Execution\", \"week\": 14, "
-                "\"value\": \"[R] Completed\", \"reason\": \"Per founders review\"}]"
-            ),
-        )
-        async def propose_gantt_update(
-            changes: list[dict],
-            reason: str = "",
-        ) -> dict:
-            try:
-                from services.gantt_manager import gantt_manager
-                from services.supabase_client import supabase_client as _sc
-
-                # Add reason to each change if provided at top level
-                if reason:
-                    for c in changes:
-                        if not c.get("reason"):
-                            c["reason"] = reason
-
-                result = await gantt_manager.propose_gantt_update(
-                    changes=changes,
-                    source="mcp",
-                )
-
-                status = result.get("status", "")
-
-                if status == "rejected":
-                    mcp_auth.log_call("propose_gantt_update", {"status": "rejected"})
-                    return _error(
-                        f"Proposal rejected: {result.get('errors', [])}"
-                    )
-
-                if status == "needs_confirmation":
-                    # Conflicts — return details for Claude to explain
-                    conflicts = result.get("conflicts", [])
-                    conflict_details = []
-                    for c in conflicts:
-                        conflict_details.append(
-                            f"{c.get('section')} → {c.get('subsection')} (W{c.get('week')}): "
-                            f"current='{c.get('existing_content')}', "
-                            f"proposed='{c.get('proposed_content')}'"
-                        )
-                    mcp_auth.log_call("propose_gantt_update", {"status": "needs_confirmation"})
-                    return _success({
-                        "status": "needs_confirmation",
-                        "conflicts": conflict_details,
-                        "message": (
-                            "Some cells already have content. Present each conflict "
-                            "to Eyal and ask whether to replace or append."
-                        ),
-                    })
-
-                # Success — proposal created
-                proposal_id = result.get("proposal_id", "")
-
-                _sc.log_action(
-                    action="gantt_proposal_created",
-                    details={
-                        "proposal_id": proposal_id,
-                        "changes_count": len(changes),
-                        "source": "mcp",
-                    },
-                    triggered_by="eyal",
-                )
-
-                mcp_auth.log_call("propose_gantt_update", {"proposal_id": proposal_id})
-                return _success({
-                    "status": "pending",
-                    "proposal_id": proposal_id,
-                    "changes_count": len(result.get("changes", [])),
-                    "message": (
-                        "Proposal created. Present the changes to Eyal and "
-                        "call approve_gantt_proposal(proposal_id) when approved."
-                    ),
-                })
-
-            except Exception as e:
-                logger.error(f"propose_gantt_update error: {e}")
-                mcp_auth.log_call("propose_gantt_update", success=False, error=str(e))
-                return _error(str(e))
-
-        # ============================================================
-        # 26. approve_gantt_proposal (write)
-        # ============================================================
-        @mcp.tool(
-            name="approve_gantt_proposal",
-            description=(
-                "[GANTT] Execute an approved Gantt proposal. Creates a backup snapshot first, "
-                "then applies changes to the Gantt chart. Call only after Eyal "
-                "explicitly approves the proposal from propose_gantt_update()."
-            ),
-        )
-        async def approve_gantt_proposal(proposal_id: str) -> dict:
-            try:
-                from services.gantt_manager import gantt_manager
-                from services.supabase_client import supabase_client as _sc
-
-                result = await gantt_manager.execute_approved_proposal(proposal_id)
-
-                status = result.get("status", "")
-                if status == "error":
-                    return _error(result.get("error", "Execution failed"))
-
-                # Build human-readable change descriptions
-                changes_applied = []
-                for c in result.get("changes_applied", result.get("changes", [])):
-                    desc = (
-                        f"{c.get('section', '')} → {c.get('subsection', '')}: "
-                        f"'{c.get('old_value', '')}' → '{c.get('new_value', '')}' "
-                        f"(W{c.get('week', '?')})"
-                    )
-                    changes_applied.append(desc)
-
-                _sc.log_action(
-                    action="gantt_proposal_executed",
-                    details={
-                        "proposal_id": proposal_id,
-                        "changes_count": len(changes_applied),
-                        "source": "mcp",
-                    },
-                    triggered_by="eyal",
-                )
-
-                mcp_auth.log_call("approve_gantt_proposal", {"proposal_id": proposal_id})
-                return _success({
-                    "executed": True,
-                    "proposal_id": proposal_id,
-                    "changes_applied": changes_applied,
-                    "snapshot_id": result.get("snapshot_id", ""),
-                    "message": f"Applied {len(changes_applied)} Gantt changes. Snapshot saved for rollback.",
-                })
-
-            except Exception as e:
-                logger.error(f"approve_gantt_proposal error: {e}")
-                mcp_auth.log_call("approve_gantt_proposal", success=False, error=str(e))
-                try:
-                    from services.alerting import send_system_alert, AlertSeverity
-                    await send_system_alert(
-                        AlertSeverity.CRITICAL, "gantt_execution",
-                        f"Gantt proposal execution failed: {e}", error=e,
-                    )
-                except Exception:
-                    pass
-                return _error(str(e))
 
         # ============================================================
         # 34. list_canonical_projects (read)

@@ -397,7 +397,7 @@ class TestGetGanttStatus:
 
 
 # =============================================================================
-# get_gantt_horizon
+# get_gantt_status(view="horizon") — folds in former get_gantt_horizon
 # =============================================================================
 
 
@@ -407,7 +407,7 @@ class TestGetGanttHorizon:
         horizon = {"milestones": [{"week": 14, "event": "MVP release"}]}
         with patch("services.gantt_manager.gantt_manager") as mock_gantt:
             mock_gantt.get_gantt_horizon = AsyncMock(return_value=horizon)
-            result = await call_tool(server, "get_gantt_horizon", {"weeks_ahead": 4})
+            result = await call_tool(server, "get_gantt_status", {"view": "horizon", "weeks_ahead": 4})
 
         assert result["status"] == "success"
         mock_gantt.get_gantt_horizon.assert_called_once_with(weeks_ahead=4)
