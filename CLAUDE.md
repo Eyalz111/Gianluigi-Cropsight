@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Gianluigi — CropSight's AI operations assistant ("AI Office Manager") for a 4-person AgTech founding team. Ingests meeting transcripts (Tactiq → Drive), extracts tasks/decisions/open questions, threads them across meetings, and serves the CEO (Eyal) via Telegram and Claude.ai MCP (60 tools).
+Gianluigi — CropSight's AI operations assistant ("AI Office Manager") for a 4-person AgTech founding team. Ingests meeting transcripts (Tactiq → Drive), extracts tasks/decisions/open questions, threads them across meetings, and serves the CEO (Eyal) via Telegram and Claude.ai MCP (45 tools).
 
 CropSight: Israeli AgTech startup, ML crop-yield forecasting, pre-revenue. Team: Eyal (CEO), Roye (CTO), Paolo (BD), Yoram (Advisor).
 
@@ -123,7 +123,7 @@ Calendar is read using **Eyal's OAuth refresh token** (`EYAL_CALENDAR_REFRESH_TO
 3. `config/team.py` — team emails, filter keywords, blocklists
 4. `core/system_prompt.py` + `config/prompts/system.yaml` — Gianluigi's voice + guardrails
 5. `models/schemas.py` — all Pydantic data models
-6. `services/mcp_server.py` — MCP server with 60 tools (read + write)
+6. `services/mcp_server.py` — MCP server with 45 tools (read + write)
 7. `guardrails/mcp_auth.py` + `guardrails/approval_flow.py` — auth and the approval/reject/cascade flow
 8. `processors/transcript_processor.py` + `processors/cross_reference.py` — extraction + dedup
 9. `processors/meeting_continuity.py` + `processors/topic_threading.py` — cross-meeting memory
