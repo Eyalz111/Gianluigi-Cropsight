@@ -565,6 +565,38 @@ class Settings(BaseSettings):
         default=2, description="IST hour for the pre-nightly reconcile (must be < KNOWLEDGE_NIGHTLY_HOUR so the DB is correct before nightly reads tasks)"
     )
 
+    # ==========================================================================
+    # Gantt redesign (v3 chunk 2) — curated knowledge-view of the Gantt.
+    # ==========================================================================
+    GANTT_RECONCILE_ENABLED: bool = Field(
+        default=False, description="Enable the pre-weekly-digest Gantt status rollup + timeframe reconcile"
+    )
+    GANTT_SHADOW_MODE: bool = Field(
+        default=True, description="Gantt rollup/reconcile computes + logs but does NOT write the sheet/snapshot. Keep True until cutover (duplicated sheet first)."
+    )
+    GANTT_PREDIGEST_HOUR: int = Field(
+        default=13, description="IST hour to refresh the Gantt (must be < WEEKLY_DIGEST_HOUR so the digest reads a fresh Gantt)"
+    )
+    GANTT_TAG_COLUMN: str = Field(
+        default="DZ", description="Hidden column holding each Gantt row's topic UUID (must sit past the last week column on every sheet)"
+    )
+    GANTT_CUTOVER_PREVIEW: bool = Field(
+        default=True, description="During cutover, DM Eyal a preview of the pre-digest Gantt write (reply STOP to cancel); drop after 3 clean cycles"
+    )
+    # v3 revised (improve EXISTING Gantt): restructure (add rows), linkage, nudges, high-bar pops
+    GANTT_RESTRUCTURE_ENABLED: bool = Field(
+        default=False, description="Enable the copy+add-rows engine (+1 Planning/+2 Execution per area). Cutover to live also requires confirm=True. Copy-first, never auto."
+    )
+    GANTT_LINKAGE_ENABLED: bool = Field(
+        default=False, description="Enable per-lane->topics linkage proposals (knowledge_links 'gantt_covers'); proposal-only, DB-only"
+    )
+    GANTT_NUDGE_ENABLED: bool = Field(
+        default=False, description="Surface the weekly 'Gantt updates' nudges (brief<->board divergence) in the weekly review"
+    )
+    GANTT_ALERT_ENABLED: bool = Field(
+        default=False, description="Enable the rare high-bar Telegram pop for critical+blocked+board-active Gantt divergences (cooldown 1/topic/week)"
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""

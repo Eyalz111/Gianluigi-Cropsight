@@ -739,3 +739,104 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         pass
     logger.info(f"[reconcile] applied: {summary}")
     return summary
+
+
+# =============================================================================
+# Gantt timeframe reconcile (v3 chunk 2) — read-back of Eyal's bar edits.
+# =============================================================================
+# Reads each tagged topic-lane's active span off the grid ("filled" = non-empty
+# text AND a known status color) and pulls Eyal's timeframe edits into gantt_rows
+# (manual-wins). Multi-segment (gapped) lanes are FLAGGED for splitting, not
+# guessed into one span. The system never repaints his bars — read-back only.
+
+async def reconcile_gantt(dry_run: bool = False, shadow: bool | None = None) -> dict:
+    from guardrails.gantt_guard import _load_schema, _load_schema_metadata
+    from services.gantt_manager import _get_color_map, _sheets_color_to_hex
+    from services.gantt_rows import read_row_tags
+    from services.gantt_weeks import week_to_column
+    from services.google_sheets import sheets_service
+
+    if shadow is None:
+        shadow = getattr(settings, "GANTT_SHADOW_MODE", True)
+    write_allowed = not (dry_run or shadow)
+
+    color_vals = {_normalize(v) for v in _get_color_map().values() if v}
+    meta = _load_schema_metadata()
+    week_offset = meta.get("week_offset", 9)
+    first_col = meta.get("first_week_col", "E")
+    max_week = meta.get("max_week", 104)
+    last_col = week_to_column(max_week, week_offset, first_col)
+
+    sheet_names = sorted({
+        r["sheet_name"] for r in _load_schema()
+        if r.get("sheet_name") and not r["sheet_name"].startswith("_")
+    })
+    db_rows = {(r["sheet_name"], r["topic_id"]): r
+               for r in supabase_client.get_gantt_rows() if r.get("topic_id")}
+    snaps = supabase_client.get_gantt_row_snapshots()
+
+    summary = {"sheets": [], "pulled": 0, "flagged_multigap": 0, "untagged_in_db": 0,
+               "shadow": shadow, "dry_run": dry_run}
+
+    for sheet in sheet_names:
+        try:
+            tags = await read_row_tags(sheet)
+        except Exception as e:
+            logger.warning(f"[reconcile_gantt] read tags {sheet} failed: {e}")
+            continue
+        if not tags:
+            continue
+        try:
+            resp = sheets_service.service.spreadsheets().get(
+                spreadsheetId=settings.GANTT_SHEET_ID,
+                ranges=[f"'{sheet}'!{first_col}1:{last_col}"],
+                includeGridData=True,
+            ).execute()
+            rowdata = resp["sheets"][0]["data"][0].get("rowData", [])
+        except Exception as e:
+            logger.warning(f"[reconcile_gantt] read grid {sheet} failed: {e}")
+            continue
+
+        for row_num, topic_id in tags.items():
+            cells = rowdata[row_num - 1].get("values", []) if (row_num - 1) < len(rowdata) else []
+            filled = []
+            for ci, c in enumerate(cells):
+                txt = (c.get("formattedValue", "") or "").strip()
+                bg = c.get("effectiveFormat", {}).get("backgroundColor")
+                hexv = _sheets_color_to_hex(bg) if bg else ""
+                if txt and hexv and _normalize(hexv) in color_vals:
+                    filled.append(week_offset + ci)
+            if not filled:
+                continue
+            gr = db_rows.get((sheet, topic_id))
+            if not gr:
+                summary["untagged_in_db"] += 1
+                continue
+            ws, we = min(filled), max(filled)
+            if set(range(ws, we + 1)) - set(filled):
+                summary["flagged_multigap"] += 1  # multi-segment lane — don't guess; flag to split
+                continue
+            gid = gr["id"]
+            snap = snaps.get(gid) or {}
+            if snap.get("week_start") == ws and snap.get("week_end") == we:
+                continue  # unchanged
+            summary["pulled"] += 1
+            if write_allowed:
+                try:
+                    supabase_client.client.table("gantt_rows").update(
+                        {"week_start": ws, "week_end": we}
+                    ).eq("id", gid).execute()
+                    supabase_client.mark_gantt_field_manual(gid, "timeframe", "sheet_edit")
+                    supabase_client.upsert_gantt_snapshot(gid, row_num, ws, we)
+                except Exception as e:
+                    logger.warning(f"[reconcile_gantt] pull {gid} failed: {e}")
+        summary["sheets"].append(sheet)
+
+    action = ("shadow_gantt_reconcile" if shadow
+              else "gantt_reconcile_dryrun" if dry_run else "gantt_reconcile_applied")
+    try:
+        supabase_client.log_action(action, details=summary, triggered_by="auto")
+    except Exception:
+        pass
+    logger.info(f"[reconcile_gantt][{action}] {summary}")
+    return summary

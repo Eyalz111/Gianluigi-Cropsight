@@ -732,6 +732,217 @@ class MCPServer:
                 return _error(str(e))
 
         # ============================================================
+        # 7e. Gantt curated knowledge-view (v3 chunk 2)
+        # ============================================================
+        @mcp.tool(
+            name="tag_gantt_row",
+            description=(
+                "[GANTT] Tag a Gantt row to a topic (writes the hidden topic-id tag + "
+                "upserts the gantt_rows record). Use to map a curated lane to a topic."
+            ),
+        )
+        async def tag_gantt_row(sheet_name: str, row: int, topic_id: str, area_id: str = "", owner: str = "") -> dict:
+            try:
+                from services.gantt_rows import write_row_tag
+                from services.supabase_client import supabase_client
+                ok = await write_row_tag(sheet_name, row, topic_id)
+                if ok:
+                    supabase_client.upsert_gantt_row({
+                        "sheet_name": sheet_name, "topic_id": topic_id,
+                        "area_id": area_id or None, "owner": owner or None, "display_order": row,
+                    })
+                mcp_auth.log_call("tag_gantt_row", {"sheet": sheet_name, "row": row, "topic_id": topic_id})
+                return _success({"tagged": ok, "sheet": sheet_name, "row": row, "topic_id": topic_id})
+            except Exception as e:
+                logger.error(f"tag_gantt_row error: {e}")
+                mcp_auth.log_call("tag_gantt_row", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="list_gantt_tag_proposals",
+            description="[GANTT] List pending Gantt row->topic tagging proposals for review.",
+        )
+        async def list_gantt_tag_proposals() -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                rows = supabase_client.get_pending_approvals_by_status("pending") or []
+                props = [{"proposal_id": r.get("approval_id"), **(r.get("content") or {})}
+                         for r in rows if r.get("content_type") == "gantt_tag_mapping"]
+                mcp_auth.log_call("list_gantt_tag_proposals", {"count": len(props)})
+                return _success(props)
+            except Exception as e:
+                logger.error(f"list_gantt_tag_proposals error: {e}")
+                mcp_auth.log_call("list_gantt_tag_proposals", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="approve_gantt_tag_mapping",
+            description=(
+                "[GANTT] Apply an approved (optionally edited) row->topic tag mapping. "
+                "Pass the proposal_id from list_gantt_tag_proposals; optionally pass an "
+                "edited candidates list to override."
+            ),
+        )
+        async def approve_gantt_tag_mapping(proposal_id: str, candidates: list | None = None) -> dict:
+            try:
+                from processors.gantt_tagging import apply_row_tags
+                from services.supabase_client import supabase_client
+                pending = supabase_client.get_pending_approval(proposal_id)
+                if not pending:
+                    return _error(f"Proposal {proposal_id} not found")
+                content = pending.get("content") or {}
+                sheet_name = content.get("sheet_name")
+                mapping = candidates if candidates is not None else content.get("candidates", [])
+                result = await apply_row_tags(sheet_name, mapping)
+                supabase_client.delete_pending_approval(proposal_id)
+                mcp_auth.log_call("approve_gantt_tag_mapping", {"proposal_id": proposal_id, **result})
+                return _success({"sheet": sheet_name, **result})
+            except Exception as e:
+                logger.error(f"approve_gantt_tag_mapping error: {e}")
+                mcp_auth.log_call("approve_gantt_tag_mapping", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="refresh_gantt",
+            description=(
+                "[GANTT] On-demand Gantt refresh: read-back (board -> knowledge layer, DB-only, "
+                "manual-wins) + brief<->board nudges. NEVER writes the board. apply=False = shadow "
+                "preview; apply=True writes only to the knowledge layer (gantt_rows) + nudges, "
+                "honoring GANTT_SHADOW_MODE."
+            ),
+        )
+        async def refresh_gantt(apply: bool = False) -> dict:
+            try:
+                from processors.gantt_readback import reconcile_gantt_lanes
+                from processors.gantt_nudge import compute_gantt_nudges
+                shadow = not apply
+                recon = await reconcile_gantt_lanes(shadow=shadow)
+                nudges = compute_gantt_nudges(shadow=shadow)
+                mcp_auth.log_call("refresh_gantt", {"apply": apply})
+                return _success({"status": "applied" if apply else "preview",
+                                 "read_back": recon, "nudges": nudges})
+            except Exception as e:
+                logger.error(f"refresh_gantt error: {e}")
+                mcp_auth.log_call("refresh_gantt", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="clear_gantt_override",
+            description=(
+                "[GANTT] Clear a sticky override on a Gantt row (field: status | timeframe) "
+                "so rollup/reconcile can update it again. Identify the row by sheet + topic_id."
+            ),
+        )
+        async def clear_gantt_override(sheet_name: str, topic_id: str, field: str) -> dict:
+            try:
+                from services.supabase_client import supabase_client
+                rows = supabase_client.get_gantt_rows(sheet_name)
+                gid = next((r["id"] for r in rows if r.get("topic_id") == topic_id), None)
+                if not gid:
+                    return _error("Gantt row not found for that sheet + topic")
+                ok = supabase_client.clear_gantt_manual_flag(gid, field)
+                mcp_auth.log_call("clear_gantt_override", {"sheet": sheet_name, "topic_id": topic_id, "field": field})
+                return _success({"cleared": ok, "field": field})
+            except Exception as e:
+                logger.error(f"clear_gantt_override error: {e}")
+                mcp_auth.log_call("clear_gantt_override", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="propose_gantt_restructure",
+            description=(
+                "[GANTT] Make a working COPY of the live Gantt and add +1 Planning / +2 Execution "
+                "rows per Area ON THE COPY (-> 2 Planning + 3 Execution), verify formulas + "
+                "conditional-formatting, and return the copy link to review. NEVER touches the live "
+                "board. Gated by GANTT_RESTRUCTURE_ENABLED."
+            ),
+        )
+        async def propose_gantt_restructure() -> dict:
+            try:
+                from processors.gantt_restructure import propose_restructure
+                res = await propose_restructure()
+                mcp_auth.log_call("propose_gantt_restructure", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"propose_gantt_restructure error: {e}")
+                mcp_auth.log_call("propose_gantt_restructure", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="apply_gantt_restructure_to_live",
+            description=(
+                "[GANTT] CUTOVER: apply the same +1 Planning/+2 Execution inserts to the LIVE Gantt. "
+                "Requires confirm=True AND GANTT_RESTRUCTURE_ENABLED; backs up first, idempotent "
+                "(aborts if already done), re-parses schema. Only after reviewing the working copy."
+            ),
+        )
+        async def apply_gantt_restructure_to_live(working_copy_id: str, confirm: bool = False) -> dict:
+            try:
+                from processors.gantt_restructure import apply_restructure_to_live
+                res = await apply_restructure_to_live(working_copy_id, confirm=confirm)
+                mcp_auth.log_call("apply_gantt_restructure_to_live", {"confirm": confirm})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"apply_gantt_restructure_to_live error: {e}")
+                mcp_auth.log_call("apply_gantt_restructure_to_live", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="propose_gantt_links",
+            description=(
+                "[GANTT] Shadow dry-run: propose lane->topic links (knowledge_links 'gantt_covers') "
+                "by semantic matching, grouped by Area with each lane's content beside its candidate "
+                "topics. No writes — the go/no-go table to review before approving."
+            ),
+        )
+        async def propose_gantt_links() -> dict:
+            try:
+                from processors.gantt_linkage import propose_lane_links
+                res = propose_lane_links(persist_preview=True)
+                mcp_auth.log_call("propose_gantt_links", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"propose_gantt_links error: {e}")
+                mcp_auth.log_call("propose_gantt_links", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="approve_gantt_link_mapping",
+            description=(
+                "[GANTT] Apply the proposed lane->topic links as knowledge_links 'gantt_covers' "
+                "(DB-only, never the board). Run propose_gantt_links first to review."
+            ),
+        )
+        async def approve_gantt_link_mapping() -> dict:
+            try:
+                from processors.gantt_linkage import build_link_proposals, apply_lane_links
+                res = apply_lane_links(build_link_proposals()["proposals"])
+                mcp_auth.log_call("approve_gantt_link_mapping", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"approve_gantt_link_mapping error: {e}")
+                mcp_auth.log_call("approve_gantt_link_mapping", success=False, error=str(e))
+                return _error(str(e))
+
+        @mcp.tool(
+            name="get_gantt_nudges",
+            description=(
+                "[GANTT] Compute the current brief<->board divergence nudges (shadow; no writes). "
+                "Returns the ranked nudge list (severity >=2, capped) for review."
+            ),
+        )
+        async def get_gantt_nudges() -> dict:
+            try:
+                from processors.gantt_nudge import compute_gantt_nudges
+                res = compute_gantt_nudges(shadow=True)
+                mcp_auth.log_call("get_gantt_nudges", {})
+                return _success(res)
+            except Exception as e:
+                logger.error(f"get_gantt_nudges error: {e}")
+                mcp_auth.log_call("get_gantt_nudges", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
         # 8. deal_ops (composite — replaces deprecated get_commitments)
         # ============================================================
         @mcp.tool(

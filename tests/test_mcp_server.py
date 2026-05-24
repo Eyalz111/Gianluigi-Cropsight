@@ -149,10 +149,22 @@ class TestServerBuild:
         # v3 PR5: task-update proposals + manual-flag control
         expected_tools.extend(["get_task_proposals", "approve_task_proposal", "clear_manual_flag"])
 
+        # v3 chunk 2: Gantt curated knowledge-view
+        expected_tools.extend([
+            "tag_gantt_row", "list_gantt_tag_proposals", "approve_gantt_tag_mapping",
+            "refresh_gantt", "clear_gantt_override",
+        ])
+
+        # v3 chunk 2 REVISED: improve existing Gantt — restructure + linkage + nudges
+        expected_tools.extend([
+            "propose_gantt_restructure", "apply_gantt_restructure_to_live",
+            "propose_gantt_links", "approve_gantt_link_mapping", "get_gantt_nudges",
+        ])
+
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 50
+        assert len(tool_names) == 60
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

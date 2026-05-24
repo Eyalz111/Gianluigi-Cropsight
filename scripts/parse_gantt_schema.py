@@ -299,7 +299,9 @@ def _parse_meeting_cadence(spreadsheet_id: str) -> list[dict]:
     return meetings
 
 
-async def parse_gantt_schema() -> dict:
+async def parse_gantt_schema(spreadsheet_id: str | None = None,
+                             sheet_name: str | None = None,
+                             persist: bool = True) -> dict:
     """
     Parse the live Gantt spreadsheet and populate the gantt_schema table.
 
@@ -314,11 +316,11 @@ async def parse_gantt_schema() -> dict:
     Returns:
         Dict with parsing results: rows_created, sections_found, etc.
     """
-    spreadsheet_id = settings.GANTT_SHEET_ID
+    spreadsheet_id = spreadsheet_id or settings.GANTT_SHEET_ID
     if not spreadsheet_id:
         raise ValueError("GANTT_SHEET_ID not configured in settings")
 
-    sheet_name = settings.GANTT_MAIN_TAB
+    sheet_name = sheet_name or settings.GANTT_MAIN_TAB
     header_rows = settings.GANTT_HEADER_ROWS
 
     # Step 1: Read Config tab
@@ -482,6 +484,13 @@ async def parse_gantt_schema() -> dict:
         "protected": True,
         "notes": json.dumps(metadata),
     })
+
+    # Non-persisting mode (e.g. parsing a working COPY): return parsed structure,
+    # do NOT touch the live gantt_schema.
+    if not persist:
+        return {"persisted": False, "schema_rows": schema_rows,
+                "sections_found": sections_found, "max_week": max_week,
+                "status_colors": status_colors}
 
     # Step 6: Clear old schema and insert new rows
     try:

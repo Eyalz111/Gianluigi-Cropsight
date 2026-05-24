@@ -1,12 +1,14 @@
 """
-Tasks reconcile scheduler (v3 outputs re-architecture).
+Reconcile scheduler (v3 outputs re-architecture).
 
-Runs the Sheet<->DB reconcile twice daily — midday and pre-nightly (the latter
-strictly before the knowledge nightly, so the DB is correct before nightly reads
-tasks). On-demand reconcile is via the `/sync` MCP tool. Honors
-RECONCILE_SHADOW_MODE (the engine writes nothing while shadow is on).
+Two cadences, each independently flag-gated:
+- TASKS (RECONCILE_ENABLED): midday + pre-nightly Sheet<->DB reconcile.
+- GANTT (GANTT_RECONCILE_ENABLED): a weekly pre-digest pass (status rollup +
+  timeframe read-back) just before the weekly digest, so the digest reads a
+  fresh Gantt.
 
-Mirrors the class-based async pattern of the knowledge schedulers.
+On-demand reconcile is via the MCP tools. Honors the *_SHADOW_MODE flags (the
+engines write nothing while shadow is on).
 """
 
 import asyncio
@@ -19,14 +21,15 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 _ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+_GANTT_TIMEOUT_S = 1800  # hard 30-min cap on the pre-digest Gantt pass
 
 
 class ReconcileScheduler:
-    """Twice-daily Tasks reconcile (midday + pre-nightly)."""
+    """Tasks reconcile (midday + pre-nightly) + weekly pre-digest Gantt pass."""
 
     def __init__(self):
         self._running = False
-        self._last_slot: str | None = None  # "YYYY-MM-DD:midday" | ":prenightly"
+        self._last_slot: str | None = None
 
     async def start(self) -> None:
         if self._running:
@@ -34,17 +37,20 @@ class ReconcileScheduler:
             return
         self._running = True
         logger.info(
-            f"Reconcile scheduler started "
-            f"(midday={settings.RECONCILE_MIDDAY_HOUR}, "
-            f"pre-nightly={settings.RECONCILE_PRENIGHTLY_HOUR} IST)"
+            f"Reconcile scheduler started (tasks={settings.RECONCILE_ENABLED} "
+            f"midday={settings.RECONCILE_MIDDAY_HOUR}/pre-nightly={settings.RECONCILE_PRENIGHTLY_HOUR}; "
+            f"gantt={settings.GANTT_RECONCILE_ENABLED} pre-digest={settings.GANTT_PREDIGEST_HOUR} "
+            f"day={settings.WEEKLY_DIGEST_DAY} IST)"
         )
         while self._running:
             try:
                 slot = await self._sleep_until_next()
-                if not self._running:
-                    break
+                if not self._running or slot is None:
+                    if slot is None:
+                        await asyncio.sleep(3600)  # nothing enabled; idle
+                    continue
                 if slot == self._last_slot:
-                    await asyncio.sleep(3600)  # already ran this slot; avoid tight loop
+                    await asyncio.sleep(3600)
                     continue
                 await self._run(slot)
                 self._last_slot = slot
@@ -58,46 +64,75 @@ class ReconcileScheduler:
         self._running = False
         logger.info("Reconcile scheduler stopped")
 
-    async def _sleep_until_next(self) -> str:
+    def _next_daily(self, now: datetime, hour: int) -> datetime:
+        trig = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if now >= trig:
+            trig += timedelta(days=1)
+        return trig
+
+    def _next_weekly(self, now: datetime, weekday: int, hour: int) -> datetime:
+        # weekday: Mon=0 .. Sun=6 (Python). Settings WEEKLY_DIGEST_DAY uses the same.
+        days_ahead = (weekday - now.weekday()) % 7
+        trig = (now + timedelta(days=days_ahead)).replace(hour=hour, minute=0, second=0, microsecond=0)
+        if trig <= now:
+            trig += timedelta(days=7)
+        return trig
+
+    async def _sleep_until_next(self) -> str | None:
         now = datetime.now(_ISRAEL_TZ)
         candidates = []
-        for hour, name in (
-            (settings.RECONCILE_MIDDAY_HOUR, "midday"),
-            (settings.RECONCILE_PRENIGHTLY_HOUR, "prenightly"),
-        ):
-            trig = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if now >= trig:
-                trig += timedelta(days=1)
-            candidates.append((trig, name))
+        if settings.RECONCILE_ENABLED:
+            candidates.append((self._next_daily(now, settings.RECONCILE_MIDDAY_HOUR), "midday"))
+            candidates.append((self._next_daily(now, settings.RECONCILE_PRENIGHTLY_HOUR), "prenightly"))
+        if settings.GANTT_RECONCILE_ENABLED:
+            candidates.append((
+                self._next_weekly(now, settings.WEEKLY_DIGEST_DAY, settings.GANTT_PREDIGEST_HOUR),
+                "predigest",
+            ))
+        if not candidates:
+            return None
         trig, name = min(candidates, key=lambda c: c[0])
         sleep_s = max(0, (trig - now).total_seconds())
-        logger.info(
-            f"Next reconcile ({name}): {trig.strftime('%a %Y-%m-%d %H:%M IST')} "
-            f"({sleep_s / 3600:.1f}h from now)"
-        )
+        logger.info(f"Next reconcile ({name}): {trig.strftime('%a %Y-%m-%d %H:%M IST')} ({sleep_s/3600:.1f}h)")
         await asyncio.sleep(sleep_s)
         return f"{trig.strftime('%Y-%m-%d')}:{name}"
 
     async def _run(self, slot: str) -> None:
+        name = slot.split(":", 1)[1]
         logger.info(f"Reconcile triggering ({slot})")
+        from services.supabase_client import supabase_client
         try:
-            from processors.sheets_sync import reconcile_tasks
-
-            summary = await reconcile_tasks()
-
-            from services.supabase_client import supabase_client
-            supabase_client.log_action(
-                action="scheduler_heartbeat",
-                details={"scheduler": "reconcile", "slot": slot, **summary},
-                triggered_by="auto",
-            )
+            if name == "predigest":
+                await self._run_gantt()
+                supabase_client.log_action(
+                    "scheduler_heartbeat",
+                    details={"scheduler": "gantt_reconcile", "slot": slot},
+                    triggered_by="auto",
+                )
+            else:
+                from processors.sheets_sync import reconcile_tasks
+                summary = await reconcile_tasks()
+                supabase_client.log_action(
+                    "scheduler_heartbeat",
+                    details={"scheduler": "reconcile", "slot": slot, **summary},
+                    triggered_by="auto",
+                )
         except Exception as e:
-            logger.error(f"Reconcile failed: {e}")
+            logger.error(f"Reconcile failed ({slot}): {e}")
             try:
                 from core.health_monitor import check_and_alert
                 await check_and_alert("reconcile", e)
             except Exception:
                 pass
+
+    async def _run_gantt(self) -> None:
+        """Pre-digest Gantt pass: read-back (board -> knowledge, DB-only) + nudges. Never paints the board."""
+        async def _work():
+            from processors.gantt_readback import reconcile_gantt_lanes
+            from processors.gantt_nudge import compute_gantt_nudges
+            await reconcile_gantt_lanes()      # board -> knowledge (DB-only, manual-wins)
+            compute_gantt_nudges()             # brief<->board divergence -> nudges
+        await asyncio.wait_for(_work(), timeout=_GANTT_TIMEOUT_S)
 
 
 # Singleton instance
