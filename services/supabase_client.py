@@ -2443,6 +2443,27 @@ class SupabaseClient:
         )
         return result.data
 
+    def get_pending_approvals_for_reminders(self) -> list[dict]:
+        """
+        Get ALL pending approvals (no limit), newest first.
+
+        Used on startup to reconstruct approval-reminder timers — unlike
+        get_pending_approvals_by_status (capped at 5 for the free-text approve
+        lookup), reconstruction must see every pending item to reschedule its
+        remaining reminders.
+
+        Returns:
+            List of pending approval records.
+        """
+        result = (
+            self.client.table("pending_approvals")
+            .select("*")
+            .eq("status", "pending")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return result.data
+
     def expire_pending_approvals(self) -> list[dict]:
         """
         Expire pending approvals whose expires_at is in the past.
@@ -3340,6 +3361,23 @@ class SupabaseClient:
             .execute()
         )
         return bool(result.data)
+
+    def get_recent_scanned_email_ids(self, limit: int = 200) -> list[str]:
+        """
+        Recent scanned email message IDs (newest first).
+
+        Used on startup to rebuild the email watcher's in-memory processed-IDs
+        set, so a Cloud Run cycle doesn't re-route recently handled mail in the
+        narrow window before Gmail's read-status (the primary dedup) catches it.
+        """
+        result = (
+            self.client.table("email_scans")
+            .select("email_id")
+            .order("date", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return [r["email_id"] for r in (result.data or []) if r.get("email_id")]
 
     # =========================================================================
     # v1.0 — MCP Sessions

@@ -6,15 +6,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 @pytest.fixture(autouse=True)
 def mock_settings():
-    mock = MagicMock()
-    mock.EMAIL_DAILY_SCAN_ENABLED = True
-    mock.MORNING_BRIEF_ENABLED = True
-    mock.EYAL_EMAIL = "eyal@cropsight.io"
-    mock.ROYE_EMAIL = "roye@cropsight.io"
-    mock.PAOLO_EMAIL = "paolo@cropsight.io"
-    mock.YORAM_EMAIL = "yoram@cropsight.io"
-    with patch("config.settings.settings", mock):
-        yield mock
+    # Patch ATTRIBUTES on the real settings object — do NOT replace the object.
+    # Replacing config.settings.settings wholesale leaks: lazy first-time imports
+    # during the patch (compile_morning_brief does local imports) bind their own
+    # `settings` name to the mock and keep it after teardown. That silently turned
+    # weekly_review_scheduler.settings into a MagicMock for the rest of the suite
+    # (timedelta(hours=MagicMock) → TypeError). Attribute patching auto-restores
+    # and preserves object identity, so nothing can leak.
+    from contextlib import ExitStack
+
+    from config.settings import settings
+    overrides = {
+        "EMAIL_DAILY_SCAN_ENABLED": True,
+        "MORNING_BRIEF_ENABLED": True,
+        "EYAL_EMAIL": "eyal@cropsight.io",
+        "ROYE_EMAIL": "roye@cropsight.io",
+        "PAOLO_EMAIL": "paolo@cropsight.io",
+        "YORAM_EMAIL": "yoram@cropsight.io",
+    }
+    with ExitStack() as stack:
+        for key, val in overrides.items():
+            stack.enter_context(patch.object(settings, key, val))
+        yield settings
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -79,15 +92,26 @@ class TestCompileMorningBrief:
 
     @pytest.mark.asyncio
     async def test_empty_when_no_items(self):
+        # Neutralize the always-on operational sources (sheets-sync, task proposals,
+        # continuity) so this test stays hermetic — otherwise compile_morning_brief
+        # reaches real Sheets/DB and adds sections. (task_proposals re-imports the
+        # client from services.supabase_client, so patch there too.)
         with patch("processors.morning_brief.supabase_client") as mock_sc, \
-             patch("services.google_calendar.calendar_service") as mock_cal:
+             patch("services.supabase_client.supabase_client") as mock_sc_src, \
+             patch("services.google_calendar.calendar_service") as mock_cal, \
+             patch("processors.sheets_sync.compute_sheets_diff", new=AsyncMock(return_value=None)), \
+             patch("processors.sheets_sync.format_sync_summary", return_value=""), \
+             patch("processors.meeting_continuity.build_daily_continuity_context", return_value=None):
             mock_sc.get_unapproved_email_scans.return_value = []
             mock_sc.get_pending_prep_outlines.return_value = []
             mock_sc.get_active_weekly_review_session.return_value = None
+            mock_sc_src.get_pending_approvals_by_status.return_value = []
             mock_cal.get_todays_events = AsyncMock(return_value=[])
             from processors.morning_brief import compile_morning_brief
             brief = await compile_morning_brief()
-        assert brief["sections"] == []
+        # "System State" is a constant section (always present); assert no CONTENT sections
+        content = [s for s in brief["sections"] if s.get("title") != "System State"]
+        assert content == []
         assert brief["scan_ids"] == []
 
     @pytest.mark.asyncio

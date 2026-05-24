@@ -396,13 +396,24 @@ async def start_services() -> None:
     _http_server.set_ready(True)
 
     # Reconstruct auto-publish timers from persistent state (v0.4)
-    from guardrails.approval_flow import reconstruct_auto_publish_timers
+    from guardrails.approval_flow import (
+        reconstruct_approval_reminders,
+        reconstruct_auto_publish_timers,
+    )
     try:
         reconstructed = await reconstruct_auto_publish_timers()
         if reconstructed:
             logger.info(f"  Reconstructed {reconstructed} auto-publish timer(s)")
     except Exception as e:
         logger.warning(f"  Timer reconstruction failed (non-fatal): {e}")
+
+    # Reconstruct approval-reminder timers from persistent state (restart-safety)
+    try:
+        reminders_reconstructed = await reconstruct_approval_reminders()
+        if reminders_reconstructed:
+            logger.info(f"  Reconstructed reminders for {reminders_reconstructed} pending approval(s)")
+    except Exception as e:
+        logger.warning(f"  Approval-reminder reconstruction failed (non-fatal): {e}")
 
     # NOTE: reconstruct_prep_timers() now runs inside start() before the main loop.
     # This external call is kept as a safety net but is effectively a no-op.

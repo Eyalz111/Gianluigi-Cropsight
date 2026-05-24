@@ -45,6 +45,12 @@ from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
 
+# Short bounded backoff before the second Perplexity attempt. Kept small on
+# purpose: a long in-process wait here is restart-unsafe (a Cloud Run cycle
+# during the sleep loses the whole generation) and pointless — if Perplexity is
+# rate-limited, the Claude search fallback below covers it. (Was 2h.)
+_PERPLEXITY_RETRY_DELAY_S = 60
+
 
 async def generate_intelligence_signal(signal_id: str | None = None) -> dict:
     """
@@ -377,12 +383,12 @@ async def _execute_research_with_retry(
             logger.info(f"Perplexity research complete: {len(successful)}/{len(queries)}")
             return successful, "perplexity"
 
-        # Attempt 2: Retry Perplexity after delay
+        # Attempt 2: short bounded retry, then fall through to the Claude fallback.
         logger.warning(
             f"Perplexity partial failure ({len(successful)}/{len(queries)}), "
-            f"retrying in 2 hours"
+            f"retrying in {_PERPLEXITY_RETRY_DELAY_S}s"
         )
-        await asyncio.sleep(7200)  # 2 hours
+        await asyncio.sleep(_PERPLEXITY_RETRY_DELAY_S)
 
         results = await perplexity_client.search_batch(queries)
         successful = {

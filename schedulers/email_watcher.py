@@ -53,6 +53,18 @@ class EmailWatcher:
         self._running = True
         logger.info(f"Starting email watcher (interval: {self.check_interval}s)")
 
+        # Restart-safety: rebuild the processed-IDs set from persisted scans so a
+        # Cloud Run cycle doesn't re-route recently handled mail. (mark_as_read is
+        # the primary dedup — handled mail is no longer "unread" — this covers the
+        # narrow window between processing a message and marking it read.)
+        try:
+            recent = supabase_client.get_recent_scanned_email_ids()
+            if recent:
+                self._processed_ids.update(recent)
+                logger.info(f"Email watcher: reconstructed {len(recent)} processed IDs")
+        except Exception as e:
+            logger.debug(f"Email watcher processed-ID reconstruction failed (non-fatal): {e}")
+
         while self._running:
             try:
                 await self._check_inbox()

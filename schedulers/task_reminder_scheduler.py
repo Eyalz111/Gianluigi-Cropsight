@@ -90,6 +90,13 @@ class TaskReminderScheduler:
             f"Starting task reminder scheduler (interval: {self.check_interval}s)"
         )
 
+        # Restart-safety: rebuild today's sent-reminder dedup set from audit_log so a
+        # mid-day restart doesn't re-send a full duplicate reminder batch.
+        try:
+            self._reconstruct_reminders_sent_today()
+        except Exception as e:
+            logger.debug(f"Reminder dedup reconstruction failed (non-fatal): {e}")
+
         # Wait 5 minutes before first check to avoid spamming on every restart
         await asyncio.sleep(300)
 
@@ -127,6 +134,47 @@ class TaskReminderScheduler:
         """Stop the scheduler."""
         self._running = False
         logger.info("Task reminder scheduler stopped")
+
+    def _mark_reminded(self, task_id: str) -> None:
+        """
+        Record that a reminder was sent for task_id today.
+
+        Tracks in-memory for the live dedup AND persists to audit_log so the set
+        can be rebuilt after a restart — otherwise a mid-day Cloud Run cycle wipes
+        _reminders_sent_today and re-sends a full duplicate reminder batch ~5 min
+        later.
+        """
+        self._reminders_sent_today.add(task_id)
+        try:
+            supabase_client.log_action(
+                action="task_reminder_sent",
+                details={"task_key": task_id},
+                triggered_by="auto",
+            )
+        except Exception:
+            pass  # dedup persistence is best-effort; never block a reminder
+
+    def _reconstruct_reminders_sent_today(self) -> None:
+        """Rebuild today's sent-reminder dedup set from audit_log on startup."""
+        today = datetime.now(_ISRAEL_TZ).strftime("%Y-%m-%d")
+        self._last_reminder_date = today
+        rows = supabase_client.get_audit_log(action="task_reminder_sent", limit=500)
+        restored = 0
+        for r in rows:
+            # created_at is UTC ISO; keep only rows whose Israel-local date is today
+            try:
+                dt = datetime.fromisoformat((r.get("created_at") or "").replace("Z", "+00:00"))
+                local_date = dt.astimezone(_ISRAEL_TZ).strftime("%Y-%m-%d")
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if local_date != today:
+                continue  # rows are newest-first; once we pass today, the rest are older
+            key = (r.get("details") or {}).get("task_key")
+            if key:
+                self._reminders_sent_today.add(key)
+                restored += 1
+        if restored:
+            logger.info(f"Task reminder: reconstructed {restored} sent-today marker(s)")
 
     def _get_explicit_task_keys(self) -> set[tuple[str, str]]:
         """
@@ -243,7 +291,7 @@ class TaskReminderScheduler:
                 # Overdue
                 summary["overdue"].append(task)
                 await self._send_overdue_reminder(task, abs(days_until))
-                self._reminders_sent_today.add(task_id)
+                self._mark_reminded(task_id)
                 summary["reminders_sent"] += 1
 
                 # Update status to overdue in sheet
@@ -259,14 +307,14 @@ class TaskReminderScheduler:
                 # Due today
                 summary["due_today"].append(task)
                 await self._send_due_today_reminder(task)
-                self._reminders_sent_today.add(task_id)
+                self._mark_reminded(task_id)
                 summary["reminders_sent"] += 1
 
             elif days_until <= self.days_before_warning:
                 # Due soon
                 summary["due_soon"].append(task)
                 await self._send_due_soon_reminder(task, days_until)
-                self._reminders_sent_today.add(task_id)
+                self._mark_reminded(task_id)
                 summary["reminders_sent"] += 1
 
         logger.info(

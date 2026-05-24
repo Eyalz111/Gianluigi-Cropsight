@@ -98,7 +98,6 @@ class TestServerBuild:
             "get_meeting_history",
             "get_pending_approvals",
             "get_gantt_status",
-            "get_gantt_horizon",
             "get_upcoming_meetings",
             "get_weekly_summary",
             "get_full_status",
@@ -108,8 +107,6 @@ class TestServerBuild:
             "create_task",
             "quick_inject",
             "confirm_quick_inject",
-            "propose_gantt_update",
-            "approve_gantt_proposal",
             "get_system_health",
             "get_cost_summary",
             "update_decision",
@@ -118,7 +115,10 @@ class TestServerBuild:
             "list_topic_threads",
             "merge_topic_threads",
             "rename_topic_thread",
-            "get_gantt_metrics",
+            # Composite: proposals + Gantt write ops
+            "get_proposals",
+            "decide_proposal",
+            "gantt_ops",
             # Phase 10: canonical projects
             "list_canonical_projects",
             "add_canonical_project",
@@ -143,28 +143,14 @@ class TestServerBuild:
         # v2.5 PR1: knowledge shadow-diff summary (cutover support)
         expected_tools.append("get_shadow_diff_summary")
 
-        # v2.5 PR10: knowledge consolidation proposals
-        expected_tools.extend(["get_knowledge_proposals", "approve_knowledge_proposal"])
-
-        # v3 PR5: task-update proposals + manual-flag control
-        expected_tools.extend(["get_task_proposals", "approve_task_proposal", "clear_manual_flag"])
-
-        # v3 chunk 2: Gantt curated knowledge-view
-        expected_tools.extend([
-            "tag_gantt_row", "list_gantt_tag_proposals", "approve_gantt_tag_mapping",
-            "refresh_gantt", "clear_gantt_override",
-        ])
-
-        # v3 chunk 2 REVISED: improve existing Gantt — restructure + linkage + nudges
-        expected_tools.extend([
-            "propose_gantt_restructure", "apply_gantt_restructure_to_live",
-            "propose_gantt_links", "approve_gantt_link_mapping", "get_gantt_nudges",
-        ])
+        # v3 PR5: task manual-flag control (proposal list/decide folded into
+        # get_proposals / decide_proposal; Gantt write ops folded into gantt_ops)
+        expected_tools.append("clear_manual_flag")
 
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 60
+        assert len(tool_names) == 45
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):
