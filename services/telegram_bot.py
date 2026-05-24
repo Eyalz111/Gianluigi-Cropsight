@@ -3216,7 +3216,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             await self.send_message(chat_id, "Voice replies are off.")
             return
 
-        spoken = text[:600]  # cap (~45s); long messages read as a headline
+        # Read the whole message: eleven_v3 allows 5000 chars/request and a single
+        # Telegram message maxes at 4096, so this reads any single message in full.
+        spoken = text[:4800]
         t0 = time.monotonic()
         audio = await elevenlabs_client.text_to_speech(
             spoken, voice_id=settings.ELEVENLABS_VOICE_ID_GIANLUIGI

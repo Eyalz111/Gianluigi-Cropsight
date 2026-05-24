@@ -75,6 +75,25 @@ async def test_listen_callback_tts_and_send_audio_and_logs():
     assert db.log_action.call_args.kwargs["action"] == "voice_tts"
 
 
+async def test_listen_callback_reads_full_long_message_not_truncated():
+    """A long message (well past the old 600 cap) is spoken in full (up to ~4800)."""
+    long_text = "Sentence number {}. ".format  # build ~1500 chars
+    body = "".join(long_text(i) for i in range(75))  # ~1500 chars
+    el = MagicMock()
+    el.tts_available.return_value = True
+    el.text_to_speech = AsyncMock(return_value=b"mp3")
+    app = MagicMock()
+    app.bot.send_audio = AsyncMock()
+    with patch("services.elevenlabs_client.elevenlabs_client", el), patch(
+        "services.supabase_client.supabase_client", MagicMock()
+    ), patch.object(telegram_bot, "_app", app), patch.object(
+        telegram_bot, "send_message", AsyncMock()
+    ):
+        await telegram_bot._handle_listen_callback(_query(text=body))
+    spoken = el.text_to_speech.call_args.args[0]
+    assert len(spoken) == len(body.strip()) > 600  # full message (stripped), not the old 600 cap
+
+
 async def test_listen_callback_empty_text_no_tts():
     el = MagicMock()
     el.tts_available.return_value = True
