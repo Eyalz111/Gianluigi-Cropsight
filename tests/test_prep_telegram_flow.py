@@ -265,7 +265,7 @@ class TestPrepOutlineEmailGuard:
     async def test_email_response_rejected(self):
         """Email response to prep_outline should be rejected."""
         with patch("guardrails.approval_flow.supabase_client") as mock_db, \
-             patch("guardrails.approval_flow.telegram_bot"), \
+             patch("guardrails.approval_flow.comms_spine"), \
              patch("guardrails.approval_flow.gmail_service"):
 
             mock_db.get_pending_approval.return_value = {
@@ -298,7 +298,7 @@ class TestGenerateMeetingPrepFromOutline:
         """Should load outline, generate doc, submit for approval (no Drive upload yet)."""
         with patch("processors.meeting_prep.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.supabase_client") as mock_af_db, \
-             patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
              patch("guardrails.approval_flow.conversation_memory"), \
              patch("guardrails.sensitivity_classifier.classify_sensitivity", return_value="founders"):

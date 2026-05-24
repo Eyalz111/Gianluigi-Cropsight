@@ -130,7 +130,7 @@ def _has_cropsight_prefix(title_lower: str) -> bool:
 
 async def ask_eyal_about_meeting(
     event: dict,
-    telegram_bot: Any,
+    messenger: Any,
     timeout_seconds: int = 300
 ) -> bool | None:
     """
@@ -138,7 +138,7 @@ async def ask_eyal_about_meeting(
 
     Args:
         event: The calendar event in question.
-        telegram_bot: TelegramBot instance for sending the message.
+        messenger: Object exposing send_to_eyal (the comms spine, or any messenger).
         timeout_seconds: How long to wait for response (default 5 minutes).
 
     Returns:
@@ -171,7 +171,7 @@ async def ask_eyal_about_meeting(
 
     # Send to Eyal (HTML format for consistency)
     message = f"<b>Meeting Classification Needed</b>\n\n{question}"
-    success = await telegram_bot.send_to_eyal(
+    success = await messenger.send_to_eyal(
         message, reply_markup=reply_markup, parse_mode="HTML"
     )
 

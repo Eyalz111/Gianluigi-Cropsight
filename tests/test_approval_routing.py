@@ -31,7 +31,7 @@ class TestSubmitForApprovalRouting:
         """Meeting prep should be persisted to Supabase and send prep-specific messages."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
@@ -91,7 +91,7 @@ class TestSubmitForApprovalRouting:
         """Weekly digest should be persisted to Supabase and send digest-specific messages."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
@@ -147,7 +147,7 @@ class TestSubmitForApprovalRouting:
         """Meeting summary (default) should persist to Supabase and use original flow."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
@@ -198,7 +198,7 @@ class TestSubmitForApprovalRouting:
         """Meeting prep Telegram preview should show sensitivity (no Drive link before approval)."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
@@ -238,7 +238,7 @@ class TestSubmitForApprovalRouting:
         """Weekly digest Telegram preview should include meeting/task stats."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.conversation_memory") as mock_mem,
@@ -304,7 +304,7 @@ class TestProcessResponseRouting:
 
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
             patch("guardrails.approval_flow.cancel_auto_publish"),
             patch(
@@ -356,7 +356,7 @@ class TestProcessResponseRouting:
 
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
             patch("guardrails.approval_flow.cancel_auto_publish"),
             patch(
@@ -414,7 +414,7 @@ class TestProcessResponseRouting:
 
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
             patch("guardrails.approval_flow.cancel_auto_publish"),
             patch(
@@ -461,7 +461,7 @@ class TestProcessResponseRouting:
 
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
             patch("guardrails.approval_flow.cancel_auto_publish"),
             patch(
@@ -507,7 +507,7 @@ class TestProcessResponseRouting:
 
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
             patch("guardrails.approval_flow.cancel_auto_publish"),
             patch(
@@ -554,7 +554,7 @@ class TestDistributeApprovedPrep:
     async def test_normal_meeting_sends_to_eyal_and_group(self):
         """Normal sensitivity should send prep to both Eyal and group chat."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
             patch("services.google_drive.drive_service") as mock_drive,
@@ -596,7 +596,7 @@ class TestDistributeApprovedPrep:
     async def test_sensitive_meeting_sends_only_to_eyal(self):
         """Sensitive meetings should only send prep to Eyal, not group."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("services.google_drive.drive_service") as mock_drive,
         ):
@@ -630,7 +630,7 @@ class TestDistributeApprovedPrep:
     async def test_logs_action_with_correct_details(self):
         """Should log the distribution action to audit log with correct details."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("services.google_drive.drive_service") as mock_drive,
         ):
@@ -666,7 +666,7 @@ class TestDistributeApprovedPrep:
     async def test_telegram_error_sets_sent_false(self):
         """If Telegram raises an exception, telegram_sent should remain False."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("services.google_drive.drive_service") as mock_drive,
         ):
@@ -708,7 +708,7 @@ class TestDistributeApprovedDigest:
     async def test_sends_email_to_team_and_telegram_to_group(self):
         """Should send email to all team members and post summary to Telegram group."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
@@ -769,7 +769,7 @@ class TestDistributeApprovedDigest:
     async def test_skips_email_when_no_team_emails(self):
         """Should not send email when team_emails is empty."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
@@ -810,7 +810,7 @@ class TestDistributeApprovedDigest:
     async def test_logs_action_with_week_and_stats(self):
         """Should log the distribution action with week_of and meetings_count."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
@@ -848,7 +848,7 @@ class TestDistributeApprovedDigest:
     async def test_email_failure_does_not_block_telegram(self):
         """If email sending fails, Telegram should still be attempted."""
         with (
-            patch("guardrails.approval_flow.telegram_bot") as mock_tg,
+            patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,

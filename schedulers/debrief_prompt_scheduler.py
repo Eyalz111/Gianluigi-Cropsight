@@ -90,7 +90,7 @@ class DebriefPromptScheduler:
             logger.info("Debrief prompt skipped (Saturday)")
             return
 
-        from services.telegram_bot import telegram_bot
+        from services.orchestrator.spine import comms_spine
         from services.supabase_client import supabase_client
 
         message = (
@@ -99,7 +99,7 @@ class DebriefPromptScheduler:
         )
 
         try:
-            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            await comms_spine.send_to_eyal(message, parse_mode="HTML")
             supabase_client.upsert_scheduler_heartbeat(
                 name="debrief_prompt",
                 status="ok",

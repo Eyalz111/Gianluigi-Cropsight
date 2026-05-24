@@ -202,8 +202,8 @@ async def send_daily_health_report() -> bool:
         data = collect_health_data()
         report = format_daily_health_report(data)
 
-        from services.telegram_bot import telegram_bot
-        await telegram_bot.send_to_eyal(report)
+        from services.orchestrator.spine import comms_spine
+        await comms_spine.send_to_eyal(report)
         logger.info("Daily health report sent")
         return True
     except Exception as e:

@@ -788,10 +788,10 @@ async def trigger_morning_brief() -> dict | None:
 
     # 4. Send directly to Eyal (internal, no approval gate)
     try:
-        from services.telegram_bot import telegram_bot
+        from services.orchestrator.spine import comms_spine
 
         formatted = format_morning_brief(brief)
-        await telegram_bot.send_to_eyal(formatted, parse_mode="HTML")
+        await comms_spine.send_to_eyal(formatted, parse_mode="HTML")
 
         # Audit log for traceability (no approval needed, but keep record)
         brief_id = f"brief-{date.today().isoformat()}"

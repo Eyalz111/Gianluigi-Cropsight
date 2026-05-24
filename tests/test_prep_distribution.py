@@ -138,7 +138,7 @@ class TestDistributeApprovedPrep:
     @pytest.mark.asyncio
     async def test_sensitive_eyal_only(self):
         """Sensitive meeting prep should only go to Eyal."""
-        with patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+        with patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("services.word_generator.generate_prep_docx") as mock_docx, \
@@ -172,7 +172,7 @@ class TestDistributeApprovedPrep:
     @pytest.mark.asyncio
     async def test_normal_team_distribution(self):
         """Normal meeting should distribute to team."""
-        with patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+        with patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
@@ -213,7 +213,7 @@ class TestDistributeApprovedPrep:
     @pytest.mark.asyncio
     async def test_docx_generation_failure_non_fatal(self):
         """Docx generation failure should not block distribution."""
-        with patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+        with patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("services.google_drive.drive_service") as mock_drive, \
@@ -242,7 +242,7 @@ class TestDistributeApprovedPrep:
     @pytest.mark.asyncio
     async def test_non_production_eyal_only(self):
         """Non-production environments should only send to Eyal."""
-        with patch("guardrails.approval_flow.telegram_bot") as mock_tg, \
+        with patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("services.word_generator.generate_prep_docx") as mock_docx, \

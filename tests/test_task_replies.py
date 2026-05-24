@@ -65,11 +65,12 @@ class TestTaskReminderButtons:
         mock_msg = MagicMock()
         mock_msg.message_id = 12345
 
-        with patch("schedulers.task_reminder_scheduler.telegram_bot") as mock_bot:
-            mock_bot.eyal_chat_id = "8190904141"
-            mock_bot.app.bot.send_message = AsyncMock(return_value=mock_msg)
-            mock_bot.send_message = AsyncMock(return_value=True)
-            mock_bot.send_to_eyal = AsyncMock(return_value=True)
+        with patch("schedulers.task_reminder_scheduler.telegram_bot") as mock_bot, \
+             patch("schedulers.task_reminder_scheduler.comms_spine") as mock_spine:
+            mock_bot.eyal_chat_id = "8190904141"  # eyal_chat_id stays on telegram_bot
+            mock_spine.send_raw = AsyncMock(return_value=mock_msg)
+            mock_spine.send_message = AsyncMock(return_value=True)
+            mock_spine.send_to_eyal = AsyncMock(return_value=True)
 
             task = {
                 "task": "Update pitch deck",
@@ -97,10 +98,11 @@ class TestTaskReminderButtons:
         mock_msg = MagicMock()
         mock_msg.message_id = 999
 
-        with patch("schedulers.task_reminder_scheduler.telegram_bot") as mock_bot:
-            mock_bot.eyal_chat_id = "8190904141"
-            mock_bot.app.bot.send_message = AsyncMock(return_value=mock_msg)
-            mock_bot.send_message = AsyncMock(return_value=True)
+        with patch("schedulers.task_reminder_scheduler.telegram_bot") as mock_bot, \
+             patch("schedulers.task_reminder_scheduler.comms_spine") as mock_spine:
+            mock_bot.eyal_chat_id = "8190904141"  # eyal_chat_id stays on telegram_bot
+            mock_spine.send_raw = AsyncMock(return_value=mock_msg)
+            mock_spine.send_message = AsyncMock(return_value=True)
 
             task = {
                 "task": "Send investor update",
@@ -113,7 +115,7 @@ class TestTaskReminderButtons:
             await scheduler._send_overdue_reminder(task, days_overdue=2)
 
         # Verify send_message was called with reply_markup
-        call_args = mock_bot.app.bot.send_message.call_args
+        call_args = mock_spine.send_raw.call_args
         assert call_args.kwargs.get("reply_markup") is not None
 
 

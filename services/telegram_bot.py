@@ -441,6 +441,12 @@ class TelegramBot:
             CallbackQueryHandler(self._handle_callback_query)
         )
 
+        # Voice notes -> STT -> the same brain as text (comms/voice beat #1).
+        # VOICE and TEXT filters are disjoint, so order vs the text handler is safe.
+        self.app.add_handler(
+            MessageHandler(filters.VOICE, self._handle_voice)
+        )
+
         # Add message handler for general text (must be last)
         self.app.add_handler(
             MessageHandler(
@@ -564,6 +570,20 @@ class TelegramBot:
             True if message was sent successfully.
         """
         try:
+            # Voice-OUT (beat #4): attach an on-demand "Listen" button to substantive prose
+            # sent to Eyal's DM (tap -> TTS the message, send audio). `is True` (not truthy)
+            # so mocked-settings tests never trip it. Skips short acks, messages that already
+            # carry buttons (cards/approvals), and the team group.
+            if (
+                settings.VOICE_OUT_ENABLED is True
+                and reply_markup is None
+                and str(chat_id) == str(self.eyal_chat_id)
+                and len(text or "") >= 60  # skip short acks; substantive prose only
+            ):
+                reply_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\U0001f50a Listen", callback_data="listen:1")]]
+                )
+
             # Split long messages (Telegram limit is 4096 chars).
             # Send overflow parts first, buttons only on the last part.
             # Tier 3.4: _bot_send_message wraps the network call in @retry.
@@ -2582,8 +2602,17 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         self,
         chat_id: int | str,
         result: dict,
+        *,
+        raw_transcript: str | None = None,
+        source_message_id: int | str | None = None,
     ) -> None:
-        """Send quick injection summary with Inject/Dismiss buttons."""
+        """Send quick injection summary with Inject/Dismiss buttons.
+
+        For voice-originated injections, raw_transcript is shown as a collapsed
+        safety-net line (so Eyal can catch a mis-transcription that the items don't
+        reveal) and stored — with the Telegram message id — in the session's
+        raw_messages for provenance.
+        """
         from datetime import date as date_cls
         from services.supabase_client import supabase_client
 
@@ -2596,6 +2625,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             item_type = item.get("type", "info")
             title = item.get("title", item.get("description", ""))[:80]
             summary_lines.append(f"  {i}. [{item_type}] {title}")
+        if raw_transcript:
+            summary_lines.append("")
+            summary_lines.append(f'heard: "{raw_transcript[:200]}"')
 
         summary = "\n".join(summary_lines)
 
@@ -2604,11 +2636,14 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # (get_active_debrief_session only returns status="in_progress").
         today_str = date_cls.today().isoformat()
         session = supabase_client.create_debrief_session(today_str)
-        supabase_client.update_debrief_session(
-            session["id"],
-            items_captured=items,
-            status="confirming",
-        )
+        update_kwargs = {"items_captured": items, "status": "confirming"}
+        if raw_transcript:
+            update_kwargs["raw_messages"] = [{
+                "role": "voice",
+                "transcript": raw_transcript,
+                "telegram_message_id": source_message_id,
+            }]
+        supabase_client.update_debrief_session(session["id"], **update_kwargs)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -2622,8 +2657,220 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         )
 
     # =========================================================================
+    # Voice intake (comms/voice beat #1)
+    # =========================================================================
+
+    async def _handle_voice(self, update, context) -> None:
+        """Handle a Telegram voice note: STT -> the same brain as a text message.
+
+        Eyal-only for beat #1. Flag-gated via VOICE_INTAKE_ENABLED
+        (elevenlabs_client.stt_available). Defers if a stateful session is active,
+        and confirms before spending STT on an unusually long note.
+        """
+        user = update.effective_user
+        if not user or str(user.id) != str(self.eyal_chat_id):
+            return  # voice intake is Eyal-only for beat #1
+
+        from services.elevenlabs_client import elevenlabs_client
+
+        if not elevenlabs_client.stt_available():
+            await self.send_message(update.effective_chat.id, "Voice intake is off.")
+            return
+
+        voice = update.message.voice
+        msg_id = update.message.message_id
+        chat_id = update.effective_chat.id
+
+        # Dedupe — Telegram can redeliver an update; avoid a double STT spend / double
+        # card. In-memory per-user set: assumes a single Cloud Run instance (we run
+        # min=max=1) and is NOT restart-safe. Failure mode is benign (one extra card).
+        seen = context.user_data.setdefault("_voice_seen", set())
+        if msg_id in seen:
+            return
+        seen.add(msg_id)
+
+        # Don't bypass presentation-layer state: if a stateful session is active, ask
+        # Eyal to type for now (voice during a session is a later beat).
+        if self._active_interactive_session == "weekly_review":
+            await self.send_message(
+                chat_id,
+                "You're mid weekly-review - type your reply for now "
+                "(voice during a session is coming).",
+            )
+            return
+        from services.supabase_client import supabase_client
+
+        active = supabase_client.get_active_debrief_session()
+        if active and active.get("status") == "in_progress":
+            await self.send_message(
+                chat_id,
+                "You're mid-debrief - type your reply for now "
+                "(voice during a debrief is coming).",
+            )
+            return
+
+        # Caps (known from the Voice metadata, before download).
+        hard_max = 20 * 1024 * 1024  # Telegram getFile ceiling
+        soft_secs = 5 * 60
+        soft_bytes = 8 * 1024 * 1024
+        duration = voice.duration or 0
+        file_size = voice.file_size or 0
+
+        if file_size and file_size > hard_max:
+            await self.send_message(
+                chat_id,
+                "That note's too long for me to fetch (20 MB max). "
+                "Send a shorter one or type it.",
+            )
+            return
+
+        if duration > soft_secs or (file_size and file_size > soft_bytes):
+            # Confirm before spending STT — guards the phone-in-pocket / accidental
+            # meeting-recording case (cost won't catch it; this protects attention).
+            context.user_data["pending_long_voice"] = {
+                "file_id": voice.file_id,
+                "message_id": msg_id,
+                "duration": duration,
+            }
+            mins = max(1, round(duration / 60))
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Transcribe anyway", callback_data="voicecap:yes"),
+                InlineKeyboardButton("Cancel", callback_data="voicecap:no"),
+            ]])
+            await self.send_message(
+                chat_id,
+                f"That's ~{mins} min - longer than a usual note. Transcribe anyway?",
+                reply_markup=keyboard,
+            )
+            return
+
+        user_id = self._get_user_id(user.id) or "unknown"
+        await self._transcribe_and_route(
+            chat_id, voice.file_id, msg_id, user_id, duration_s=duration
+        )
+
+    async def _transcribe_and_route(
+        self, chat_id, file_id: str, message_id, user_id: str, duration_s: int = 0
+    ) -> None:
+        """Download a voice file, transcribe + route via the spine, render the result."""
+        import time
+
+        from services.supabase_client import supabase_client
+
+        await self.send_message(chat_id, "Transcribing...")
+        try:
+            tg_file = await self.app.bot.get_file(file_id)
+            audio = bytes(await tg_file.download_as_bytearray())
+        except Exception as e:
+            logger.error(f"Voice download failed: {e}")
+            await self.send_message(
+                chat_id, "I couldn't fetch that voice note - resend it?"
+            )
+            return
+
+        from services.orchestrator.spine import comms_spine
+        from services.orchestrator.events import Channel, InboundEvent, Modality
+
+        event = InboundEvent(
+            channel=Channel.TELEGRAM,
+            modality=Modality.VOICE,
+            sender_id=user_id,
+            chat_id=chat_id,
+            audio_bytes=audio,
+            audio_mime="audio/ogg",
+            message_id=str(message_id),
+        )
+        t0 = time.monotonic()
+        result = await comms_spine.handle_inbound(event)
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
+        # Telemetry to audit_log — sync (never await supabase_client), non-fatal.
+        # ElevenLabs Scribe is $0.40/hr; latency_ms is end-to-end (STT + routing) =
+        # the time Eyal waits. est_cost_usd is the STT cost (duration-based).
+        transcript = event.raw_transcript or ""
+        action = result.get("action", "")
+        try:
+            supabase_client.log_action(
+                action="voice_stt_failed" if action == "stt_failed" else "voice_stt",
+                details={
+                    "latency_ms": latency_ms,
+                    "audio_bytes": len(audio),
+                    "duration_s": duration_s,
+                    "chars": len(transcript),
+                    "transcript": transcript[:2000],
+                    "est_cost_usd": round(duration_s / 3600 * 0.40, 5),
+                    "result_action": action,
+                },
+                triggered_by="eyal",
+            )
+        except Exception as e:
+            logger.warning(f"voice_stt telemetry failed: {e}")
+
+        if action == "stt_failed":
+            await self.send_message(
+                chat_id,
+                result.get("response", "I couldn't transcribe that - resend or type it."),
+            )
+            return
+
+        if result.get("action") == "quick_injection_confirm":
+            await self._send_quick_injection_confirmation(
+                chat_id,
+                result,
+                raw_transcript=event.raw_transcript,
+                source_message_id=message_id,
+            )
+            return
+
+        # Question answered (or any other action) — reply with the text, plus a small
+        # "heard" footer so Eyal can spot a mis-transcription.
+        response = result.get("response", "")
+        if event.raw_transcript:
+            response = f'{response}\n\n(heard: "{event.raw_transcript[:200]}")'
+        await self.send_message(chat_id, response, parse_mode=None)
+
+    # =========================================================================
     # Message Handlers
     # =========================================================================
+
+    async def _route_inbound_text(
+        self,
+        message_text: str,
+        user_id: str,
+        history: list,
+        chat_id: str | int,
+        message_id: str | None,
+    ) -> dict:
+        """Dispatch an inbound text message to the brain (flag-gated seam).
+
+        When ORCHESTRATION_SPINE_ENABLED, route through the comms spine — the single
+        inbound entry shared with voice — which normalizes the event, calls the brain,
+        and returns the agent result dict. Otherwise call the agent directly. Either
+        way the caller renders the same dict, so this is behavior-preserving while the
+        flag is off.
+        """
+        if settings.ORCHESTRATION_SPINE_ENABLED:
+            from services.orchestrator.spine import comms_spine
+            from services.orchestrator.events import Channel, InboundEvent, Modality
+
+            return await comms_spine.handle_inbound(
+                InboundEvent(
+                    channel=Channel.TELEGRAM,
+                    modality=Modality.TEXT,
+                    sender_id=user_id,
+                    chat_id=chat_id,
+                    text=message_text,
+                    message_id=message_id,
+                    conversation_history=history,
+                )
+            )
+        from core.agent import gianluigi_agent
+
+        return await gianluigi_agent.process_message(
+            user_message=message_text,
+            user_id=user_id,
+            conversation_history=history,
+        )
 
     async def _handle_message(
         self,
@@ -2808,9 +3055,6 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             "Thinking..."
         )
 
-        # Import here to avoid circular imports
-        from core.agent import gianluigi_agent
-
         user_id = self._get_user_id(user.id) or "unknown"
         chat_id_str = str(update.effective_chat.id)
 
@@ -2818,10 +3062,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         history = conversation_memory.get_history(chat_id_str)
 
         try:
-            result = await gianluigi_agent.process_message(
-                user_message=message_text,
+            result = await self._route_inbound_text(
+                message_text=message_text,
                 user_id=user_id,
-                conversation_history=history,
+                history=history,
+                chat_id=update.effective_chat.id,
+                message_id=str(update.message.message_id) if update.message else None,
             )
 
             # Handle quick injection confirmation
@@ -2957,6 +3203,59 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             except Exception as dm_err:
                 logger.error(f"Could not DM Eyal about handler error: {dm_err}")
 
+    async def _handle_listen_callback(self, query) -> None:
+        """Voice-out (beat #4): TTS the message the Listen button is under, send as audio.
+
+        Stateless — the callback already carries the message text. The dispatcher has
+        already answered the query (stops the spinner), so feedback here uses send_message.
+        Reads up to ~600 chars (long briefs read as a headline); telemetry to audit_log.
+        """
+        import time
+
+        from services.elevenlabs_client import elevenlabs_client
+        from services.supabase_client import supabase_client
+
+        chat_id = query.message.chat_id
+        text = (query.message.text or "").strip()
+        if not text:
+            await self.send_message(chat_id, "Nothing to read here.")
+            return
+        if not elevenlabs_client.tts_available():
+            await self.send_message(chat_id, "Voice replies are off.")
+            return
+
+        # Read the whole message: eleven_v3 allows 5000 chars/request and a single
+        # Telegram message maxes at 4096, so this reads any single message in full.
+        spoken = text[:4800]
+        t0 = time.monotonic()
+        audio = await elevenlabs_client.text_to_speech(
+            spoken, voice_id=settings.ELEVENLABS_VOICE_ID_GIANLUIGI
+        )
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if not audio:
+            await self.send_message(chat_id, "Sorry - I couldn't generate the audio.")
+            return
+        try:
+            await self.app.bot.send_audio(chat_id=chat_id, audio=audio, title="Gianluigi")
+        except Exception as e:
+            logger.error(f"Voice-out send_audio failed: {e}")
+            await self.send_message(chat_id, "Sorry - I couldn't send the audio.")
+            return
+
+        try:
+            supabase_client.log_action(
+                action="voice_tts",
+                details={
+                    "latency_ms": latency_ms,
+                    "chars": len(spoken),
+                    "audio_bytes": len(audio),
+                    "est_cost_usd": round(len(spoken) / 1000 * 0.30, 5),
+                },
+                triggered_by="eyal",
+            )
+        except Exception as e:
+            logger.warning(f"voice_tts telemetry failed: {e}")
+
     async def _handle_callback_query(
         self,
         update: Update,
@@ -2981,6 +3280,27 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         # Import here to avoid circular imports
         from services.supabase_client import supabase_client
+
+        # ---- Voice-out: "Listen" -> TTS this message and send audio (beat #4) ----
+        if action == "listen":
+            await self._handle_listen_callback(query)
+            return
+
+        # ---- Voice soft-cap confirm (comms/voice beat #1) ----
+        if action == "voicecap":
+            pending = context.user_data.pop("pending_long_voice", None)
+            if meeting_id == "yes" and pending:
+                await query.edit_message_text("On it, transcribing...")
+                await self._transcribe_and_route(
+                    query.message.chat_id,
+                    pending["file_id"],
+                    pending["message_id"],
+                    self._get_user_id(query.from_user.id) or "unknown",
+                    pending.get("duration", 0),
+                )
+            else:
+                await query.edit_message_text("Okay, discarded that voice note.")
+            return
 
         # ---- Prep outline callbacks (Phase 5) ----
         if action in ("prep_generate", "prep_focus", "prep_reclassify", "prep_skip"):

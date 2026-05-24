@@ -34,7 +34,7 @@ from typing import Any
 from config.settings import settings
 from core.llm import call_llm
 from config.team import TEAM_MEMBERS, get_team_member
-from services.telegram_bot import telegram_bot
+from services.orchestrator.spine import comms_spine
 from services.gmail import gmail_service
 from services.google_drive import drive_service
 from services.google_sheets import sheets_service
@@ -114,7 +114,7 @@ async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None
 
     # Notify Eyal that it was auto-published
     title = meeting.get("title", "Unknown meeting")
-    await telegram_bot.send_to_eyal(
+    await comms_spine.send_to_eyal(
         f"Auto-published: *{title}*\n\n"
         f"The review window ({delay_minutes}min) expired without action.\n"
         f"Use /retract to undo if needed."
@@ -147,7 +147,7 @@ async def _send_approval_reminder(meeting_id: str, hours: int, content_type: str
     else:
         title = content_type
 
-    await telegram_bot.send_to_eyal(
+    await comms_spine.send_to_eyal(
         f"Reminder: \"{title}\" is awaiting your approval ({hours}h).\n"
         f"Reply approve/edit/reject, or use /status to see all pending items."
     )
@@ -290,12 +290,12 @@ async def expire_stale_approvals() -> list[dict]:
             lines.append(f"  - {title} ({ct})")
 
         if auto_generated:
-            await telegram_bot.send_to_eyal(
+            await comms_spine.send_to_eyal(
                 f"Auto-generated {len(auto_generated)} prep(s) on expiry: "
                 f"{', '.join(auto_generated)}"
             )
 
-        await telegram_bot.send_to_eyal("\n".join(lines))
+        await comms_spine.send_to_eyal("\n".join(lines))
         logger.info(f"Expired {len(expired)} stale approvals")
 
     # Clean stale focus_active flags
@@ -502,7 +502,7 @@ async def submit_for_approval(
             ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        telegram_sent = await telegram_bot.send_to_eyal(
+        telegram_sent = await comms_spine.send_to_eyal(
             card, reply_markup=reply_markup, parse_mode="HTML"
         )
 
@@ -525,7 +525,7 @@ async def submit_for_approval(
             f"Tasks overdue: {content.get('tasks_overdue', 0)}\n"
         )
 
-        telegram_sent = await telegram_bot.send_approval_request(
+        telegram_sent = await comms_spine.send_approval_request(
             meeting_title=f"Weekly Digest — {week_of}",
             summary_preview=preview,
             meeting_id=meeting_id,
@@ -565,7 +565,7 @@ async def submit_for_approval(
 
         preview = "\n".join(preview_lines)
 
-        telegram_sent = await telegram_bot.send_approval_request(
+        telegram_sent = await comms_spine.send_approval_request(
             meeting_title=f"Gantt Update ({changes_count} cells)",
             summary_preview=preview,
             meeting_id=meeting_id,
@@ -584,7 +584,7 @@ async def submit_for_approval(
 
         preview = formatted if formatted else "<b>Morning Brief</b>\n\nNo details available."
 
-        telegram_sent = await telegram_bot.send_approval_request(
+        telegram_sent = await comms_spine.send_approval_request(
             meeting_title=f"Morning Brief ({total} email items)",
             summary_preview=preview,
             meeting_id=meeting_id,
@@ -606,7 +606,7 @@ async def submit_for_approval(
 
     elif content_type == "prep_outline":
         # Prep outline — Telegram-only, no email. The outline is sent via
-        # telegram_bot.send_prep_outline() by the scheduler, not here.
+        # comms_spine.send_prep_outline() by the scheduler, not here.
         # We just log the submission.
         event = content.get("event", {})
         meeting_title = event.get("title", "Untitled")
@@ -627,7 +627,7 @@ async def submit_for_approval(
         meeting_record = supabase_client.get_meeting(meeting_id)
         meeting_sensitivity = meeting_record.get("sensitivity", "founders") if meeting_record else "founders"
 
-        telegram_sent = await telegram_bot.send_approval_request(
+        telegram_sent = await comms_spine.send_approval_request(
             meeting_title=meeting_title,
             summary_preview=discussion_summary or summary[:600],
             meeting_id=meeting_id,
@@ -1086,12 +1086,12 @@ async def process_response(
                 # Notify Eyal of the result
                 if exec_result.get("status") == "executed":
                     cells_written = exec_result.get("cells_written", 0)
-                    await telegram_bot.send_to_eyal(
+                    await comms_spine.send_to_eyal(
                         f"Gantt updated: {cells_written} cell(s) written successfully."
                     )
                 else:
                     error = exec_result.get("error", "Unknown error")
-                    await telegram_bot.send_to_eyal(
+                    await comms_spine.send_to_eyal(
                         f"Gantt update failed: {error}"
                     )
 
@@ -1941,7 +1941,7 @@ async def distribute_approved_content(
 
         if sensitivity in ("ceo", "ceo_only", "restricted", "sensitive"):
             # CEO: send full summary to Eyal only
-            telegram_result = await telegram_bot.send_meeting_summary(
+            telegram_result = await comms_spine.send_meeting_summary(
                 title=meeting_title,
                 summary=summary,
                 drive_link=drive_link,
@@ -1959,9 +1959,9 @@ async def distribute_approved_content(
                 drive_link=drive_link,
             )
             if settings.ENVIRONMENT != "production":
-                telegram_result = await telegram_bot.send_to_eyal(teaser, parse_mode="HTML")
+                telegram_result = await comms_spine.send_to_eyal(teaser, parse_mode="HTML")
             else:
-                telegram_result = await telegram_bot.send_to_group(teaser, parse_mode="HTML")
+                telegram_result = await comms_spine.send_to_group(teaser, parse_mode="HTML")
 
         results["telegram_sent"] = telegram_result
         logger.info(f"Telegram notification sent: {telegram_result}")
@@ -2202,19 +2202,19 @@ async def distribute_approved_prep(
                 "\n<i>This prep contains CEO content — not distributed to "
                 "other participants. Forward manually if appropriate.</i>"
             )
-            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            await comms_spine.send_to_eyal(message, parse_mode="HTML")
             results["telegram_sent"] = True
             results["distribution"] = "eyal_only"
             logger.info(f"Sensitive prep — Eyal-only distribution for {title}")
         elif settings.ENVIRONMENT != "production":
             # Non-production: Eyal only
-            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
+            await comms_spine.send_to_eyal(message, parse_mode="HTML")
             results["telegram_sent"] = True
             results["distribution"] = "eyal_only"
         else:
             # FOUNDERS/PUBLIC/TEAM: full team distribution
-            await telegram_bot.send_to_eyal(message, parse_mode="HTML")
-            await telegram_bot.send_to_group(message, parse_mode="HTML")
+            await comms_spine.send_to_eyal(message, parse_mode="HTML")
+            await comms_spine.send_to_group(message, parse_mode="HTML")
             results["telegram_sent"] = True
             results["distribution"] = "team"
 
@@ -2315,9 +2315,9 @@ async def distribute_approved_digest(
         if drive_link:
             summary_msg += f"\nFull digest: {drive_link}"
         if settings.ENVIRONMENT != "production":
-            await telegram_bot.send_to_eyal(summary_msg)
+            await comms_spine.send_to_eyal(summary_msg)
         else:
-            await telegram_bot.send_to_group(summary_msg)
+            await comms_spine.send_to_group(summary_msg)
         results["telegram_sent"] = True
     except Exception as e:
         logger.error(f"Error sending digest Telegram: {e}")
@@ -2534,7 +2534,7 @@ async def submit_stakeholder_updates_for_approval(
     action = "add" if is_new else "update"
 
     # Send approval request via Telegram
-    result = await telegram_bot.send_stakeholder_approval_request(
+    result = await comms_spine.send_stakeholder_approval_request(
         stakeholder_name=stakeholder_name,
         organization=organization,
         updates=updates,
@@ -2826,9 +2826,9 @@ async def distribute_approved_review(
             summary_msg += f"\nDigest: {digest_link}"
 
         if settings.ENVIRONMENT != "production":
-            await telegram_bot.send_to_eyal(summary_msg)
+            await comms_spine.send_to_eyal(summary_msg)
         else:
-            await telegram_bot.send_to_group(summary_msg)
+            await comms_spine.send_to_group(summary_msg)
         results["telegram_sent"] = True
     except Exception as e:
         logger.error(f"Review Telegram notification failed: {e}")
