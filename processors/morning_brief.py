@@ -20,6 +20,9 @@ from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
 
+# Telegram-message length budget for the brief (matches the historical 3800 cap).
+MORNING_BRIEF_BUDGET_CHARS = 3800
+
 
 # =========================================================================
 # Source Categorization
@@ -63,6 +66,122 @@ def _categorize_source(sender: str, subject: str) -> str:
 
 
 # =========================================================================
+# Topic surfacing helpers (v1 legacy + v2 knowledge-layer)
+# =========================================================================
+
+def _gather_topic_state_legacy() -> dict | None:
+    """Legacy (v1) blocked/stale topic surfacing off state_json (hard cap 3)."""
+    from datetime import date as _date, timedelta as _td
+
+    state_rows = (
+        supabase_client.client.table("topic_threads")
+        .select("id, topic_name, meeting_count, state_json")
+        .not_.is_("state_json", "null")
+        .limit(200)
+        .execute()
+    )
+    today = _date.today()
+    stale_cutoff = today - _td(days=14)
+    blocked, stale = [], []
+    for row in (state_rows.data or []):
+        state = row.get("state_json") or {}
+        status = state.get("current_status")
+        if status == "blocked":
+            blocked.append({
+                "topic_name": row.get("topic_name", ""),
+                "summary": state.get("summary", "")[:160],
+                "kind": "blocked",
+            })
+            continue
+        if (row.get("meeting_count") or 0) > 3:
+            last = state.get("last_activity_date")
+            if last:
+                try:
+                    last_d = _date.fromisoformat(str(last)[:10])
+                    if last_d < stale_cutoff:
+                        stale.append({
+                            "topic_name": row.get("topic_name", ""),
+                            "summary": state.get("summary", "")[:160],
+                            "days_idle": (today - last_d).days,
+                            "last_activity_date": str(last),
+                            "kind": "stale",
+                        })
+                except (ValueError, TypeError):
+                    pass
+    stale.sort(key=lambda x: x["days_idle"], reverse=True)
+    topic_items = (blocked + stale)[:3]
+    if topic_items:
+        return {"type": "topic_state", "title": "Topic state", "items": topic_items}
+    return None
+
+
+def _gather_knowledge_flags() -> list[dict]:
+    """v2 foresight flags off the live topic briefs (brief_json).
+
+    Reads the knowledge layer's authoritative current_status (blocked/stale),
+    carrying each topic's source id (citation) and tier (sensitivity). The brief
+    goes to Eyal (CEO tier) so nothing is filtered out here, but tier is
+    preserved so these lines could be reused safely in a team-facing surface.
+    Never raises; returns [] when no briefs exist yet (pre-synthesis).
+    """
+    rows = (
+        supabase_client.client.table("topic_threads")
+        .select("id, topic_name, brief_json")
+        .not_.is_("brief_json", "null")
+        .limit(300)
+        .execute()
+        .data
+        or []
+    )
+    flags: list[dict] = []
+    for r in rows:
+        brief = r.get("brief_json") or {}
+        status = brief.get("current_status")
+        if status not in ("blocked", "stale"):
+            continue
+        name = r.get("topic_name", "")
+        narrative = (brief.get("narrative") or "").strip()
+        if status == "blocked":
+            risks = brief.get("risks") or []
+            detail = (risks[0] if risks else narrative)[:140]
+            flags.append({
+                "topic_name": name, "kind": "blocked", "severity": "red",
+                "detail": detail, "citation": r.get("id"),
+                "sensitivity": brief.get("sensitivity"),
+            })
+        else:  # stale
+            flags.append({
+                "topic_name": name, "kind": "idle", "severity": "yellow",
+                "detail": narrative[:140], "citation": r.get("id"),
+                "sensitivity": brief.get("sensitivity"),
+            })
+    return flags
+
+
+def _gather_loose_ends(knowledge_flags: list[dict] | None = None) -> str | None:
+    """One aggregated 'loose ends' line from existing signals. None when clean.
+
+    Blocked topics are surfaced individually (Needs attention), so they are NOT
+    re-counted here — loose ends is the quiet aggregate of lower-signal items
+    (overdue commitments, idle topics).
+    """
+    parts: list[str] = []
+    try:
+        from processors.deal_intelligence import generate_commitments_due
+        n = len(generate_commitments_due(max_items=50) or [])
+        if n:
+            parts.append(f"{n} overdue commitment{'s' if n != 1 else ''}")
+    except Exception:
+        pass
+    idle = sum(1 for f in (knowledge_flags or []) if f.get("kind") == "idle")
+    if idle:
+        parts.append(f"{idle} idle topic{'s' if idle != 1 else ''}")
+    if not parts:
+        return None
+    return ", ".join(parts) + " — ask me to expand"
+
+
+# =========================================================================
 # Compilation
 # =========================================================================
 
@@ -85,6 +204,14 @@ async def compile_morning_brief() -> dict:
     sections = []
     scan_ids = []
     stats = {"email_scans": 0, "constant_items": 0, "calendar_events": 0, "alerts": 0}
+
+    # v2 (PR2) rollout flags. During shadow both formats are produced (v1 is the
+    # authoritative send, v2 a tagged preview), so we gather data for whichever
+    # is rendered: v1 needs topic_state; v2 needs knowledge_flags + loose_ends.
+    v2_enabled = settings.MORNING_BRIEF_V2_ENABLED
+    v2_shadow = settings.MORNING_BRIEF_V2_SHADOW
+    render_v1 = (not v2_enabled) or v2_shadow
+    render_v2 = v2_enabled
 
     # 1. Daily email scan results (personal Gmail)
     daily_scans = supabase_client.get_unapproved_email_scans(
@@ -142,9 +269,9 @@ async def compile_morning_brief() -> dict:
     # 3. Today's calendar preview
     try:
         from services.google_calendar import calendar_service
-        from guardrails.calendar_filter import is_cropsight_meeting
+        from guardrails.calendar_filter import should_include_meeting
         events = await calendar_service.get_todays_events()
-        cropsight_events = [e for e in events if is_cropsight_meeting(e) is not False]
+        cropsight_events = [e for e in events if should_include_meeting(e)]
         if cropsight_events:
             event_list = []
             for e in cropsight_events:
@@ -358,64 +485,39 @@ async def compile_morning_brief() -> dict:
     except Exception as e:
         logger.debug(f"Task urgency for morning brief failed: {e}")
 
-    # 11b. v2.3 PR 4 — Blocked / stale topic surfacing
-    # Surface up to 3 topic threads whose structured state_json shows either
-    # current_status='blocked' or (last_activity_date >14 days AND meeting_count>3).
-    # Hard cap of 3 forces triage — if 6 topics are blocked we don't spam.
-    try:
-        from datetime import date as _date, timedelta as _td
+    # 11b. Topic surfacing.
+    #  - v1 path: legacy state_json blocked/stale block (hard cap 3).
+    #  - v2 path: knowledge-layer foresight flags (off brief_json) + loose-ends line.
+    if render_v1:
+        try:
+            ts = _gather_topic_state_legacy()
+            if ts:
+                sections.append(ts)
+        except Exception as e:
+            logger.debug(f"Topic state surfacing failed: {e}")
 
-        state_rows = (
-            supabase_client.client.table("topic_threads")
-            .select("id, topic_name, meeting_count, state_json")
-            .not_.is_("state_json", "null")
-            .limit(200)
-            .execute()
-        )
-        today = _date.today()
-        stale_cutoff = today - _td(days=14)
-
-        blocked = []
-        stale = []
-        for row in (state_rows.data or []):
-            state = row.get("state_json") or {}
-            status = state.get("current_status")
-            if status == "blocked":
-                blocked.append({
-                    "topic_name": row.get("topic_name", ""),
-                    "summary": state.get("summary", "")[:160],
-                    "kind": "blocked",
+    if render_v2:
+        kflags = []
+        try:
+            kflags = _gather_knowledge_flags()
+            if kflags:
+                sections.append({
+                    "type": "knowledge_flags",
+                    "title": "Knowledge",
+                    "items": kflags,
                 })
-                continue
-            if (row.get("meeting_count") or 0) > 3:
-                last = state.get("last_activity_date")
-                if last:
-                    try:
-                        last_d = _date.fromisoformat(str(last)[:10])
-                        if last_d < stale_cutoff:
-                            days_idle = (today - last_d).days
-                            stale.append({
-                                "topic_name": row.get("topic_name", ""),
-                                "summary": state.get("summary", "")[:160],
-                                "days_idle": days_idle,
-                                "last_activity_date": str(last),
-                                "kind": "stale",
-                            })
-                    except (ValueError, TypeError):
-                        pass
-
-        # Sort stale by days_idle desc (most stale first)
-        stale.sort(key=lambda x: x["days_idle"], reverse=True)
-        # Prefer blocked over stale in the hard cap of 3
-        topic_items = (blocked + stale)[:3]
-        if topic_items:
-            sections.append({
-                "type": "topic_state",
-                "title": "Topic state",
-                "items": topic_items,
-            })
-    except Exception as e:
-        logger.debug(f"Topic state surfacing failed: {e}")
+        except Exception as e:
+            logger.debug(f"Knowledge flags for morning brief failed: {e}")
+        try:
+            loose = _gather_loose_ends(kflags)
+            if loose:
+                sections.append({
+                    "type": "loose_ends",
+                    "title": "Loose ends",
+                    "summary": loose,
+                })
+        except Exception as e:
+            logger.debug(f"Loose ends for morning brief failed: {e}")
 
     # 12. Gantt Milestones This Week + Drift Alerts (Phase 5)
     try:
@@ -753,6 +855,313 @@ def format_morning_brief(brief: dict) -> str:
 
 
 # =========================================================================
+# v2 Formatting (PR2) — decision-first, knowledge-aware, ranked-not-capped
+# =========================================================================
+
+from html import escape as _esc
+
+
+def _strip_line(line: str) -> str:
+    """Strip leading bullet/emoji decoration from a formatted line (for the lead input)."""
+    return line.replace("🔴", "").replace("🟡", "").replace("•", "").strip()
+
+
+def _assemble_v2_groups(sections: list[dict]) -> dict:
+    """Pure, deterministic regrouping of brief sections for the v2 layout.
+
+    Facts come only from the gathered sections — nothing is invented here.
+    """
+    category_labels = {
+        "team": "Team emails", "investor": "Investor emails", "client": "Client emails",
+        "legal": "Legal emails", "partner": "Partner emails", "other": "External emails",
+    }
+    groups: dict = {
+        "today": [], "attention": [], "deals": [], "milestones": [], "emails": [],
+        "loose_ends": None, "weekly_review_line": "", "system_line": "",
+    }
+    attention_ranked: list[tuple[int, str]] = []  # (severity_rank, line); red=0, yellow=1
+    system_raw = None
+    qa_issue = ""
+
+    for section in sections:
+        st = section.get("type", "")
+
+        if st in ("email_scan", "constant_layer"):
+            items = section.get("items", [])
+            by_cat: dict[str, list[dict]] = {}
+            for item in items:
+                by_cat.setdefault(item.get("_source_category", "other"), []).append(item)
+            for cat, cat_items in by_cat.items():
+                label = category_labels.get(cat, "Emails")
+                sensitive = any(i.get("_sensitive") for i in cat_items)
+                lines = [f"  • {_esc(i.get('text', i.get('description', ''))[:120])}" for i in cat_items]
+                groups["emails"].append((label, sensitive, lines))
+
+        elif st == "calendar":
+            for e in section.get("events", []):
+                groups["today"].append(f"  • {_esc(e.get('time', ''))} — {_esc(e.get('title', ''))}")
+
+        elif st == "pending_prep_outlines":
+            for po in section.get("items", []):
+                t = f" at {_esc(po['time'])}" if po.get("time") else ""
+                groups["today"].append(f"  • {_esc(po.get('title', 'Unknown'))}{t} (prep pending)")
+
+        elif st == "alerts":
+            for alert in section.get("alerts", []):
+                sev = alert.get("severity", "")
+                msg = _esc(alert.get("message", alert.get("description", ""))[:100])
+                if sev == "high":
+                    attention_ranked.append((0, f"  🔴 {msg}"))
+                elif sev == "medium":
+                    attention_ranked.append((1, f"  🟡 {msg}"))
+
+        elif st == "task_urgency":
+            for item in section.get("items", []):
+                assignee = f" ({_esc(item['assignee'])})" if item.get("assignee") else ""
+                deadline_str = item.get("deadline", "?")
+                if item.get("deadline_confidence") == "INFERRED" and deadline_str != "?":
+                    deadline_str = f"~{deadline_str}"
+                attention_ranked.append(
+                    (1, f"  🟡 {_esc(item['title'])}{assignee} — due {_esc(deadline_str)}")
+                )
+
+        elif st == "knowledge_flags":
+            # Blocked topics surface individually (red). Idle topics are quietly
+            # aggregated into the loose-ends line instead.
+            for f in section.get("items", []):
+                if f.get("kind") == "blocked":
+                    detail = _esc(f.get("detail", "") or "blocked")
+                    attention_ranked.append((0, f"  🔴 {_esc(f.get('topic_name', ''))}: blocked — {detail}"))
+
+        elif st == "drift_alerts":
+            for item in section.get("items", []):
+                attention_ranked.append((0, f"  🔴 {_esc(item.get('drift_description', ''))}"))
+
+        elif st == "deal_pulse":
+            for item in section.get("items", []):
+                icon = "🔴 " if item.get("type") == "overdue" else ""
+                groups["deals"].append(
+                    f"  {icon}{_esc(item['name'])} ({_esc(item['organization'])}): {_esc(item['detail'])}"
+                )
+
+        elif st == "commitments_due":
+            for item in section.get("items", []):
+                to_str = f" to {_esc(item['promised_to'])}" if item.get("promised_to") else ""
+                groups["deals"].append(
+                    f"  🔴 {_esc(item['commitment'])}{to_str} ({item['days_overdue']}d overdue)"
+                )
+
+        elif st == "gantt_milestones":
+            for item in section.get("items", []):
+                weeks = item.get("weeks_away", "?")
+                groups["milestones"].append(
+                    f"  {_esc(item.get('milestone', '?'))} ({_esc(item.get('section', ''))}) — {weeks}w away"
+                )
+
+        elif st == "loose_ends":
+            groups["loose_ends"] = section.get("summary")
+
+        elif st == "system_state":
+            system_raw = section
+
+        elif st == "qa_health":
+            if section.get("score") != "healthy":
+                issues = section.get("issues", [])
+                if issues:
+                    qa_issue = _esc(issues[0][:80])
+
+        elif st == "weekly_review":
+            status = section.get("status", "unknown")
+            label = {
+                "preparing": "being prepared", "ready": "ready — use /review to start",
+                "in_progress": "in progress", "confirming": "awaiting final confirmation",
+            }.get(status, status)
+            groups["weekly_review_line"] = f"Weekly review W{section.get('week_number', 0)}: {label}"
+
+        elif st == "upcoming_review":
+            time_str = section.get("time", "")
+            groups["weekly_review_line"] = (
+                f"Weekly review{' at ' + _esc(time_str) if time_str else ' today'} — prep starts 3h before"
+            )
+
+    attention_ranked.sort(key=lambda x: x[0])  # red before yellow, stable otherwise
+    groups["attention"] = [line for _, line in attention_ranked]
+    groups["system_line"] = _v2_system_line(system_raw, qa_issue)
+    return groups
+
+
+def _v2_system_line(system_raw: dict | None, qa_issue: str) -> str:
+    """Exception-only System line: empty string when everything is healthy."""
+    problems: list[str] = []
+    if system_raw:
+        watcher = system_raw.get("watcher_status", "unknown")
+        if watcher not in ("ok", "healthy", "unknown"):
+            problems.append(f"watcher {watcher}")
+        if system_raw.get("rejected_count", 0):
+            problems.append(f"{system_raw['rejected_count']} rejected meetings with orphan data")
+        if system_raw.get("errors_24h", 0) >= settings.BRIEF_ERROR_THRESHOLD:
+            problems.append(f"{system_raw['errors_24h']} errors in 24h")
+        if system_raw.get("pending_queue", 0) > 5:
+            problems.append(f"{system_raw['pending_queue']} pending approvals")
+    line = ", ".join(problems)
+    if qa_issue:
+        line = (line + "; " if line else "") + f"QA: {qa_issue}"
+    fb = _headline_fallback_line()
+    if fb:
+        line = (line + "; " if line else "") + fb
+    return line
+
+
+def _headline_fallback_line() -> str:
+    """Surface a warning if the Haiku headline has been falling back a lot (review #2)."""
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        since = (_dt.now() - _td(days=7)).isoformat()
+        rows = (
+            supabase_client.client.table("audit_log")
+            .select("details")
+            .eq("action", "morning_brief_headline_status")
+            .gte("created_at", since)
+            .execute()
+            .data
+            or []
+        )
+        if len(rows) < 4:
+            return ""
+        fallbacks = sum(
+            1 for r in rows if str((r.get("details") or {}).get("status", "")).startswith("fallback")
+        )
+        rate = fallbacks / len(rows)
+        return f"brief headline fell back {int(rate * 100)}% of last 7d" if rate > 0.25 else ""
+    except Exception:
+        return ""
+
+
+def _log_headline_status(status: str) -> None:
+    """Record each headline-composition outcome for observability (never raises)."""
+    try:
+        supabase_client.log_action(
+            action="morning_brief_headline_status",
+            details={"status": status},
+            triggered_by="scheduler",
+        )
+    except Exception:
+        logger.debug("headline status log failed", exc_info=True)
+
+
+def _deterministic_lead(groups: dict) -> str:
+    """The always-available lead line (used directly, or as Haiku fallback)."""
+    bits = []
+    if groups["attention"]:
+        n = len(groups["attention"])
+        bits.append(f"{n} thing{'s' if n != 1 else ''} need{'s' if n == 1 else ''} attention")
+    if groups["today"]:
+        bits.append(f"{len(groups['today'])} on your calendar")
+    if groups["deals"]:
+        n = len(groups["deals"])
+        bits.append(f"{n} deal item{'s' if n != 1 else ''}")
+    return "; ".join(bits) if bits else "Quiet morning — nothing pressing"
+
+
+async def _compose_lead(groups: dict) -> str:
+    """Thin Haiku headline: one line on what needs Eyal today. Deterministic fallback.
+
+    Facts stay deterministic — the model only headlines the provided items; it
+    never sees or alters numbers/dates. Wrapped in to_thread (call_llm is sync).
+    """
+    fallback = _deterministic_lead(groups)
+    source_lines = (
+        [_strip_line(x) for x in groups["attention"][:5]]
+        + [_strip_line(x) for x in groups["today"][:3]]
+        + [_strip_line(x) for x in groups["deals"][:3]]
+    )
+    if not source_lines:
+        _log_headline_status("success:empty")
+        return fallback
+    try:
+        import asyncio
+        from core.llm import call_llm
+
+        system = (
+            "You write ONE short line (max 18 words) for the top of a CEO's morning "
+            "brief: what needs his attention today. Use ONLY the provided items; do "
+            "not invent anything. No greeting, no emoji, no trailing period."
+        )
+        prompt = "Today's items:\n" + "\n".join(f"- {s}" for s in source_lines)
+
+        def _run() -> str:
+            text, _usage = call_llm(
+                prompt=prompt, model=settings.model_simple, max_tokens=60,
+                system=system, call_site="morning_brief_headline",
+            )
+            return text
+
+        lead = (await asyncio.to_thread(_run)).strip()
+        if lead:
+            _log_headline_status("success")
+            return _esc(lead[:200])
+        _log_headline_status("fallback:empty_output")
+        return fallback
+    except Exception as e:
+        _log_headline_status(f"fallback:{type(e).__name__}")
+        return fallback
+
+
+# Per-section soft caps for the v2 render (overflow becomes a "+N more →" button).
+_V2_SECTION_CAPS = {"today": 8, "attention": 6, "deals": 4, "milestones": 4, "email": 6}
+
+
+def _render_v2(groups: dict, lead: str) -> tuple[str, list[dict]]:
+    """Render the decision-first brief. Returns (text, overflow) where overflow
+    lists {section, label, hidden} for the brief_more pull buttons (PR3)."""
+    lines = [f"<b>{lead}</b>\n"]
+    overflow: list[dict] = []
+
+    def emit(header: str, items: list[str], cap: int, section_key: str, label: str):
+        if not items:
+            return
+        lines.append(f"<b>{header}</b>")
+        lines.extend(items[:cap])
+        if len(items) > cap:
+            hidden = len(items) - cap
+            overflow.append({"section": section_key, "label": label, "hidden": hidden})
+            lines.append(f"  +{hidden} more →")
+        lines.append("")
+
+    emit("Today", groups["today"], _V2_SECTION_CAPS["today"], "today", "Today")
+    emit("Needs attention", groups["attention"], _V2_SECTION_CAPS["attention"], "attention", "attention")
+    emit("Deals", groups["deals"], _V2_SECTION_CAPS["deals"], "deals", "deals")
+    emit("Milestones", groups["milestones"], _V2_SECTION_CAPS["milestones"], "milestones", "milestones")
+    for label, sensitive, item_lines in groups["emails"]:
+        tag = " [SENSITIVE]" if sensitive else ""
+        emit(f"{label}{tag}", item_lines, _V2_SECTION_CAPS["email"], f"email:{label}", label)
+
+    if groups.get("loose_ends"):
+        lines.append(f"Loose ends: {_esc(groups['loose_ends'])}")
+        lines.append("")
+    if groups.get("weekly_review_line"):
+        lines.append(groups["weekly_review_line"])
+        lines.append("")
+    if groups.get("system_line"):
+        lines.append(f"System: {groups['system_line']}")
+
+    text = "\n".join(lines).rstrip()
+    if len(text) > MORNING_BRIEF_BUDGET_CHARS:
+        text = text[:MORNING_BRIEF_BUDGET_CHARS] + "\n\n(...)"
+    return text, overflow
+
+
+async def format_morning_brief_v2(brief: dict) -> tuple[str, list[dict]]:
+    """v2 entry point: assemble groups, compose the lead, render. Returns (text, overflow)."""
+    sections = brief.get("sections", [])
+    if not sections:
+        return "", []
+    groups = _assemble_v2_groups(sections)
+    lead = await _compose_lead(groups)
+    return _render_v2(groups, lead)
+
+
+# =========================================================================
 # Trigger
 # =========================================================================
 
@@ -790,11 +1199,35 @@ async def trigger_morning_brief() -> dict | None:
     try:
         from services.orchestrator.spine import comms_spine
 
-        formatted = format_morning_brief(brief)
-        await comms_spine.send_to_eyal(formatted, parse_mode="HTML")
+        brief_id = f"brief-{date.today().isoformat()}"
+        v2_enabled = settings.MORNING_BRIEF_V2_ENABLED
+        v2_shadow = settings.MORNING_BRIEF_V2_SHADOW
+
+        # Authoritative send: v2 once cut over (enabled & not shadow); else v1
+        # (the default, and during the shadow window where v1 stays authoritative).
+        if v2_enabled and not v2_shadow:
+            brief_text, _overflow = await format_morning_brief_v2(brief)
+        else:
+            brief_text = format_morning_brief(brief)
+        await comms_spine.send_to_eyal(brief_text, parse_mode="HTML")
+
+        # v2 shadow preview — tagged, button-less; logged for comparison.
+        if v2_enabled and v2_shadow:
+            try:
+                v2_text, _ = await format_morning_brief_v2(brief)
+                if v2_text:
+                    await comms_spine.send_to_eyal(
+                        "<b>[v2 preview]</b>\n\n" + v2_text, parse_mode="HTML"
+                    )
+                    supabase_client.log_action(
+                        action="morning_brief_v2_shadow",
+                        details={"brief_id": brief_id, "chars": len(v2_text)},
+                        triggered_by="scheduler",
+                    )
+            except Exception as e:
+                logger.debug(f"v2 shadow preview failed: {e}")
 
         # Audit log for traceability (no approval needed, but keep record)
-        brief_id = f"brief-{date.today().isoformat()}"
         supabase_client.log_action(
             action="morning_brief_sent",
             details={
