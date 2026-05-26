@@ -128,6 +128,135 @@ class TestCalendarFilter:
         assert result is False  # Blocklist wins
 
 
+from contextlib import ExitStack
+
+
+def _enforce_strict():
+    """Context manager: strict calendar filter ENFORCED (flag on, not shadow)."""
+    from config.settings import settings
+    stack = ExitStack()
+    stack.enter_context(patch.object(settings, "STRICT_CALENDAR_FILTER", True))
+    stack.enter_context(patch.object(settings, "INPUT_HYGIENE_SHADOW_MODE", False))
+    stack.enter_context(patch.object(settings, "CROPSIGHT_CALENDAR_COLOR_ID", "3"))
+    return stack
+
+
+class TestStrictCalendarFilter:
+    """The strict chain (STRICT_CALENDAR_FILTER on): purple/business/stakeholder/prefix; no 2+ gmail branch."""
+
+    def test_purple_still_caught(self):
+        from guardrails.calendar_filter import is_cropsight_meeting
+        with _enforce_strict():
+            assert is_cropsight_meeting(
+                {"title": "Some meeting", "attendees": [], "color_id": "3"}
+            ) is True
+
+    def test_business_domain_attendee_detected(self):
+        from guardrails.calendar_filter import is_cropsight_meeting
+        with _enforce_strict():
+            event = {"title": "Call", "attendees": [{"email": "x@cropsight.io"}], "color_id": None}
+            assert is_cropsight_meeting(event) is True
+
+    def test_known_stakeholder_domain_detected(self):
+        """Ad-hoc call with a known client on their own domain — caught even without purple."""
+        from guardrails.calendar_filter import is_cropsight_meeting
+        with _enforce_strict(), patch(
+            "guardrails.calendar_filter.is_known_stakeholder_domain", return_value=True
+        ):
+            event = {"title": "Sync", "attendees": [{"email": "contact@moldova-client.md"}], "color_id": None}
+            assert is_cropsight_meeting(event) is True
+
+    def test_two_personal_gmails_now_uncertain(self):
+        """The old leak: 2 personal gmails + no color -> now uncertain (excluded)."""
+        from guardrails.calendar_filter import is_cropsight_meeting
+        with _enforce_strict(), patch(
+            "guardrails.calendar_filter.is_known_stakeholder_domain", return_value=False
+        ):
+            event = {
+                "title": "Coffee",
+                "attendees": [{"email": "eyalz111@gmail.com"}, {"email": "tadmoroye@gmail.com"}],
+                "color_id": None,
+            }
+            assert is_cropsight_meeting(event) is None
+
+    def test_blocklist_wins_over_business_domain(self):
+        from guardrails.calendar_filter import is_cropsight_meeting
+        with _enforce_strict():
+            event = {"title": "Dentist", "attendees": [{"email": "x@cropsight.io"}], "color_id": "3"}
+            assert is_cropsight_meeting(event) is False
+
+    def test_prefix_detected(self):
+        from guardrails.calendar_filter import is_cropsight_meeting
+        with _enforce_strict():
+            assert is_cropsight_meeting(
+                {"title": "CropSight sync", "attendees": [], "color_id": None}
+            ) is True
+
+    def test_uncertain_when_no_signal(self):
+        from guardrails.calendar_filter import is_cropsight_meeting
+        with _enforce_strict(), patch(
+            "guardrails.calendar_filter.is_known_stakeholder_domain", return_value=False
+        ):
+            assert is_cropsight_meeting(
+                {"title": "Meeting", "attendees": [], "color_id": None}
+            ) is None
+
+
+class TestCalendarShadowMode:
+    """In shadow, the strict decision is logged but the LEGACY decision is returned."""
+
+    def test_shadow_returns_legacy_and_logs_delta(self):
+        from config.settings import settings
+        from guardrails import calendar_filter as cf
+        event = {
+            "title": "Coffee",
+            "attendees": [{"email": "a@gmail.com"}, {"email": "b@gmail.com"}],
+            "color_id": None,
+        }
+        with patch.object(settings, "STRICT_CALENDAR_FILTER", True), \
+             patch.object(settings, "INPUT_HYGIENE_SHADOW_MODE", True), \
+             patch("guardrails.calendar_filter.CROPSIGHT_TEAM_EMAILS", ["a@gmail.com", "b@gmail.com"]), \
+             patch("guardrails.calendar_filter.is_known_stakeholder_domain", return_value=False), \
+             patch.object(cf, "_log_calendar_shadow") as mock_log:
+            result = cf.is_cropsight_meeting(event)
+        assert result is True            # legacy 2+ branch returned
+        mock_log.assert_called_once()    # strict (None) != legacy (True) -> delta logged
+
+
+class TestShouldIncludeMeeting:
+    """should_include_meeting honors STRICT_UNCERTAIN_EXCLUSION only when enforcing."""
+
+    def test_excludes_uncertain_when_enforcing(self):
+        from config.settings import settings
+        from guardrails.calendar_filter import should_include_meeting
+        event = {
+            "title": "Coffee",
+            "attendees": [{"email": "eyalz111@gmail.com"}, {"email": "tadmoroye@gmail.com"}],
+            "color_id": None,
+        }
+        with patch.object(settings, "STRICT_CALENDAR_FILTER", True), \
+             patch.object(settings, "INPUT_HYGIENE_SHADOW_MODE", False), \
+             patch.object(settings, "STRICT_UNCERTAIN_EXCLUSION", True), \
+             patch("guardrails.calendar_filter.is_known_stakeholder_domain", return_value=False):
+            assert should_include_meeting(event) is False  # strict -> None -> excluded
+
+    def test_includes_uncertain_during_shadow(self):
+        from config.settings import settings
+        from guardrails.calendar_filter import should_include_meeting
+        event = {
+            "title": "Coffee",
+            "attendees": [{"email": "a@gmail.com"}, {"email": "b@gmail.com"}],
+            "color_id": None,
+        }
+        with patch.object(settings, "STRICT_CALENDAR_FILTER", True), \
+             patch.object(settings, "INPUT_HYGIENE_SHADOW_MODE", True), \
+             patch.object(settings, "STRICT_UNCERTAIN_EXCLUSION", True), \
+             patch("guardrails.calendar_filter.CROPSIGHT_TEAM_EMAILS", ["a@gmail.com", "b@gmail.com"]), \
+             patch("guardrails.calendar_filter.is_known_stakeholder_domain", return_value=False):
+            # shadow returns legacy (True via 2+), exclusion suppressed during shadow
+            assert should_include_meeting(event) is True
+
+
 class TestFormatUncertainMeetingQuestion:
     """Tests for the question formatting function."""
 

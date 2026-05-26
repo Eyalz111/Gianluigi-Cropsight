@@ -7,12 +7,22 @@ and blocklists used throughout the application.
 This is the single source of truth for team-related configuration.
 """
 
+import re
+
 from config.settings import settings
 
 
 # =============================================================================
 # CropSight Team Members
 # =============================================================================
+#
+# Each member carries:
+#   - "email": their primary address (the historical single-email field; many
+#     call sites read it, so it stays untouched).
+#   - "identities": every address that is the SAME person (personal + work).
+#     Pre-Workspace the team uses personal gmails; as work addresses come online
+#     (e.g. Eyal's @cropsight.io) they are added here so calendar/email
+#     recognition resolves them to the right person. Additive only.
 
 TEAM_MEMBERS = {
     "eyal": {
@@ -23,6 +33,7 @@ TEAM_MEMBERS = {
             "Owns company direction, key partnerships, and board communication."
         ),
         "email": settings.EYAL_EMAIL,
+        "identities": [settings.EYAL_EMAIL, "eyal.zror@cropsight.io"],
         "is_admin": True,  # Has full access to all features
     },
     "roye": {
@@ -33,6 +44,7 @@ TEAM_MEMBERS = {
             "accuracy metrics, platform development. Owns the product roadmap."
         ),
         "email": settings.ROYE_EMAIL,
+        "identities": [settings.ROYE_EMAIL],
         "is_admin": False,
     },
     "paolo": {
@@ -43,6 +55,7 @@ TEAM_MEMBERS = {
             "Owns the Moldova pilot relationship and partner pipeline."
         ),
         "email": settings.PAOLO_EMAIL,
+        "identities": [settings.PAOLO_EMAIL],
         "is_admin": False,
     },
     "yoram": {
@@ -54,6 +67,7 @@ TEAM_MEMBERS = {
             "Assigns tasks TO others, not assigned tasks himself."
         ),
         "email": settings.YORAM_EMAIL,
+        "identities": [settings.YORAM_EMAIL],
         "is_admin": False,
     },
 }
@@ -69,6 +83,26 @@ CROPSIGHT_TEAM_EMAILS = [
     settings.PAOLO_EMAIL,
     settings.YORAM_EMAIL,
 ]
+
+
+# =============================================================================
+# Business Identity (CropSight work domains + every team member identity)
+# =============================================================================
+
+# Domains that unambiguously mean "CropSight business" (org email).
+# Pre-Workspace the team still uses personal gmails — those are recognized via
+# CROPSIGHT_WORK_IDENTITIES below, NOT by domain, so a personal-gmail event
+# does not get auto-classified as business.
+CROPSIGHT_BUSINESS_DOMAINS = ["cropsight.io", "cropsight.com"]
+
+# Flat, lowercased set of every registered team identity (personal + work).
+# Superset of CROPSIGHT_TEAM_EMAILS (which is only the primary addresses).
+CROPSIGHT_WORK_IDENTITIES = {
+    ident.lower().strip()
+    for member in TEAM_MEMBERS.values()
+    for ident in member.get("identities", [])
+    if ident
+}
 
 
 # =============================================================================
@@ -179,9 +213,50 @@ def get_team_member(member_id: str) -> dict | None:
     return TEAM_MEMBERS.get(member_id.lower().strip())
 
 
+def _normalize_email(email: str) -> str:
+    """
+    Extract a bare, lowercased email address from a possibly-formatted string.
+
+    Handles both "addr@x.com" and "Display Name <addr@x.com>" forms.
+
+    Args:
+        email: Raw email string (may include a display name).
+
+    Returns:
+        Lowercased bare address, or "" if none could be extracted.
+    """
+    if not email:
+        return ""
+    match = re.search(r"[\w.+-]+@[\w.-]+", email)
+    return (match.group(0) if match else email).lower().strip()
+
+
+def is_business_identity(email: str) -> bool:
+    """
+    Check if an email is on a CropSight business domain (@cropsight.io / .com).
+
+    This is the calendar/email *business signal*. It deliberately does NOT
+    include the team's personal gmails: a personal-gmail attendee must not
+    auto-classify an event as CropSight (that was the old "2+ team members"
+    leak). Personal team identities are recognized separately for email-routing
+    purposes via is_team_email().
+
+    Args:
+        email: The email address (or "Name <addr>" form) to check.
+
+    Returns:
+        True if the email's domain is a CropSight business domain.
+    """
+    addr = _normalize_email(email)
+    if not addr or "@" not in addr:
+        return False
+    domain = addr.split("@", 1)[1]
+    return domain in CROPSIGHT_BUSINESS_DOMAINS
+
+
 def get_team_member_by_email(email: str) -> dict | None:
     """
-    Look up a team member by their email address.
+    Look up a team member by any of their identities (primary or work).
 
     Args:
         email: The email address to look up.
@@ -189,10 +264,15 @@ def get_team_member_by_email(email: str) -> dict | None:
     Returns:
         Team member dict if found, None otherwise.
     """
-    email_lower = email.lower().strip()
+    addr = _normalize_email(email)
+    if not addr:
+        return None
     for member in TEAM_MEMBERS.values():
-        if member["email"].lower() == email_lower:
+        if member["email"].lower().strip() == addr:
             return member
+        for ident in member.get("identities", []) or []:
+            if ident and ident.lower().strip() == addr:
+                return member
     return None
 
 
@@ -210,13 +290,22 @@ def is_team_email(email: str) -> bool:
     """
     Check if an email belongs to a CropSight team member.
 
+    Matches any registered identity (personal or work), so a work address such
+    as eyal.zror@cropsight.io now resolves as a team email. Superset of the
+    historical primary-email check — never narrows it.
+
     Args:
         email: The email address to check.
 
     Returns:
         True if the email belongs to a team member, False otherwise.
     """
-    return email.lower().strip() in [e.lower() for e in CROPSIGHT_TEAM_EMAILS if e]
+    addr = _normalize_email(email)
+    if not addr:
+        return False
+    if addr in CROPSIGHT_WORK_IDENTITIES:
+        return True
+    return addr in [e.lower() for e in CROPSIGHT_TEAM_EMAILS if e]
 
 
 # =============================================================================
@@ -242,10 +331,16 @@ def passes_email_filter_chain(
 
     Rules applied in order:
     1. Blocklist check (rejects immediately)
-    2. Sender/recipient is team member
-    3. Sender domain matches known stakeholder from entity registry
-    4. Subject contains CropSight keywords (live list)
-    5. Thread is already being tracked
+    2. Sender/recipient is a team member (any registered identity)
+    3. Sender/recipient is on a CropSight business domain (org mail not yet
+       registered as a person)
+    4. Sender domain matches known stakeholder from entity registry
+    5. Subject contains CropSight keywords (live list)
+    6. Thread is already being tracked
+
+    The chain stays recall-friendly (a keyword match still passes, so cold
+    first-contact business inbound is not dropped); personal-vs-business
+    precision is the classifier's job (see processors/email_classifier.py).
 
     Args:
         sender: Sender email address.
@@ -266,9 +361,15 @@ def passes_email_filter_chain(
     if is_personal_contact_blocked(sender_lower):
         return (False, "blocked_contact")
 
-    # Rule 1: Team member
+    # Rule 1: Team member (any registered identity, incl. personal gmails) —
+    # person-level attribution for known people.
     if is_team_email(sender_lower) or is_team_email(recipient_lower):
         return (True, "team_member")
+
+    # Rule 2: CropSight business domain (@cropsight.io / .com) — unambiguous org
+    # mail, recognized even for addresses not yet registered as a team identity.
+    if is_business_identity(sender_lower) or is_business_identity(recipient_lower):
+        return (True, "business_domain")
 
     # Rule 2: Known stakeholder domain
     if is_known_stakeholder_domain(sender_lower):

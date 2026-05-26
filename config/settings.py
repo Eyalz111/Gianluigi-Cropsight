@@ -597,6 +597,29 @@ class Settings(BaseSettings):
         default=False, description="Enable the rare high-bar Telegram pop for critical+blocked+board-active Gantt divergences (cooldown 1/topic/week)"
     )
 
+    # ==========================================================================
+    # Outputs re-architecture (v2.5 Phase 3) — PR1: input hygiene.
+    # All default OFF / shadow-safe. See plan composed-brewing-giraffe.md.
+    # Three independent capabilities + one shared shadow, so a regression
+    # isolates to the exact change that caused it.
+    # ==========================================================================
+    STRICT_CALENDAR_FILTER: bool = Field(
+        default=False,
+        description="Use the strict is_cropsight_meeting() chain (purple OR business-domain OR known-stakeholder-domain OR title-prefix; drops the personal-gmail '2+ team members' branch). OFF = legacy OR-chain."
+    )
+    STRICT_UNCERTAIN_EXCLUSION: bool = Field(
+        default=False,
+        description="Calendar consumers treat uncertain (None) meetings as EXCLUDE (morning brief/debrief currently INCLUDE them). Independent of the filter rewrite so the two can be isolated."
+    )
+    EMAIL_BUSINESS_GATE: bool = Field(
+        default=False,
+        description="Use the reordered soft email gate + sharpened classifier (excludes known-personal senders; cold business inbound still reaches Haiku). OFF = legacy whitelist chain."
+    )
+    INPUT_HYGIENE_SHADOW_MODE: bool = Field(
+        default=True,
+        description="Applies to all three PR1 capabilities: compute the NEW decision, RETURN the OLD, and log the human-scannable delta to audit_log (action='input_hygiene_shadow'). The 'what it would exclude' log. Flip False to enforce."
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""

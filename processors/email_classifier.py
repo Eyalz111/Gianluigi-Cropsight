@@ -23,6 +23,34 @@ logger = logging.getLogger(__name__)
 # Classification (Haiku — ~$0.001/email)
 # =========================================================================
 
+def _classification_system(keywords_str: str, sharpened: bool) -> str:
+    """Build the classifier system prompt (legacy or sharpened)."""
+    base = (
+        "You are a classification assistant for CropSight, an Israeli AgTech startup. "
+        "Classify emails by their relevance to CropSight business operations.\n"
+        "Team members: Eyal Zror (CEO), Roye Tadmor (CTO), Paolo Vailetti (BD), Prof. Yoram Weiss (Advisor).\n"
+        f"Relevant keywords: {keywords_str}\n\n"
+        "Respond with EXACTLY one word: relevant, borderline, or false_positive.\n"
+    )
+    if not sharpened:
+        return base + (
+            "- relevant: clearly about CropSight business, team, projects, or stakeholders\n"
+            "- borderline: might be related but unclear\n"
+            "- false_positive: personal, spam, newsletters, or unrelated"
+        )
+    return base + (
+        "Judge by what the email is ABOUT, not by keyword presence — a personal "
+        "email that merely mentions a keyword is NOT relevant.\n"
+        "- relevant: the email's purpose is CropSight business — a real action, "
+        "introduction, proposal, update, or stakeholder/investor/customer outreach, "
+        "INCLUDING first-contact from someone not yet recognized.\n"
+        "- borderline: plausibly business but the purpose is genuinely unclear.\n"
+        "- false_positive: personal correspondence (family, friends, scheduling, "
+        "receipts, services), newsletters, marketing, or spam — even if it mentions "
+        "agriculture, a place name, or another CropSight keyword."
+    )
+
+
 async def classify_email(
     sender: str,
     subject: str,
@@ -45,20 +73,35 @@ async def classify_email(
         Classification: 'relevant', 'borderline', or 'false_positive'.
     """
     keywords_str = ", ".join(filter_keywords[:50]) if filter_keywords else "cropsight, moldova, gagauzia"
-
-    system = (
-        "You are a classification assistant for CropSight, an Israeli AgTech startup. "
-        "Classify emails by their relevance to CropSight business operations.\n"
-        "Team members: Eyal Zror (CEO), Roye Tadmor (CTO), Paolo Vailetti (BD), Prof. Yoram Weiss (Advisor).\n"
-        f"Relevant keywords: {keywords_str}\n\n"
-        "Respond with EXACTLY one word: relevant, borderline, or false_positive.\n"
-        "- relevant: clearly about CropSight business, team, projects, or stakeholders\n"
-        "- borderline: might be related but unclear\n"
-        "- false_positive: personal, spam, newsletters, or unrelated"
-    )
-
     prompt = f"Sender: {sender}\nSubject: {subject}\nPreview: {body_preview[:500]}"
 
+    # Sharpened classification (PR1/A2): judge by what the email is ABOUT, not by
+    # keyword presence, so a personal email that merely mentions a CropSight
+    # keyword is rejected — while cold first-contact business inbound still
+    # counts. Gated by EMAIL_BUSINESS_GATE; enforced only when not in shadow so
+    # the observation window stays non-disruptive.
+    gate_on = settings.EMAIL_BUSINESS_GATE
+    shadow = settings.INPUT_HYGIENE_SHADOW_MODE
+    sharpened = gate_on and not shadow
+
+    result = _run_classification(prompt, _classification_system(keywords_str, sharpened))
+
+    # SHADOW: also compute the sharpened verdict, log the delta, keep legacy result.
+    if gate_on and shadow:
+        try:
+            shadow_result = _run_classification(
+                prompt, _classification_system(keywords_str, True)
+            )
+            if shadow_result != result:
+                _log_email_shadow(sender, subject, result, shadow_result)
+        except Exception:
+            logger.debug("email classifier shadow log failed", exc_info=True)
+
+    return result
+
+
+def _run_classification(prompt: str, system: str) -> str:
+    """Run one Haiku classification pass; never raises (defaults to borderline)."""
     try:
         text, _usage = call_llm(
             prompt=prompt,
@@ -70,12 +113,30 @@ async def classify_email(
         result = text.strip().lower()
         if result in ("relevant", "borderline", "false_positive"):
             return result
-        # Default to borderline if unexpected output
         logger.warning(f"Unexpected classification: {result!r}, defaulting to borderline")
         return "borderline"
     except Exception as e:
         logger.error(f"Email classification failed: {e}")
         return "borderline"
+
+
+def _log_email_shadow(sender: str, subject: str, old_class: str, new_class: str) -> None:
+    """Log a human-scannable email-classification shadow delta to audit_log."""
+    try:
+        from services.supabase_client import supabase_client
+
+        supabase_client.log_action(
+            "input_hygiene_shadow",
+            {
+                "surface": "email",
+                "sender": sender,
+                "subject": subject,
+                "old_decision": old_class,
+                "new_decision": new_class,
+            },
+        )
+    except Exception:  # monitoring must never break classification
+        logger.debug("email shadow log failed", exc_info=True)
 
 
 # =========================================================================

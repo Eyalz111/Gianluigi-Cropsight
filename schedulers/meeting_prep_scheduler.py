@@ -168,9 +168,10 @@ class MeetingPrepScheduler:
                 logger.info("  Skipping '%s' — already has outline or in progress", title)
                 continue
 
-            # Check if CropSight meeting
-            if not is_cropsight_meeting(event):
-                logger.info("  Skipping event — not CropSight meeting (id=%s)", event_id[:12])
+            # Check if CropSight meeting — exclude uncertain (None) explicitly,
+            # not just via falsiness (meeting prep has always excluded uncertain).
+            if is_cropsight_meeting(event) is not True:
+                logger.info("  Skipping event — not a confirmed CropSight meeting (id=%s)", event_id[:12])
                 continue
 
             # Skip solo events (no other attendees — just Eyal)

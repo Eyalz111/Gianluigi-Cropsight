@@ -20,24 +20,34 @@ Usage:
 
 from typing import Any
 
+import logging
+
 from config.settings import settings
 from config.team import (
     CROPSIGHT_TEAM_EMAILS,
     CROPSIGHT_PREFIXES,
     BLOCKED_KEYWORDS,
+    is_business_identity,
+    is_known_stakeholder_domain,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def is_cropsight_meeting(event: dict) -> bool | None:
     """
     Determine if a calendar event is a CropSight meeting.
 
-    Applies the filter chain from Section 6 of the project plan.
+    Dispatches between the legacy OR-chain and the strict chain based on
+    ``STRICT_CALENDAR_FILTER``. While ``INPUT_HYGIENE_SHADOW_MODE`` is on, the
+    strict decision is computed and the delta logged, but the LEGACY decision is
+    returned so live behavior is unchanged during the observation window.
 
     Args:
         event: Calendar event dict with keys:
             - title (str): Event summary/title
             - attendees (list[dict]): List of attendees with 'email' key
+            - organizer (dict): {'email': ...}
             - color_id (str | None): Google Calendar color ID
 
     Returns:
@@ -45,29 +55,136 @@ def is_cropsight_meeting(event: dict) -> bool | None:
         - False: This is a personal meeting (do not process)
         - None: Uncertain - ask Eyal before processing
     """
-    title = event.get("title", "") or ""
-    title_lower = title.lower().strip()
+    legacy = _is_cropsight_meeting_legacy(event)
+
+    if not settings.STRICT_CALENDAR_FILTER:
+        return legacy
+
+    strict_decision, strict_reason = _classify_strict(event)
+
+    if settings.INPUT_HYGIENE_SHADOW_MODE:
+        if strict_decision != legacy:
+            _log_calendar_shadow(event, legacy, strict_decision, strict_reason)
+        return legacy
+
+    return strict_decision
+
+
+def should_include_meeting(event: dict) -> bool:
+    """Consumer helper: should this event appear in business outputs?
+
+    Honors ``STRICT_UNCERTAIN_EXCLUSION`` — when enforcing (flag on and NOT in
+    shadow), uncertain (None) events are EXCLUDED. Otherwise legacy behavior:
+    include unless explicitly classified personal (False). Coupling to the
+    shadow flag keeps the observation window fully non-disruptive.
+    """
+    result = is_cropsight_meeting(event)
+    if settings.STRICT_UNCERTAIN_EXCLUSION and not settings.INPUT_HYGIENE_SHADOW_MODE:
+        return result is True
+    return result is not False
+
+
+def _is_cropsight_meeting_legacy(event: dict) -> bool | None:
+    """Legacy OR-chain (retained behind STRICT_CALENDAR_FILTER for rollback).
+
+    Purple color OR 2+ team members (by personal-gmail email) OR title prefix.
+    The 2+ branch is the personal-event leak source the strict chain removes.
+    """
+    title_lower = (event.get("title", "") or "").lower().strip()
     attendees = event.get("attendees", []) or []
     color_id = event.get("color_id")
 
-    # Layer 1 (BLOCKLIST) - Check first as a hard stop
     if _matches_blocklist(title_lower):
         return False
-
-    # Layer 2 (COLOR) - Purple calendar color
     if _is_cropsight_color(color_id):
         return True
-
-    # Layer 3 (PARTICIPANTS) - 2+ CropSight team members
     if _has_sufficient_team_members(attendees):
         return True
-
-    # Layer 4 (TITLE PREFIX) - CropSight prefix patterns
     if _has_cropsight_prefix(title_lower):
         return True
-
-    # UNCERTAIN - none of the positive signals matched
     return None
+
+
+def _classify_strict(event: dict) -> tuple[bool | None, str]:
+    """Strict chain: the CEO's explicit signal is authoritative; exclude when uncertain.
+
+    Order: blocklist -> purple color -> business-domain participant ->
+    known-stakeholder-domain participant -> title prefix -> uncertain.
+    The personal-gmail "2+ team members" branch is intentionally absent.
+
+    Returns:
+        (decision, reason) where reason names the branch that fired.
+    """
+    title_lower = (event.get("title", "") or "").lower().strip()
+    color_id = event.get("color_id")
+
+    if _matches_blocklist(title_lower):
+        return False, "blocklist"
+    if _is_cropsight_color(color_id):
+        return True, "purple_color"
+    if _has_business_participant(event):
+        return True, "business_identity"
+    if _has_stakeholder_participant(event):
+        return True, "stakeholder_domain"
+    if _has_cropsight_prefix(title_lower):
+        return True, "title_prefix"
+    return None, "uncertain"
+
+
+def _is_cropsight_meeting_strict(event: dict) -> bool | None:
+    """The strict decision alone (used by tests / direct callers)."""
+    return _classify_strict(event)[0]
+
+
+def _participant_emails(event: dict) -> list[str]:
+    """Collect organizer + attendee emails from an event (bare addresses)."""
+    emails: list[str] = []
+    organizer = event.get("organizer") or {}
+    if organizer.get("email"):
+        emails.append(organizer["email"])
+    for attendee in event.get("attendees", []) or []:
+        if attendee.get("email"):
+            emails.append(attendee["email"])
+    return emails
+
+
+def _has_business_participant(event: dict) -> bool:
+    """True if any participant is on a CropSight business domain (not personal gmail)."""
+    return any(is_business_identity(email) for email in _participant_emails(event))
+
+
+def _has_stakeholder_participant(event: dict) -> bool:
+    """True if any participant is on a known-stakeholder domain (entity registry).
+
+    Catches the ad-hoc call with a known Moldova client / Italian consortium
+    contact on their own domain that wasn't colored purple.
+    """
+    return any(is_known_stakeholder_domain(email) for email in _participant_emails(event))
+
+
+def _log_calendar_shadow(
+    event: dict, legacy: bool | None, strict_decision: bool | None, strict_reason: str
+) -> None:
+    """Log a human-scannable calendar shadow delta to audit_log (never raises)."""
+    try:
+        from services.supabase_client import supabase_client
+
+        organizer = (event.get("organizer") or {}).get("email", "")
+        attendee_emails = [a.get("email", "") for a in (event.get("attendees") or [])]
+        supabase_client.log_action(
+            "input_hygiene_shadow",
+            {
+                "surface": "calendar",
+                "title": event.get("title", ""),
+                "organizer": organizer,
+                "attendees": attendee_emails,
+                "old_decision": legacy,
+                "new_decision": strict_decision,
+                "branch": strict_reason,
+            },
+        )
+    except Exception:  # monitoring must never break the filter
+        logger.debug("calendar shadow log failed", exc_info=True)
 
 
 def _matches_blocklist(title_lower: str) -> bool:
