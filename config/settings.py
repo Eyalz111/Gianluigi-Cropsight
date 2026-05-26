@@ -599,7 +599,8 @@ class Settings(BaseSettings):
 
     # ==========================================================================
     # Outputs re-architecture (v2.5 Phase 3) — PR1 input hygiene + PR2 morning
-    # brief. All default OFF/shadow-safe. See plan composed-brewing-giraffe.md.
+    # brief + PR3 engagement. All default OFF/shadow-safe. See plan
+    # composed-brewing-giraffe.md.
     # ==========================================================================
     # PR1 — input hygiene. Three independent capabilities + one shared shadow,
     # so a regression isolates to the exact change that caused it.
@@ -634,6 +635,12 @@ class Settings(BaseSettings):
     # staleness reuses the existing 24h heartbeat window.
     BRIEF_ERROR_THRESHOLD: int = Field(
         default=3, description="audit_log errors in 24h before the morning brief surfaces the System section (>=3 so a single transient blip stays silent)"
+    )
+
+    # PR3 — engagement instrumentation.
+    BRIEF_FEEDBACK_ENABLED: bool = Field(
+        default=False,
+        description="Attach whole-brief 👍/👎 + 'what felt like noise?' feedback buttons and the brief_more overflow buttons to the morning brief. Requires the morning_brief_feedback table."
     )
 
     @property

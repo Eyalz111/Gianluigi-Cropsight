@@ -3256,6 +3256,84 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         except Exception as e:
             logger.warning(f"voice_tts telemetry failed: {e}")
 
+    async def _handle_brief_feedback(self, query, rest: str) -> None:
+        """Record a 👍/👎 on the morning brief. 👎 opens one-tap noise categories.
+
+        Restart-safe: everything resolves from brief_id (carried in callback_data),
+        never in-memory state.
+        """
+        from services.supabase_client import supabase_client
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        try:
+            vote, brief_id = rest.split(":", 1)
+        except ValueError:
+            return
+        try:
+            if vote == "up":
+                supabase_client.set_brief_feedback_vote(brief_id, "up")
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("✓ Thanks", callback_data="noop:1")]]
+                    )
+                )
+            else:
+                supabase_client.set_brief_feedback_vote(brief_id, "down", pending_noise=True)
+                cats = [("Too long", "too_long"), ("Not relevant", "irrelevant"),
+                        ("Wrong / outdated", "wrong"), ("Other", "other")]
+                rows = [
+                    [InlineKeyboardButton(label, callback_data=f"briefnoise:{c}:{brief_id}")]
+                    for label, c in cats
+                ]
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+        except Exception as e:
+            logger.warning(f"brief feedback vote failed: {e}")
+
+    async def _handle_brief_noise(self, query, rest: str) -> None:
+        """Record the one-tap 'what felt like noise?' category."""
+        from services.supabase_client import supabase_client
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        try:
+            category, brief_id = rest.split(":", 1)
+        except ValueError:
+            return
+        try:
+            supabase_client.set_brief_feedback_noise(brief_id, noise_category=category)
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("✓ Noted", callback_data="noop:1")]]
+                )
+            )
+        except Exception as e:
+            logger.warning(f"brief noise capture failed: {e}")
+
+    async def _handle_brief_more(self, query, rest: str) -> None:
+        """Expand a capped section by recomputing it fresh (restart-safe, no cache)."""
+        try:
+            section, _brief_id = rest.split(":", 1)
+        except ValueError:
+            return
+        from processors.morning_brief import compile_morning_brief, _assemble_v2_groups
+
+        try:
+            brief = await compile_morning_brief()
+            groups = _assemble_v2_groups(brief.get("sections", []))
+            items = groups.get(section) or []
+            if not items:
+                await query.message.reply_text("Nothing more to show there.")
+                return
+            header = {
+                "today": "Today", "attention": "Needs attention",
+                "deals": "Deals", "milestones": "Milestones",
+            }.get(section, section)
+            text = f"<b>{header} (full)</b>\n" + "\n".join(items)
+            if len(text) > 3800:
+                text = text[:3800] + "\n\n(...)"
+            await query.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"brief_more expand failed: {e}")
+
     async def _handle_callback_query(
         self,
         update: Update,
@@ -3312,6 +3390,19 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             parts = meeting_id.split(":", 1)
             if len(parts) == 2:
                 await self._handle_prep_reclassify_callback(query, context, parts[0], parts[1])
+            return
+
+        # ---- Morning-brief engagement (PR3) ----
+        if action == "noop":
+            return  # inert confirmation button (already acknowledged above)
+        if action == "brieffb":
+            await self._handle_brief_feedback(query, meeting_id)
+            return
+        if action == "briefnoise":
+            await self._handle_brief_noise(query, meeting_id)
+            return
+        if action == "brief_more":
+            await self._handle_brief_more(query, meeting_id)
             return
 
         # ---- Weekly review callbacks ----

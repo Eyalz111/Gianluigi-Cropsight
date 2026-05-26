@@ -1161,6 +1161,31 @@ async def format_morning_brief_v2(brief: dict) -> tuple[str, list[dict]]:
     return _render_v2(groups, lead)
 
 
+def _build_brief_keyboard(brief_id: str, overflow: list[dict] | None):
+    """👍/👎 feedback + per-section '+N more' pull buttons (PR3).
+
+    Only the four ranked sections get pull buttons (their keys are colon-free,
+    so the callback parses cleanly); email overflow stays text-only.
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    rows = [[
+        InlineKeyboardButton("👍", callback_data=f"brieffb:up:{brief_id}"),
+        InlineKeyboardButton("👎", callback_data=f"brieffb:down:{brief_id}"),
+    ]]
+    for o in (overflow or []):
+        section = o.get("section", "")
+        if section not in ("today", "attention", "deals", "milestones"):
+            continue
+        rows.append([
+            InlineKeyboardButton(
+                f"+{o.get('hidden', 0)} more: {o.get('label', section)}",
+                callback_data=f"brief_more:{section}:{brief_id}",
+            )
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
 # =========================================================================
 # Trigger
 # =========================================================================
@@ -1205,11 +1230,29 @@ async def trigger_morning_brief() -> dict | None:
 
         # Authoritative send: v2 once cut over (enabled & not shadow); else v1
         # (the default, and during the shadow window where v1 stays authoritative).
+        overflow: list[dict] = []
         if v2_enabled and not v2_shadow:
-            brief_text, _overflow = await format_morning_brief_v2(brief)
+            brief_text, overflow = await format_morning_brief_v2(brief)
         else:
             brief_text = format_morning_brief(brief)
-        await comms_spine.send_to_eyal(brief_text, parse_mode="HTML")
+
+        # PR3: feedback buttons (+ pull buttons) on the authoritative send.
+        reply_markup = None
+        if settings.BRIEF_FEEDBACK_ENABLED:
+            try:
+                brief_id = supabase_client.create_brief_feedback_row(
+                    brief_id,
+                    brief_date=date.today().isoformat(),
+                    variant="primary",
+                    section_count=len(sections),
+                )
+                reply_markup = _build_brief_keyboard(brief_id, overflow)
+            except Exception as e:
+                logger.debug(f"Brief feedback row/keyboard failed: {e}")
+
+        await comms_spine.send_to_eyal(
+            brief_text, parse_mode="HTML", reply_markup=reply_markup
+        )
 
         # v2 shadow preview — tagged, button-less; logged for comparison.
         if v2_enabled and v2_shadow:
@@ -1224,6 +1267,13 @@ async def trigger_morning_brief() -> dict | None:
                         details={"brief_id": brief_id, "chars": len(v2_text)},
                         triggered_by="scheduler",
                     )
+                    if settings.BRIEF_FEEDBACK_ENABLED:
+                        supabase_client.create_brief_feedback_row(
+                            f"{brief_id}-preview",
+                            brief_date=date.today().isoformat(),
+                            variant="preview",
+                            section_count=len(sections),
+                        )
             except Exception as e:
                 logger.debug(f"v2 shadow preview failed: {e}")
 
