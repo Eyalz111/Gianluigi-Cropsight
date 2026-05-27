@@ -36,6 +36,19 @@ logger = logging.getLogger("gianluigi")
 _shutdown_event: asyncio.Event | None = None
 
 
+def active_prep_scheduler():
+    """The active meeting-prep scheduler — XOR on PREP_PING_ENABLED (exactly one runs).
+
+    New push-first ping scheduler when enabled; the legacy outline scheduler
+    otherwise. One flag check, one place — used at start / reconstruct / stop.
+    """
+    if settings.PREP_PING_ENABLED:
+        from schedulers.prep_ping_scheduler import prep_ping_scheduler
+        return prep_ping_scheduler
+    from schedulers.meeting_prep_scheduler import meeting_prep_scheduler
+    return meeting_prep_scheduler
+
+
 async def initialize_services() -> dict:
     """
     Initialize all service connections.
@@ -196,7 +209,6 @@ async def start_services() -> None:
     from services.telegram_bot import telegram_bot
     from schedulers.transcript_watcher import transcript_watcher
     from schedulers.document_watcher import document_watcher
-    from schedulers.meeting_prep_scheduler import meeting_prep_scheduler
     from schedulers.task_reminder_scheduler import task_reminder_scheduler
 
     logger.info("Starting background services...")
@@ -243,11 +255,10 @@ async def start_services() -> None:
 
     # Start meeting prep scheduler (only if Calendar is available)
     if init_status.get("google_calendar"):
-        logger.info("  Starting meeting prep scheduler...")
-        prep_task = asyncio.create_task(
-            meeting_prep_scheduler.start(),
-            name="meeting_prep_scheduler"
-        )
+        _prep = active_prep_scheduler()
+        logger.info("  Starting meeting prep scheduler (%s)...",
+                    "ping" if settings.PREP_PING_ENABLED else "outline")
+        prep_task = asyncio.create_task(_prep.start(), name="meeting_prep_scheduler")
         tasks.append(prep_task)
     else:
         logger.warning("  Meeting prep scheduler disabled (Google Calendar not available)")
@@ -418,7 +429,7 @@ async def start_services() -> None:
     # NOTE: reconstruct_prep_timers() now runs inside start() before the main loop.
     # This external call is kept as a safety net but is effectively a no-op.
     try:
-        prep_reconstructed = await meeting_prep_scheduler.reconstruct_prep_timers()
+        prep_reconstructed = await active_prep_scheduler().reconstruct_prep_timers()
         if prep_reconstructed:
             logger.info(f"  Reconstructed {prep_reconstructed} additional prep timer(s)")
     except Exception as e:
@@ -486,7 +497,6 @@ async def stop_services() -> None:
     # Stop schedulers
     from schedulers.transcript_watcher import transcript_watcher
     from schedulers.document_watcher import document_watcher
-    from schedulers.meeting_prep_scheduler import meeting_prep_scheduler
     from schedulers.task_reminder_scheduler import task_reminder_scheduler
     from schedulers.weekly_digest_scheduler import weekly_digest_scheduler
     from schedulers.email_watcher import email_watcher
@@ -495,7 +505,7 @@ async def stop_services() -> None:
 
     transcript_watcher.stop()
     document_watcher.stop()
-    meeting_prep_scheduler.stop()
+    active_prep_scheduler().stop()
     task_reminder_scheduler.stop()
     weekly_digest_scheduler.stop()
     email_watcher.stop()

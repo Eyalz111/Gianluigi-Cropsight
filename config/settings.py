@@ -651,6 +651,25 @@ class Settings(BaseSettings):
         description="Append exception-based executive-context clauses to meeting summaries: decision supersession ('(reverses the <date> decision: ...)') + a one-line topic 'Where this fits'. Tier-safe (a clause is omitted if the referenced prior item/topic is above the meeting's distribution tier). Off = summaries render exactly as before."
     )
 
+    # ==========================================================================
+    # Outputs re-architecture (v2.5 Phase 3) — chunk 3: meeting-prep "Prep Ping".
+    # Push-first ping + on-demand brief, replacing the old outline/Drive-doc prep.
+    # When ON, main.py starts prep_ping_scheduler INSTEAD of the old one.
+    # ==========================================================================
+    PREP_PING_ENABLED: bool = Field(
+        default=False,
+        description="Use the new push-first meeting-prep: a deterministic ping ~LEAD min before each meeting (participant-anchored, topic-enriched) + an on-demand 'Prepare me' brief. OFF = the old outline/Drive-doc prep scheduler."
+    )
+    PREP_PING_LEAD_MINUTES: int = Field(
+        default=90, description="Send the prep ping when a meeting is within this many minutes of starting."
+    )
+    PREP_PING_MIN_LEAD_MINUTES: int = Field(
+        default=15, description="Too-late floor: don't ping if the meeting starts in fewer than this many minutes (cold-start / sub-lead safety)."
+    )
+    PREP_PING_CHECK_INTERVAL: int = Field(
+        default=600, description="Seconds between prep-ping calendar checks (10 min; no LLM per poll)."
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""
