@@ -257,16 +257,63 @@ async def process_transcript(
         logger.error(f"Entity extraction failed (non-fatal): {e}")
 
     # Step 7d: Topic threading — link meeting to topic threads (Phase 9B)
+    linked_threads = []
     try:
         from processors.topic_threading import link_meeting_to_topics
 
-        await link_meeting_to_topics(
+        linked_threads = await link_meeting_to_topics(
             meeting_id=meeting_id,
             decisions=extracted.get("decisions", []),
             tasks=tasks_to_store,
         )
     except Exception as e:
         logger.error(f"Topic threading failed (non-fatal): {e}")
+
+    # Step 7d2: Executive-context enrichment (v2.5 Phase 3, chunk 2). Now that
+    # cross-reference (supersessions) + topic linkage have run, re-render the
+    # summary ONCE with surgical context clauses. Uses the SAME base args as the
+    # Step 6 render so the only delta is the clauses. Flag-gated, non-fatal:
+    # any failure leaves the baseline summary. DB write first, then reassign the
+    # local `summary` (which flows into the returned dict → approval/distribution)
+    # so a failed write can't diverge DB from in-memory.
+    if settings.SUMMARY_CONTEXT_ENABLED:
+        try:
+            from processors.summary_context import (
+                build_supersession_clauses,
+                build_topic_context,
+            )
+
+            decision_context = build_supersession_clauses(
+                extracted.get("decisions", []),
+                cross_ref_results.get("supersessions", []),
+                sensitivity,
+            )
+            topic_context = build_topic_context(linked_threads, sensitivity)
+            if decision_context or topic_context:
+                enriched = format_summary_template(
+                    meeting_title=meeting_title,
+                    meeting_date=meeting_date,
+                    participants=participants,
+                    duration_minutes=duration_minutes,
+                    sensitivity=sensitivity,
+                    decisions=extracted.get("decisions", []),
+                    tasks=extracted.get("tasks", []),
+                    follow_ups=extracted.get("follow_ups", []),
+                    open_questions=extracted.get("open_questions", []),
+                    discussion_summary=extracted.get("discussion_summary", ""),
+                    stakeholders_mentioned=extracted.get("stakeholders", []),
+                    decision_context=decision_context,
+                    topic_context=topic_context,
+                )
+                supabase_client.update_meeting(meeting_id, summary=enriched)
+                summary = enriched
+                logger.info(
+                    f"Summary context enrichment applied to {meeting_id}: "
+                    f"{len(decision_context)} decision clause(s), "
+                    f"topic_context={'yes' if topic_context else 'no'}"
+                )
+        except Exception as e:
+            logger.warning(f"Summary context enrichment skipped (non-fatal): {e}")
 
     # Step 7e: Deal signal detection (Phase 4 — non-fatal)
     deal_signals = {}
