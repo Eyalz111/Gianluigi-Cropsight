@@ -643,6 +643,14 @@ class Settings(BaseSettings):
         description="Attach whole-brief 👍/👎 + 'what felt like noise?' feedback buttons and the brief_more overflow buttons to the morning brief. Requires the morning_brief_feedback table."
     )
 
+    # ==========================================================================
+    # Outputs re-architecture (v2.5 Phase 3) — chunk 2: meeting-summary context.
+    # ==========================================================================
+    SUMMARY_CONTEXT_ENABLED: bool = Field(
+        default=False,
+        description="Append exception-based executive-context clauses to meeting summaries: decision supersession ('(reverses the <date> decision: ...)') + a one-line topic 'Where this fits'. Tier-safe (a clause is omitted if the referenced prior item/topic is above the meeting's distribution tier). Off = summaries render exactly as before."
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""

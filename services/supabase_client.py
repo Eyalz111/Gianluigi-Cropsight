@@ -765,6 +765,39 @@ class SupabaseClient:
         except Exception as e:
             logger.warning(f"Could not set parent for decision {decision_id}: {e}")
 
+    def get_decisions_by_ids(self, ids: list[str]) -> dict[str, dict]:
+        """
+        Batch-fetch decisions by id → {id: {description, date, sensitivity}}.
+
+        One round-trip (vs get_decision_chain per id). `date` comes from the
+        joined meeting. Used by the meeting-summary supersession clause. Never
+        raises — returns {} on error.
+        """
+        if not ids:
+            return {}
+        try:
+            result = (
+                self.client.table("decisions")
+                .select("id, description, sensitivity, meetings(date)")
+                .in_("id", list(ids))
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(f"get_decisions_by_ids failed: {e}")
+            return {}
+        out: dict[str, dict] = {}
+        for row in (result.data or []):
+            meeting = row.get("meetings")
+            if isinstance(meeting, list):
+                meeting = meeting[0] if meeting else {}
+            meeting = meeting or {}
+            out[row["id"]] = {
+                "description": row.get("description", ""),
+                "date": meeting.get("date"),
+                "sensitivity": row.get("sensitivity"),
+            }
+        return out
+
     def get_decision_chain(self, decision_id: str) -> list[dict]:
         """
         Traverse the decision chain — ancestors and descendants (Phase 12 A6).

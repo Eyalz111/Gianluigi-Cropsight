@@ -242,7 +242,7 @@
 
     **Participants:** {participants}
 
-    **Sensitivity:** {sensitivity}
+    **Sensitivity:** {sensitivity}{topic_context}
 
 
     ---

@@ -268,7 +268,7 @@ In group chats, be extra cautious — never share sensitive content that should 
 SUMMARY_TEMPLATE = """# Meeting Summary: {title}
 **Date:** {date} | **Duration:** {duration} minutes
 **Participants:** {participants}
-**Sensitivity:** {sensitivity}
+**Sensitivity:** {sensitivity}{topic_context}
 
 ---
 
@@ -695,9 +695,16 @@ def format_summary(
     open_questions: list[dict],
     discussion_summary: str,
     stakeholders_mentioned: list[dict] | None = None,
+    decision_context: dict[int, str] | None = None,
+    topic_context: str | None = None,
 ) -> str:
     """
     Format extracted data into the standard summary template.
+
+    `decision_context` (1-based decision index → clause) and `topic_context`
+    (a single pre-built, tier-safe line) are optional executive-context
+    enrichments (v2.5 Phase 3). Both default None ⇒ byte-identical baseline.
+    This function stays stateless — it only renders clauses it is handed.
 
     Uses the template from Section 8 of the project plan.
 
@@ -724,7 +731,9 @@ def format_summary(
         who = d.get("participants_involved", ["team"])
         who_str = ", ".join(who) if isinstance(who, list) else who
         ref = d.get("transcript_timestamp", "")
-        decisions_text += f"{i}. {desc} — {who_str} (ref: ~{ref})\n"
+        clause = (decision_context or {}).get(i, "")
+        clause_str = f" {clause}" if clause else ""
+        decisions_text += f"{i}. {desc}{clause_str} — {who_str} (ref: ~{ref})\n"
 
     if not decisions_text:
         decisions_text = "*No key decisions recorded*\n"
@@ -794,6 +803,7 @@ def format_summary(
         duration=duration_minutes,
         participants=", ".join(participants),
         sensitivity=sensitivity.upper().replace("_", " "),
+        topic_context=topic_context or "",
         decisions=decisions_text,
         tasks=tasks_text,
         follow_ups=follow_ups_text,
