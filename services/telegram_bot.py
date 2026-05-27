@@ -3308,6 +3308,29 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         except Exception as e:
             logger.warning(f"brief noise capture failed: {e}")
 
+    async def _handle_prepare_me_callback(self, query, event_id: str) -> None:
+        """On-demand Tier-2 prep brief (chunk 3). Re-gathers fresh; Eyal-only.
+
+        Sends the brief with no buttons so send_message auto-attaches 🔊 Listen.
+        """
+        chat_id = query.message.chat_id
+        if str(chat_id) != str(self.eyal_chat_id):
+            return  # prep is Eyal-only
+        from services.google_calendar import calendar_service
+        from processors.prep_ping import synthesize_prepare_brief
+
+        try:
+            event = await calendar_service.get_event(event_id)
+            if not event:
+                await self.send_message(chat_id, "That meeting's no longer on the calendar.")
+                return
+            await self.send_message(chat_id, "Pulling your prep…")
+            brief = await synthesize_prepare_brief(event)
+            await self.send_message(chat_id, brief, parse_mode="HTML")  # auto-attaches 🔊 Listen
+        except Exception as e:
+            logger.warning(f"prepare_me failed: {e}")
+            await self.send_message(chat_id, "Couldn't build the prep brief just now.")
+
     async def _handle_brief_more(self, query, rest: str) -> None:
         """Expand a capped section by recomputing it fresh (restart-safe, no cache)."""
         try:
@@ -3403,6 +3426,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             return
         if action == "brief_more":
             await self._handle_brief_more(query, meeting_id)
+            return
+
+        # ---- Meeting prep ping (chunk 3): on-demand "Prepare me" brief ----
+        if action == "prepare_me":
+            await self._handle_prepare_me_callback(query, meeting_id)
             return
 
         # ---- Weekly review callbacks ----

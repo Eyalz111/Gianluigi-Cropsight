@@ -2816,6 +2816,31 @@ class SupabaseClient:
         result = self.client.table("audit_log").insert(data).execute()
         return result.data[0]
 
+    def get_recent_prep_pings(self, days: int = 2) -> list[dict]:
+        """Recent 'prep_ping_sent' audit rows → restart-safe fire-once state.
+
+        Returns the `details` dicts ({event_id, event_start}) of pings sent in the
+        last `days`, so the prep-ping scheduler can rebuild its _pinged set on boot
+        without double-pinging. SYNC; never raises (returns [] on error).
+        """
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        try:
+            rows = (
+                self.client.table("audit_log")
+                .select("details")
+                .eq("action", "prep_ping_sent")
+                .gte("created_at", cutoff)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.warning(f"get_recent_prep_pings failed: {e}")
+            return []
+        return [r.get("details") or {} for r in rows]
+
     # =====================================================================
     # Morning-brief engagement feedback (v2.5 Phase 3 PR3) — all SYNC.
     # Restart-safe: every callback resolves from the row by brief_id.
