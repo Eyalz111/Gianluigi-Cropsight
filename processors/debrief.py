@@ -144,10 +144,10 @@ async def start_debrief(
     uncovered_events = []
     try:
         from services.google_calendar import calendar_service
-        from guardrails.calendar_filter import is_cropsight_meeting
+        from guardrails.calendar_filter import should_include_meeting
         events = await calendar_service.get_todays_events()
         # Filter to CropSight events
-        cropsight_events = [e for e in events if is_cropsight_meeting(e) is not False]
+        cropsight_events = [e for e in events if should_include_meeting(e)]
 
         # Build event descriptions with participants
         for e in cropsight_events:
