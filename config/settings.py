@@ -598,11 +598,12 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
-    # Outputs re-architecture (v2.5 Phase 3) — PR1: input hygiene.
-    # All default OFF / shadow-safe. See plan composed-brewing-giraffe.md.
-    # Three independent capabilities + one shared shadow, so a regression
-    # isolates to the exact change that caused it.
+    # Outputs re-architecture (v2.5 Phase 3) — PR1 input hygiene + PR2 morning
+    # brief + PR3 engagement. All default OFF/shadow-safe. See plan
+    # composed-brewing-giraffe.md.
     # ==========================================================================
+    # PR1 — input hygiene. Three independent capabilities + one shared shadow,
+    # so a regression isolates to the exact change that caused it.
     STRICT_CALENDAR_FILTER: bool = Field(
         default=False,
         description="Use the strict is_cropsight_meeting() chain (purple OR business-domain OR known-stakeholder-domain OR title-prefix; drops the personal-gmail '2+ team members' branch). OFF = legacy OR-chain."
@@ -618,6 +619,28 @@ class Settings(BaseSettings):
     INPUT_HYGIENE_SHADOW_MODE: bool = Field(
         default=True,
         description="Applies to all three PR1 capabilities: compute the NEW decision, RETURN the OLD, and log the human-scannable delta to audit_log (action='input_hygiene_shadow'). The 'what it would exclude' log. Flip False to enforce."
+    )
+
+    # PR2 — morning brief rework.
+    MORNING_BRIEF_V2_ENABLED: bool = Field(
+        default=False,
+        description="Use the v2 decision-first, knowledge-aware morning brief formatter (incl. the thin Haiku headline behind its own try/except). OFF ships today's brief."
+    )
+    MORNING_BRIEF_V2_SHADOW: bool = Field(
+        default=True,
+        description="During rollout: compute v2, log it, and send a tagged '[v2 preview]' second message (button-less) for 2-3 days; v1 stays the authoritative 07:00 send until this is flipped False."
+    )
+    # Foresight flags read the knowledge layer's authoritative current_status
+    # (blocked/stale), so no day-threshold knobs are needed for them. Watcher
+    # staleness reuses the existing 24h heartbeat window.
+    BRIEF_ERROR_THRESHOLD: int = Field(
+        default=3, description="audit_log errors in 24h before the morning brief surfaces the System section (>=3 so a single transient blip stays silent)"
+    )
+
+    # PR3 — engagement instrumentation.
+    BRIEF_FEEDBACK_ENABLED: bool = Field(
+        default=False,
+        description="Attach whole-brief 👍/👎 + 'what felt like noise?' feedback buttons and the brief_more overflow buttons to the morning brief. Requires the morning_brief_feedback table."
     )
 
     @property

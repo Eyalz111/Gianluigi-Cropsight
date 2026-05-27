@@ -2783,6 +2783,131 @@ class SupabaseClient:
         result = self.client.table("audit_log").insert(data).execute()
         return result.data[0]
 
+    # =====================================================================
+    # Morning-brief engagement feedback (v2.5 Phase 3 PR3) — all SYNC.
+    # Restart-safe: every callback resolves from the row by brief_id.
+    # =====================================================================
+
+    def create_brief_feedback_row(
+        self,
+        base_brief_id: str,
+        brief_date: str | None = None,
+        variant: str = "primary",
+        section_count: int | None = None,
+    ) -> str:
+        """Create the feedback row at send time; return the brief_id actually used.
+
+        Appends a -N suffix if a row already exists for the same base id (a
+        same-day regenerate), so a second brief never overwrites the first's vote.
+        """
+        existing = (
+            self.client.table("morning_brief_feedback")
+            .select("brief_id")
+            .like("brief_id", f"{base_brief_id}%")
+            .execute()
+            .data
+            or []
+        )
+        ids = {r["brief_id"] for r in existing}
+        brief_id = base_brief_id
+        n = 2
+        while brief_id in ids:
+            brief_id = f"{base_brief_id}-{n}"
+            n += 1
+        self.client.table("morning_brief_feedback").insert(
+            {
+                "brief_id": brief_id,
+                "brief_date": brief_date,
+                "variant": variant,
+                "section_count": section_count,
+                "vote": None,
+            }
+        ).execute()
+        return brief_id
+
+    def set_brief_feedback_vote(
+        self, brief_id: str, vote: str, pending_noise: bool = False
+    ) -> dict | None:
+        """Record a 👍/👎 vote (and optionally open the noise follow-up)."""
+        from datetime import datetime, timezone
+
+        result = (
+            self.client.table("morning_brief_feedback")
+            .update(
+                {
+                    "vote": vote,
+                    "pending_noise_reply": pending_noise,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            .eq("brief_id", brief_id)
+            .execute()
+        )
+        return (result.data or [None])[0]
+
+    def set_brief_feedback_noise(
+        self, brief_id: str, noise_category: str | None = None, noise_note: str | None = None
+    ) -> dict | None:
+        """Attach the 'what felt like noise?' follow-up and clear the pending flag."""
+        from datetime import datetime, timezone
+
+        patch: dict = {
+            "pending_noise_reply": False,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if noise_category is not None:
+            patch["noise_category"] = noise_category
+        if noise_note is not None:
+            patch["noise_note"] = noise_note
+        result = (
+            self.client.table("morning_brief_feedback")
+            .update(patch)
+            .eq("brief_id", brief_id)
+            .execute()
+        )
+        return (result.data or [None])[0]
+
+    def get_pending_noise_brief(self) -> dict | None:
+        """Most recent brief awaiting a noise follow-up, within the last 24h.
+
+        Used to associate a free-text reply with the right brief after a restart
+        (the pending state lives in the DB row, not in-memory). Stale flags (>24h)
+        are ignored — the next morning brief supersedes them anyway.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        rows = (
+            self.client.table("morning_brief_feedback")
+            .select("*")
+            .eq("pending_noise_reply", True)
+            .gte("updated_at", cutoff)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+
+    def get_brief_feedback_trend(self, days: int = 30) -> dict:
+        """Up/down counts over the window for the authoritative ('primary') sends only."""
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        rows = (
+            self.client.table("morning_brief_feedback")
+            .select("vote")
+            .eq("variant", "primary")
+            .gte("brief_date", cutoff)
+            .execute()
+            .data
+            or []
+        )
+        up = sum(1 for r in rows if r.get("vote") == "up")
+        down = sum(1 for r in rows if r.get("vote") == "down")
+        return {"up": up, "down": down, "total": len(rows), "days": days}
+
     def get_audit_log(
         self,
         action: str | None = None,
