@@ -86,6 +86,12 @@ class WeeklyDigestScheduler:
         Fires on the configured day/hour window (default: Friday 14:00-16:00).
         Skips if a digest was already generated for this week.
         """
+        # Chunk 4: when the weekly Pulse owns the Friday push, suppress the old
+        # digest auto-push (the generator stays callable for the team package).
+        # `is True` (not truthy) so mocked-settings tests never trip it.
+        if settings.WEEKLY_PULSE_ENABLED is True:
+            return
+
         now = datetime.now(_ISRAEL_TZ)
 
         digest_day = settings.WEEKLY_DIGEST_DAY

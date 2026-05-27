@@ -64,6 +64,25 @@ def _escape_markdown(text: str) -> str:
     return text
 
 
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002190-\U000021FF"
+    "\U00002B00-\U00002BFF\U0001F1E6-\U0001F1FF️⃣]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_for_tts(text: str) -> str:
+    """Clean a message for narration: drop emoji/symbols and any stray HTML tags.
+
+    Telegram already strips HTML entities from message.text, but we defensively
+    remove tags too, then emoji (so ElevenLabs doesn't vocalise "bell"/"fire"),
+    and collapse runs of spaces.
+    """
+    t = re.sub(r"<[^>]+>", "", text or "")
+    t = _EMOJI_RE.sub("", t)
+    return re.sub(r"[ \t]{2,}", " ", t).strip()
+
+
 def _split_message(text: str, max_len: int = 3800) -> list[str]:
     """
     Split a long message into parts that fit within Telegram's limit.
@@ -2894,6 +2913,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             if handled:
                 return
 
+        # Weekly pulse (chunk 4): a reply to the pulse message → log a note (scoped)
+        if is_eyal and update.message.reply_to_message:
+            if await self._handle_pulse_reply(update):
+                return
+
         # Phase 3 (v2.2): Check if this is a reply to a task reminder message
         if is_eyal and update.message.reply_to_message:
             handled = await self._handle_task_reply(update, context)
@@ -3226,7 +3250,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         # Read the whole message: eleven_v3 allows 5000 chars/request and a single
         # Telegram message maxes at 4096, so this reads any single message in full.
-        spoken = text[:4800]
+        # Strip emoji/tags first so the narration doesn't read decoration aloud.
+        spoken = _strip_for_tts(text)[:4800]
+        if not spoken:
+            await self.send_message(chat_id, "Nothing to read here.")
+            return
         t0 = time.monotonic()
         audio = await elevenlabs_client.text_to_speech(
             spoken, voice_id=settings.ELEVENLABS_VOICE_ID_GIANLUIGI
@@ -3331,6 +3359,83 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             logger.warning(f"prepare_me failed: {e}")
             await self.send_message(chat_id, "Couldn't build the prep brief just now.")
 
+    async def _handle_weekly_pkg_callback(self, query, week_of: str) -> None:
+        """[📤 Send to team] tapped → confirm naming the contents (single source). Eyal-only."""
+        from datetime import datetime
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from processors.weekly_team_package import team_package_contents
+
+        chat_id = query.message.chat_id
+        if str(chat_id) != str(self.eyal_chat_id):
+            return  # team distribution is Eyal-gated
+        try:
+            week_start = datetime.strptime(week_of, "%Y-%m-%d")
+            contents = await team_package_contents(week_start)
+        except Exception as e:
+            logger.warning(f"weekly_pkg contents failed: {e}")
+            contents = ["recap", "area status", "Gantt link"]
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Send", callback_data=f"weekly_pkg_confirm:{week_of}"),
+            InlineKeyboardButton("Cancel", callback_data=f"weekly_pkg_cancel:{week_of}"),
+        ]])
+        await self.send_message(
+            chat_id,
+            f"Send weekly package to Roye, Paolo, Yoram?\nIncludes: {', '.join(contents)}.",
+            reply_markup=markup,
+        )
+
+    async def _handle_weekly_pkg_confirm(self, query, week_of: str) -> None:
+        """[✅ Send] → build + email the tier-filtered package to the team. Eyal-only."""
+        from datetime import datetime
+        from processors.weekly_team_package import send_team_package
+
+        chat_id = query.message.chat_id
+        if str(chat_id) != str(self.eyal_chat_id):
+            return
+        try:
+            week_start = datetime.strptime(week_of, "%Y-%m-%d")
+            ok = await send_team_package(week_start)
+        except Exception as e:
+            logger.warning(f"weekly_pkg send failed: {e}")
+            ok = False
+        msg = "Sent to the team." if ok else "Couldn't send — check email config."
+        try:
+            await query.edit_message_text(msg)
+        except Exception:
+            await self.send_message(chat_id, msg)
+
+    async def _handle_weekly_pkg_cancel(self, query) -> None:
+        """[Cancel] → nothing sent."""
+        try:
+            await query.edit_message_text("Cancelled — nothing sent.")
+        except Exception:
+            pass
+
+    async def _handle_pulse_reply(self, update) -> bool:
+        """A reply to the weekly Pulse message → log a 'flag for next review' note.
+
+        Scoped to reply-to + the pulse header marker, so other replies pass through.
+        Log-only by design (no edit engine); actioning happens in Claude.ai/MCP.
+        """
+        replied = update.message.reply_to_message
+        rtext = (replied.text or "") if replied else ""
+        from processors.weekly_pulse import PULSE_REPLY_MARKER
+        if PULSE_REPLY_MARKER not in rtext:
+            return False
+        note = (update.message.text or "").strip()
+        try:
+            from services.supabase_client import supabase_client
+            supabase_client.log_action(
+                action="weekly_pulse_note", details={"note": note[:1000]}, triggered_by="eyal",
+            )
+        except Exception as e:
+            logger.warning(f"weekly_pulse_note log failed: {e}")
+        await self.send_message(
+            update.message.chat_id,
+            "Noted — open CropSight Ops in Claude.ai to action this.",
+        )
+        return True
+
     async def _handle_brief_more(self, query, rest: str) -> None:
         """Expand a capped section by recomputing it fresh (restart-safe, no cache)."""
         try:
@@ -3431,6 +3536,17 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # ---- Meeting prep ping (chunk 3): on-demand "Prepare me" brief ----
         if action == "prepare_me":
             await self._handle_prepare_me_callback(query, meeting_id)
+            return
+
+        # ---- Weekly pulse (chunk 4): on-demand team-package send ----
+        if action == "weekly_pkg":
+            await self._handle_weekly_pkg_callback(query, meeting_id)
+            return
+        if action == "weekly_pkg_confirm":
+            await self._handle_weekly_pkg_confirm(query, meeting_id)
+            return
+        if action == "weekly_pkg_cancel":
+            await self._handle_weekly_pkg_cancel(query)
             return
 
         # ---- Weekly review callbacks ----

@@ -670,6 +670,27 @@ class Settings(BaseSettings):
         default=600, description="Seconds between prep-ping calendar checks (10 min; no LLM per poll)."
     )
 
+    # ==========================================================================
+    # Outputs re-architecture (v2.5 Phase 3) — chunk 4: weekly "Pulse" report.
+    # One deterministic Friday push (a view over the knowledge layer, no LLM) +
+    # an on-demand tier-filtered team-email package. When ON, the old weekly
+    # digest auto-push and the heavy weekly-review Telegram session self-suppress
+    # (their generator + the MCP review path stay alive). OFF = today unchanged.
+    # ==========================================================================
+    WEEKLY_PULSE_ENABLED: bool = Field(
+        default=False,
+        description="Push the deterministic weekly Pulse report (where-we-stand across all areas + needs-your-call + moved-this-week) Friday afternoon, with an on-demand [Send to team] package. OFF = the old weekly digest auto-push + heavy review session run as before."
+    )
+    WEEKLY_PULSE_HOUR: int = Field(
+        default=15, description="IST hour to push the weekly Pulse (default 15:00 — just after the weekly-digest 14:00 slot)."
+    )
+    WEEKLY_PULSE_WINDOW_HOURS: int = Field(
+        default=2, description="Hour window after WEEKLY_PULSE_HOUR within which the Pulse may fire (catches it on a CHECK_INTERVAL cadence)."
+    )
+    WEEKLY_PULSE_CHECK_INTERVAL: int = Field(
+        default=3600, description="Seconds between weekly-Pulse day/hour-window checks (hourly; reuses WEEKLY_DIGEST_DAY for the day)."
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""
