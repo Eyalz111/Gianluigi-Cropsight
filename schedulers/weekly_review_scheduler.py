@@ -239,6 +239,11 @@ class WeeklyReviewScheduler:
 
     async def _send_notification(self, event_id: str) -> None:
         """Send Telegram notification at T-30min, re-verifying calendar first."""
+        # Chunk 4: when the weekly Pulse owns the Friday push, suppress the heavy
+        # review-session Telegram nudge (the MCP review path stays available).
+        # `is True` so mocked-settings tests never trip it.
+        if settings.WEEKLY_PULSE_ENABLED is True:
+            return
         # Re-verify calendar event still exists
         try:
             event = await self._find_review_event()
@@ -294,6 +299,9 @@ class WeeklyReviewScheduler:
 
     async def _check_fallback_needed(self) -> None:
         """If it's review day with no event, prompt Eyal once."""
+        # Chunk 4: the weekly Pulse replaces this Friday nudge when enabled.
+        if settings.WEEKLY_PULSE_ENABLED is True:
+            return
         now = datetime.now(_ISRAEL_TZ)
         if now.weekday() != settings.WEEKLY_REVIEW_DAY:
             return

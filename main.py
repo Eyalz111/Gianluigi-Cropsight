@@ -285,6 +285,18 @@ async def start_services() -> None:
     else:
         logger.warning("  Weekly digest/review schedulers disabled (Google Calendar not available)")
 
+    # Weekly pulse (chunk 4): one deterministic Friday push, gated by its flag.
+    # When ON, the digest auto-push + heavy review-session nudges self-suppress
+    # (their generator + the MCP review path stay alive).
+    if init_status.get("google_calendar") and settings.WEEKLY_PULSE_ENABLED:
+        from schedulers.weekly_pulse_scheduler import weekly_pulse_scheduler
+        logger.info("  Starting weekly pulse scheduler...")
+        pulse_task = asyncio.create_task(
+            weekly_pulse_scheduler.start(),
+            name="weekly_pulse_scheduler"
+        )
+        tasks.append(pulse_task)
+
     # Task reminder scheduler — time-window filters added (C2), safe to enable
     if init_status.get("google_sheets"):
         logger.info("  Starting task reminder scheduler...")
@@ -511,6 +523,14 @@ async def stop_services() -> None:
     email_watcher.stop()
     alert_scheduler.stop()
     orphan_cleanup_scheduler.stop()
+
+    # Stop weekly pulse scheduler if started
+    if settings.WEEKLY_PULSE_ENABLED:
+        try:
+            from schedulers.weekly_pulse_scheduler import weekly_pulse_scheduler
+            weekly_pulse_scheduler.stop()
+        except Exception:
+            pass
 
     # Stop weekly review scheduler if started
     if settings.WEEKLY_REVIEW_ENABLED:
