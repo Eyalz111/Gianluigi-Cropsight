@@ -39,11 +39,32 @@ def _is_eyal_email(email: str) -> bool:
     return _normalize_email(email) in EYAL_IDENTITIES
 
 
+def _att_email(a) -> str:
+    """Extract an email from an attendee that may be a dict OR a plain string.
+
+    Google Calendar normally returns `[{email, displayName, ...}, ...]`, but some
+    events come back as `["someone@x.com", ...]` — calling `.get(...)` on the
+    string crashes. This guard returns "" for anything unexpected.
+    """
+    if isinstance(a, dict):
+        return (a.get("email") or "").strip()
+    if isinstance(a, str):
+        return a.strip()
+    return ""
+
+
+def _att_display(a) -> str:
+    """Extract a display name from an attendee (dict or string)."""
+    if isinstance(a, dict):
+        return (a.get("displayName") or "").strip()
+    return ""
+
+
 def eyal_is_attendee(event: dict) -> bool:
     """True if Eyal is an attendee/organizer — only prep meetings he's actually in."""
     if _is_eyal_email(event.get("organizer", "") or ""):
         return True
-    return any(_is_eyal_email(a.get("email", "")) for a in (event.get("attendees") or []))
+    return any(_is_eyal_email(_att_email(a)) for a in (event.get("attendees") or []))
 
 
 def _first_name(member: dict) -> str:
@@ -92,7 +113,7 @@ def anchor_event(event: dict) -> dict:
     participants: list[dict] = []
     seen: set[str] = set()
     for a in (event.get("attendees") or []):
-        email = (a.get("email") or "").strip()
+        email = _att_email(a)
         if not email or _is_eyal_email(email):
             continue
         member = get_team_member_by_email(email)
@@ -102,7 +123,7 @@ def anchor_event(event: dict) -> dict:
         if not first or first.lower() in seen:
             continue
         seen.add(first.lower())
-        display = (a.get("displayName") or "").strip() or first
+        display = _att_display(a) or first
         participants.append({"first": first, "display": display})
 
     topic = None

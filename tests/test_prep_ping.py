@@ -51,6 +51,26 @@ class TestAnchorAndHelpers:
         assert out["participants"][0]["display"] == "רועי תדמור"  # Hebrew kept for rendering
         assert out["topic"] is None
 
+    def test_string_attendees_dont_crash(self):
+        """Regression: some calendar events return attendees as plain email strings,
+        not dicts. Pre-fix this raised `'str' object has no attribute 'get'` in
+        prep_ping_scheduler (live error 2026-05-28)."""
+        event = {
+            "title": "Roye 1:1",
+            "attendees": ["roye@cropsight.io", "external@x.com"],  # strings, not dicts
+            "organizer": "eyalz111@gmail.com",
+        }
+        members = {"roye@cropsight.io": {"name": "Roye Tadmor"}}
+        with patch.object(pp, "EYAL_IDENTITIES", {"eyalz111@gmail.com"}), \
+             patch.object(pp, "get_team_member_by_email", side_effect=lambda e: members.get(e)), \
+             patch("processors.topic_threading._match_canonical_name", return_value=None), \
+             patch("processors.topic_threading._find_thread_by_name", return_value=None):
+            assert pp.eyal_is_attendee(event) is True
+            out = pp.anchor_event(event)
+        # Roye still resolves (by email); display falls back to first name (no displayName on a string attendee).
+        assert [p["first"] for p in out["participants"]] == ["Roye"]
+        assert out["participants"][0]["display"] == "Roye"
+
     def test_anchor_excludes_eyal(self):
         with patch.object(pp, "EYAL_IDENTITIES", {"eyalz111@gmail.com"}), \
              patch.object(pp, "get_team_member_by_email", return_value={"name": "Eyal Zror"}), \

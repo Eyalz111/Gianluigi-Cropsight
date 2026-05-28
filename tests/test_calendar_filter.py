@@ -313,3 +313,37 @@ class TestFormatUncertainMeetingQuestion:
         question = format_uncertain_meeting_question(event)
 
         assert "test@example.com" in question
+
+
+class TestStringAttendeesDefensive:
+    """Regression: some calendar events arrive with attendees as plain email strings
+    (not dicts). Pre-fix this crashed prep_ping_scheduler with
+    `'str' object has no attribute 'get'` (live error 2026-05-28)."""
+
+    def test_participant_emails_handles_string_attendees_and_organizer(self):
+        from guardrails.calendar_filter import _participant_emails
+        # Attendees as strings, organizer as string (both shapes seen in the wild).
+        event = {
+            "attendees": ["a@cropsight.io", "b@x.com"],
+            "organizer": "o@cropsight.io",
+        }
+        emails = _participant_emails(event)
+        assert "o@cropsight.io" in emails
+        assert "a@cropsight.io" in emails
+        assert "b@x.com" in emails
+
+    def test_has_sufficient_team_members_handles_strings(self):
+        from guardrails.calendar_filter import _has_sufficient_team_members
+        # Contract here is "does not crash" — count depends on CROPSIGHT_TEAM_EMAILS.
+        result = _has_sufficient_team_members(["roye@cropsight.io", "paolo@cropsight.io", "x@external.com"])
+        assert isinstance(result, bool)
+
+    def test_format_uncertain_handles_string_attendees(self):
+        from guardrails.calendar_filter import format_uncertain_meeting_question
+        event = {
+            "title": "Meeting",
+            "start": "2026-05-29T10:00:00Z",
+            "attendees": ["a@x.com", "b@y.com"],  # strings, not dicts
+        }
+        question = format_uncertain_meeting_question(event)
+        assert "a@x.com" in question and "b@y.com" in question
