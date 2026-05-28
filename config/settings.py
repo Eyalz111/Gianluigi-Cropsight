@@ -691,6 +691,32 @@ class Settings(BaseSettings):
         default=3600, description="Seconds between weekly-Pulse day/hour-window checks (hourly; reuses WEEKLY_DIGEST_DAY for the day)."
     )
 
+    # ==========================================================================
+    # Rollout orchestrator (v2.5 Phase 3, chunk 5) — staged env-flag rollouts.
+    # Daily reminder + tap-to-apply via Cloud Run admin API. Restart-safe via
+    # audit_log. Plan = processors/rollout_plan.py (hardcoded Python list).
+    # Eyal-gated; default OFF → no behavior change.
+    # ==========================================================================
+    ROLLOUT_SCHEDULER_ENABLED: bool = Field(
+        default=False,
+        description="Enable the rollout orchestrator: daily 09:00 IST reminder for the next due staged rollout + [Apply] button → Cloud Run admin API updates env vars. Eyal-gated; persistent reminders until applied."
+    )
+    ROLLOUT_CHECK_HOUR: int = Field(
+        default=9, description="IST hour at which the rollout orchestrator fires its daily reminder."
+    )
+    ROLLOUT_CHECK_INTERVAL: int = Field(
+        default=3600, description="Seconds between rollout-orchestrator ticks (hourly — fires only inside the configured hour, once per day)."
+    )
+    GCP_PROJECT_ID: str = Field(
+        default="gianluigi-488420", description="GCP project for Cloud Run admin API calls."
+    )
+    GCP_REGION: str = Field(
+        default="europe-west1", description="Cloud Run region for admin API calls."
+    )
+    CLOUD_RUN_SERVICE_NAME: str = Field(
+        default="gianluigi", description="Cloud Run service name targeted by rollout env-var updates."
+    )
+
     @property
     def model_extraction(self) -> str:
         """Model for transcript extraction (accuracy-critical, rare)."""
