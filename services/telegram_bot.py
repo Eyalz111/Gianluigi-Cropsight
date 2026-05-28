@@ -3411,6 +3411,81 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         except Exception:
             pass
 
+    async def _handle_rollout_apply(self, query, stage_id: str) -> None:
+        """[✅ Apply] tapped on a rollout reminder → Cloud Run admin updates env vars. Eyal-only.
+
+        Idempotent: if a `rollout_applied` row already exists for this stage_id, we say so
+        and don't re-apply. On success, logs `rollout_applied` with the env_changes + new
+        revision so the scheduler's next tick skips this stage.
+        """
+        from processors.rollout_plan import get_stage
+        from services.cloud_run_admin import cloud_run_admin
+        from services.supabase_client import supabase_client
+
+        chat_id = query.message.chat_id
+        if str(chat_id) != str(self.eyal_chat_id):
+            return  # rollout apply is Eyal-gated
+
+        stage = get_stage(stage_id)
+        if not stage:
+            try:
+                await query.edit_message_text(f"Unknown stage: {stage_id}")
+            except Exception:
+                pass
+            return
+
+        # Idempotency check: already applied?
+        try:
+            applied_rows = supabase_client.get_audit_log(action="rollout_applied", limit=100) or []
+        except Exception:
+            applied_rows = []
+        if any((r.get("details") or {}).get("stage_id") == stage_id for r in applied_rows):
+            try:
+                await query.edit_message_text(f"{stage_id} is already applied.")
+            except Exception:
+                pass
+            return
+
+        try:
+            await query.edit_message_text(f"Applying {stage_id}…")
+        except Exception:
+            pass
+        try:
+            result = await cloud_run_admin.apply_env_changes(stage.get("env_changes") or {})
+        except Exception as e:
+            logger.warning(f"rollout_apply failed for {stage_id}: {e}")
+            try:
+                await query.edit_message_text(f"Apply failed for {stage_id}: {e}")
+            except Exception:
+                pass
+            try:
+                supabase_client.log_action(
+                    action="rollout_apply_failed",
+                    details={"stage_id": stage_id, "error": str(e)},
+                    triggered_by="eyal",
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            supabase_client.log_action(
+                action="rollout_applied",
+                details={
+                    "stage_id": stage_id,
+                    "env_changes": stage.get("env_changes"),
+                    "revision": result.get("revision", ""),
+                },
+                triggered_by="eyal",
+            )
+        except Exception as e:
+            logger.warning(f"rollout_applied log failed: {e}")
+        rev = result.get("revision", "?")
+        try:
+            await query.edit_message_text(f"✅ Applied {stage_id} — new revision {rev}.")
+        except Exception:
+            pass
+
     async def _handle_pulse_reply(self, update) -> bool:
         """A reply to the weekly Pulse message → log a 'flag for next review' note.
 
@@ -3547,6 +3622,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             return
         if action == "weekly_pkg_cancel":
             await self._handle_weekly_pkg_cancel(query)
+            return
+
+        # ---- Rollout orchestrator (chunk 5): tap-to-apply staged env-flag rollout ----
+        if action == "rollout_apply":
+            await self._handle_rollout_apply(query, meeting_id)
             return
 
         # ---- Weekly review callbacks ----

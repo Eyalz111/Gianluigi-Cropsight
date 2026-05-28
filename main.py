@@ -297,6 +297,17 @@ async def start_services() -> None:
         )
         tasks.append(pulse_task)
 
+    # Rollout orchestrator (chunk 5): daily reminder + tap-to-apply for staged
+    # env-flag cutovers. Independent of Calendar — Cloud Run admin only.
+    if settings.ROLLOUT_SCHEDULER_ENABLED:
+        from schedulers.rollout_scheduler import rollout_scheduler
+        logger.info("  Starting rollout orchestrator...")
+        rollout_task = asyncio.create_task(
+            rollout_scheduler.start(),
+            name="rollout_scheduler"
+        )
+        tasks.append(rollout_task)
+
     # Task reminder scheduler — time-window filters added (C2), safe to enable
     if init_status.get("google_sheets"):
         logger.info("  Starting task reminder scheduler...")
@@ -529,6 +540,14 @@ async def stop_services() -> None:
         try:
             from schedulers.weekly_pulse_scheduler import weekly_pulse_scheduler
             weekly_pulse_scheduler.stop()
+        except Exception:
+            pass
+
+    # Stop rollout orchestrator if started
+    if settings.ROLLOUT_SCHEDULER_ENABLED:
+        try:
+            from schedulers.rollout_scheduler import rollout_scheduler
+            rollout_scheduler.stop()
         except Exception:
             pass
 
