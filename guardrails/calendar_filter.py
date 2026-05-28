@@ -136,15 +136,40 @@ def _is_cropsight_meeting_strict(event: dict) -> bool | None:
     return _classify_strict(event)[0]
 
 
+def _attendee_email(a) -> str:
+    """Extract email from an attendee that may be a dict OR a plain string.
+
+    Google Calendar normally returns attendees as `[{email, ...}, ...]`, but
+    some events come back as `["x@y.com", ...]` — calling `.get(...)` on the
+    string crashed prep_ping_scheduler (May 2026). Defensive across the file.
+    """
+    if isinstance(a, dict):
+        return (a.get("email") or "").strip()
+    if isinstance(a, str):
+        return a.strip()
+    return ""
+
+
+def _organizer_email(event: dict) -> str:
+    """Extract organizer email regardless of dict-or-string shape."""
+    org = event.get("organizer")
+    if isinstance(org, dict):
+        return (org.get("email") or "").strip()
+    if isinstance(org, str):
+        return org.strip()
+    return ""
+
+
 def _participant_emails(event: dict) -> list[str]:
     """Collect organizer + attendee emails from an event (bare addresses)."""
     emails: list[str] = []
-    organizer = event.get("organizer") or {}
-    if organizer.get("email"):
-        emails.append(organizer["email"])
+    org = _organizer_email(event)
+    if org:
+        emails.append(org)
     for attendee in event.get("attendees", []) or []:
-        if attendee.get("email"):
-            emails.append(attendee["email"])
+        email = _attendee_email(attendee)
+        if email:
+            emails.append(email)
     return emails
 
 
@@ -169,8 +194,8 @@ def _log_calendar_shadow(
     try:
         from services.supabase_client import supabase_client
 
-        organizer = (event.get("organizer") or {}).get("email", "")
-        attendee_emails = [a.get("email", "") for a in (event.get("attendees") or [])]
+        organizer = _organizer_email(event)
+        attendee_emails = [_attendee_email(a) for a in (event.get("attendees") or [])]
         supabase_client.log_action(
             "input_hygiene_shadow",
             {
@@ -225,9 +250,10 @@ def _has_sufficient_team_members(attendees: list[dict]) -> bool:
     Returns:
         True if at least 2 team members are present.
     """
+    team_lower = [e.lower() for e in CROPSIGHT_TEAM_EMAILS if e]
     team_attendees = [
         a for a in attendees
-        if a.get("email", "").lower() in [e.lower() for e in CROPSIGHT_TEAM_EMAILS if e]
+        if _attendee_email(a).lower() in team_lower
     ]
     return len(team_attendees) >= 2
 
@@ -457,7 +483,10 @@ def format_uncertain_meeting_question(event: dict) -> str:
     start_time = event.get("start", "Unknown time")
     attendees = event.get("attendees", [])
 
-    attendee_names = [a.get("displayName") or a.get("email", "") for a in attendees[:3]]
+    attendee_names = [
+        (a.get("displayName") or a.get("email", "")) if isinstance(a, dict) else (a if isinstance(a, str) else "")
+        for a in attendees[:3]
+    ]
     attendee_str = ", ".join(attendee_names)
     if len(attendees) > 3:
         attendee_str += f" and {len(attendees) - 3} others"
