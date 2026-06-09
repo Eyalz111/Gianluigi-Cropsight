@@ -167,6 +167,22 @@ async def test_voicecap_yes_transcribes():
     tr.assert_awaited_once_with(int(EYAL), "f1", 7, "eyal", 0)
 
 
+async def test_stale_callback_answer_does_not_abort_dispatch():
+    """A stale 'query is too old' ack must NOT abort the action (rollout-apply bug)."""
+    update, query = _voicecap_update("voicecap:yes")
+    query.answer = AsyncMock(side_effect=Exception("query is too old"))
+    context = MagicMock()
+    context.user_data = {"pending_long_voice": {"file_id": "f2", "message_id": 9}}
+
+    with patch.object(telegram_bot, "_transcribe_and_route", AsyncMock()) as tr, patch.object(
+        telegram_bot, "_get_user_id", MagicMock(return_value="eyal")
+    ):
+        await telegram_bot._handle_callback_query(update, context)
+
+    # Despite the answer() raising, the dispatch proceeded.
+    tr.assert_awaited_once_with(int(EYAL), "f2", 9, "eyal", 0)
+
+
 # --------------------------------------------------------------------------- #
 # _handle_voice — caps and gating                                             #
 # --------------------------------------------------------------------------- #

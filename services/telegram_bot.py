@@ -3447,7 +3447,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             return
 
         try:
-            await query.edit_message_text(f"Applying {stage_id}…")
+            await query.edit_message_text(
+                f"⏳ Applying {stage_id}… (~1 min — no need to tap again)"
+            )
         except Exception:
             pass
         try:
@@ -3549,7 +3551,14 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         reject discards, edit prompts for instructions.
         """
         query = update.callback_query
-        await query.answer()  # Acknowledge the callback
+        # Best-effort ack. A stale callback (bot woke from idle, or the user
+        # re-tapped a slow button) makes answerCallbackQuery raise "query is too
+        # old"; that must NOT abort the action below — the handlers are
+        # idempotent and give their own feedback via edit_message_text.
+        try:
+            await query.answer()  # Acknowledge the callback
+        except Exception as e:
+            logger.debug(f"callback answer failed (stale query, non-fatal): {e}")
 
         data = query.data or ""
         if ":" not in data:
