@@ -774,6 +774,22 @@ class QAScheduler:
                     triggered_by="auto",
                 )
 
+                # Restart-safe backstop (PR1): re-pick intelligence-signal finalize
+                # jobs left stale (>60 min) by a silently-dead task. Boot
+                # reconstruction + the per-task done-callback cover restarts and
+                # immediate alerting; this is the daily auto-recovery net.
+                try:
+                    from processors.intelligence_signal_agent import (
+                        reconstruct_intelligence_finalize_jobs,
+                    )
+                    repicked = await reconstruct_intelligence_finalize_jobs(
+                        stale_after_minutes=60
+                    )
+                    if repicked:
+                        logger.info(f"QA: re-picked {repicked} stale finalize job(s)")
+                except Exception as e:
+                    logger.warning(f"QA finalize re-pickup failed (non-fatal): {e}")
+
             except Exception as e:
                 logger.error(f"QA scheduler cycle failed: {e}")
                 await asyncio.sleep(3600)  # Wait 1h on error

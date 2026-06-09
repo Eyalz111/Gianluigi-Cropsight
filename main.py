@@ -449,6 +449,19 @@ async def start_services() -> None:
     except Exception as e:
         logger.warning(f"  Approval-reminder reconstruction failed (non-fatal): {e}")
 
+    # Reconstruct restart-safe intelligence-signal finalize jobs (PR1) — any signal
+    # left 'approved_finalizing' by a Cloud Run cycle resumes its bounded readiness
+    # wait + at-most-once send instead of being silently lost.
+    try:
+        from processors.intelligence_signal_agent import (
+            reconstruct_intelligence_finalize_jobs,
+        )
+        finalize_reconstructed = await reconstruct_intelligence_finalize_jobs()
+        if finalize_reconstructed:
+            logger.info(f"  Reconstructed {finalize_reconstructed} intelligence-signal finalize job(s)")
+    except Exception as e:
+        logger.warning(f"  Intelligence-signal finalize reconstruction failed (non-fatal): {e}")
+
     # NOTE: reconstruct_prep_timers() now runs inside start() before the main loop.
     # This external call is kept as a safety net but is effectively a no-op.
     try:
