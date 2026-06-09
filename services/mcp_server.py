@@ -2632,7 +2632,6 @@ class MCPServer:
 
                 # Approve and distribute
                 _sc.update_pending_approval(signal_id, status="approved")
-                _sc.update_intelligence_signal(signal_id, {"status": "approved"})
                 # v2.3 PR 3: observation log
                 try:
                     _sc.log_approval_observation(
@@ -2647,11 +2646,40 @@ class MCPServer:
                 except Exception as e:
                     logger.warning(f"[observation] signal approve log failed (non-fatal): {e}")
 
-                from processors.intelligence_signal_agent import (
-                    distribute_intelligence_signal,
-                )
+                from config.settings import settings as _settings
 
-                result = await distribute_intelligence_signal(signal_id)
+                if _settings.INTELLIGENCE_SIGNAL_SAFE_DISTRIBUTE:
+                    # Restart-safe path: mark 'approved_finalizing' and hand off to a
+                    # reconstructable background worker — no 30-min blocking await in
+                    # the MCP request path. The team gets it when the worker finishes.
+                    import asyncio as _asyncio
+                    from datetime import datetime as _dt, timezone as _tz
+
+                    _sc.update_intelligence_signal(signal_id, {
+                        "status": "approved_finalizing",
+                        "finalize_started_at": _dt.now(_tz.utc).isoformat(),
+                    })
+                    from processors.intelligence_signal_agent import (
+                        _attach_finalize_done_callback,
+                        finalize_and_distribute_intelligence_signal,
+                    )
+
+                    _task = _asyncio.create_task(
+                        finalize_and_distribute_intelligence_signal(signal_id)
+                    )
+                    _attach_finalize_done_callback(_task, signal_id)
+                    result = {
+                        "signal_id": signal_id,
+                        "status": "approved_finalizing",
+                        "note": "Distributing in the background; the team will receive it shortly.",
+                    }
+                else:
+                    _sc.update_intelligence_signal(signal_id, {"status": "approved"})
+                    from processors.intelligence_signal_agent import (
+                        distribute_intelligence_signal,
+                    )
+
+                    result = await distribute_intelligence_signal(signal_id)
 
                 mcp_auth.log_call(
                     "approve_intelligence_signal",

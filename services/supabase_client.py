@@ -2476,6 +2476,22 @@ class SupabaseClient:
         )
         return result.data
 
+    def get_signals_by_status(self, status: str) -> list[dict]:
+        """
+        Get all intelligence_signals rows in a given status.
+
+        Used on startup (and the daily QA backstop) to reconstruct restart-safe
+        finalize→distribute jobs for signals left in 'approved_finalizing' by a
+        Cloud Run cycle. Mirrors get_pending_auto_publishes.
+        """
+        result = (
+            self.client.table("intelligence_signals")
+            .select("*")
+            .eq("status", status)
+            .execute()
+        )
+        return result.data or []
+
     def get_pending_approvals_for_reminders(self) -> list[dict]:
         """
         Get ALL pending approvals (no limit), newest first.

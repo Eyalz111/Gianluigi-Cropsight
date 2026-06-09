@@ -435,7 +435,7 @@ class GoogleDriveService:
             file = self._execute_with_retry(
                 lambda: self.service.files().get(
                     fileId=file_id,
-                    fields="id, name, mimeType, createdTime, modifiedTime, webViewLink, size",
+                    fields="id, name, mimeType, createdTime, modifiedTime, webViewLink, size, videoMediaMetadata",
                 )
             )
             return file

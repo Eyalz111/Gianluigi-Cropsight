@@ -471,6 +471,17 @@ class Settings(BaseSettings):
     INTELLIGENCE_SIGNAL_VIDEO_ENABLED: bool = Field(
         default=False, description="Enable video generation (requires ffmpeg + Pillow + ElevenLabs)"
     )
+    INTELLIGENCE_SIGNAL_SAFE_DISTRIBUTE: bool = Field(
+        default=False,
+        description=(
+            "Restart-safe distribution. When True, approval marks the signal "
+            "'approved_finalizing' and a reconstructable background worker does a "
+            "bounded Drive-readiness poll + an at-most-once (double-send-guarded) send "
+            "— replacing the in-process 30-min asyncio.sleep that a Cloud Run cycle "
+            "silently loses. When False, the legacy synchronous distribute path runs "
+            "unchanged. Does NOT move video generation (see POST_APPROVAL_VIDEO)."
+        ),
+    )
     INTELLIGENCE_SIGNAL_FOLDER_ID: str = Field(
         default="", description="Google Drive folder ID for Intelligence Signal outputs"
     )

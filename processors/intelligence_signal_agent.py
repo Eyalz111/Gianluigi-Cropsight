@@ -24,7 +24,7 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from config.settings import settings
 from core.llm import call_llm
@@ -241,6 +241,26 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
     if not signal:
         return {"status": "error", "error": f"Signal {signal_id} not found"}
 
+    safe = settings.INTELLIGENCE_SIGNAL_SAFE_DISTRIBUTE
+    # Double-send guard (at-most-once). On the safe path, distributed_at is written
+    # as a marker immediately before the email send below. If it is already set, a
+    # prior attempt already sent — never re-send to the whole team; just make the
+    # status terminal and return.
+    if safe and signal.get("distributed_at"):
+        if signal.get("status") != "distributed":
+            supabase_client.update_intelligence_signal(
+                signal_id, {"status": "distributed"}
+            )
+        logger.info(
+            f"Signal {signal_id} already distributed (marker set) — skipping re-send"
+        )
+        return {
+            "signal_id": signal_id,
+            "status": "distributed",
+            "recipients": signal.get("recipients") or [],
+            "already_distributed": True,
+        }
+
     content = signal.get("signal_content", "")
     if not content:
         return {"status": "error", "error": "Signal has no content"}
@@ -302,10 +322,23 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
     )
 
     # Wait for Drive to process the video before sending email
-    # (Drive needs ~30 min to transcode 1080p for web/mobile streaming)
-    if video_link:
+    # (Drive needs ~30 min to transcode 1080p for web/mobile streaming).
+    # LEGACY path only — this fixed in-process sleep is restart-unsafe. On the safe
+    # path the bounded, restart-safe readiness poll already ran in
+    # finalize_and_distribute_intelligence_signal, so we do NOT block here.
+    if not safe and video_link:
         logger.info("Waiting 30 minutes for Drive video processing...")
         await asyncio.sleep(1800)
+
+    # Safe path: write the distributed_at MARKER immediately before the send so a
+    # Cloud Run cycle can never cause a double-send to the team (at-most-once). The
+    # tiny marker→send window risks an at-most-once MISS (surfaced by the
+    # done-callback + daily QA re-pickup), never a duplicate. Status is flipped LAST.
+    if safe:
+        supabase_client.update_intelligence_signal(signal_id, {
+            "distributed_at": datetime.now(timezone.utc).isoformat(),
+            "recipients": recipients,
+        })
 
     email_sent = await gmail_service.send_email_with_attachments(
         to=recipients,
@@ -332,12 +365,12 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
         parse_mode="HTML",
     )
 
-    # Update DB
-    supabase_client.update_intelligence_signal(signal_id, {
-        "status": "distributed",
-        "recipients": recipients,
-        "distributed_at": datetime.now(timezone.utc).isoformat(),
-    })
+    # Update DB — status flipped LAST (terminal). On the safe path distributed_at +
+    # recipients were already written as the pre-send marker; legacy writes them here.
+    final_update = {"status": "distributed", "recipients": recipients}
+    if not safe:
+        final_update["distributed_at"] = datetime.now(timezone.utc).isoformat()
+    supabase_client.update_intelligence_signal(signal_id, final_update)
 
     supabase_client.log_action(
         action="intelligence_signal_distributed",
@@ -356,6 +389,173 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
         "status": "distributed",
         "recipients": recipients,
     }
+
+
+# ── Restart-safe finalize + distribute (PR1) ──────────────────────────
+
+
+async def _wait_for_drive_video_ready(file_id: str, deadline_ts: datetime) -> bool:
+    """Bounded, restart-safe poll for Drive video transcode completion.
+
+    Replaces the old fixed 30-min ``asyncio.sleep``. Each iteration is short (60s)
+    and the deadline is recomputed from the persisted ``finalize_started_at``, so a
+    Cloud Run cycle loses <=60s and reconstruction resumes. Returns True once Drive
+    reports ``videoMediaMetadata.durationMillis`` (transcode complete). On deadline,
+    returns False — we proceed anyway (the download link works pre-transcode; only
+    in-browser streaming lags a few minutes), which is strictly better than the old
+    all-or-nothing 30-min block a restart destroyed entirely.
+    """
+    from services.google_drive import drive_service
+
+    while True:
+        if datetime.now(timezone.utc) >= deadline_ts:
+            logger.info(
+                f"Drive video-readiness deadline reached for {file_id}; proceeding"
+            )
+            return False
+        try:
+            meta = await drive_service.get_file_metadata(file_id)
+            if ((meta or {}).get("videoMediaMetadata") or {}).get("durationMillis"):
+                return True
+        except Exception as e:
+            logger.warning(f"Drive readiness check failed for {file_id}: {e}")
+        await asyncio.sleep(60)
+
+
+async def finalize_and_distribute_intelligence_signal(signal_id: str) -> dict:
+    """Restart-safe worker: bounded Drive-readiness wait, then at-most-once send.
+
+    Entry points: MCP/Telegram approval (when INTELLIGENCE_SIGNAL_SAFE_DISTRIBUTE),
+    boot reconstruction, and the daily QA re-pickup. Idempotent — a duplicate task
+    bails on the status guard, and the double-send guard in
+    ``distribute_intelligence_signal`` prevents any duplicate email. (Video stays
+    pre-approval in PR1; PR2 moves generation into this worker.)
+    """
+    signal = supabase_client.get_intelligence_signal(signal_id)
+    if not signal:
+        return {"status": "error", "error": f"Signal {signal_id} not found"}
+
+    status = signal.get("status")
+    if status == "distributed":
+        return {"signal_id": signal_id, "status": "distributed", "already": True}
+    if status != "approved_finalizing":
+        logger.info(
+            f"finalize: {signal_id} not in approved_finalizing (status={status}); skip"
+        )
+        return {"signal_id": signal_id, "status": status or "unknown", "skipped": True}
+
+    # Bounded, restart-safe readiness wait for the (pre-approval-generated) video.
+    video_id = signal.get("drive_video_id")
+    if video_id:
+        started_str = signal.get("finalize_started_at")
+        try:
+            started = (
+                datetime.fromisoformat(started_str)
+                if started_str
+                else datetime.now(timezone.utc)
+            )
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            started = datetime.now(timezone.utc)
+        await _wait_for_drive_video_ready(video_id, started + timedelta(minutes=35))
+
+    # Re-read status right before sending (reject-during-finalize guard).
+    fresh = supabase_client.get_intelligence_signal(signal_id)
+    if fresh and fresh.get("status") == "cancelled":
+        logger.info(f"finalize: {signal_id} cancelled during finalize; aborting send")
+        return {"signal_id": signal_id, "status": "cancelled", "skipped": True}
+
+    return await distribute_intelligence_signal(signal_id)
+
+
+def _attach_finalize_done_callback(task: "asyncio.Task", signal_id: str) -> None:
+    """Surface silent finalize-task death (audit + Eyal DM), like _on_handler_error.
+
+    Without this, a swallowed exception in the fire-and-forget finalize task would
+    leave recovery to the next boot (potentially days away with min-instances=1).
+    """
+
+    def _cb(t: "asyncio.Task") -> None:
+        try:
+            exc = t.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+        logger.error(f"Intelligence-signal finalize task for {signal_id} died: {exc}")
+        try:
+            supabase_client.log_action(
+                action="intelligence_signal_finalize_error",
+                details={"signal_id": signal_id, "error": str(exc)},
+                triggered_by="auto",
+            )
+        except Exception:
+            pass
+        try:
+            from services.orchestrator.spine import comms_spine
+
+            asyncio.create_task(
+                comms_spine.send_to_eyal(
+                    f"⚠️ Intelligence Signal {signal_id}: the finalize/distribute task "
+                    f"failed ({type(exc).__name__}). It will be retried on next boot / "
+                    f"the daily sweep; you can also re-approve via CropSight Ops."
+                )
+            )
+        except Exception:
+            pass
+
+    task.add_done_callback(_cb)
+
+
+async def reconstruct_intelligence_finalize_jobs(
+    stale_after_minutes: int | None = None,
+) -> int:
+    """Restart-safe recovery of signals stuck in 'approved_finalizing'.
+
+    On boot (``stale_after_minutes=None``) re-pick every such row — all in-memory
+    tasks are gone after a restart. As a periodic backstop (``stale_after_minutes``
+    set, e.g. 60), re-pick only rows whose ``finalize_started_at`` is older than the
+    threshold, so healthy in-flight jobs (bounded to <=35 min) are not disturbed.
+    Duplicate tasks are safe (status guard + double-send guard). Returns the count
+    (re)scheduled.
+    """
+    try:
+        rows = supabase_client.get_signals_by_status("approved_finalizing")
+    except Exception as e:
+        logger.warning(f"finalize-job reconstruction query failed: {e}")
+        return 0
+    if not rows:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    count = 0
+    for row in rows:
+        signal_id = row.get("signal_id")
+        if not signal_id:
+            continue
+        if stale_after_minutes is not None:
+            started_str = row.get("finalize_started_at")
+            try:
+                started = (
+                    datetime.fromisoformat(started_str) if started_str else now
+                )
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                started = now
+            if (now - started).total_seconds() < stale_after_minutes * 60:
+                continue  # still within the healthy finalize window
+        task = asyncio.create_task(
+            finalize_and_distribute_intelligence_signal(signal_id),
+            name=f"signal_finalize_{signal_id}",
+        )
+        _attach_finalize_done_callback(task, signal_id)
+        count += 1
+
+    if count:
+        logger.info(f"Reconstructed {count} intelligence-signal finalize job(s)")
+    return count
 
 
 # ── Research pipeline ──────────────────────────────────────────────────
