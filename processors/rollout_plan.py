@@ -41,8 +41,11 @@ ROLLOUT_PLAN: list[dict] = [
     },
     {
         "stage_id": "phase3_add_email_business_gate",
-        "target_date": "2026-06-06",
-        "description": "Add EMAIL_BUSINESS_GATE — strict email classifier on top of strict calendar.",
+        # HELD by Eyal (2026-06-09) — deferred from 2026-06-06 so the orchestrator
+        # stops the daily nag and the intel-signal checkpoint below can surface.
+        # Re-surfaces 2026-06-19; apply whenever ready (or push the date again).
+        "target_date": "2026-06-19",
+        "description": "Add EMAIL_BUSINESS_GATE — strict email classifier on top of strict calendar. (Held since Jun 6.)",
         "env_changes": {"EMAIL_BUSINESS_GATE": "true"},
         "audit_action_summary": "input_hygiene_shadow",
     },
@@ -52,6 +55,27 @@ ROLLOUT_PLAN: list[dict] = [
         "description": "Drop the v2 morning-brief shadow preview → v2 becomes the live brief.",
         "env_changes": {"MORNING_BRIEF_V2_SHADOW": "false"},
         "audit_action_summary": "morning_brief_headline_status",
+    },
+    {
+        # Reminder/checkpoint (not a feature cutover): nudge Eyal to verify the
+        # Intelligence Signal redesign PR1 on its first live weekly run, then
+        # continue the redesign. Fires the morning after the weekly signal
+        # (signal = Thu 18:00 IST; this = Fri). env_changes re-asserts the
+        # already-live SAFE_DISTRIBUTE flag so [✅ Apply] is a clean idempotent
+        # confirm-and-dismiss. The audit count surfaces whether the signal actually
+        # distributed this week.
+        "stage_id": "intel_signal_pr1_verify_continue",
+        "target_date": "2026-06-12",
+        "description": (
+            "✅ Intelligence Signal PR1 (restart-safe distribution) is LIVE. This "
+            "Thursday's weekly signal was the first run on the new safe-distribute "
+            "path — verify it reached the team cleanly (one email, no duplicate, no "
+            "silent loss; the audit count below = distributions). Then CONTINUE the "
+            "redesign: PR2 = approve-content-before-video + a Telegram approve/reject "
+            "keyboard. Tap Apply to confirm & dismiss."
+        ),
+        "env_changes": {"INTELLIGENCE_SIGNAL_SAFE_DISTRIBUTE": "true"},
+        "audit_action_summary": "intelligence_signal_distributed",
     },
 ]
 
