@@ -673,6 +673,21 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Meeting-summaries operational upgrade (2026-06-10) — PR7: the forward-
+    # facing, richer meeting summary (executive TL;DR, urgency/area action items,
+    # decision intelligence, risks/blockers, per-area focus, what-changed-since).
+    # Renders via a SEPARATE summary_template_rich registry key so the legacy
+    # template is never touched. OFF = today's summary, byte-for-byte. Supersedes
+    # SUMMARY_CONTEXT_ENABLED when both are on (the rich render folds in the same
+    # supersession + topic clauses). Every section is independently guarded — a
+    # gather failure degrades to the baseline summary, never crashes the flow.
+    # ==========================================================================
+    SUMMARY_RICH_ENABLED: bool = Field(
+        default=False,
+        description="Render the forward-facing rich meeting summary: an executive TL;DR (LLM headline with deterministic fallback, never invents facts), Urgency+Area columns on Action Items, a Decision Intelligence block (rationale/options/confidence/supersession), Risks & Blockers + per-area focus from the topic/area briefs, and a 'What changed since last time' cross-meeting delta. Tier-safe (every block filtered to the meeting's distribution tier). OFF = today's summary unchanged. Reads tasks.urgency/area_label (PR1 floor)."
+    )
+
+    # ==========================================================================
     # Outputs re-architecture (v2.5 Phase 3) — chunk 3: meeting-prep "Prep Ping".
     # Push-first ping + on-demand brief, replacing the old outline/Drive-doc prep.
     # When ON, main.py starts prep_ping_scheduler INSTEAD of the old one.
