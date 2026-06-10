@@ -300,14 +300,37 @@ async def process_transcript(
     except Exception as e:
         logger.error(f"Topic threading failed (non-fatal): {e}")
 
-    # Step 7d2: Executive-context enrichment (v2.5 Phase 3, chunk 2). Now that
-    # cross-reference (supersessions) + topic linkage have run, re-render the
-    # summary ONCE with surgical context clauses. Uses the SAME base args as the
-    # Step 6 render so the only delta is the clauses. Flag-gated, non-fatal:
-    # any failure leaves the baseline summary. DB write first, then reassign the
-    # local `summary` (which flows into the returned dict → approval/distribution)
-    # so a failed write can't diverge DB from in-memory.
-    if settings.SUMMARY_CONTEXT_ENABLED:
+    # Step 7d2: Summary enrichment (re-render once now that cross-reference
+    # supersessions + topic linkage have run). Two flag-gated paths, non-fatal —
+    # any failure leaves the baseline Step-6 summary. DB write first, then
+    # reassign the local `summary` (which flows into the returned dict →
+    # approval/distribution) so a failed write can't diverge DB from in-memory.
+    #
+    # SUMMARY_RICH_ENABLED (PR7) is the forward-facing rich summary and a
+    # superset of the context render (it folds in the same supersession + topic
+    # clauses), so it takes precedence when both flags are on.
+    if settings.SUMMARY_RICH_ENABLED:
+        try:
+            from processors.summary_rich import build_rich_summary
+
+            enriched = await build_rich_summary(
+                meeting_title=meeting_title,
+                meeting_date=meeting_date,
+                participants=participants,
+                duration_minutes=duration_minutes,
+                sensitivity=sensitivity,
+                extracted=extracted,
+                meeting_id=meeting_id,
+                supersessions=cross_ref_results.get("supersessions", []),
+                linked_threads=linked_threads,
+            )
+            if enriched:
+                supabase_client.update_meeting(meeting_id, summary=enriched)
+                summary = enriched
+                logger.info(f"Rich summary applied to {meeting_id}")
+        except Exception as e:
+            logger.warning(f"Rich summary skipped (non-fatal): {e}")
+    elif settings.SUMMARY_CONTEXT_ENABLED:
         try:
             from processors.summary_context import (
                 build_supersession_clauses,

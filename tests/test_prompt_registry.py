@@ -26,9 +26,10 @@ class TestPromptRegistryLoad:
         """Registry loads all prompts from config/prompts/."""
         reg = self._fresh_registry()
         reg.load()
-        # Should have 20 prompts (10 system + 2 debrief + 5 weekly + 3 signal)
+        # Should have 21 prompts (11 system [incl. summary_template_rich]
+        # + 2 debrief + 5 weekly + 3 signal)
         assert reg._loaded
-        assert len(reg.prompt_names) == 20
+        assert len(reg.prompt_names) == 21
 
     def test_get_returns_content(self):
         """get() returns prompt content for existing prompt."""
@@ -128,7 +129,7 @@ class TestPromptRegistryReload:
         reg = self._fresh_registry()
         reg.load()
         result = reg.reload()
-        assert result["prompts_loaded"] == 20
+        assert result["prompts_loaded"] == 21
         assert result["changes"] == []
         assert result["errors"] == []
 
@@ -170,7 +171,7 @@ class TestPromptRegistryHealthCheck:
         reg.load()
         health = reg.health_check()
         assert health["status"] == "healthy"
-        assert health["prompts_loaded"] == 20
+        assert health["prompts_loaded"] == 21
         assert health["load_errors"] == 0
 
     def test_warning_on_load_errors(self):
@@ -194,7 +195,7 @@ class TestQASchedulerPromptCheck:
         assert "prompt_health" in report["checks"]
         ph = report["checks"]["prompt_health"]
         assert "prompts_loaded" in ph
-        assert ph["prompts_loaded"] == 20
+        assert ph["prompts_loaded"] == 21
 
 
 class TestPromptContentMatch:
@@ -215,3 +216,11 @@ class TestPromptContentMatch:
         reg.load()
         from core.debrief_prompt import _DEBRIEF_SYSTEM_PROMPT_FALLBACK
         assert reg.get("debrief_system_prompt") == _DEBRIEF_SYSTEM_PROMPT_FALLBACK
+
+    def test_summary_template_rich_yaml_matches_python(self):
+        """summary_template_rich in YAML matches the SUMMARY_TEMPLATE_RICH fallback."""
+        PromptRegistry._instance = None
+        reg = PromptRegistry()
+        reg.load()
+        from core.system_prompt import SUMMARY_TEMPLATE_RICH
+        assert reg.get("summary_template_rich") == SUMMARY_TEMPLATE_RICH
