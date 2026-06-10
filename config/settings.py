@@ -141,6 +141,17 @@ class Settings(BaseSettings):
             "effect on the next process restart."
         ),
     )
+    TASK_URGENCY_AREA_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "SHADOW step of the operational-task upgrade: extraction + manual "
+            "injection populate tasks.urgency (H/M/L, time-pressure separate from "
+            "priority) and tasks.area (a Gantt area or 'non-area'), applying the "
+            "no-invented-dates rule (ASAP -> urgency H, deadline null). Off = "
+            "prompt + storage exactly as today (tasks take the column defaults). "
+            "No output reads these until the later flip flags."
+        ),
+    )
 
     # ==========================================================================
     # Calendar Configuration
