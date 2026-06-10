@@ -131,6 +131,16 @@ class Settings(BaseSettings):
     ROYE_EMAIL: str = Field(default="", description="Roye's email address")
     PAOLO_EMAIL: str = Field(default="", description="Paolo's email address")
     YORAM_EMAIL: str = Field(default="", description="Yoram's email address")
+    TEAM_ROSTER_DB_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Load the team roster from the team_members DB table (add people "
+            "without a deploy) instead of the hardcoded config/team.py dict. On "
+            "ANY error/empty, config/team.py falls back to the hardcoded roster, "
+            "so it can never come back empty. Built once at import — a flip takes "
+            "effect on the next process restart."
+        ),
+    )
 
     # ==========================================================================
     # Calendar Configuration
