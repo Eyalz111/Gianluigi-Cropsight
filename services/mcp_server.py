@@ -70,6 +70,26 @@ def _error(message: str, source: str = "internal") -> dict:
     }
 
 
+def _coerce_urgency(value) -> str:
+    """Normalize a task urgency to H/M/L (default M). Shared by create/update_task."""
+    u = str(value or "M").strip().upper()
+    return u if u in ("H", "M", "L") else "M"
+
+
+def _resolve_area_fields(area, resolver) -> tuple[dict, str | None]:
+    """Turn an Area name into the DB fields the tasks table stores.
+
+    `area is None` means "leave area untouched" (update_task semantics) → ({}, None).
+    Otherwise `resolver` (supabase_client.resolve_area) maps it to area_id+area_label.
+    Returns (fields_to_merge_into_updates, resolved_label_or_None). Extracted from
+    the create/update_task tool closures so the resolution logic is unit-testable.
+    """
+    if area is None:
+        return {}, None
+    area_id, area_label = resolver(area)
+    return {"area_id": area_id, "area_label": area_label}, area_label
+
+
 def _sanitize_records(records: list[dict], exclude_fields: set | None = None) -> list[dict]:
     """Remove raw text fields that shouldn't be returned via MCP."""
     exclude = exclude_fields or {"raw_transcript", "email_body", "full_text"}
@@ -2061,13 +2081,9 @@ class MCPServer:
                 # PR9: urgency (H/M/L time-pressure) + area (a Gantt area name or
                 # 'non-area'). Area resolves to the FK + label the tasks table stores.
                 if urgency is not None:
-                    u = str(urgency).strip().upper()
-                    updates["urgency"] = u if u in ("H", "M", "L") else "M"
-                _area_label = None
-                if area is not None:
-                    aid, _area_label = _sc.resolve_area(area)
-                    updates["area_id"] = aid
-                    updates["area_label"] = _area_label
+                    updates["urgency"] = _coerce_urgency(urgency)
+                _area_fields, _area_label = _resolve_area_fields(area, _sc.resolve_area)
+                updates.update(_area_fields)
 
                 # Parse deadline (natural language support)
                 parsed_deadline = None
@@ -2190,8 +2206,8 @@ class MCPServer:
                         pass  # Will pass as None
 
                 # PR9: urgency (time-pressure) + area (resolved to FK + label).
-                _u = str(urgency or "M").strip().upper()
-                _u = _u if _u in ("H", "M", "L") else "M"
+                # create defaults area to non-area, so resolve even when None.
+                _u = _coerce_urgency(urgency)
                 _area_id, _area_label = _sc.resolve_area(area)
 
                 # Create in Supabase

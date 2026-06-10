@@ -410,6 +410,13 @@ def apply_sheets_to_db(diff: dict) -> dict:
     """
     applied = {"tasks_updated": 0, "tasks_created": 0, "decisions_updated": 0, "decisions_created": 0}
 
+    # PR9: cache areas once (resolve_area is called per modified/created task).
+    _areas = (
+        supabase_client.get_areas()
+        if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False)
+        else None
+    )
+
     # Apply task modifications (Sheets wins)
     for item in diff["tasks"]["modified"]:
         db_id = item.get("db_id")
@@ -420,7 +427,7 @@ def apply_sheets_to_db(diff: dict) -> dict:
             update_data[field] = vals["to"]
         # PR9: an Area edit carries the label — resolve the FK; normalize urgency.
         if "area_label" in update_data:
-            aid, alabel = supabase_client.resolve_area(update_data["area_label"])
+            aid, alabel = supabase_client.resolve_area(update_data["area_label"], areas=_areas)
             update_data["area_label"] = alabel
             update_data["area_id"] = aid
         if "urgency" in update_data:
@@ -449,7 +456,7 @@ def apply_sheets_to_db(diff: dict) -> dict:
         if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
             u = (st.get("urgency") or "M").strip().upper()
             insert_row["urgency"] = u if u in ("H", "M", "L") else "M"
-            aid, alabel = supabase_client.resolve_area(st.get("area"))
+            aid, alabel = supabase_client.resolve_area(st.get("area"), areas=_areas)
             insert_row["area_id"] = aid
             insert_row["area_label"] = alabel
         try:
@@ -616,6 +623,13 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         return {"error": str(e)}
     db_tasks = supabase_client.get_tasks(status=None, limit=1000, include_pending=True)
     snapshots = supabase_client.get_sheet_snapshots()
+    # PR9: cache the area list once per cycle — resolve_area would otherwise
+    # re-query for every task that carries an Area edit/create.
+    _areas_cache = (
+        supabase_client.get_areas()
+        if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False)
+        else None
+    )
 
     db_by_id = {t["id"]: t for t in db_tasks if t.get("id")}
     sheet_by_id, creates = {}, []
@@ -677,7 +691,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 summary["pulled"] += 1
             s_area = (st.get("area") or "").strip()
             if s_area and _normalize(s_area) != _normalize(dt.get("area_label")):
-                aid, alabel = supabase_client.resolve_area(s_area)
+                aid, alabel = supabase_client.resolve_area(s_area, areas=_areas_cache)
                 upd["area_id"] = aid
                 upd["area_label"] = alabel
                 summary["pulled"] += 1
@@ -696,7 +710,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
                 u = (st.get("urgency") or "M").strip().upper()
                 extra["urgency"] = u if u in ("H", "M", "L") else "M"
-                aid, alabel = supabase_client.resolve_area(st.get("area"))
+                aid, alabel = supabase_client.resolve_area(st.get("area"), areas=_areas_cache)
                 extra["area_id"] = aid
                 extra["area_label"] = alabel
             created = supabase_client.create_task(

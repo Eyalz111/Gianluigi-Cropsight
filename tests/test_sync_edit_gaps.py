@@ -108,3 +108,44 @@ class TestReconcilePull:
         summary = await self._run(False)
         assert summary["matched"] == 1
         assert summary["pulled"] == 0
+
+
+# ---------------------------------------------------------------------------
+# resolve_area area-cache param — a batch caller avoids re-querying get_areas
+# ---------------------------------------------------------------------------
+class TestResolveAreaCache:
+    def test_uses_passed_cache_without_querying(self):
+        cache = [{"id": "a9", "name": "Strategy & Research"}]
+        with patch.object(supabase_client, "get_areas", side_effect=AssertionError("should not query")):
+            assert supabase_client.resolve_area("strategy & research", areas=cache) == ("a9", "Strategy & Research")
+
+    def test_empty_cache_means_no_match(self):
+        with patch.object(supabase_client, "get_areas", side_effect=AssertionError("should not query")):
+            assert supabase_client.resolve_area("Anything", areas=[]) == (None, "Anything")
+
+
+# ---------------------------------------------------------------------------
+# MCP task-tool helpers — the resolution/normalization logic, unit-tested
+# (the tools themselves are closures; this is the extracted core)
+# ---------------------------------------------------------------------------
+from services.mcp_server import _coerce_urgency, _resolve_area_fields
+
+
+class TestMcpTaskHelpers:
+    def test_coerce_urgency(self):
+        assert _coerce_urgency("h") == "H"
+        assert _coerce_urgency(" m ") == "M"
+        assert _coerce_urgency(None) == "M"
+        assert _coerce_urgency("bogus") == "M"
+
+    def test_resolve_area_fields_none_is_skip(self):
+        # update_task semantics: area=None leaves the field untouched
+        fields, label = _resolve_area_fields(None, lambda a: (_ for _ in ()).throw(AssertionError()))
+        assert fields == {}
+        assert label is None
+
+    def test_resolve_area_fields_resolves(self):
+        resolver = lambda a: ("a2", "BD & Sales")
+        fields, label = _resolve_area_fields("bd & sales", resolver)
+        assert fields == {"area_id": "a2", "area_label": "BD & Sales"}
+        assert label == "BD & Sales"
