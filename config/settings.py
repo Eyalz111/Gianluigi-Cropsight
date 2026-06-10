@@ -152,6 +152,15 @@ class Settings(BaseSettings):
             "No output reads these until the later flip flags."
         ),
     )
+    TASK_SHEET_URGENCY_AREA_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Add Urgency (col K) + Area (col L) to the Tasks sheet, APPENDED after "
+            "the col-J UUID identity (never relocated, so reconcile keeps matching). "
+            "Off = today's A:J 10-column layout. After flipping, run "
+            "scripts/repopulate_tasks_sheet.py to materialize K/L from the DB."
+        ),
+    )
 
     # ==========================================================================
     # Calendar Configuration
