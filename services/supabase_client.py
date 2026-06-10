@@ -880,6 +880,9 @@ class SupabaseClient:
         status: str = "pending",
         category: str | None = None,
         deadline_confidence: str = "NONE",
+        urgency: str = "M",
+        area_id: str | None = None,
+        area_label: str = "non-area",
     ) -> dict:
         """
         Create a new task.
@@ -897,6 +900,10 @@ class SupabaseClient:
                 whether reminders + proactive alerts fire. Default 'NONE' means
                 the task has no deadline at all. Callers that set a deadline
                 must also set this to 'EXPLICIT' or 'INFERRED'.
+            urgency: 'H' | 'M' | 'L' — time-pressure, SEPARATE from priority
+                (importance). Never implies a deadline.
+            area_id: Gantt area UUID (optional, nullable).
+            area_label: Gantt area name or 'non-area' (the hard area field).
 
         Returns:
             Created task record.
@@ -911,6 +918,9 @@ class SupabaseClient:
             "status": status,
             "category": category,
             "deadline_confidence": deadline_confidence,
+            "urgency": urgency,
+            "area_id": area_id,
+            "area_label": area_label,
         }
 
         result = self.client.table("tasks").insert(data).execute()
@@ -961,6 +971,9 @@ class SupabaseClient:
                 "category": t.get("category"),
                 "label": t.get("label"),
                 "deadline_confidence": t.get("deadline_confidence", "NONE"),
+                "urgency": t.get("urgency", "M"),
+                "area_id": t.get("area_id"),
+                "area_label": t.get("area_label", "non-area"),
             }
             for t in valid_tasks
         ]

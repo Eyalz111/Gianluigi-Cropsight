@@ -39,7 +39,20 @@ class TaskStatus(str, Enum):
 
 
 class TaskPriority(str, Enum):
-    """Priority level of a task."""
+    """Priority level of a task — its IMPORTANCE (long-term/business impact)."""
+    HIGH = "H"
+    MEDIUM = "M"
+    LOW = "L"
+
+
+class TaskUrgency(str, Enum):
+    """Time-pressure of a task — SEPARATE from priority (importance).
+
+    Together, priority x urgency form an Eisenhower-style matrix. Urgency is
+    derived from deadline proximity + explicit time-pressure language; it lets us
+    flag a time-pressing task WITHOUT inventing a deadline ("ASAP" -> urgency H,
+    deadline null).
+    """
     HIGH = "H"
     MEDIUM = "M"
     LOW = "L"
@@ -312,6 +325,9 @@ class Task(BaseModel):
     deadline_confidence: DeadlineConfidence = DeadlineConfidence.NONE
     status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
+    urgency: TaskUrgency = TaskUrgency.MEDIUM
+    area_id: UUID | None = None
+    area_label: str = "non-area"
     transcript_timestamp: str | None = None
     sensitivity: Sensitivity = Sensitivity.FOUNDERS
     created_at: datetime | None = None
