@@ -719,6 +719,18 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Meeting-summaries operational upgrade (2026-06-10) — PR8: branded summary
+    # ARTIFACTS (the distributed .docx + the email HTML). CropSight palette
+    # (green #1A7A4C / gold #C9A227 / navy #0A1628) PLUS the Area + Urgency
+    # columns the structured .docx/email table drops today (the audit gap).
+    # OFF = today's plain python-docx / 4-column email, byte-for-byte.
+    # ==========================================================================
+    SUMMARY_BRANDED_ENABLED: bool = Field(
+        default=False,
+        description="Brand the distributed summary .docx + email with the CropSight palette (green #1A7A4C / gold #C9A227 / navy text) and add Area + Urgency columns to the Action Items table (closes the gap where the .docx/email dropped the new fields). OFF = today's plain document + 4-column email table, unchanged. Reads tasks.urgency/area_label (PR1 floor)."
+    )
+
+    # ==========================================================================
     # Outputs re-architecture (v2.5 Phase 3) — chunk 3: meeting-prep "Prep Ping".
     # Push-first ping + on-demand brief, replacing the old outline/Drive-doc prep.
     # When ON, main.py starts prep_ping_scheduler INSTEAD of the old one.

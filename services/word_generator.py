@@ -16,8 +16,44 @@ import logging
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# CropSight brand palette (PR8). Hex strings for cell shading; RGBColor for runs.
+BRAND_GREEN_HEX = "1A7A4C"
+BRAND_GOLD_HEX = "C9A227"
+BRAND_GREEN = RGBColor(0x1A, 0x7A, 0x4C)
+BRAND_GOLD = RGBColor(0xC9, 0xA2, 0x27)
+BRAND_NAVY = RGBColor(0x0A, 0x16, 0x28)
+_URGENCY_COLOR = {"H": RGBColor(0xC0, 0x39, 0x2B), "M": BRAND_GOLD, "L": RGBColor(0x6B, 0x6B, 0x6B)}
+
+
+def _set_cell_shading(cell, hex_color: str) -> None:
+    """Fill a table cell's background (python-docx has no direct API for it)."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), hex_color)
+    tcPr.append(shd)
+
+
+def _add_accent_rule(doc, hex_color: str) -> None:
+    """Add a thin horizontal brand rule (a paragraph with a bottom border)."""
+    p = doc.add_paragraph()
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "18")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), hex_color)
+    pBdr.append(bottom)
+    pPr.append(pBdr)
 
 
 def generate_summary_docx(
@@ -53,9 +89,14 @@ def generate_summary_docx(
         Bytes content of the .docx file.
     """
     doc = Document()
+    branded = getattr(settings, "SUMMARY_BRANDED_ENABLED", False)
 
     # --- Title ---
     title_para = doc.add_heading(f"Meeting Summary: {meeting_title}", level=1)
+    if branded:
+        for run in title_para.runs:
+            run.font.color.rgb = BRAND_GREEN
+        _add_accent_rule(doc, BRAND_GOLD_HEX)  # gold rule under the title
 
     # --- Metadata ---
     participants_str = ", ".join(participants) if participants else "Not recorded"
@@ -111,26 +152,49 @@ def generate_summary_docx(
     # --- Action Items (compact table) ---
     doc.add_heading("Action Items", level=2)
     if tasks:
-        table = doc.add_table(rows=1, cols=4)
+        # Branded (PR8) adds Area + Urgency columns + a green header; the
+        # off-path stays the original 4-column "Light Grid Accent 1" table.
+        if branded:
+            headers = ["Pri", "Action Item", "Area", "Owner", "Deadline", "Urgency"]
+        else:
+            headers = ["Pri", "Action Item", "Owner", "Deadline"]
+        table = doc.add_table(rows=1, cols=len(headers))
         table.style = "Light Grid Accent 1"
-        headers = ["Pri", "Action Item", "Owner", "Deadline"]
         for j, header in enumerate(headers):
             cell = table.rows[0].cells[j]
             cell.text = header
+            if branded:
+                _set_cell_shading(cell, BRAND_GREEN_HEX)
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
                     run.bold = True
+                    if branded:
+                        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
                 paragraph.paragraph_format.space_after = Pt(2)
 
         for t in tasks:
             row = table.add_row()
-            row.cells[0].text = t.get("priority", "M")
-            # Use label + title for compact display
             label = t.get("label", "")
             title = t.get("title", "")
-            row.cells[1].text = f"[{label}] {title}" if label else title
-            row.cells[2].text = t.get("assignee", "") or "—"
-            row.cells[3].text = str(t.get("deadline", "") or "—")
+            item_text = f"[{label}] {title}" if label else title
+            if branded:
+                row.cells[0].text = t.get("priority", "M")
+                row.cells[1].text = item_text
+                row.cells[2].text = t.get("area_label", "") or "non-area"
+                row.cells[3].text = t.get("assignee", "") or "—"
+                row.cells[4].text = str(t.get("deadline", "") or "—")
+                urgency = (t.get("urgency") or "M").upper()
+                row.cells[5].text = urgency
+                # tint the urgency cell text by level (H red / M gold / L gray)
+                for paragraph in row.cells[5].paragraphs:
+                    for run in paragraph.runs:
+                        run.font.color.rgb = _URGENCY_COLOR.get(urgency, BRAND_GOLD)
+                        run.bold = True
+            else:
+                row.cells[0].text = t.get("priority", "M")
+                row.cells[1].text = item_text
+                row.cells[2].text = t.get("assignee", "") or "—"
+                row.cells[3].text = str(t.get("deadline", "") or "—")
 
             # Compact row spacing
             for cell in row.cells:
@@ -183,6 +247,15 @@ def generate_summary_docx(
             if role:
                 text += f" ({role})"
             doc.add_paragraph(text, style="List Bullet")
+
+    # Brand pass: recolor the section headings green (the title is already
+    # handled above). Done once at the end so every level-2 heading is covered
+    # without threading a helper through each call site.
+    if branded:
+        for p in doc.paragraphs:
+            if p.style is not None and p.style.name == "Heading 2":
+                for run in p.runs:
+                    run.font.color.rgb = BRAND_GREEN
 
     # --- Footer ---
     doc.add_paragraph()  # spacing
