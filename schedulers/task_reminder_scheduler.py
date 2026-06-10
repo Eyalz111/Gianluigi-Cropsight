@@ -42,6 +42,25 @@ logger = logging.getLogger(__name__)
 DAYS_BEFORE_WARNING = 2
 
 
+def _urgency_area_suffix(task: dict) -> str:
+    """A compact second line for reminder copy when the operational-floor flag
+    is on: '🔴 Urgent · <Area>'. Surfaces urgency=H and a real area; stays
+    silent (returns '') when there's nothing worth adding, so a non-urgent
+    area-less task reads exactly like today's reminder. This only enriches the
+    copy — the EXPLICIT-deadline gate upstream is untouched, so an ASAP task
+    never reaches here as a false deadline reminder.
+    """
+    if not settings.OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED:
+        return ""
+    bits = []
+    if (task.get("urgency") or "").upper() == "H":
+        bits.append("🔴 Urgent")
+    area = task.get("area") or task.get("area_label") or ""
+    if area and area != "non-area":
+        bits.append(area)
+    return ("\n" + " · ".join(bits)) if bits else ""
+
+
 class TaskReminderScheduler:
     """
     Schedules and sends task deadline reminders.
@@ -389,6 +408,7 @@ class TaskReminderScheduler:
         priority_emoji = {"H": "!!!", "M": "!!", "L": "!"}.get(priority, "!!")
 
         message = f"<b>{task_desc}</b> is {days_overdue} days overdue ({assignee})."
+        message += _urgency_area_suffix(task)
 
         if source:
             message += f"\nFrom: {source}"
@@ -478,6 +498,7 @@ class TaskReminderScheduler:
         priority = task.get("priority", "M")
 
         message = f"<b>{task_desc}</b> is due today ({assignee})."
+        message += _urgency_area_suffix(task)
 
         # Send to assignee
         assignee_telegram = self._get_telegram_id(assignee)
@@ -513,6 +534,7 @@ class TaskReminderScheduler:
         day_word = "day" if days_until == 1 else "days"
 
         message = f"<b>{task_desc}</b> is due {deadline} — {days_until} {day_word} from now ({assignee})."
+        message += _urgency_area_suffix(task)
 
         # Send to assignee
         assignee_telegram = self._get_telegram_id(assignee)

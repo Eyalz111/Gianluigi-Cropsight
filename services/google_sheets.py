@@ -256,6 +256,13 @@ TASK_COLUMNS = {
     "id": "J",             # Task UUID — robust Sheet<->DB identity (v3 reconcile)
 }
 
+# Operational floor (PR5): append Urgency=K, Area=L AFTER the col-J UUID identity
+# (never relocate J — reconcile keys the Sheet<->DB match on it). Flag-gated; off =
+# today's A:J 10-column layout, byte-identical.
+if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
+    TASK_COLUMNS["urgency"] = "K"
+    TASK_COLUMNS["area"] = "L"
+
 # Column indices (0-based) for formatting operations
 TASK_COL_INDEX = {k: ord(v) - ord("A") for k, v in TASK_COLUMNS.items()}
 
@@ -277,6 +284,8 @@ TASK_TRACKER_HEADERS = [
     "Priority", "Label", "Task", "Owner", "Deadline",
     "Status", "Category", "Source Meeting", "Created", "ID",
 ]
+if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
+    TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Urgency", "Area"]
 
 DECISION_TRACKER_HEADERS = [
     "Label", "Decision", "Rationale", "Confidence",
@@ -613,9 +622,10 @@ class GoogleSheetsService:
         # rebuild_sheets.py or duplicateSheet) lands in front of "Tasks".
         # See regression test test_get_all_tasks_uses_explicit_tab_name.
         tab_name = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+        _last_col = max(TASK_COLUMNS.values())  # 'J' (off) or 'L' (urgency/area on)
         rows = await self._read_sheet_range(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
-            range_name=f"'{tab_name}'!A:J"
+            range_name=f"'{tab_name}'!A:{_last_col}"
         )
 
         if not rows or len(rows) < 2:
@@ -629,7 +639,7 @@ class GoogleSheetsService:
             while len(row) < num_cols:
                 row.append("")
 
-            tasks.append({
+            _task = {
                 "row_number": i,
                 "priority": row[TASK_COL_INDEX["priority"]],
                 "label": row[TASK_COL_INDEX["label"]],
@@ -641,7 +651,11 @@ class GoogleSheetsService:
                 "category": row[TASK_COL_INDEX["category"]],
                 "created_date": row[TASK_COL_INDEX["created"]],
                 "id": row[TASK_COL_INDEX["id"]],
-            })
+            }
+            if "urgency" in TASK_COL_INDEX:
+                _task["urgency"] = row[TASK_COL_INDEX["urgency"]]
+                _task["area"] = row[TASK_COL_INDEX["area"]]
+            tasks.append(_task)
 
         return tasks
 
@@ -812,7 +826,7 @@ class GoogleSheetsService:
                     t.get("source_meeting", "")
                     or (meeting_info.get("title", "") if isinstance(meeting_info, dict) else "")
                 )
-                rows.append([
+                _row = [
                     t.get("priority", "M"),
                     t.get("label", ""),
                     t.get("title", ""),
@@ -823,7 +837,11 @@ class GoogleSheetsService:
                     source,
                     created,
                     t.get("id", ""),
-                ])
+                ]
+                if "urgency" in TASK_COLUMNS:
+                    _row.append(t.get("urgency") or "M")
+                    _row.append(t.get("area_label") or "non-area")
+                rows.append(_row)
 
             # Clear the tab and write fresh data
             num_cols = len(TASK_COLUMNS)
@@ -1141,7 +1159,7 @@ class GoogleSheetsService:
         values = []
         for task in tasks:
             created = task.get("created_date", datetime.now().strftime("%Y-%m-%d"))
-            values.append([
+            _row = [
                 task.get("priority", "M"),
                 task.get("label", ""),
                 task.get("task", ""),
@@ -1152,7 +1170,11 @@ class GoogleSheetsService:
                 task.get("source_meeting", ""),
                 created,
                 task.get("id", ""),
-            ])
+            ]
+            if "urgency" in TASK_COLUMNS:
+                _row.append(task.get("urgency") or "M")
+                _row.append(task.get("area") or task.get("area_label") or "non-area")
+            values.append(_row)
 
         return await self._append_rows(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,

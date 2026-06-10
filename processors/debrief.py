@@ -576,6 +576,45 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
 # Shared Injection Pipeline
 # =========================================================================
 
+def _unify_manual_task(item: dict) -> dict:
+    """Align a manually-injected task with meeting-extracted ones (flag-gated).
+
+    Sets the fields the debrief path historically DROPPED — `deadline_confidence`
+    (a deadline the CEO stated is EXPLICIT; none -> NONE, which is exactly what made
+    manual tasks invisible to deadline reminders) and `label` — plus `urgency` + area.
+    No invented dates: 'ASAP'/'urgent' text -> urgency H with NO deadline.
+    """
+    title = item.get("title") or item.get("description") or ""
+    text = f"{title} {item.get('description') or ''}".lower()
+    deadline = item.get("deadline")
+    extra = {
+        "deadline_confidence": "EXPLICIT" if deadline else "NONE",
+        "label": item.get("label", ""),
+    }
+    u = str(item.get("urgency") or "").strip().upper()
+    if u not in ("H", "M", "L"):
+        u = "H" if any(w in text for w in ("asap", "urgent", "blocking", "right now", "today")) else "M"
+    extra["urgency"] = u
+    # area: explicit hint resolved, else a conservative phrase match on the text.
+    area_id, area_label = None, "non-area"
+    try:
+        areas = supabase_client.get_areas() or []
+        by_name = {(a.get("name") or "").strip().lower(): a for a in areas}
+        m = by_name.get(str(item.get("area") or "").strip().lower())
+        if not m:
+            for nm, a in by_name.items():
+                if nm and len(nm) > 3 and nm in text:
+                    m = a
+                    break
+        if m:
+            area_id, area_label = m.get("id"), m.get("name")
+    except Exception:
+        pass
+    extra["area_id"] = area_id
+    extra["area_label"] = area_label
+    return extra
+
+
 async def _inject_debrief_items(
     session_id: str | None,
     items: list[dict],
@@ -621,7 +660,7 @@ async def _inject_debrief_items(
                 # and create directly. No cross-meeting dedup: Haiku false-positives
                 # would silently drop the task with no fallback (data-loss bug found
                 # 2026-04-11 on the 2026-04-10 U Bank / D&O / Yoram injection).
-                supabase_client.create_task(
+                _task_kwargs = dict(
                     title=item.get("title", item.get("description", "")),
                     assignee=item.get("assignee") or "Eyal",
                     priority=item.get("priority", "M"),
@@ -629,6 +668,11 @@ async def _inject_debrief_items(
                     meeting_id=meeting_id,
                     category=item.get("category"),
                 )
+                if getattr(settings, "TASK_URGENCY_AREA_ENABLED", False):
+                    # Unify with meeting extraction: stop dropping deadline_confidence
+                    # + label, and set urgency/area. Off = byte-identical to today.
+                    _task_kwargs.update(_unify_manual_task(item))
+                supabase_client.create_task(**_task_kwargs)
                 counts["tasks"] += 1
 
             elif item_type == "decision":

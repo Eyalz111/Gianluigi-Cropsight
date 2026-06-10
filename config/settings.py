@@ -141,6 +141,26 @@ class Settings(BaseSettings):
             "effect on the next process restart."
         ),
     )
+    TASK_URGENCY_AREA_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "SHADOW step of the operational-task upgrade: extraction + manual "
+            "injection populate tasks.urgency (H/M/L, time-pressure separate from "
+            "priority) and tasks.area (a Gantt area or 'non-area'), applying the "
+            "no-invented-dates rule (ASAP -> urgency H, deadline null). Off = "
+            "prompt + storage exactly as today (tasks take the column defaults). "
+            "No output reads these until the later flip flags."
+        ),
+    )
+    TASK_SHEET_URGENCY_AREA_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Add Urgency (col K) + Area (col L) to the Tasks sheet, APPENDED after "
+            "the col-J UUID identity (never relocated, so reconcile keeps matching). "
+            "Off = today's A:J 10-column layout. After flipping, run "
+            "scripts/repopulate_tasks_sheet.py to materialize K/L from the DB."
+        ),
+    )
 
     # ==========================================================================
     # Calendar Configuration
@@ -670,6 +690,17 @@ class Settings(BaseSettings):
     SUMMARY_CONTEXT_ENABLED: bool = Field(
         default=False,
         description="Append exception-based executive-context clauses to meeting summaries: decision supersession ('(reverses the <date> decision: ...)') + a one-line topic 'Where this fits'. Tier-safe (a clause is omitted if the referenced prior item/topic is above the meeting's distribution tier). Off = summaries render exactly as before."
+    )
+
+    # ==========================================================================
+    # Meeting-summaries operational upgrade (2026-06-10) — PR6: flip the
+    # push outputs to read the priority×urgency×area floor (PR1/PR3/PR4 populate
+    # it). Brief/reminders/digest only — the rich summary is its own flag.
+    # OFF = today's deadline-and-priority-only outputs, byte-for-byte.
+    # ==========================================================================
+    OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED: bool = Field(
+        default=False,
+        description="Rank the morning-brief task line by urgency-then-priority (surfacing urgency=H ASAP tasks that have no deadline, which today's overdue filter drops) + annotate by area; add an urgency/area tag to task reminders (the EXPLICIT-deadline gate is unchanged — ASAP never fires a false deadline reminder); add per-area + per-urgency rollups to the weekly digest. OFF = today's outputs unchanged. Reads tasks.urgency/area_label (PR1 floor)."
     )
 
     # ==========================================================================
