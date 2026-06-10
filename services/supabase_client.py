@@ -883,6 +883,7 @@ class SupabaseClient:
         urgency: str = "M",
         area_id: str | None = None,
         area_label: str = "non-area",
+        label: str | None = None,
     ) -> dict:
         """
         Create a new task.
@@ -921,6 +922,7 @@ class SupabaseClient:
             "urgency": urgency,
             "area_id": area_id,
             "area_label": area_label,
+            "label": label,
         }
 
         result = self.client.table("tasks").insert(data).execute()
