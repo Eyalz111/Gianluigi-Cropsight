@@ -457,12 +457,15 @@ class GoogleSheetsService:
         created_date: str,
         category: str = "",
         label: str = "",
+        task_id: str = "",
+        urgency: str = "M",
+        area_label: str = "non-area",
     ) -> bool:
         """
         Add a new task to the Task Tracker sheet.
 
         Column order follows TASK_COLUMNS: Priority, Label, Task, Owner,
-        Deadline, Status, Category, Source Meeting, Created.
+        Deadline, Status, Category, Source Meeting, Created, ID [, Urgency, Area].
 
         Args:
             task: Task description.
@@ -474,6 +477,13 @@ class GoogleSheetsService:
             created_date: When the task was created (YYYY-MM-DD).
             category: Task category (e.g., 'Product & Tech').
             label: Project label (e.g., 'Moldova Pilot').
+            task_id: The DB task UUID — written to column J so the v3 reconcile
+                matches this row by identity. WITHOUT it the row is UUID-less and
+                a write-mode reconcile would treat it as new -> a DUPLICATE DB
+                task (PR10 fix; callers now pass the id they just created).
+            urgency: 'H', 'M', or 'L' — written to column K when the sheet's
+                urgency/area columns are enabled.
+            area_label: Gantt area or 'non-area' — written to column L likewise.
 
         Returns:
             True if task was added successfully.
@@ -482,6 +492,8 @@ class GoogleSheetsService:
             logger.warning("TASK_TRACKER_SHEET_ID not configured")
             return False
 
+        # A:J always (J=id matches the 10-column base layout); K/L appended only
+        # when the urgency/area columns are enabled (TASK_COLUMNS then has them).
         values = [
             priority,
             label,
@@ -492,7 +504,11 @@ class GoogleSheetsService:
             category,
             source_meeting,
             created_date,
+            task_id,
         ]
+        if "urgency" in TASK_COLUMNS:
+            values.append(urgency or "M")
+            values.append(area_label or "non-area")
 
         return await self._append_row(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,

@@ -2236,6 +2236,11 @@ class MCPServer:
                         created_date=today,
                         category=category or "",
                         label=label,
+                        # PR10: write the UUID (col J) + urgency/area so the row is
+                        # reconcile-complete — otherwise it'd be re-created as a dup.
+                        task_id=task.get("id", "") if isinstance(task, dict) else "",
+                        urgency=_u,
+                        area_label=_area_label,
                     )
                 except Exception as sheets_err:
                     warnings.append(f"Sheets sync failed: {sheets_err}")

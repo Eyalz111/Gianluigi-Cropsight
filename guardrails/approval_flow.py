@@ -1898,9 +1898,29 @@ async def distribute_approved_content(
     try:
         logger.info(f"Tasks to add to Sheets: {len(tasks)} items")
         if tasks:
+            # PR10: the content tasks may not carry the DB UUID/urgency/area, so
+            # index the meeting's DB tasks by (title, assignee) to enrich each
+            # row. Writing the UUID (col J) is what keeps a write-mode reconcile
+            # from re-creating the row as a duplicate task.
+            _db_task_index: dict[tuple, dict] = {}
+            try:
+                for _t in supabase_client.get_tasks(status=None, include_pending=True):
+                    if _t.get("meeting_id") == meeting_id:
+                        _k = (
+                            (_t.get("title") or "").strip().lower(),
+                            (_t.get("assignee") or "").strip().lower(),
+                        )
+                        _db_task_index[_k] = _t
+            except Exception as _idx_err:
+                logger.warning(f"Could not index DB tasks for sheet-add enrichment: {_idx_err}")
+
             for i, task in enumerate(tasks):
                 label = task.get("label", "")
                 title = task.get("title", "")
+                _dbt = _db_task_index.get(
+                    ((title or "").strip().lower(), (task.get("assignee") or "").strip().lower()),
+                    {},
+                )
                 logger.info(f"  Adding task {i+1}: '[{label}] {title[:50]}' -> {task.get('assignee', '?')}")
                 await sheets_service.add_task(
                     task=title,
@@ -1912,6 +1932,9 @@ async def distribute_approved_content(
                     created_date=meeting_date,
                     category=task.get("category", ""),
                     label=label,
+                    task_id=task.get("id") or _dbt.get("id", ""),
+                    urgency=task.get("urgency") or _dbt.get("urgency", "M"),
+                    area_label=task.get("area_label") or _dbt.get("area_label", "non-area"),
                 )
             results["sheets_updated"] = True
             results["tasks_added"] = len(tasks)
