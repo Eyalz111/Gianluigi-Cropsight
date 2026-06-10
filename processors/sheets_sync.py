@@ -687,6 +687,8 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             "category": dt.get("category", ""),
             "source_meeting": dt.get("source_meeting") or (meeting_info or {}).get("title", ""),
             "created_date": str(dt.get("created_at", ""))[:10], "id": tid,
+            # carried through; add_tasks_batch only writes K/L when the flag is on
+            "urgency": dt.get("urgency", "M"), "area": dt.get("area_label", "non-area"),
         })
 
     if shadow or dry_run:
