@@ -673,6 +673,17 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Meeting-summaries operational upgrade (2026-06-10) — PR6: flip the
+    # push outputs to read the priority×urgency×area floor (PR1/PR3/PR4 populate
+    # it). Brief/reminders/digest only — the rich summary is its own flag.
+    # OFF = today's deadline-and-priority-only outputs, byte-for-byte.
+    # ==========================================================================
+    OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED: bool = Field(
+        default=False,
+        description="Rank the morning-brief task line by urgency-then-priority (surfacing urgency=H ASAP tasks that have no deadline, which today's overdue filter drops) + annotate by area; add an urgency/area tag to task reminders (the EXPLICIT-deadline gate is unchanged — ASAP never fires a false deadline reminder); add per-area + per-urgency rollups to the weekly digest. OFF = today's outputs unchanged. Reads tasks.urgency/area_label (PR1 floor)."
+    )
+
+    # ==========================================================================
     # Outputs re-architecture (v2.5 Phase 3) — chunk 3: meeting-prep "Prep Ping".
     # Push-first ping + on-demand brief, replacing the old outline/Drive-doc prep.
     # When ON, main.py starts prep_ping_scheduler INSTEAD of the old one.
