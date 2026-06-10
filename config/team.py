@@ -7,9 +7,12 @@ and blocklists used throughout the application.
 This is the single source of truth for team-related configuration.
 """
 
+import logging
 import re
 
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -24,7 +27,7 @@ from config.settings import settings
 #     (e.g. Eyal's @cropsight.io) they are added here so calendar/email
 #     recognition resolves them to the right person. Additive only.
 
-TEAM_MEMBERS = {
+_HARDCODED_TEAM_MEMBERS = {
     "eyal": {
         "name": "Eyal Zror",
         "role": "CEO",
@@ -73,16 +76,67 @@ TEAM_MEMBERS = {
 }
 
 
+def _load_team_members() -> dict:
+    """Roster source: the team_members DB table when TEAM_ROSTER_DB_ENABLED, else
+    the hardcoded literal. Falls back to the hardcoded literal on ANY error or an
+    empty result, so the roster can never come back empty. Built once at import."""
+    if not getattr(settings, "TEAM_ROSTER_DB_ENABLED", False):
+        return _HARDCODED_TEAM_MEMBERS
+    try:
+        from services.supabase_client import supabase_client
+
+        rows = supabase_client.list_team_members(status="active")
+        out: dict = {}
+        for r in rows or []:
+            key = (r.get("member_key") or "").lower().strip()
+            if not key:
+                continue
+            email = r.get("primary_email") or ""
+            idents = [i for i in (r.get("identities") or []) if i] or (
+                [email] if email else []
+            )
+            out[key] = {
+                "name": r.get("name", ""),
+                "role": r.get("role", ""),
+                "role_description": r.get("role_description", ""),
+                "email": email,
+                "identities": idents,
+                "is_admin": bool(r.get("is_admin", False)),
+                "tier": r.get("tier", "founders"),
+                "telegram_id": r.get("telegram_id"),
+            }
+        return out or _HARDCODED_TEAM_MEMBERS
+    except Exception as e:
+        logger.warning(f"[team] DB roster load failed; using hardcoded roster: {e}")
+        return _HARDCODED_TEAM_MEMBERS
+
+
+def refresh_team_roster() -> None:
+    """Re-load the module-level roster + derived constants from the current source.
+    A seam for a future 'add teammate' admin/MCP path (otherwise the roster is
+    built once at import, so a flag flip needs a restart)."""
+    global TEAM_MEMBERS, CROPSIGHT_TEAM_EMAILS, CROPSIGHT_WORK_IDENTITIES, TEAM_TELEGRAM_IDS
+    TEAM_MEMBERS = _load_team_members()
+    CROPSIGHT_TEAM_EMAILS = [m.get("email", "") for m in TEAM_MEMBERS.values()]
+    CROPSIGHT_WORK_IDENTITIES = {
+        ident.lower().strip()
+        for member in TEAM_MEMBERS.values()
+        for ident in member.get("identities", [])
+        if ident
+    }
+    TEAM_TELEGRAM_IDS = _build_telegram_ids(TEAM_MEMBERS)
+
+
+TEAM_MEMBERS = _load_team_members()
+
+
 # =============================================================================
 # Email Whitelist for Calendar Filtering
 # =============================================================================
 
-CROPSIGHT_TEAM_EMAILS = [
-    settings.EYAL_EMAIL,
-    settings.ROYE_EMAIL,
-    settings.PAOLO_EMAIL,
-    settings.YORAM_EMAIL,
-]
+# Derived from the (possibly DB-backed) roster — byte-identical to the historical
+# [EYAL, ROYE, PAOLO, YORAM] list when the roster is the hardcoded default.
+CROPSIGHT_TEAM_EMAILS = [m.get("email", "") for m in TEAM_MEMBERS.values()]
 
 
 # =============================================================================
@@ -169,31 +223,42 @@ SENSITIVE_KEYWORDS = [
 # Telegram Configuration
 # =============================================================================
 
-# Mapping of team member names to their Telegram chat IDs
-# These are set via environment variables for privacy
-TEAM_TELEGRAM_IDS: dict[str, int] = {}
+# Mapping of team member keys/names to their Telegram chat IDs. When the roster
+# is DB-backed, IDs come from the team_members rows; otherwise from the per-person
+# settings env vars (byte-identical to the historical block).
+def _build_telegram_ids(members: dict) -> dict[str, int]:
+    ids: dict[str, int] = {}
+    # Eyal keeps the historical TELEGRAM_EYAL_CHAT_ID fallback in both modes.
+    _eyal_tid = settings.EYAL_TELEGRAM_ID or (
+        int(settings.TELEGRAM_EYAL_CHAT_ID) if settings.TELEGRAM_EYAL_CHAT_ID else None
+    )
+    if getattr(settings, "TEAM_ROSTER_DB_ENABLED", False):
+        for key, m in members.items():
+            tid = m.get("telegram_id")
+            if key == "eyal" and not tid:
+                tid = _eyal_tid
+            if tid:
+                ids[key] = int(tid)
+                if m.get("name"):
+                    ids[m["name"].lower()] = int(tid)
+        return ids
+    # Hardcoded mode — byte-identical to the historical settings-based block.
+    if _eyal_tid:
+        ids["eyal"] = _eyal_tid
+        ids["eyal zror"] = _eyal_tid
+    if settings.ROYE_TELEGRAM_ID:
+        ids["roye"] = settings.ROYE_TELEGRAM_ID
+        ids["roye tadmor"] = settings.ROYE_TELEGRAM_ID
+    if settings.PAOLO_TELEGRAM_ID:
+        ids["paolo"] = settings.PAOLO_TELEGRAM_ID
+        ids["paolo vailetti"] = settings.PAOLO_TELEGRAM_ID
+    if settings.YORAM_TELEGRAM_ID:
+        ids["yoram"] = settings.YORAM_TELEGRAM_ID
+        ids["yoram weiss"] = settings.YORAM_TELEGRAM_ID
+    return ids
 
-# Populate from settings if available
-# Fall back to TELEGRAM_*_CHAT_ID if *_TELEGRAM_ID is not set
-# (in Telegram DMs, user ID == chat ID)
-_eyal_tid = settings.EYAL_TELEGRAM_ID or (
-    int(settings.TELEGRAM_EYAL_CHAT_ID) if settings.TELEGRAM_EYAL_CHAT_ID else None
-)
-if _eyal_tid:
-    TEAM_TELEGRAM_IDS["eyal"] = _eyal_tid
-    TEAM_TELEGRAM_IDS["eyal zror"] = _eyal_tid
 
-if settings.ROYE_TELEGRAM_ID:
-    TEAM_TELEGRAM_IDS["roye"] = settings.ROYE_TELEGRAM_ID
-    TEAM_TELEGRAM_IDS["roye tadmor"] = settings.ROYE_TELEGRAM_ID
-
-if settings.PAOLO_TELEGRAM_ID:
-    TEAM_TELEGRAM_IDS["paolo"] = settings.PAOLO_TELEGRAM_ID
-    TEAM_TELEGRAM_IDS["paolo vailetti"] = settings.PAOLO_TELEGRAM_ID
-
-if settings.YORAM_TELEGRAM_ID:
-    TEAM_TELEGRAM_IDS["yoram"] = settings.YORAM_TELEGRAM_ID
-    TEAM_TELEGRAM_IDS["yoram weiss"] = settings.YORAM_TELEGRAM_ID
+TEAM_TELEGRAM_IDS: dict[str, int] = _build_telegram_ids(TEAM_MEMBERS)
 
 
 # =============================================================================

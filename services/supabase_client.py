@@ -3878,6 +3878,56 @@ class SupabaseClient:
 
 
     # =========================================================================
+    # Team Roster (extensible — config/team.py loads this when TEAM_ROSTER_DB_ENABLED)
+    # =========================================================================
+
+    def list_team_members(self, status: str = "active") -> list[dict]:
+        """All team_members rows (optionally by status). Mirrors get_canonical_projects."""
+        try:
+            query = self.client.table("team_members").select("*")
+            if status:
+                query = query.eq("status", status)
+            result = query.order("member_key").execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting team members: {e}")
+            return []
+
+    def add_team_member(
+        self,
+        member_key: str,
+        name: str,
+        role: str = "",
+        role_description: str = "",
+        primary_email: str = "",
+        identities: list[str] | None = None,
+        tier: str = "founders",
+        telegram_id: int | None = None,
+        is_admin: bool = False,
+    ) -> dict | None:
+        """Add or upsert a team member (idempotent on member_key). Returns the row or None."""
+        try:
+            result = self.client.table("team_members").upsert({
+                "member_key": member_key.lower().strip(),
+                "name": name,
+                "role": role,
+                "role_description": role_description,
+                "primary_email": primary_email,
+                "identities": identities or ([primary_email] if primary_email else []),
+                "tier": tier,
+                "telegram_id": telegram_id,
+                "is_admin": is_admin,
+                "status": "active",
+            }, on_conflict="member_key").execute()
+            if result.data:
+                logger.info(f"Upserted team member: {member_key}")
+                return result.data[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error adding team member '{member_key}': {e}")
+            return None
+
+    # =========================================================================
     # Canonical Projects (Phase 10)
     # =========================================================================
 
