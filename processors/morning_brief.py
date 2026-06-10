@@ -463,24 +463,12 @@ async def compile_morning_brief() -> dict:
         today_str_urgency = date.today().isoformat()
         all_tasks = supabase_client.get_tasks(status="pending", limit=100)
         all_tasks += supabase_client.get_tasks(status="in_progress", limit=100)
-        overdue_high = [
-            t for t in all_tasks
-            if t.get("deadline") and t["deadline"] < today_str_urgency
-            and t.get("priority") == "H"
-        ][:3]
-        if overdue_high:
+        items = _gather_task_urgency_items(all_tasks, today_str_urgency)
+        if items:
             sections.append({
                 "type": "task_urgency",
                 "title": "Task Urgency",
-                "items": [
-                    {
-                        "title": t.get("title", "")[:80],
-                        "assignee": t.get("assignee", ""),
-                        "deadline": t.get("deadline", ""),
-                        "deadline_confidence": t.get("deadline_confidence", "NONE"),
-                    }
-                    for t in overdue_high
-                ],
+                "items": items,
             })
     except Exception as e:
         logger.debug(f"Task urgency for morning brief failed: {e}")
@@ -636,6 +624,87 @@ async def compile_morning_brief() -> dict:
 # Formatting
 # =========================================================================
 
+def _gather_task_urgency_items(all_tasks: list[dict], today_str: str) -> list[dict]:
+    """Pick up to 3 tasks for the morning-brief urgency line.
+
+    Flag ON (OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED): rank by urgency-then-
+    priority and INCLUDE the urgency=H ASAP class (no deadline) that today's
+    overdue filter silently drops — capturing time-pressure without a date.
+    Item dicts carry 'urgency'+'area' (the flag-on render shape).
+
+    Flag OFF: the legacy selection (overdue ∧ priority=H), byte-for-byte —
+    item dicts carry no 'urgency' key so the renderer keeps the old line.
+    """
+    if settings.OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED:
+        _rank = {"H": 0, "M": 1, "L": 2}
+        candidates = [
+            t for t in all_tasks
+            if (t.get("deadline") and t["deadline"] < today_str)  # overdue
+            or t.get("urgency") == "H"                            # ASAP / time-critical
+            or t.get("priority") == "H"                           # important (legacy)
+        ]
+        candidates.sort(key=lambda t: (
+            _rank.get(t.get("urgency") or "M", 1),
+            _rank.get(t.get("priority") or "M", 1),
+            t.get("deadline") or "9999-12-31",  # dated before undated within a tier
+        ))
+        return [
+            {
+                "title": t.get("title", "")[:80],
+                "assignee": t.get("assignee", ""),
+                "deadline": t.get("deadline", ""),
+                "deadline_confidence": t.get("deadline_confidence", "NONE"),
+                "urgency": t.get("urgency") or "M",
+                "area": t.get("area_label") or "non-area",
+            }
+            for t in candidates[:3]
+        ]
+
+    overdue_high = [
+        t for t in all_tasks
+        if t.get("deadline") and t["deadline"] < today_str
+        and t.get("priority") == "H"
+    ][:3]
+    return [
+        {
+            "title": t.get("title", "")[:80],
+            "assignee": t.get("assignee", ""),
+            "deadline": t.get("deadline", ""),
+            "deadline_confidence": t.get("deadline_confidence", "NONE"),
+        }
+        for t in overdue_high
+    ]
+
+
+def _task_urgency_line(item: dict, esc) -> tuple[int, str]:
+    """Render a task-urgency item the operational way (PR6 flag-on shape only —
+    keyed on the item carrying an 'urgency' field).
+
+    Urgency-first: a 🔴 for urgency=H, and for an undated H task it says "ASAP"
+    rather than inventing a date (the no-invented-dates guardrail). Appends an
+    area chip when the task has a real area. `esc` escapes user text (identity
+    for plain-text v1, _esc for HTML v2). Returns (rank, line) — rank 0 floats
+    H tasks to the top of the attention list.
+    """
+    urg = (item.get("urgency") or "M").upper()
+    assignee = f" ({esc(item['assignee'])})" if item.get("assignee") else ""
+    deadline_str = item.get("deadline") or ""
+    if deadline_str:
+        # ~ prefix signals an INFERRED (LLM-guessed) date, not a commitment.
+        if item.get("deadline_confidence") == "INFERRED":
+            deadline_str = f"~{deadline_str}"
+        when = f"due {esc(deadline_str)}"
+    elif urg == "H":
+        when = "ASAP"          # time-critical but no committed date — never faked
+    else:
+        when = "no date set"
+    area = item.get("area") or "non-area"
+    area_str = f" · {esc(area)}" if area and area != "non-area" else ""
+    icon = "🔴" if urg == "H" else "🟡"
+    rank = 0 if urg == "H" else 1
+    return rank, f"  {icon} {esc(item['title'])}{assignee} — {when}{area_str}"
+
+
 def format_morning_brief(brief: dict) -> str:
     """
     Format brief for Telegram display (Option A: tightened scannable).
@@ -704,6 +773,10 @@ def format_morning_brief(brief: dict) -> str:
 
         elif section_type == "task_urgency":
             for item in section.get("items", []):
+                if "urgency" in item:  # PR6 flag-on shape — urgency-first render
+                    _, line = _task_urgency_line(item, esc=lambda s: s)
+                    attention_items.append(line)
+                    continue
                 assignee = f" ({item['assignee']})" if item.get("assignee") else ""
                 deadline_str = item.get("deadline", "?")
                 # v2.3: ~ prefix signals INFERRED deadline (LLM guess, not a
@@ -917,6 +990,9 @@ def _assemble_v2_groups(sections: list[dict]) -> dict:
 
         elif st == "task_urgency":
             for item in section.get("items", []):
+                if "urgency" in item:  # PR6 flag-on shape — urgency-first render
+                    attention_ranked.append(_task_urgency_line(item, esc=_esc))
+                    continue
                 assignee = f" ({_esc(item['assignee'])})" if item.get("assignee") else ""
                 deadline_str = item.get("deadline", "?")
                 if item.get("deadline_confidence") == "INFERRED" and deadline_str != "?":
