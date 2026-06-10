@@ -577,6 +577,15 @@ class GoogleSheetsService:
             "status": TASK_COLUMNS["status"],
             "priority": TASK_COLUMNS["priority"],
         }
+        # PR9: the urgency/area cells only exist when TASK_SHEET_URGENCY_AREA_ENABLED
+        # added K/L to TASK_COLUMNS. Map them (with an area_label alias) so a DB-side
+        # edit (e.g. MCP update_task) can keep the Sheet cell in lockstep — otherwise
+        # reconcile would later pull the stale Sheet value back over the edit.
+        if "urgency" in TASK_COLUMNS:
+            column_map["urgency"] = TASK_COLUMNS["urgency"]
+        if "area" in TASK_COLUMNS:
+            column_map["area"] = TASK_COLUMNS["area"]
+            column_map["area_label"] = TASK_COLUMNS["area"]
 
         try:
             batch_data = []

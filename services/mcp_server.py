@@ -70,6 +70,26 @@ def _error(message: str, source: str = "internal") -> dict:
     }
 
 
+def _coerce_urgency(value) -> str:
+    """Normalize a task urgency to H/M/L (default M). Shared by create/update_task."""
+    u = str(value or "M").strip().upper()
+    return u if u in ("H", "M", "L") else "M"
+
+
+def _resolve_area_fields(area, resolver) -> tuple[dict, str | None]:
+    """Turn an Area name into the DB fields the tasks table stores.
+
+    `area is None` means "leave area untouched" (update_task semantics) → ({}, None).
+    Otherwise `resolver` (supabase_client.resolve_area) maps it to area_id+area_label.
+    Returns (fields_to_merge_into_updates, resolved_label_or_None). Extracted from
+    the create/update_task tool closures so the resolution logic is unit-testable.
+    """
+    if area is None:
+        return {}, None
+    area_id, area_label = resolver(area)
+    return {"area_id": area_id, "area_label": area_label}, area_label
+
+
 def _sanitize_records(records: list[dict], exclude_fields: set | None = None) -> list[dict]:
     """Remove raw text fields that shouldn't be returned via MCP."""
     exclude = exclude_fields or {"raw_transcript", "email_body", "full_text"}
@@ -2043,6 +2063,8 @@ class MCPServer:
             deadline: str | None = None,
             status: str | None = None,
             priority: str | None = None,
+            urgency: str | None = None,
+            area: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -2056,6 +2078,12 @@ class MCPServer:
                     updates["status"] = status
                 if priority is not None:
                     updates["priority"] = priority
+                # PR9: urgency (H/M/L time-pressure) + area (a Gantt area name or
+                # 'non-area'). Area resolves to the FK + label the tasks table stores.
+                if urgency is not None:
+                    updates["urgency"] = _coerce_urgency(urgency)
+                _area_fields, _area_label = _resolve_area_fields(area, _sc.resolve_area)
+                updates.update(_area_fields)
 
                 # Parse deadline (natural language support)
                 parsed_deadline = None
@@ -2068,7 +2096,7 @@ class MCPServer:
                         updates["deadline"] = deadline  # Pass as-is, let DB handle
 
                 if not updates:
-                    return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority.")
+                    return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority, urgency, area.")
 
                 # Get current task for response context
                 current = _sc.get_task(task_id) if hasattr(_sc, "get_task") else None
@@ -2092,6 +2120,13 @@ class MCPServer:
                                 sheet_fields["priority"] = priority
                             if parsed_deadline is not None:
                                 sheet_fields["deadline"] = parsed_deadline.isoformat()
+                            # PR9: keep the Sheet's K/L cells in lockstep so the
+                            # reconcile pull doesn't revert this edit (no-ops when
+                            # the sheet columns aren't enabled).
+                            if "urgency" in updates:
+                                sheet_fields["urgency"] = updates["urgency"]
+                            if _area_label is not None:
+                                sheet_fields["area"] = _area_label
                             await sheets_service.update_task_row(row, **sheet_fields)
                         else:
                             warnings.append("Task not found in Google Sheets — Sheets not synced")
@@ -2141,6 +2176,9 @@ class MCPServer:
                 "[TASKS] Create a new task. Assignee should be a team member name "
                 "(Eyal, Roye, Paolo, Yoram) or empty string if unassigned. "
                 "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
+                "priority=H/M/L is importance; urgency=H/M/L is time-pressure "
+                "(use urgency=H for 'ASAP' WITHOUT inventing a deadline). area is a "
+                "Gantt area name (e.g. 'Product & Tech') or 'non-area'. "
                 "Always confirm with Eyal before creating."
             ),
         )
@@ -2151,6 +2189,8 @@ class MCPServer:
             priority: str = "M",
             category: str | None = None,
             label: str = "",
+            urgency: str = "M",
+            area: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -2165,6 +2205,11 @@ class MCPServer:
                     except (ValueError, ImportError):
                         pass  # Will pass as None
 
+                # PR9: urgency (time-pressure) + area (resolved to FK + label).
+                # create defaults area to non-area, so resolve even when None.
+                _u = _coerce_urgency(urgency)
+                _area_id, _area_label = _sc.resolve_area(area)
+
                 # Create in Supabase
                 task = _sc.create_task(
                     title=title,
@@ -2172,6 +2217,9 @@ class MCPServer:
                     priority=priority,
                     deadline=parsed_deadline,
                     category=category,
+                    urgency=_u,
+                    area_id=_area_id,
+                    area_label=_area_label,
                 )
 
                 # Sheets sync
