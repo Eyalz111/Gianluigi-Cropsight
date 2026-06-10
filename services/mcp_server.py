@@ -2043,6 +2043,8 @@ class MCPServer:
             deadline: str | None = None,
             status: str | None = None,
             priority: str | None = None,
+            urgency: str | None = None,
+            area: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -2056,6 +2058,16 @@ class MCPServer:
                     updates["status"] = status
                 if priority is not None:
                     updates["priority"] = priority
+                # PR9: urgency (H/M/L time-pressure) + area (a Gantt area name or
+                # 'non-area'). Area resolves to the FK + label the tasks table stores.
+                if urgency is not None:
+                    u = str(urgency).strip().upper()
+                    updates["urgency"] = u if u in ("H", "M", "L") else "M"
+                _area_label = None
+                if area is not None:
+                    aid, _area_label = _sc.resolve_area(area)
+                    updates["area_id"] = aid
+                    updates["area_label"] = _area_label
 
                 # Parse deadline (natural language support)
                 parsed_deadline = None
@@ -2068,7 +2080,7 @@ class MCPServer:
                         updates["deadline"] = deadline  # Pass as-is, let DB handle
 
                 if not updates:
-                    return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority.")
+                    return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority, urgency, area.")
 
                 # Get current task for response context
                 current = _sc.get_task(task_id) if hasattr(_sc, "get_task") else None
@@ -2092,6 +2104,13 @@ class MCPServer:
                                 sheet_fields["priority"] = priority
                             if parsed_deadline is not None:
                                 sheet_fields["deadline"] = parsed_deadline.isoformat()
+                            # PR9: keep the Sheet's K/L cells in lockstep so the
+                            # reconcile pull doesn't revert this edit (no-ops when
+                            # the sheet columns aren't enabled).
+                            if "urgency" in updates:
+                                sheet_fields["urgency"] = updates["urgency"]
+                            if _area_label is not None:
+                                sheet_fields["area"] = _area_label
                             await sheets_service.update_task_row(row, **sheet_fields)
                         else:
                             warnings.append("Task not found in Google Sheets — Sheets not synced")
@@ -2141,6 +2160,9 @@ class MCPServer:
                 "[TASKS] Create a new task. Assignee should be a team member name "
                 "(Eyal, Roye, Paolo, Yoram) or empty string if unassigned. "
                 "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
+                "priority=H/M/L is importance; urgency=H/M/L is time-pressure "
+                "(use urgency=H for 'ASAP' WITHOUT inventing a deadline). area is a "
+                "Gantt area name (e.g. 'Product & Tech') or 'non-area'. "
                 "Always confirm with Eyal before creating."
             ),
         )
@@ -2151,6 +2173,8 @@ class MCPServer:
             priority: str = "M",
             category: str | None = None,
             label: str = "",
+            urgency: str = "M",
+            area: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -2165,6 +2189,11 @@ class MCPServer:
                     except (ValueError, ImportError):
                         pass  # Will pass as None
 
+                # PR9: urgency (time-pressure) + area (resolved to FK + label).
+                _u = str(urgency or "M").strip().upper()
+                _u = _u if _u in ("H", "M", "L") else "M"
+                _area_id, _area_label = _sc.resolve_area(area)
+
                 # Create in Supabase
                 task = _sc.create_task(
                     title=title,
@@ -2172,6 +2201,9 @@ class MCPServer:
                     priority=priority,
                     deadline=parsed_deadline,
                     category=category,
+                    urgency=_u,
+                    area_id=_area_id,
+                    area_label=_area_label,
                 )
 
                 # Sheets sync

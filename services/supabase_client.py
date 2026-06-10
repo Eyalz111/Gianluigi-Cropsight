@@ -4083,6 +4083,25 @@ class SupabaseClient:
             logger.error(f"Error getting areas: {e}")
             return []
 
+    def resolve_area(self, name: str | None) -> tuple[str | None, str]:
+        """Map a free-text Area name to (area_id, area_label).
+
+        Case-insensitive exact match against active areas. Blank / 'non-area' /
+        no-match returns (None, 'non-area' or the given label) — never raises,
+        so the sheet reconcile + MCP task tools can call it inline. Used to turn
+        an Area cell/parameter into the FK + label the tasks table stores.
+        """
+        label = (name or "").strip()
+        if not label or label.lower() in ("non-area", "none", "n/a", "-"):
+            return None, "non-area"
+        try:
+            for a in self.get_areas():
+                if (a.get("name") or "").strip().lower() == label.lower():
+                    return a.get("id"), a.get("name")
+        except Exception as e:
+            logger.warning(f"resolve_area lookup failed (keeping label): {e}")
+        return None, label
+
     def add_area(
         self,
         name: str,
