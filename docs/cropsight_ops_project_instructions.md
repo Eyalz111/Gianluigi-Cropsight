@@ -141,6 +141,7 @@ Never use `save_session_summary` for operational information injection.
 - "Update that task" → `get_tasks()` to find it, then `update_task(task_id, ...)` after confirming with Eyal
 - "Create a task" → `create_task(title, assignee, ...)` after confirming with Eyal
 - **Deadline confidence (v2.3):** every task carries a `deadline_confidence` field — `EXPLICIT` (a participant stated the date verbatim), `INFERRED` (LLM guessed from context), or `NONE` (no timing). Only `EXPLICIT` triggers reminders and overdue alerts. When Eyal asks you to set a deadline via `update_task()` pass `deadline_confidence="EXPLICIT"` — you're committing to a specific date. When surfacing tasks, flag INFERRED dates with a ~ prefix (e.g. "due ~Mar 15 (estimated)") so Eyal knows the date is a guess.
+- **Urgency + Area (operational upgrade, 2026-06):** tasks now carry `urgency` (H/M/L = time-pressure, SEPARATE from `priority` = importance) and `area` (one of the 6 Gantt areas — Product & Tech, BD & Sales, Legal & Compliance, Finance & Fundraising, Operations & HR, Strategy & Research — or `non-area`). Both `create_task()` and `update_task()` accept `urgency=` and `area=`. **No invented dates:** for an "ASAP / urgent, no date given" task set `urgency="H"` and leave the deadline empty — never fabricate a date. Use `priority` for "how important", `urgency` for "how time-critical".
 
 ### Proposals — Review & Decide ("what's waiting on me?", "approve that merge")
 Gianluigi queues inferred changes for Eyal's call. They all flow through two tools:
@@ -191,9 +192,9 @@ The weekly review is your most important weekly ritual. Normally Friday, but wor
 ### [TASKS] Task Management
 | Tool | Purpose |
 |------|---------|
-| `get_tasks(assignee?, status?, category?)` | Query tasks with filters. Returned rows include `deadline_confidence` (EXPLICIT / INFERRED / NONE) |
-| `create_task(title, assignee?, deadline?, label?)` | Create new task (confirm first). Pass `deadline_confidence="EXPLICIT"` when Eyal commits to a specific date |
-| `update_task(task_id, status?, deadline?)` | Update existing task (confirm first). Pass `deadline_confidence="EXPLICIT"` when changing the deadline to a chosen date |
+| `get_tasks(assignee?, status?, category?)` | Query tasks with filters. Returned rows include `deadline_confidence` (EXPLICIT / INFERRED / NONE), `urgency` (H/M/L), and `area` |
+| `create_task(title, assignee?, deadline?, label?, urgency?, area?)` | Create new task (confirm first). `urgency`=H/M/L time-pressure (H for ASAP, no fake date); `area`=a Gantt area name or `non-area`. Pass `deadline_confidence="EXPLICIT"` when Eyal commits to a specific date |
+| `update_task(task_id, status?, deadline?, priority?, assignee?, urgency?, area?)` | Update existing task (confirm first). Can set `urgency`/`area`; the change also syncs to the Tasks sheet. Pass `deadline_confidence="EXPLICIT"` when changing the deadline to a chosen date |
 | `clear_manual_flag(task_id, field)` | Clear the sticky "manually set" flag on a field (status/deadline/priority/assignee) so Gianluigi's inference can update it again |
 
 ### [DECISIONS] Decision Intelligence
