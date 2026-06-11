@@ -23,7 +23,7 @@ def _base_kwargs(**over):
         sensitivity="founders",
         decisions=[{"description": "Adopt Postgres", "participants_involved": ["Roye"]}],
         tasks=[{"title": "Ship pilot", "assignee": "Roye", "deadline": "2026-06-20",
-                "priority": "H", "urgency": "H", "area_label": "Product & Tech"}],
+                "priority": "H", "urgency": "H", "category": "PRODUCT & TECHNOLOGY"}],
         follow_ups=[],
         open_questions=[],
         discussion_summary="We discussed the stack.",
@@ -45,7 +45,7 @@ class TestRenderer:
         assert "| # | Task | Area | Owner | Deadline | Priority | Urgency | Ref |" not in out
         assert "TL;DR" not in out
         assert "Decision Intelligence" not in out
-        assert "Per-Area Focus" not in out
+        assert "Per-Category Focus" not in out
 
     def test_legacy_ignores_rich_kwargs(self):
         # passing rich blocks with rich=False must be inert (off-path safety)
@@ -59,8 +59,8 @@ class TestRenderer:
     def test_rich_adds_urgency_area_columns(self):
         out = format_summary(**_base_kwargs(), rich=True)
         assert "| # | Task | Area | Owner | Deadline | Priority | Urgency | Ref |" in out
-        # the H/area task renders its area + urgency cells
-        assert "| Product & Tech |" in out
+        # the H/categorized task renders its category (Area cell) + urgency cells
+        assert "| PRODUCT & TECHNOLOGY |" in out
         assert "| H |" in out
 
     def test_rich_renders_supplied_blocks(self):
@@ -68,13 +68,13 @@ class TestRenderer:
             **_base_kwargs(), rich=True,
             tl_dr="\n\n> **🎯 TL;DR**\n> Postgres chosen",
             decision_intelligence="\n\n## Decision Intelligence\nstuff\n",
-            area_rollup="\n\n## Per-Area Focus\n- x\n",
+            area_rollup="\n\n## Per-Category Focus\n- x\n",
             risks_text="\n\n## Risks & Blockers\n- y\n",
             changed_since="\n\n## What Changed Since Last Time\nz\n",
         )
         assert "🎯 TL;DR" in out
         assert "## Decision Intelligence" in out
-        assert "## Per-Area Focus" in out
+        assert "## Per-Category Focus" in out
         assert "## Risks & Blockers" in out
         assert "## What Changed Since Last Time" in out
 
@@ -82,7 +82,7 @@ class TestRenderer:
         # default ""/None blocks → no empty headers leak into the summary
         out = format_summary(**_base_kwargs(), rich=True)
         assert "Decision Intelligence" not in out
-        assert "Per-Area Focus" not in out
+        assert "Per-Category Focus" not in out
         assert "Risks & Blockers" not in out
 
     def test_rich_empty_action_items(self):
@@ -128,19 +128,20 @@ class TestDecisionIntelligence:
 
 
 # ---------------------------------------------------------------------------
-# Per-Area Focus
+# Per-Category Focus (groups by task.category since the 2026-06 realignment)
 # ---------------------------------------------------------------------------
 class TestAreaRollup:
     def test_groups_and_flags_urgent(self):
         out = sr.build_area_rollup([
-            {"area_label": "Product & Tech", "urgency": "H"},
-            {"area_label": "Product & Tech", "urgency": "L"},
-            {"area_label": "BD & Sales", "urgency": "M"},
+            {"category": "PRODUCT & TECHNOLOGY", "urgency": "H"},
+            {"category": "PRODUCT & TECHNOLOGY", "urgency": "L"},
+            {"category": "SALES & BUSINESS DEVELOPMENT", "urgency": "M"},
         ])
-        assert "**Product & Tech**: 2 action items (1 urgent)" in out
-        assert "**BD & Sales**: 1 action item" in out
-        # busiest area first
-        assert out.index("Product & Tech") < out.index("BD & Sales")
+        assert "## Per-Category Focus" in out
+        assert "**PRODUCT & TECHNOLOGY**: 2 action items (1 urgent)" in out
+        assert "**SALES & BUSINESS DEVELOPMENT**: 1 action item" in out
+        # busiest category first
+        assert out.index("PRODUCT & TECHNOLOGY") < out.index("SALES & BUSINESS DEVELOPMENT")
 
     def test_empty(self):
         assert sr.build_area_rollup([]) == ""
@@ -217,7 +218,7 @@ class TestBuildRichSummary:
             "decisions": [{"description": "Adopt Postgres", "rationale": "scales",
                            "confidence": 4}],
             "tasks": [{"title": "Ship pilot", "assignee": "Roye", "deadline": "2026-06-20",
-                       "priority": "H", "urgency": "H", "area_label": "Product & Tech"}],
+                       "priority": "H", "urgency": "H", "category": "PRODUCT & TECHNOLOGY"}],
             "follow_ups": [], "open_questions": [],
             "discussion_summary": "stack talk", "stakeholders": [],
         }
@@ -237,7 +238,7 @@ class TestBuildRichSummary:
         # rich table + the enrichment sections all present
         assert "| # | Task | Area | Owner | Deadline | Priority | Urgency | Ref |" in out
         assert "## Decision Intelligence" in out
-        assert "## Per-Area Focus" in out
+        assert "## Per-Category Focus" in out
         assert "## Risks & Blockers" in out
         assert "licence unclear" in out
         # TL;DR fell back to deterministic (no invented content)

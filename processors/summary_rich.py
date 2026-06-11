@@ -162,16 +162,17 @@ def build_decision_intelligence(
 
 
 # ---------------------------------------------------------------------------
-# Per-Area Focus — group this meeting's action items by the Gantt area
+# Per-Category Focus — group this meeting's action items by the Gantt area
+# (task.category carries the Gantt-area taxonomy since the 2026-06 realignment)
 # ---------------------------------------------------------------------------
 def build_area_rollup(tasks: list[dict]) -> str:
-    """Group the meeting's action items by area_label with an urgent-count flag.
+    """Group the meeting's action items by category with an urgent-count flag.
     Deterministic; empty (no section) when there are no tasks."""
     if not tasks:
         return ""
     by_area: dict[str, dict] = {}
     for t in tasks:
-        area = t.get("area_label") or "non-area"
+        area = t.get("category") or "General"
         slot = by_area.setdefault(area, {"count": 0, "urgent": 0})
         slot["count"] += 1
         if (t.get("urgency") or "M").upper() == "H":
@@ -183,7 +184,7 @@ def build_area_rollup(tasks: list[dict]) -> str:
         urgent = f" ({c['urgent']} urgent)" if c["urgent"] else ""
         plural = "s" if c["count"] != 1 else ""
         rows.append(f"- **{area}**: {c['count']} action item{plural}{urgent}")
-    return "\n\n## Per-Area Focus\n" + "\n".join(rows) + "\n"
+    return "\n\n## Per-Category Focus\n" + "\n".join(rows) + "\n"
 
 
 # ---------------------------------------------------------------------------

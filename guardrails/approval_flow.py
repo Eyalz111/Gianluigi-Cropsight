@@ -1898,7 +1898,7 @@ async def distribute_approved_content(
     try:
         logger.info(f"Tasks to add to Sheets: {len(tasks)} items")
         if tasks:
-            # PR10: the content tasks may not carry the DB UUID/urgency/area, so
+            # PR10: the content tasks may not carry the DB UUID/urgency, so
             # index the meeting's DB tasks by (title, assignee) to enrich each
             # row. Writing the UUID (col J) is what keeps a write-mode reconcile
             # from re-creating the row as a duplicate task.
@@ -1934,7 +1934,6 @@ async def distribute_approved_content(
                     label=label,
                     task_id=task.get("id") or _dbt.get("id", ""),
                     urgency=task.get("urgency") or _dbt.get("urgency", "M"),
-                    area_label=task.get("area_label") or _dbt.get("area_label", "non-area"),
                 )
             results["sheets_updated"] = True
             results["tasks_added"] = len(tasks)

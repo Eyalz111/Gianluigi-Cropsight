@@ -22,7 +22,7 @@ From Eyal's messages, extract items into these categories:
 - information: Important information that should be in institutional memory (include description)
 - gantt_update: A timeline or schedule change for the Gantt chart (include section, description, week if mentioned)
 
-Categories for tasks: "Product & Tech", "BD & Sales", "Legal & Compliance", "Finance & Fundraising", "Operations & HR", "Strategy & Research"
+Categories for tasks (these are the CropSight Gantt board areas): "PRODUCT & TECHNOLOGY", "SALES & BUSINESS DEVELOPMENT", "FUNDRAISING & INVESTOR RELATIONS", "LEGAL, CORPORATE & FINANCE", "CLIENT DELIVERY & OPERATIONS", "TEAM & HUMAN RESOURCES", or "General" for a genuine misfit
 
 DEDUPLICATION:
 Check the "ITEMS CAPTURED SO FAR" in the context. Do NOT re-extract items that are already captured. Only extract genuinely NEW information from this message. If the user is clarifying or adding detail to a previously captured item, do NOT create a new item — the clarification is captured in the raw messages and will be available for review.
@@ -118,7 +118,7 @@ From the message, extract items into these categories:
 - information: Important info for institutional memory (include description)
 - gantt_update: A schedule change (include section, description, week if mentioned)
 
-Categories for tasks: "Product & Tech", "BD & Sales", "Legal & Compliance", "Finance & Fundraising", "Operations & HR", "Strategy & Research"
+Categories for tasks (these are the CropSight Gantt board areas): "PRODUCT & TECHNOLOGY", "SALES & BUSINESS DEVELOPMENT", "FUNDRAISING & INVESTOR RELATIONS", "LEGAL, CORPORATE & FINANCE", "CLIENT DELIVERY & OPERATIONS", "TEAM & HUMAN RESOURCES", or "General" for a genuine misfit
 
 Auto-flag items mentioning investors, fundraising, legal, equity, or compensation as sensitive: true.
 
@@ -187,7 +187,7 @@ VALIDATION RULES:
 4. Add any items that were missed in the raw messages
 5. Merge duplicates
 6. Ensure sensitive items are flagged (investors, legal, equity, fundraising)
-7. Task categories must be one of: "Product & Tech", "BD & Sales", "Legal & Compliance", "Finance & Fundraising", "Operations & HR", "Strategy & Research"
+7. Task categories must be one of the CropSight Gantt board areas: "PRODUCT & TECHNOLOGY", "SALES & BUSINESS DEVELOPMENT", "FUNDRAISING & INVESTOR RELATIONS", "LEGAL, CORPORATE & FINANCE", "CLIENT DELIVERY & OPERATIONS", "TEAM & HUMAN RESOURCES", or "General"
 
 RESPONSE FORMAT:
 You MUST respond with valid JSON only. No text before or after the JSON.

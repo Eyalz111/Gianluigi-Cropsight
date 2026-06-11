@@ -193,13 +193,14 @@ class TestFormatTaskTracker:
             category_rules = _get_cond_rules_for_column(cond_reqs, 6)
             assert len(category_rules) == 6, "Expected 6 category conditional format rules"
 
+            # 2026-06 realignment: Category carries the Gantt-area taxonomy
             keywords = _get_cond_keywords(category_rules)
-            assert "Product & Tech" in keywords
-            assert "BD & Sales" in keywords
-            assert "Strategy & Research" in keywords
-            assert "Finance & Fundraising" in keywords
-            assert "Legal & Compliance" in keywords
-            assert "Operations & HR" in keywords
+            assert "PRODUCT & TECHNOLOGY" in keywords
+            assert "SALES & BUSINESS DEVELOPMENT" in keywords
+            assert "FUNDRAISING & INVESTOR RELATIONS" in keywords
+            assert "LEGAL, CORPORATE & FINANCE" in keywords
+            assert "CLIENT DELIVERY & OPERATIONS" in keywords
+            assert "TEAM & HUMAN RESOURCES" in keywords
 
     @pytest.mark.asyncio
     async def test_priority_conditional_formatting(self):

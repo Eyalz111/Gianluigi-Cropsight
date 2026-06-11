@@ -91,14 +91,15 @@ TOOL_CREATE_TASK = {
             "category": {
                 "type": "string",
                 "enum": [
-                    "Product & Tech",
-                    "BD & Sales",
-                    "Legal & Compliance",
-                    "Finance & Fundraising",
-                    "Operations & HR",
-                    "Strategy & Research"
+                    "PRODUCT & TECHNOLOGY",
+                    "SALES & BUSINESS DEVELOPMENT",
+                    "FUNDRAISING & INVESTOR RELATIONS",
+                    "LEGAL, CORPORATE & FINANCE",
+                    "CLIENT DELIVERY & OPERATIONS",
+                    "TEAM & HUMAN RESOURCES",
+                    "General"
                 ],
-                "description": "Task category for organizational alignment"
+                "description": "Task category — one of the CropSight Gantt board areas, or 'General' for a genuine misfit"
             },
             "meeting_id": {
                 "type": "string",
@@ -130,14 +131,15 @@ TOOL_GET_TASKS = {
             "category": {
                 "type": "string",
                 "enum": [
-                    "Product & Tech",
-                    "BD & Sales",
-                    "Legal & Compliance",
-                    "Finance & Fundraising",
-                    "Operations & HR",
-                    "Strategy & Research"
+                    "PRODUCT & TECHNOLOGY",
+                    "SALES & BUSINESS DEVELOPMENT",
+                    "FUNDRAISING & INVESTOR RELATIONS",
+                    "LEGAL, CORPORATE & FINANCE",
+                    "CLIENT DELIVERY & OPERATIONS",
+                    "TEAM & HUMAN RESOURCES",
+                    "General"
                 ],
-                "description": "Filter by task category (optional)"
+                "description": "Filter by task category — a Gantt board area (optional)"
             }
         },
         "required": []
@@ -159,8 +161,8 @@ TOOL_UPDATE_TASK = {
             },
             "status": {
                 "type": "string",
-                "enum": ["pending", "in_progress", "done"],
-                "description": "New status (optional)"
+                "enum": ["pending", "in_progress", "done", "archived"],
+                "description": "New status (optional). 'archived' removes the task from the working view (sheet + briefs) while keeping it in the DB."
             },
             "deadline": {
                 "type": "string",

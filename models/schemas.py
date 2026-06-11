@@ -36,6 +36,11 @@ class TaskStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     DONE = "done"
     OVERDUE = "overdue"
+    # Removed from the working set without claiming completion (irrelevant,
+    # duplicate, finished long ago). Archived tasks stay in the DB for history/
+    # citations, move to the Archive tab in the tracker sheet, and are excluded
+    # from briefs, digests, reminders, and the reconcile re-add path.
+    ARCHIVED = "archived"
 
 
 class TaskPriority(str, Enum):
@@ -135,14 +140,27 @@ class DeadlineConfidence(str, Enum):
     NONE = "NONE"
 
 
+# Fallback category for tasks that genuinely fit no Gantt area. The canonical
+# category values are NOT hardcoded here — they are the live `areas` table rows
+# (seeded from the Gantt board sections), so the task taxonomy and the Gantt
+# stay structurally aligned. Resolve free text via supabase_client.resolve_category().
+GENERAL_CATEGORY = "General"
+
+
 class TaskCategory(str, Enum):
-    """Category of a task for organizational alignment."""
-    PRODUCT_TECH = "Product & Tech"
-    BD_SALES = "BD & Sales"
-    LEGAL_COMPLIANCE = "Legal & Compliance"
-    FINANCE_FUNDRAISING = "Finance & Fundraising"
-    OPERATIONS_HR = "Operations & HR"
-    STRATEGY_RESEARCH = "Strategy & Research"
+    """Task category = Gantt board area (2026-06 realignment).
+
+    Mirrors the live `areas` table (source of truth, seeded from the Gantt
+    sections) so static consumers (prompts, tests) have a fallback list. If the
+    Gantt board areas change, update this mirror — runtime paths read the DB.
+    """
+    PRODUCT_TECH = "PRODUCT & TECHNOLOGY"
+    SALES_BD = "SALES & BUSINESS DEVELOPMENT"
+    FUNDRAISING_IR = "FUNDRAISING & INVESTOR RELATIONS"
+    LEGAL_CORP_FINANCE = "LEGAL, CORPORATE & FINANCE"
+    CLIENT_DELIVERY_OPS = "CLIENT DELIVERY & OPERATIONS"
+    TEAM_HR = "TEAM & HUMAN RESOURCES"
+    GENERAL = GENERAL_CATEGORY
 
 
 class QuestionStatus(str, Enum):
@@ -320,12 +338,16 @@ class Task(BaseModel):
     meeting_id: UUID | None = None
     title: str
     assignee: str
-    category: TaskCategory | None = None
+    # Free string validated against the live areas table (resolve_category);
+    # TaskCategory enum is a static mirror for prompts/tests.
+    category: str | None = None
     deadline: date | None = None
     deadline_confidence: DeadlineConfidence = DeadlineConfidence.NONE
     status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
     urgency: TaskUrgency = TaskUrgency.MEDIUM
+    # DEPRECATED (2026-06 category realignment): category now carries the
+    # Gantt-area value. Columns retained in the DB; no longer written.
     area_id: UUID | None = None
     area_label: str = "non-area"
     transcript_timestamp: str | None = None

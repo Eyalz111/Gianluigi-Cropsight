@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 
 from config.settings import settings
+from core.dates import parse_human_date
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -261,11 +262,9 @@ def _compare_task(sheets_task: dict, db_task: dict) -> dict:
         "label": ("label", "label"),
         "category": ("category", "category"),
     }
-    # PR9: the urgency/area cells only exist when the sheet flag is on. Change is
-    # keyed by the DB column ('area_label'); apply resolves the FK from it.
+    # PR9: the urgency cell only exists when the sheet flag is on.
     if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
         field_mapping["urgency"] = ("urgency", "urgency")
-        field_mapping["area_label"] = ("area", "area_label")
 
     for field, (sheets_key, db_key) in field_mapping.items():
         sheets_val = _normalize(sheets_task.get(sheets_key, ""))
@@ -410,12 +409,8 @@ def apply_sheets_to_db(diff: dict) -> dict:
     """
     applied = {"tasks_updated": 0, "tasks_created": 0, "decisions_updated": 0, "decisions_created": 0}
 
-    # PR9: cache areas once (resolve_area is called per modified/created task).
-    _areas = (
-        supabase_client.get_areas()
-        if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False)
-        else None
-    )
+    # Cache areas once (resolve_category is called per modified/created task).
+    _areas = supabase_client.get_areas()
 
     # Apply task modifications (Sheets wins)
     for item in diff["tasks"]["modified"]:
@@ -425,14 +420,26 @@ def apply_sheets_to_db(diff: dict) -> dict:
         update_data = {}
         for field, vals in item["changes"].items():
             update_data[field] = vals["to"]
-        # PR9: an Area edit carries the label — resolve the FK; normalize urgency.
-        if "area_label" in update_data:
-            aid, alabel = supabase_client.resolve_area(update_data["area_label"], areas=_areas)
-            update_data["area_label"] = alabel
-            update_data["area_id"] = aid
+        # Category carries the Gantt-area taxonomy — canonicalize the edit.
+        if "category" in update_data:
+            update_data["category"] = supabase_client.resolve_category(
+                update_data["category"], areas=_areas
+            )
         if "urgency" in update_data:
             u = str(update_data["urgency"]).strip().upper()
             update_data["urgency"] = u if u in ("H", "M", "L") else "M"
+        # NEVER let an unparseable date string null out a deadline (2026-06-11
+        # incident): drop the deadline change instead of writing garbage/NULL.
+        if "deadline" in update_data and update_data["deadline"]:
+            parsed = parse_human_date(update_data["deadline"])
+            if parsed:
+                update_data["deadline"] = parsed
+            else:
+                logger.warning(
+                    f"sync: unparseable deadline {update_data['deadline']!r} "
+                    f"for task {db_id} — skipping deadline change"
+                )
+                del update_data["deadline"]
         try:
             supabase_client.client.table("tasks").update(update_data).eq("id", db_id).execute()
             applied["tasks_updated"] += 1
@@ -449,16 +456,13 @@ def apply_sheets_to_db(diff: dict) -> dict:
             "assignee": st.get("assignee", ""),
             "status": st.get("status", "pending"),
             "priority": st.get("priority", "M"),
-            "deadline": st.get("deadline") or None,
-            "category": st.get("category", ""),
+            "deadline": parse_human_date(st.get("deadline")) or None,
+            "category": supabase_client.resolve_category(st.get("category"), areas=_areas),
             "label": st.get("label", ""),
         }
         if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
             u = (st.get("urgency") or "M").strip().upper()
             insert_row["urgency"] = u if u in ("H", "M", "L") else "M"
-            aid, alabel = supabase_client.resolve_area(st.get("area"), areas=_areas)
-            insert_row["area_id"] = aid
-            insert_row["area_label"] = alabel
         try:
             supabase_client.client.table("tasks").insert(insert_row).execute()
             applied["tasks_created"] += 1
@@ -576,12 +580,18 @@ def format_sync_summary(diff: dict) -> str:
 # Reconcile engine (v3 outputs re-architecture)
 # =============================================================================
 # DB is the source of truth; the Sheet is an editable downstream view.
-#   - CONTENT columns (title/label/category/source/created) are one-way DB->Sheet.
+#   - CONTENT columns (title/label/source/created) are one-way DB->Sheet.
 #   - ACTION fields (status/deadline/priority/assignee) are reconciled with
 #     "manual wins & sticks" via a per-task SNAPSHOT (Sheet-now vs snapshot
 #     attributes an edit to Eyal). Identity is the task UUID in column J,
 #     resolved live at write time. Rule 2 (inference proposes, never clobbers a
 #     sticky field) lives in the inference callers (cross_reference), not here.
+#   - CATEGORY (2026-06 realignment) carries the Gantt-area taxonomy: a
+#     non-blank cell is Eyal's call (canonicalized + pulled); a blank cell is
+#     refreshed from the DB. Cells with legacy/sloppy values are rewritten to
+#     the canonical area name.
+#   - status 'archived' = sanctioned removal: the row moves to the Archive tab
+#     and is never resurrected (Eyal sets the status, or asks Gianluigi).
 # =============================================================================
 
 _ACTION_FIELDS = ("status", "deadline", "priority", "assignee")
@@ -590,7 +600,7 @@ _ACTION_SHEET_KEY = {
     "status": "status", "deadline": "deadline", "priority": "priority", "assignee": "owner",
 }
 # content db-field -> (TASK_COLUMNS key, get_all_tasks dict key)
-_CONTENT_MAP = {"title": ("task", "task"), "label": ("label", "label"), "category": ("category", "category")}
+_CONTENT_MAP = {"title": ("task", "task"), "label": ("label", "label")}
 # DB-only tasks in these statuses get re-added to the Sheet (done/archived are not resurrected)
 _READD_STATUSES = ("pending", "in_progress", "overdue")
 
@@ -621,15 +631,13 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     except Exception as e:
         logger.error(f"[reconcile] could not read Sheet: {e}")
         return {"error": str(e)}
-    db_tasks = supabase_client.get_tasks(status=None, limit=1000, include_pending=True)
-    snapshots = supabase_client.get_sheet_snapshots()
-    # PR9: cache the area list once per cycle — resolve_area would otherwise
-    # re-query for every task that carries an Area edit/create.
-    _areas_cache = (
-        supabase_client.get_areas()
-        if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False)
-        else None
+    db_tasks = supabase_client.get_tasks(
+        status=None, limit=1000, include_pending=True, include_archived=True
     )
+    snapshots = supabase_client.get_sheet_snapshots()
+    # Cache the area list once per cycle — resolve_category would otherwise
+    # re-query for every task that carries a Category edit/create.
+    _areas_cache = supabase_client.get_areas()
 
     db_by_id = {t["id"]: t for t in db_tasks if t.get("id")}
     sheet_by_id, creates = {}, []
@@ -641,11 +649,12 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             creates.append(st)
 
     summary = {"matched": 0, "pulled": 0, "pushed": 0, "created": 0, "readded": 0,
-               "shadow": shadow, "dry_run": dry_run}
+               "archived": 0, "bad_dates": 0, "shadow": shadow, "dry_run": dry_run}
     db_updates: dict[str, dict] = {}   # task_id -> {field: value}
     manual_marks: list[tuple] = []     # (task_id, field)
     cell_writes: list[dict] = []       # {"range": ..., "values": [[v]]}
     snapshot_writes: list[tuple] = []  # (task_id, row, status, deadline, priority, assignee)
+    archive_moves: list[dict] = []     # sheet-row dicts to move to the Archive tab
 
     def _cell(col_key, row, value):
         if row:
@@ -663,8 +672,22 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         row = st.get("row_number")
         snap = snapshots.get(sid) or {}
         upd, final = {}, {}
+        deadline_cell_written = False
         for field in _ACTION_FIELDS:
             sheet_val, snap_val, db_val = st.get(field), snap.get(field), dt.get(field)
+            # A non-empty deadline cell that didn't parse to ISO is raw text
+            # (get_all_tasks convention). NEVER pull it — that's how the
+            # 2026-06-11 NULL-deadline data loss happened. Keep the DB value,
+            # leave the cell for Eyal, and flag it in the summary.
+            if (field == "deadline" and sheet_val
+                    and parse_human_date(sheet_val) is None):
+                logger.warning(
+                    f"[reconcile] unparseable deadline cell {sheet_val!r} "
+                    f"(row {row}, task {sid}) — ignored, fix the cell"
+                )
+                summary["bad_dates"] += 1
+                final[field] = db_val
+                continue
             if _normalize(sheet_val) != _normalize(snap_val):
                 upd[field] = sheet_val or None          # Eyal edited (Rule 1)
                 manual_marks.append((sid, field))
@@ -674,31 +697,52 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 _cell(_ACTION_SHEET_KEY[field], row, db_val)  # DB advanced -> refresh (Rule 4)
                 summary["pushed"] += 1
                 final[field] = db_val
+                if field == "deadline":
+                    deadline_cell_written = True
             else:
                 final[field] = sheet_val
+        # Normalize sloppy-but-valid date cells ("20.6.26" -> "2026-06-20") so
+        # every future compare is ISO-vs-ISO.
+        if (not deadline_cell_written and final.get("deadline")
+                and st.get("deadline_raw")
+                and str(final["deadline"]) != str(st["deadline_raw"])):
+            _cell("deadline", row, str(final["deadline"]))
         for db_key, (col_key, sheet_key) in _CONTENT_MAP.items():
             if _normalize(st.get(sheet_key)) != _normalize(dt.get(db_key)):
                 _cell(col_key, row, dt.get(db_key))       # content: one-way DB -> Sheet
                 summary["pushed"] += 1
-        # PR9: urgency + area are a simple Sheet->DB pull (no snapshot needed —
-        # nothing auto-advances them post-extraction, so a Sheet/DB mismatch on
-        # a matched task is always Eyal's cell edit). Gated on the sheet columns
-        # actually existing (TASK_SHEET_URGENCY_AREA_ENABLED writes K/L).
+        # Urgency is a simple Sheet->DB pull (no snapshot needed — nothing
+        # auto-advances it post-extraction, so a Sheet/DB mismatch on a matched
+        # task is always Eyal's cell edit). Gated on the K column existing.
         if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
             s_urg = (st.get("urgency") or "").strip().upper()
             if s_urg in ("H", "M", "L") and s_urg != (dt.get("urgency") or "").strip().upper():
                 upd["urgency"] = s_urg
                 summary["pulled"] += 1
-            s_area = (st.get("area") or "").strip()
-            if s_area and _normalize(s_area) != _normalize(dt.get("area_label")):
-                aid, alabel = supabase_client.resolve_area(s_area, areas=_areas_cache)
-                upd["area_id"] = aid
-                upd["area_label"] = alabel
+        # Category (Gantt-area taxonomy): non-blank cell is Eyal's call —
+        # canonicalize + pull on mismatch; rewrite the cell when his text
+        # resolves to a different canonical name. Blank cell refreshes from DB.
+        s_cat = (st.get("category") or "").strip()
+        if s_cat:
+            canon = supabase_client.resolve_category(s_cat, areas=_areas_cache)
+            if _normalize(canon) != _normalize(dt.get("category")):
+                upd["category"] = canon
                 summary["pulled"] += 1
+            if canon != s_cat:
+                _cell("category", row, canon)
+        elif dt.get("category"):
+            _cell("category", row, dt.get("category"))
+            summary["pushed"] += 1
         if upd:
             db_updates[sid] = upd
-        snapshot_writes.append((sid, row, final["status"], final["deadline"],
-                                final["priority"], final["assignee"]))
+        # 'archived' (typed by Eyal or already set in the DB) -> move the row to
+        # the Archive tab; no snapshot (the row is leaving the working view).
+        if _normalize(final.get("status")) == "archived":
+            archive_moves.append({**st, "status": "archived"})
+            summary["archived"] += 1
+        else:
+            snapshot_writes.append((sid, row, final["status"], final["deadline"],
+                                    final["priority"], final["assignee"]))
 
     # --- Sheet rows with no UUID -> create in DB + write UUID back ---
     for st in creates:
@@ -710,14 +754,19 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
                 u = (st.get("urgency") or "M").strip().upper()
                 extra["urgency"] = u if u in ("H", "M", "L") else "M"
-                aid, alabel = supabase_client.resolve_area(st.get("area"), areas=_areas_cache)
-                extra["area_id"] = aid
-                extra["area_label"] = alabel
+            _deadline = parse_human_date(st.get("deadline"))
+            if st.get("deadline") and not _deadline:
+                summary["bad_dates"] += 1
+                logger.warning(
+                    f"[reconcile] unparseable deadline {st.get('deadline')!r} on new "
+                    f"Sheet row {st.get('row_number')} — created without deadline"
+                )
             created = supabase_client.create_task(
                 title=st.get("task", ""), assignee=st.get("assignee", ""),
-                priority=st.get("priority") or "M", deadline=st.get("deadline") or None,
-                status=st.get("status") or "pending", category=st.get("category") or None,
-                deadline_confidence="EXPLICIT" if st.get("deadline") else "NONE",
+                priority=st.get("priority") or "M", deadline=_deadline,
+                status=st.get("status") or "pending",
+                category=supabase_client.resolve_category(st.get("category"), areas=_areas_cache),
+                deadline_confidence="EXPLICIT" if _deadline else "NONE",
                 **extra,
             )
             new_id = created.get("id")
@@ -735,6 +784,12 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             continue
         if (dt.get("status") or "pending") not in _READD_STATUSES:
             continue  # don't resurrect done/archived tasks
+        if (dt.get("approval_status") or "approved") != "approved":
+            # Approval gate: pending-approval tasks surface only when their
+            # meeting is approved (the distribution flow adds them then).
+            # Re-adding them here was the phantom "readded 5/6/11" loop —
+            # every rebuild removed them, every reconcile re-added them.
+            continue
         summary["readded"] += 1
         meeting_info = dt.get("meetings") if isinstance(dt.get("meetings"), dict) else {}
         readd_rows.append({
@@ -744,8 +799,8 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             "category": dt.get("category", ""),
             "source_meeting": dt.get("source_meeting") or (meeting_info or {}).get("title", ""),
             "created_date": str(dt.get("created_at", ""))[:10], "id": tid,
-            # carried through; add_tasks_batch only writes K/L when the flag is on
-            "urgency": dt.get("urgency", "M"), "area": dt.get("area_label", "non-area"),
+            # carried through; add_tasks_batch only writes K when the flag is on
+            "urgency": dt.get("urgency", "M"),
         })
 
     if shadow or dry_run:
@@ -785,6 +840,13 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         except Exception as e:
             logger.error(f"[reconcile] batched Sheet write failed: {e}")
             return {**summary, "error": "sheet_write_failed"}  # do NOT rewrite snapshot
+    # 3.5. Move archived rows to the Archive tab. MUST come after the batched
+    #      cell writes — deleting rows shifts the row numbers cell_writes used.
+    if archive_moves:
+        try:
+            await sheets_service.archive_task_rows(archive_moves)
+        except Exception as e:
+            logger.warning(f"[reconcile] archive move failed (rows stay put): {e}")
     # 4. Rewrite snapshots LAST (with a light retry so a transient miss doesn't
     #    leave a stale snapshot that re-attributes the change next cycle, #5).
     for (tid, row, sstatus, sdeadline, spriority, sassignee) in snapshot_writes:

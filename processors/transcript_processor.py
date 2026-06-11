@@ -56,17 +56,14 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_task_urgency_area(tasks: list[dict], areas: list[dict]) -> None:
-    """Operational floor (PR3): coerce each task's urgency to {H,M,L}, resolve the
-    model's `area` string -> `area_id`/`area_label` (the hard field, never blank),
-    and drop an INFERRED (guessed) deadline on an urgent task — the "express urgency
-    with a fake date" trap. Mutates the task dicts in place."""
-    by_name = {(a.get("name") or "").strip().lower(): a for a in (areas or [])}
+    """Operational floor (PR3): coerce each task's urgency to {H,M,L}, canonicalize
+    the model's `category` against the live Gantt areas (2026-06 realignment —
+    category IS the area taxonomy), and drop an INFERRED (guessed) deadline on an
+    urgent task — the "express urgency with a fake date" trap. Mutates in place."""
     for t in tasks:
         u = str(t.get("urgency") or "").strip().upper()
         t["urgency"] = u if u in ("H", "M", "L") else "M"
-        m = by_name.get(str(t.get("area") or "").strip().lower())
-        t["area_id"] = m.get("id") if m else None
-        t["area_label"] = m.get("name") if m else "non-area"
+        t["category"] = supabase_client.resolve_category(t.get("category"), areas=areas)
         if (t["urgency"] == "H" and t.get("deadline")
                 and t.get("deadline_confidence") == "INFERRED"):
             logger.info(
@@ -244,9 +241,10 @@ async def process_transcript(
         elif dc is None:
             _t["deadline_confidence"] = "NONE"
 
-    # Operational floor (PR3, flag-gated): coerce urgency + resolve area + the
-    # no-invented-dates backstop. Off -> tasks keep the column defaults.
-    if getattr(settings, "TASK_URGENCY_AREA_ENABLED", False) and tasks_to_store:
+    # Coerce urgency + canonicalize category against the live Gantt areas + the
+    # no-invented-dates backstop. Runs unconditionally — category must stay
+    # canonical even when the urgency extraction flag is off.
+    if tasks_to_store:
         try:
             _areas = supabase_client.get_areas() or []
         except Exception:
@@ -661,20 +659,30 @@ async def extract_structured_data(
     # v2.5 PR5: the "aim for 3-7 items" cap is the extraction "muzzle" — toggled.
     consolidation_rule = _consolidation_rule()
 
-    # Operational floor (PR3): urgency (separate axis from priority) + area, flag-gated.
-    # Off -> both placeholders resolve to "" so the prompt is byte-identical to today.
+    # Category = Gantt-area taxonomy (2026-06 realignment): the option list comes
+    # from the live areas table (seeded from the Gantt board), so extraction
+    # stays structurally aligned with the board. 'General' = genuine misfit.
+    try:
+        _area_names = [a.get("name", "") for a in (_sc.get_areas() or []) if a.get("name")]
+    except Exception:
+        _area_names = []
+    if not _area_names:
+        from models.schemas import TaskCategory
+        _area_names = [c.value for c in TaskCategory if c.value != "General"]
+    category_options = " / ".join(_area_names + ["General"])
+    category_rules = (
+        "\n- CATEGORY: assign exactly ONE of these CropSight Gantt areas: "
+        + ", ".join(f'"{n}"' for n in _area_names)
+        + ", or \"General\" for a genuine misfit. The category taxonomy IS the "
+        "Gantt board's area list — never invent a different bucket name."
+    )
+
+    # Operational floor (PR3): urgency (separate axis from priority), flag-gated.
+    # Off -> both placeholders resolve to "" so the prompt is unchanged.
     urgency_area_json = ""
     urgency_area_rules = ""
     if getattr(settings, "TASK_URGENCY_AREA_ENABLED", False):
-        try:
-            area_names = [a.get("name", "") for a in (_sc.get_areas() or []) if a.get("name")]
-        except Exception:
-            area_names = []
-        _area_opts = ", ".join(f'"{n}"' for n in area_names) or '"<a CropSight Gantt area>"'
-        urgency_area_json = (
-            '\n            "urgency": "H/M/L",'
-            '\n            "area": "exactly one of [' + _area_opts + '] or non-area",'
-        )
+        urgency_area_json = '\n            "urgency": "H/M/L",'
         urgency_area_rules = (
             "\n- URGENCY: H/M/L — TIME-PRESSURE, a SEPARATE axis from priority (which is "
             "IMPORTANCE). Judge how SOON it must happen: an explicit near deadline or explicit "
@@ -682,9 +690,8 @@ async def extract_structured_data(
             "needed this week-ish -> M; no time pressure -> L (default M when unsure). "
             "CRITICAL: \"ASAP\"/\"as soon as possible\"/\"soon\" -> urgency H WITH deadline=null "
             "and deadline_confidence=NONE — never invent a date to express urgency."
-            "\n- AREA: assign exactly ONE of these CropSight Gantt areas: " + _area_opts + ", "
-            "or \"non-area\" for a genuine misfit. Never leave it blank."
         )
+    urgency_area_rules += category_rules
 
     # Use a structured extraction approach with JSON output
     extraction_system = """You are an expert meeting analyst. Extract structured information from meeting transcripts.
@@ -712,7 +719,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
             "deadline": "YYYY-MM-DD or null",
             "deadline_confidence": "EXPLICIT",
             "priority": "H/M/L",{urgency_area_json}
-            "category": "Product & Tech / BD & Sales / Legal & Compliance / Finance & Fundraising / Operations & HR / Strategy & Research",
+            "category": "{category_options}",
             "transcript_timestamp": "MM:SS",
             "existing_task_match": {"task_id": "uuid or null", "confidence": "high/medium/low", "evolution": "status_update/scope_change/completion/null"}
         }
@@ -808,7 +815,7 @@ Meetings may be in Hebrew, English, or mixed. Regardless of language:
 - Keep company/organization names as-is
 - If a Hebrew term has no clear English equivalent, transliterate and add brief explanation
 
-Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names).replace("{consolidation_rule}", consolidation_rule).replace("{urgency_area_json}", urgency_area_json).replace("{urgency_area_rules}", urgency_area_rules)
+Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names).replace("{consolidation_rule}", consolidation_rule).replace("{urgency_area_json}", urgency_area_json).replace("{urgency_area_rules}", urgency_area_rules).replace("{category_options}", category_options)
 
     # Retry with exponential backoff for transient errors (529 overloaded, 500, etc.)
     max_retries = 4

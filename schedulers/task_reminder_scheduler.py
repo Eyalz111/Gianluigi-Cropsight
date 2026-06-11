@@ -44,19 +44,20 @@ DAYS_BEFORE_WARNING = 2
 
 def _urgency_area_suffix(task: dict) -> str:
     """A compact second line for reminder copy when the operational-floor flag
-    is on: '🔴 Urgent · <Area>'. Surfaces urgency=H and a real area; stays
-    silent (returns '') when there's nothing worth adding, so a non-urgent
-    area-less task reads exactly like today's reminder. This only enriches the
-    copy — the EXPLICIT-deadline gate upstream is untouched, so an ASAP task
-    never reaches here as a false deadline reminder.
+    is on: '🔴 Urgent · <Category>'. Surfaces urgency=H and a real category
+    (= Gantt area since the 2026-06 realignment); stays silent (returns '')
+    when there's nothing worth adding, so a non-urgent uncategorized task reads
+    exactly like today's reminder. This only enriches the copy — the
+    EXPLICIT-deadline gate upstream is untouched, so an ASAP task never reaches
+    here as a false deadline reminder.
     """
     if not settings.OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED:
         return ""
     bits = []
     if (task.get("urgency") or "").upper() == "H":
         bits.append("🔴 Urgent")
-    area = task.get("area") or task.get("area_label") or ""
-    if area and area != "non-area":
+    area = task.get("category") or ""
+    if area and area not in ("non-area", "General"):
         bits.append(area)
     return ("\n" + " · ".join(bits)) if bits else ""
 

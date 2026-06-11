@@ -239,21 +239,21 @@ async def get_task_summary() -> dict:
                     pass
         result["due_next_week"] = due_next_week
 
-        # Operational floor (PR6): per-area + per-urgency rollups over the open
-        # workload (overdue + still-pending), alongside the status buckets.
-        # Keys are added only when the flag is on, so today's callers are
-        # unaffected.
+        # Operational floor (PR6): per-category + per-urgency rollups over the
+        # open workload (overdue + still-pending), alongside the status buckets.
+        # Category = the Gantt-area taxonomy (2026-06 realignment). Keys are
+        # added only when the flag is on, so today's callers are unaffected.
         if settings.OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED:
             open_tasks = list(overdue_tasks) + list(pending_tasks)
             by_area: dict[str, int] = {}
             by_urgency = {"H": 0, "M": 0, "L": 0}
             for t in open_tasks:
-                area = t.get("area_label") or "non-area"
+                area = t.get("category") or "General"
                 by_area[area] = by_area.get(area, 0) + 1
                 u = (t.get("urgency") or "M").upper()
                 if u in by_urgency:
                     by_urgency[u] += 1
-            # Busiest area first, then alphabetical for stable ordering.
+            # Busiest category first, then alphabetical for stable ordering.
             result["by_area"] = dict(
                 sorted(by_area.items(), key=lambda kv: (-kv[1], kv[0]))
             )
@@ -536,7 +536,7 @@ def format_digest_document(
             )
             lines.append("")
         if task_area_rollup:
-            lines.append("**Open by area:**")
+            lines.append("**Open by category:**")
             for area, count in task_area_rollup.items():
                 lines.append(f"- {area}: {count}")
             lines.append("")
@@ -580,8 +580,8 @@ def format_digest_document(
     if tasks_upcoming:
         _ua = settings.OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED
         if _ua:
-            lines.append("| Task | Area | Assignee | Deadline | Priority | Urgency |")
-            lines.append("|------|------|----------|----------|----------|---------|")
+            lines.append("| Task | Category | Assignee | Deadline | Priority | Urgency |")
+            lines.append("|------|----------|----------|----------|----------|---------|")
         else:
             lines.append("| Task | Category | Assignee | Deadline | Priority |")
             lines.append("|------|----------|----------|----------|----------|")
@@ -594,10 +594,9 @@ def format_digest_document(
                 deadline = str(deadline)[:10]
             priority = t.get("priority", "M")
             if _ua:
-                area = t.get("area_label") or "non-area"
                 urgency = t.get("urgency") or "M"
                 lines.append(
-                    f"| {title} | {area} | {assignee} | {deadline} | {priority} | {urgency} |"
+                    f"| {title} | {category or 'General'} | {assignee} | {deadline} | {priority} | {urgency} |"
                 )
             else:
                 lines.append(f"| {title} | {category} | {assignee} | {deadline} | {priority} |")

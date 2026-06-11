@@ -581,7 +581,8 @@ def _unify_manual_task(item: dict) -> dict:
 
     Sets the fields the debrief path historically DROPPED — `deadline_confidence`
     (a deadline the CEO stated is EXPLICIT; none -> NONE, which is exactly what made
-    manual tasks invisible to deadline reminders) and `label` — plus `urgency` + area.
+    manual tasks invisible to deadline reminders) and `label` — plus `urgency` and a
+    canonical `category` (the Gantt-area taxonomy, 2026-06 realignment).
     No invented dates: 'ASAP'/'urgent' text -> urgency H with NO deadline.
     """
     title = item.get("title") or item.get("description") or ""
@@ -595,23 +596,21 @@ def _unify_manual_task(item: dict) -> dict:
     if u not in ("H", "M", "L"):
         u = "H" if any(w in text for w in ("asap", "urgent", "blocking", "right now", "today")) else "M"
     extra["urgency"] = u
-    # area: explicit hint resolved, else a conservative phrase match on the text.
-    area_id, area_label = None, "non-area"
+    # category: canonicalize the LLM's hint; if it didn't resolve to a real
+    # area, fall back to a conservative phrase match on the text.
     try:
         areas = supabase_client.get_areas() or []
-        by_name = {(a.get("name") or "").strip().lower(): a for a in areas}
-        m = by_name.get(str(item.get("area") or "").strip().lower())
-        if not m:
-            for nm, a in by_name.items():
+        category = supabase_client.resolve_category(item.get("category"), areas=areas)
+        canonical_names = {(a.get("name") or "") for a in areas}
+        if category not in canonical_names:
+            for a in areas:
+                nm = (a.get("name") or "").strip().lower()
                 if nm and len(nm) > 3 and nm in text:
-                    m = a
+                    category = a.get("name")
                     break
-        if m:
-            area_id, area_label = m.get("id"), m.get("name")
+        extra["category"] = category
     except Exception:
         pass
-    extra["area_id"] = area_id
-    extra["area_label"] = area_label
     return extra
 
 
@@ -666,11 +665,12 @@ async def _inject_debrief_items(
                     priority=item.get("priority", "M"),
                     deadline=item.get("deadline"),
                     meeting_id=meeting_id,
-                    category=item.get("category"),
+                    # category = Gantt-area taxonomy; always canonicalized
+                    category=supabase_client.resolve_category(item.get("category")),
                 )
                 if getattr(settings, "TASK_URGENCY_AREA_ENABLED", False):
                     # Unify with meeting extraction: stop dropping deadline_confidence
-                    # + label, and set urgency/area. Off = byte-identical to today.
+                    # + label, and set urgency/category. Off = byte-identical to today.
                     _task_kwargs.update(_unify_manual_task(item))
                 supabase_client.create_task(**_task_kwargs)
                 counts["tasks"] += 1

@@ -190,15 +190,15 @@ async def detect_gantt_drift() -> list[dict]:
         all_tasks = supabase_client.get_tasks(status="pending", limit=200)
         all_tasks += supabase_client.get_tasks(status="in_progress", limit=200)
 
-        # Map task categories to likely Gantt sections
-        category_to_section = {
-            "Product & Tech": ["Product & Tech", "Technology", "Platform"],
-            "BD & Sales": ["BD & Sales", "Business Development", "Sales"],
-            "Legal & Compliance": ["Legal & Compliance", "Legal"],
-            "Finance & Fundraising": ["Finance & Fundraising", "Finance", "Fundraising"],
-            "Operations & HR": ["Operations & HR", "Operations"],
-            "Strategy & Research": ["Strategy & Research", "Strategy"],
-        }
+        # Category IS the Gantt-area taxonomy since the 2026-06 realignment —
+        # match directly (case-insensitive). The legacy taxonomy map bridges
+        # BOTH sides for rows/boards that predate the realignment backfill.
+        from services.supabase_client import supabase_client as _sc_map
+        legacy_map = _sc_map.LEGACY_CATEGORY_MAP
+
+        def _canon(name: str) -> str:
+            n = (name or "").strip()
+            return legacy_map.get(n.lower(), n).lower()
 
         # Check each Gantt section for drift
         for section, gantt_items in gantt_sections.items():
@@ -208,12 +208,10 @@ async def detect_gantt_drift() -> list[dict]:
                 continue
 
             # Find tasks matching this section
-            matching_tasks = []
-            for task in all_tasks:
-                task_cat = task.get("category", "")
-                possible_sections = category_to_section.get(task_cat, [])
-                if section in possible_sections or task_cat == section:
-                    matching_tasks.append(task)
+            matching_tasks = [
+                task for task in all_tasks
+                if _canon(task.get("category")) == _canon(section)
+            ]
 
             if not matching_tasks:
                 continue

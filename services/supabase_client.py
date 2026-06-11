@@ -154,6 +154,12 @@ class SupabaseClient:
             iso_match = re.match(r'^(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:?\d{2}|Z)?)?)', dt)
             if iso_match:
                 return iso_match.group(1)  # Return only the parseable portion
+            # Human-entered dates ("20.6.26", "20/6/2026" — day-first). The
+            # 2026-06-11 incident: these returned NULL and erased deadlines.
+            from core.dates import parse_human_date
+            parsed = parse_human_date(dt)
+            if parsed:
+                return parsed
             # Unparseable (e.g., "Friday February 27th at 4 PM") — return None
             # to avoid Supabase TIMESTAMPTZ parse errors
             logger.warning(f"Could not parse date string: {dt!r}, storing as NULL")
@@ -903,8 +909,9 @@ class SupabaseClient:
                 must also set this to 'EXPLICIT' or 'INFERRED'.
             urgency: 'H' | 'M' | 'L' — time-pressure, SEPARATE from priority
                 (importance). Never implies a deadline.
-            area_id: Gantt area UUID (optional, nullable).
-            area_label: Gantt area name or 'non-area' (the hard area field).
+            area_id / area_label: DEPRECATED (2026-06 category realignment) —
+                category now carries the Gantt-area taxonomy. Params kept so the
+                retained DB columns get their defaults; no caller passes them.
 
         Returns:
             Created task record.
@@ -1003,13 +1010,16 @@ class SupabaseClient:
         limit: int = 100,
         include_pending: bool = False,
         include_superseded: bool = False,
+        include_archived: bool = False,
     ) -> list[dict]:
         """
         Get tasks with optional filtering.
 
         Args:
             assignee: Filter by assignee name.
-            status: Filter by status ('pending', 'in_progress', 'done', 'overdue').
+            status: Filter by status ('pending', 'in_progress', 'done', 'overdue',
+                'archived'). Passing 'archived' explicitly returns archived tasks
+                regardless of include_archived.
             category: Filter by task category (e.g., 'Product & Tech').
             include_overdue: Include overdue tasks when filtering by status.
             limit: Maximum number of results.
@@ -1020,6 +1030,10 @@ class SupabaseClient:
                 Tier 3.1, child rows can only be 'pending' or 'approved', so "all" is
                 effectively "both". Use True only from the approval flow internals,
                 extraction, edit apply, QA scheduler orphan detection, and similar.
+            include_archived: When False (default) and no status filter is given,
+                archived tasks (sanctioned removals) are excluded — they should
+                never surface in briefs/digests/sync views. The reconcile engine
+                passes True (it must see archived rows to move them off the sheet).
 
         Returns:
             List of task records.
@@ -1045,6 +1059,10 @@ class SupabaseClient:
                 query = query.in_("status", [status, "overdue"])
             else:
                 query = query.eq("status", status)
+        elif not include_archived:
+            # No status filter -> "everything in the working set". Archived
+            # tasks are removals, not work — exclude unless explicitly asked.
+            query = query.neq("status", "archived")
 
         if category:
             query = query.eq("category", category)
@@ -4086,7 +4104,10 @@ class SupabaseClient:
     def resolve_area(
         self, name: str | None, areas: list[dict] | None = None
     ) -> tuple[str | None, str]:
-        """Map a free-text Area name to (area_id, area_label).
+        """LEGACY (2026-06 realignment): tasks no longer store area fields — use
+        resolve_category for the task taxonomy. Kept for knowledge-layer callers.
+
+        Map a free-text Area name to (area_id, area_label).
 
         Case-insensitive exact match against active areas. Blank / 'non-area' /
         no-match returns (None, 'non-area' or the given label) — never raises,
@@ -4107,6 +4128,51 @@ class SupabaseClient:
         except Exception as e:
             logger.warning(f"resolve_area lookup failed (keeping label): {e}")
         return None, label
+
+    # Pre-realignment category taxonomy -> Gantt area (2026-06). Covers the
+    # historical TaskCategory enum plus the stragglers found live. Ambiguous
+    # legacy buckets (Operations & HR, Strategy & Research) are NOT mapped here —
+    # the realignment backfill classifies those per-task.
+    LEGACY_CATEGORY_MAP = {
+        "product & tech": "PRODUCT & TECHNOLOGY",
+        "product & technology": "PRODUCT & TECHNOLOGY",
+        "technology & product": "PRODUCT & TECHNOLOGY",
+        "r&d": "PRODUCT & TECHNOLOGY",
+        "bd & sales": "SALES & BUSINESS DEVELOPMENT",
+        "sales & bd": "SALES & BUSINESS DEVELOPMENT",
+        "marketing & communications": "SALES & BUSINESS DEVELOPMENT",
+        "legal & compliance": "LEGAL, CORPORATE & FINANCE",
+        "legal & admin": "LEGAL, CORPORATE & FINANCE",
+        "finance": "LEGAL, CORPORATE & FINANCE",
+        "finance & fundraising": "FUNDRAISING & INVESTOR RELATIONS",
+        "finance & business plan": "FUNDRAISING & INVESTOR RELATIONS",
+        "investor relations": "FUNDRAISING & INVESTOR RELATIONS",
+        "fundraising": "FUNDRAISING & INVESTOR RELATIONS",
+    }
+
+    def resolve_category(
+        self, name: str | None, areas: list[dict] | None = None
+    ) -> str:
+        """Canonicalize a task category against the live Gantt areas.
+
+        Category IS the Gantt-area taxonomy (2026-06 realignment): exact
+        case-insensitive match against active areas wins, then the legacy
+        taxonomy map, then 'General' for blank/none. An unknown non-empty
+        value is RETURNED AS-IS (sheets-wins: never destroy what Eyal typed)
+        — the QA pass flags non-canonical categories instead.
+        """
+        from models.schemas import GENERAL_CATEGORY
+        label = (name or "").strip()
+        if not label or label.lower() in ("general", "non-area", "none", "n/a", "-"):
+            return GENERAL_CATEGORY
+        try:
+            area_rows = areas if areas is not None else self.get_areas()
+            for a in area_rows:
+                if (a.get("name") or "").strip().lower() == label.lower():
+                    return a.get("name")
+        except Exception as e:
+            logger.warning(f"resolve_category lookup failed (keeping label): {e}")
+        return self.LEGACY_CATEGORY_MAP.get(label.lower(), label)
 
     def add_area(
         self,
