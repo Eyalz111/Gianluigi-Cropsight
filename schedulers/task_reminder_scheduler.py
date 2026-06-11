@@ -265,8 +265,11 @@ class TaskReminderScheduler:
         }
 
         for task in tasks:
-            # Skip completed tasks
-            if task.get("status") == "done":
+            # Skip completed + archived tasks. An 'archived' row can sit on
+            # the sheet between Eyal typing it and the next reconcile moving
+            # it — reminding on it (and rewriting its status cell to
+            # 'overdue' below) would clobber the archive edit.
+            if task.get("status") in ("done", "archived"):
                 continue
 
             # Skip tasks created before the lookback window

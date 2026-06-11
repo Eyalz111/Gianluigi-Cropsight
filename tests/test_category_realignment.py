@@ -62,6 +62,18 @@ class TestParseHumanDate:
     def test_garbage_numeric_returns_none(self):
         assert parse_human_date("99.99.99") is None
 
+    def test_underspecified_inputs_rejected(self):
+        # dateutil would "complete" these from today's date — inventing a
+        # deadline. The two-default trick must reject them.
+        assert parse_human_date("2026") is None
+        assert parse_human_date("30") is None
+        assert parse_human_date("June") is None
+        assert parse_human_date("Jun 20") is None  # year missing
+
+    def test_written_out_full_dates_accepted(self):
+        assert parse_human_date("Jun 20 2026") == "2026-06-20"
+        assert parse_human_date("20 June 2026") == "2026-06-20"
+
 
 # =============================================================================
 # resolve_category
@@ -131,6 +143,42 @@ class TestSerializeDatetimeHumanDates:
     def test_truly_unparseable_still_none(self):
         from services.supabase_client import supabase_client
         assert supabase_client._serialize_datetime("Friday-ish maybe") is None
+
+    def test_update_task_never_nulls_deadline_from_garbage(self, monkeypatch):
+        """A provided-but-unparseable deadline must be DROPPED, not written as
+        NULL over a real deadline (the deep-path version of the 2026-06-11 bug)."""
+        from services.supabase_client import supabase_client
+        captured = {}
+
+        table = MagicMock()
+        table.update.side_effect = lambda data: captured.update(data) or table
+        table.eq.return_value = table
+        table.execute.return_value = MagicMock(data=[{"id": "t-1"}])
+        client = MagicMock()
+        client.table.return_value = table
+        monkeypatch.setattr(supabase_client, "_client", client)
+
+        supabase_client.update_task("t-1", status="pending", deadline="end of Q3 vibes")
+        assert "deadline" not in captured
+        assert captured["status"] == "pending"
+
+    def test_create_task_canonicalizes_category(self, monkeypatch):
+        """create_task is the choke point: any caller's legacy category lands
+        canonical in the insert payload."""
+        from services.supabase_client import supabase_client
+        captured = {}
+
+        table = MagicMock()
+        table.insert.side_effect = lambda data: captured.update(data) or table
+        table.execute.return_value = MagicMock(data=[{"id": "t-new"}])
+        client = MagicMock()
+        client.table.return_value = table
+        monkeypatch.setattr(supabase_client, "_client", client)
+        monkeypatch.setattr(supabase_client, "get_areas", lambda status="active": _AREAS)
+        monkeypatch.setattr(supabase_client, "log_action", lambda **kw: None)
+
+        supabase_client.create_task(title="x", assignee="Eyal", category="BD & Sales")
+        assert captured["category"] == "SALES & BUSINESS DEVELOPMENT"
 
 
 # =============================================================================
@@ -241,6 +289,48 @@ class TestReconcileDateSafety:
         assert pulled[0]["deadline_confidence"] == "EXPLICIT"
 
 
+class TestReconcileDateSafetyHardening:
+    """Regressions from the 2026-06-11 code review."""
+
+    async def test_unparseable_cell_text_never_overwritten(self, reconcile_env):
+        """The ISO-normalize pass must NOT replace Eyal's unparseable text
+        with the DB date — that destroys the edit the bad_dates guard kept."""
+        ss, sheets, sc = reconcile_env
+        sheets.get_all_tasks.return_value = [
+            _mk_sheet_task(deadline="after Moldova trip",
+                           deadline_raw="after Moldova trip"),
+        ]
+        sc.get_tasks.return_value = [_mk_db_task(deadline="2026-07-01")]
+        sc.get_sheet_snapshots.return_value = {
+            "t-1": {"status": "pending", "deadline": "2026-07-01",
+                    "priority": "M", "assignee": "Eyal"}
+        }
+        await ss.reconcile_tasks(shadow=False)
+        # no batched cell write may target the deadline cell
+        batch = sheets.service.spreadsheets.return_value.values.return_value.batchUpdate
+        for call in batch.call_args_list:
+            for w in call.kwargs.get("body", {}).get("data", []):
+                assert "!E" not in w["range"], f"deadline cell overwritten: {w}"
+
+    async def test_cleared_cell_writes_explicit_null(self, reconcile_env):
+        """Emptying a deadline cell must NULL the DB deadline (update_task
+        treats deadline=None as 'not provided', so reconcile writes directly)."""
+        ss, sheets, sc = reconcile_env
+        sheets.get_all_tasks.return_value = [
+            _mk_sheet_task(deadline="", deadline_raw=""),
+        ]
+        sc.get_tasks.return_value = [_mk_db_task(deadline="2026-06-20")]
+        sc.get_sheet_snapshots.return_value = {
+            "t-1": {"status": "pending", "deadline": "2026-06-20",
+                    "priority": "M", "assignee": "Eyal"}
+        }
+        await ss.reconcile_tasks(shadow=False)
+        upd_calls = sc.client.table.return_value.update.call_args_list
+        assert any(
+            c.args and c.args[0].get("deadline", "x") is None for c in upd_calls
+        ), f"expected explicit NULL deadline write, got {upd_calls}"
+
+
 class TestReconcileArchiveFlow:
     async def test_sheet_archived_status_moves_row(self, reconcile_env):
         ss, sheets, sc = reconcile_env
@@ -269,6 +359,21 @@ class TestReconcileArchiveFlow:
         summary = await ss.reconcile_tasks(shadow=False)
         assert summary["readded"] == 0
         sheets.add_tasks_batch.assert_not_awaited()
+
+    async def test_archive_move_skipped_when_db_update_fails(self, reconcile_env):
+        """If the status='archived' DB pull fails, the row must STAY on the
+        sheet — deleting it while the task remains open causes the next
+        cycle's re-add to resurrect it (archive oscillation)."""
+        ss, sheets, sc = reconcile_env
+        sheets.get_all_tasks.return_value = [_mk_sheet_task(status="archived")]
+        sc.get_tasks.return_value = [_mk_db_task(status="pending")]
+        sc.get_sheet_snapshots.return_value = {
+            "t-1": {"status": "pending", "deadline": None,
+                    "priority": "M", "assignee": "Eyal"}
+        }
+        sc.update_task.side_effect = Exception("transient PostgREST error")
+        await ss.reconcile_tasks(shadow=False)
+        sheets.archive_task_rows.assert_not_awaited()
 
     async def test_shadow_mode_never_writes(self, reconcile_env):
         ss, sheets, sc = reconcile_env

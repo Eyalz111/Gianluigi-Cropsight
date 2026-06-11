@@ -80,7 +80,11 @@ async def compute_sheets_diff() -> dict:
         logger.error(f"Failed to read tasks from Sheets: {e}")
         sheets_tasks = []
 
-    db_tasks = supabase_client.get_tasks(status=None, limit=500)
+    # include_archived: an archived DB task whose sheet row hasn't been moved
+    # to the Archive tab yet must still MATCH its row — otherwise the row
+    # classifies as "new in Sheets" and apply re-creates the task (resurrecting
+    # a sanctioned removal under a fresh UUID).
+    db_tasks = supabase_client.get_tasks(status=None, limit=500, include_archived=True)
 
     # Build lookup dicts by matching key
     sheets_by_key = {}
@@ -440,6 +444,8 @@ def apply_sheets_to_db(diff: dict) -> dict:
                     f"for task {db_id} — skipping deadline change"
                 )
                 del update_data["deadline"]
+        if not update_data:
+            continue  # only change was an unparseable deadline — nothing to write
         try:
             supabase_client.client.table("tasks").update(update_data).eq("id", db_id).execute()
             applied["tasks_updated"] += 1
@@ -451,6 +457,8 @@ def apply_sheets_to_db(diff: dict) -> dict:
         title = st.get("task", "")
         if not title:
             continue
+        if _normalize(st.get("status")) == "archived":
+            continue  # a row mid-archive is not a new task
         insert_row = {
             "title": title,
             "assignee": st.get("assignee", ""),
@@ -673,6 +681,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         snap = snapshots.get(sid) or {}
         upd, final = {}, {}
         deadline_cell_written = False
+        deadline_unparseable = False
         for field in _ACTION_FIELDS:
             sheet_val, snap_val, db_val = st.get(field), snap.get(field), dt.get(field)
             # A non-empty deadline cell that didn't parse to ISO is raw text
@@ -686,6 +695,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                     f"(row {row}, task {sid}) — ignored, fix the cell"
                 )
                 summary["bad_dates"] += 1
+                deadline_unparseable = True
                 final[field] = db_val
                 continue
             if _normalize(sheet_val) != _normalize(snap_val):
@@ -702,8 +712,11 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             else:
                 final[field] = sheet_val
         # Normalize sloppy-but-valid date cells ("20.6.26" -> "2026-06-20") so
-        # every future compare is ISO-vs-ISO.
-        if (not deadline_cell_written and final.get("deadline")
+        # every future compare is ISO-vs-ISO. NEVER when the cell was
+        # unparseable — that would overwrite Eyal's text with the DB date and
+        # destroy the very edit the bad_dates guard just preserved.
+        if (not deadline_cell_written and not deadline_unparseable
+                and final.get("deadline")
                 and st.get("deadline_raw")
                 and str(final["deadline"]) != str(st["deadline_raw"])):
             _cell("deadline", row, str(final["deadline"]))
@@ -814,16 +827,36 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
 
     # --- APPLY (write_allowed) ---
     # 1. DB action-field pulls + sticky marks.
+    db_update_failed: set[str] = set()
     for tid, upd in db_updates.items():
         try:
             if "deadline" in upd and upd["deadline"]:
                 upd["deadline_confidence"] = "EXPLICIT"
-            supabase_client.update_task(tid, **upd)
+            if "deadline" in upd and upd["deadline"] is None:
+                # Eyal CLEARED the cell. update_task's deadline kwarg treats
+                # None as "not provided", so write the NULL explicitly here —
+                # otherwise the clear never lands and Rule 4 refills the cell
+                # with the old date next cycle.
+                upd.pop("deadline")
+                supabase_client.client.table("tasks").update(
+                    {"deadline": None, "deadline_confidence": "NONE"}
+                ).eq("id", tid).execute()
+            if upd:
+                supabase_client.update_task(tid, **upd)
             for (mtid, mfield) in manual_marks:
                 if mtid == tid:
                     supabase_client.mark_task_field_manual(tid, mfield, "sheet_edit")
         except Exception as e:
+            db_update_failed.add(tid)
             logger.warning(f"[reconcile] DB update failed for {tid}: {e}")
+    # An archive move is only safe once the DB row actually says 'archived' —
+    # otherwise the row gets deleted from the sheet while the task stays open,
+    # and the next cycle's re-add resurrects it (archive oscillation).
+    if db_update_failed:
+        archive_moves = [
+            st for st in archive_moves
+            if str(st.get("id") or "") not in db_update_failed
+        ]
     # 2. Re-add DB-only rows (batched; carries the UUID into col J).
     if readd_rows:
         try:

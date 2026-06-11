@@ -208,9 +208,10 @@ async def detect_gantt_drift() -> list[dict]:
                 continue
 
             # Find tasks matching this section
+            sec_canon = _canon(section)
             matching_tasks = [
                 task for task in all_tasks
-                if _canon(task.get("category")) == _canon(section)
+                if _canon(task.get("category")) == sec_canon
             ]
 
             if not matching_tasks:

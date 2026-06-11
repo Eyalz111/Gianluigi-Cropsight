@@ -65,6 +65,7 @@ def run_qa_check() -> dict:
     report["checks"]["rls_coverage"] = _check_rls_coverage(report["issues"])
     report["checks"]["duplicate_tasks"] = _check_duplicate_tasks(report["issues"])
     report["checks"]["topic_state_staleness"] = _check_topic_state_staleness(report["issues"])
+    report["checks"]["category_taxonomy"] = _check_category_taxonomy(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -106,8 +107,12 @@ def _check_extraction_quality(issues: list[str]) -> dict:
                 decisions = supabase_client.list_decisions(
                     meeting_id=mid, include_pending=True
                 )
+                # include_archived: archived tasks still count as extracted
+                # output — without this, a meeting whose tasks were later all
+                # archived (e.g. the 2026-06 cleanup) trips a daily false
+                # "Empty extraction" alert.
                 all_tasks = supabase_client.get_tasks(
-                    status=None, include_pending=True
+                    status=None, include_pending=True, include_archived=True
                 )
                 tasks = [t for t in all_tasks if t.get("meeting_id") == mid]
                 total_items = len(decisions) + len(tasks)
@@ -498,6 +503,36 @@ def _check_duplicate_tasks(issues: list[str]) -> dict:
         logger.warning(f"Duplicate task check failed: {e}")
         issues.append(f"Duplicate task check failed: {e}")
 
+    return result
+
+
+def _check_category_taxonomy(issues: list[str]) -> dict:
+    """
+    2026-06 category realignment guard: task categories must be Gantt-area
+    names (live `areas` table) or 'General'. resolve_category deliberately
+    keeps unknown non-empty values as-is (sheets-wins — never destroy what
+    Eyal typed); THIS check is the compensating control that surfaces them.
+    """
+    result: dict = {"non_canonical": 0, "values": []}
+    try:
+        from models.schemas import GENERAL_CATEGORY
+        canonical = {(a.get("name") or "") for a in supabase_client.get_areas()}
+        canonical.add(GENERAL_CATEGORY)
+        tasks = supabase_client.get_tasks(status=None, limit=1000, include_pending=True)
+        bad: dict[str, int] = {}
+        for t in tasks:
+            cat = (t.get("category") or "").strip()
+            if cat and cat not in canonical:
+                bad[cat] = bad.get(cat, 0) + 1
+        if bad:
+            result["non_canonical"] = sum(bad.values())
+            result["values"] = sorted(bad, key=bad.get, reverse=True)[:8]
+            issues.append(
+                f"Non-canonical task categories ({result['non_canonical']} tasks): "
+                + ", ".join(f"'{v}' x{bad[v]}" for v in result["values"])
+            )
+    except Exception as e:
+        logger.warning(f"Category taxonomy check failed: {e}")
     return result
 
 

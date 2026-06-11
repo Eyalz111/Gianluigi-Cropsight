@@ -15,10 +15,19 @@ None as "leave the existing value alone", never as "clear the field".
 import re
 from datetime import date, datetime
 
+from dateutil.parser import parse as _du_parse
+
 # 20.6.26 / 20/6/2026 / 20-6-26 — day-first; separators . / -
 _DMY = re.compile(r"^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s*$")
 # ISO date, optionally with a time suffix to discard: 2026-06-20T10:00:00Z
 _ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$")
+
+# Two deliberately different defaults: dateutil fills unspecified components
+# (year/month/day) from its default, so parsing with both and comparing
+# detects underspecified input ("2026", "30", "June") — which must be
+# REJECTED, not silently completed with today's date (invented-deadline trap).
+_DEFAULT_A = datetime(2001, 1, 1)
+_DEFAULT_B = datetime(2002, 12, 28)
 
 
 def parse_human_date(value) -> str | None:
@@ -52,12 +61,15 @@ def parse_human_date(value) -> str | None:
         # Day-first by convention; if impossible (e.g. 6.20.26), try month-first.
         return _safe_iso(y, mo, d) or _safe_iso(y, d, mo)
 
-    # Last resort: natural language ("March 30", "next Friday" comes pre-parsed
-    # by MCP callers; this covers "Jun 20 2026"-style cells). dayfirst keeps
-    # the Israeli convention for anything dateutil finds ambiguous.
+    # Last resort: written-out dates like "Jun 20 2026" / "20 June 2026".
+    # dayfirst keeps the Israeli convention for anything dateutil finds
+    # ambiguous. Parse twice with different defaults — if the results differ,
+    # the input was underspecified (e.g. "2026", "30", "June") and dateutil
+    # filled the gaps from the default; reject instead of inventing a date.
     try:
-        from dateutil.parser import parse as _du_parse
-        return _du_parse(text, dayfirst=True, fuzzy=False).date().isoformat()
+        a = _du_parse(text, dayfirst=True, fuzzy=False, default=_DEFAULT_A).date()
+        b = _du_parse(text, dayfirst=True, fuzzy=False, default=_DEFAULT_B).date()
+        return a.isoformat() if a == b else None
     except Exception:
         return None
 

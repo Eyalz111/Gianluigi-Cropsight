@@ -2088,15 +2088,24 @@ class MCPServer:
                 _cat_fields, _cat_label = _resolve_category_field(category, _sc.resolve_category)
                 updates.update(_cat_fields)
 
-                # Parse deadline (natural language support)
+                # Parse deadline: day-first numeric dates FIRST (20.6.26 must
+                # mean 20 June everywhere — same convention as the sheet),
+                # then dateutil fuzzy for natural language ("next Friday").
                 parsed_deadline = None
                 if deadline is not None:
-                    try:
-                        from dateutil.parser import parse as parse_date
-                        parsed_deadline = parse_date(deadline, fuzzy=True).date()
-                        updates["deadline"] = parsed_deadline.isoformat()
-                    except (ValueError, ImportError):
-                        updates["deadline"] = deadline  # Pass as-is, let DB handle
+                    from core.dates import parse_human_date
+                    _iso = parse_human_date(deadline)
+                    if _iso:
+                        from datetime import date as _date
+                        parsed_deadline = _date.fromisoformat(_iso)
+                        updates["deadline"] = _iso
+                    else:
+                        try:
+                            from dateutil.parser import parse as parse_date
+                            parsed_deadline = parse_date(deadline, fuzzy=True).date()
+                            updates["deadline"] = parsed_deadline.isoformat()
+                        except (ValueError, ImportError):
+                            updates["deadline"] = deadline  # update_task drops it if unparseable
 
                 if not updates:
                     return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority, urgency, category.")
@@ -2198,14 +2207,21 @@ class MCPServer:
                 from services.supabase_client import supabase_client as _sc
                 from services.google_sheets import sheets_service
 
-                # Parse deadline
+                # Parse deadline: day-first numeric first (sheet convention),
+                # dateutil fuzzy as the natural-language fallback.
                 parsed_deadline = None
                 if deadline:
-                    try:
-                        from dateutil.parser import parse as parse_date
-                        parsed_deadline = parse_date(deadline, fuzzy=True).date()
-                    except (ValueError, ImportError):
-                        pass  # Will pass as None
+                    from core.dates import parse_human_date
+                    _iso = parse_human_date(deadline)
+                    if _iso:
+                        from datetime import date as _date
+                        parsed_deadline = _date.fromisoformat(_iso)
+                    else:
+                        try:
+                            from dateutil.parser import parse as parse_date
+                            parsed_deadline = parse_date(deadline, fuzzy=True).date()
+                        except (ValueError, ImportError):
+                            pass  # Will pass as None
 
                 # urgency (time-pressure) + category canonicalized against the
                 # live Gantt areas (blank/None -> 'General').

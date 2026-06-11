@@ -576,7 +576,7 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
 # Shared Injection Pipeline
 # =========================================================================
 
-def _unify_manual_task(item: dict) -> dict:
+def _unify_manual_task(item: dict, areas: list[dict] | None = None) -> dict:
     """Align a manually-injected task with meeting-extracted ones (flag-gated).
 
     Sets the fields the debrief path historically DROPPED — `deadline_confidence`
@@ -599,7 +599,8 @@ def _unify_manual_task(item: dict) -> dict:
     # category: canonicalize the LLM's hint; if it didn't resolve to a real
     # area, fall back to a conservative phrase match on the text.
     try:
-        areas = supabase_client.get_areas() or []
+        if areas is None:
+            areas = supabase_client.get_areas() or []
         category = supabase_client.resolve_category(item.get("category"), areas=areas)
         canonical_names = {(a.get("name") or "") for a in areas}
         if category not in canonical_names:
@@ -650,6 +651,12 @@ async def _inject_debrief_items(
     counts = {"tasks": 0, "decisions": 0, "gantt_proposals": 0, "information": 0}
     embed_texts = []
 
+    # One areas fetch for the whole batch (resolve/phrase-match per item).
+    try:
+        _areas = supabase_client.get_areas() or []
+    except Exception:
+        _areas = []
+
     for item in items:
         item_type = item.get("type", "information")
 
@@ -665,13 +672,13 @@ async def _inject_debrief_items(
                     priority=item.get("priority", "M"),
                     deadline=item.get("deadline"),
                     meeting_id=meeting_id,
-                    # category = Gantt-area taxonomy; always canonicalized
-                    category=supabase_client.resolve_category(item.get("category")),
+                    # create_task canonicalizes category (Gantt-area taxonomy)
+                    category=item.get("category"),
                 )
                 if getattr(settings, "TASK_URGENCY_AREA_ENABLED", False):
                     # Unify with meeting extraction: stop dropping deadline_confidence
                     # + label, and set urgency/category. Off = byte-identical to today.
-                    _task_kwargs.update(_unify_manual_task(item))
+                    _task_kwargs.update(_unify_manual_task(item, _areas))
                 supabase_client.create_task(**_task_kwargs)
                 counts["tasks"] += 1
 

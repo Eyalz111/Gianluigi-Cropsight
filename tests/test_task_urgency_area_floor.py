@@ -1,4 +1,8 @@
-"""PR1 — operational-task floor: urgency + area fields (additive, no behavior change).
+"""PR1 — operational-task floor: urgency field plumbing.
+
+2026-06 category realignment: the per-task area surface is gone — create_task/
+create_tasks_batch no longer take or write area_id/area_label (the retained DB
+columns get their defaults), and category is canonicalized at this choke point.
 
 Mirrors tests/test_deadline_confidence.py's create_task payload-capture pattern.
 """
@@ -17,18 +21,14 @@ class TestTaskUrgencyAreaSchema:
         from models.schemas import Task, TaskUrgency
         t = Task(title="t", assignee="a")
         assert t.urgency == TaskUrgency.MEDIUM
+        # deprecated columns retain their model defaults
         assert t.area_id is None
         assert t.area_label == "non-area"
 
-    def test_task_accepts_urgency_area(self):
+    def test_task_accepts_urgency(self):
         from models.schemas import Task, TaskUrgency
-        from uuid import uuid4
-        aid = uuid4()
-        t = Task(title="t", assignee="a", urgency=TaskUrgency.HIGH,
-                 area_id=aid, area_label="BD & Sales")
+        t = Task(title="t", assignee="a", urgency=TaskUrgency.HIGH)
         assert t.urgency == TaskUrgency.HIGH
-        assert t.area_id == aid
-        assert t.area_label == "BD & Sales"
 
 
 # ------------------------------------------------------- supabase plumbing ----
@@ -37,6 +37,10 @@ def _mock_sc():
     with patch.object(SupabaseClient, "__init__", return_value=None):
         sc = SupabaseClient()
     sc.log_action = MagicMock()
+    sc.get_areas = MagicMock(return_value=[
+        {"id": "a-1", "name": "SALES & BUSINESS DEVELOPMENT"},
+        {"id": "a-2", "name": "PRODUCT & TECHNOLOGY"},
+    ])
     captured = {}
     fake_query = MagicMock()
     fake_query.insert.return_value = fake_query
@@ -53,33 +57,37 @@ def _mock_sc():
 
 
 class TestCreateTaskPlumbing:
-    def test_create_task_passes_urgency_area(self):
+    def test_create_task_passes_urgency_and_canonical_category(self):
         sc, captured = _mock_sc()
-        sc.create_task("title", "Eyal", urgency="H", area_id="a-1", area_label="BD & Sales")
+        sc.create_task("title", "Eyal", urgency="H", category="BD & Sales")
         p = captured["payload"]
         assert p["urgency"] == "H"
-        assert p["area_id"] == "a-1"
-        assert p["area_label"] == "BD & Sales"
+        # legacy taxonomy canonicalized at the choke point
+        assert p["category"] == "SALES & BUSINESS DEVELOPMENT"
+        # area fields are no longer written (DB column defaults apply)
+        assert "area_id" not in p
+        assert "area_label" not in p
 
     def test_create_task_defaults(self):
         sc, captured = _mock_sc()
         sc.create_task("title", "Eyal")
         p = captured["payload"]
         assert p["urgency"] == "M"
-        assert p["area_id"] is None
-        assert p["area_label"] == "non-area"
+        assert p["category"] == "General"
+        assert "area_id" not in p
+        assert "area_label" not in p
 
-    def test_create_tasks_batch_passes_urgency_area(self):
+    def test_create_tasks_batch_passes_urgency_and_canonical_category(self):
         sc, captured = _mock_sc()
         sc.create_tasks_batch("m-1", [
-            {"title": "t1", "urgency": "H", "area_id": "a-1", "area_label": "Product & Tech"},
+            {"title": "t1", "urgency": "H", "category": "Product & Tech"},
             {"title": "t2"},  # defaults
         ])
         rows = captured["payload"]
         assert rows[0]["urgency"] == "H"
-        assert rows[0]["area_id"] == "a-1"
-        assert rows[0]["area_label"] == "Product & Tech"
+        assert rows[0]["category"] == "PRODUCT & TECHNOLOGY"
+        assert "area_id" not in rows[0]
+        assert "area_label" not in rows[0]
         # defaults for the second row
         assert rows[1]["urgency"] == "M"
-        assert rows[1]["area_id"] is None
-        assert rows[1]["area_label"] == "non-area"
+        assert rows[1]["category"] == "General"

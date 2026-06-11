@@ -1,4 +1,12 @@
 """
+SUPERSEDED — DO NOT RUN. Kept as the incident record only.
+
+This was the first repair attempt; it ran against an already-wiped sheet (see
+KNOWN_ISSUES 2026-06-11) and its archive heuristic (stray col-L probe) is only
+valid against the pre-repair sheet state. The actual repair that succeeded is
+scripts/finish_realign_2026_06.py (ground truth from Drive revision 1385).
+The --apply path below is disabled.
+
 One-shot live-data repair + realignment (2026-06-11) — run AFTER deploying the
 category-realignment code (or locally from the same branch).
 
@@ -275,4 +283,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     args = ap.parse_args()
-    asyncio.run(run(apply=args.apply))
+    if args.apply:
+        sys.exit(
+            "SUPERSEDED: this script's --apply is disabled (its archive "
+            "heuristic is only valid against the pre-repair sheet state). "
+            "Use scripts/finish_realign_2026_06.py instead."
+        )
+    asyncio.run(run(apply=False))

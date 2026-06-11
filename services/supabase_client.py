@@ -887,8 +887,6 @@ class SupabaseClient:
         category: str | None = None,
         deadline_confidence: str = "NONE",
         urgency: str = "M",
-        area_id: str | None = None,
-        area_label: str = "non-area",
         label: str | None = None,
     ) -> dict:
         """
@@ -902,16 +900,16 @@ class SupabaseClient:
             meeting_id: Source meeting UUID (optional).
             transcript_timestamp: Source citation (optional).
             status: Initial status (default: 'pending').
-            category: Task category (e.g., 'Product & Tech', 'BD & Sales').
+            category: Task category — canonicalized HERE against the Gantt-area
+                taxonomy (resolve_category), so every creation path (MCP,
+                Telegram agent, debrief, sheets, scripts) stores one taxonomy
+                no matter what the caller passed.
             deadline_confidence: 'EXPLICIT' | 'INFERRED' | 'NONE'. Controls
                 whether reminders + proactive alerts fire. Default 'NONE' means
                 the task has no deadline at all. Callers that set a deadline
                 must also set this to 'EXPLICIT' or 'INFERRED'.
             urgency: 'H' | 'M' | 'L' — time-pressure, SEPARATE from priority
                 (importance). Never implies a deadline.
-            area_id / area_label: DEPRECATED (2026-06 category realignment) —
-                category now carries the Gantt-area taxonomy. Params kept so the
-                retained DB columns get their defaults; no caller passes them.
 
         Returns:
             Created task record.
@@ -924,11 +922,9 @@ class SupabaseClient:
             "meeting_id": meeting_id,
             "transcript_timestamp": transcript_timestamp,
             "status": status,
-            "category": category,
+            "category": self.resolve_category(category),
             "deadline_confidence": deadline_confidence,
             "urgency": urgency,
-            "area_id": area_id,
-            "area_label": area_label,
             "label": label,
         }
 
@@ -968,6 +964,9 @@ class SupabaseClient:
             logger.info("No valid tasks to insert after filtering")
             return []
 
+        # Canonicalize categories at this choke point (one areas fetch per batch)
+        # so every batch-creation path stores the Gantt-area taxonomy.
+        _areas = self.get_areas()
         data = [
             {
                 "meeting_id": meeting_id,
@@ -977,12 +976,10 @@ class SupabaseClient:
                 "deadline": self._serialize_datetime(t.get("deadline")),
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
-                "category": t.get("category"),
+                "category": self.resolve_category(t.get("category"), areas=_areas),
                 "label": t.get("label"),
                 "deadline_confidence": t.get("deadline_confidence", "NONE"),
                 "urgency": t.get("urgency", "M"),
-                "area_id": t.get("area_id"),
-                "area_label": t.get("area_label", "non-area"),
             }
             for t in valid_tasks
         ]
@@ -1124,7 +1121,21 @@ class SupabaseClient:
         if status is not None:
             updates["status"] = status
         if deadline is not None:
-            updates["deadline"] = self._serialize_datetime(deadline)
+            serialized = self._serialize_datetime(deadline)
+            if serialized is None:
+                # The caller PROVIDED a deadline but it didn't parse. Writing
+                # NULL here would erase a real deadline from garbage input
+                # (the 2026-06-11 incident class) — drop the field instead.
+                logger.warning(
+                    f"update_task {task_id}: unparseable deadline "
+                    f"{deadline!r} — deadline left unchanged"
+                )
+            else:
+                updates["deadline"] = serialized
+        # Category carries the Gantt-area taxonomy — canonicalize at this
+        # choke point so every update path stores one taxonomy.
+        if updates.get("category"):
+            updates["category"] = self.resolve_category(updates["category"])
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         result = (
@@ -4100,34 +4111,6 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error getting areas: {e}")
             return []
-
-    def resolve_area(
-        self, name: str | None, areas: list[dict] | None = None
-    ) -> tuple[str | None, str]:
-        """LEGACY (2026-06 realignment): tasks no longer store area fields — use
-        resolve_category for the task taxonomy. Kept for knowledge-layer callers.
-
-        Map a free-text Area name to (area_id, area_label).
-
-        Case-insensitive exact match against active areas. Blank / 'non-area' /
-        no-match returns (None, 'non-area' or the given label) — never raises,
-        so the sheet reconcile + MCP task tools can call it inline. Used to turn
-        an Area cell/parameter into the FK + label the tasks table stores.
-
-        `areas` lets a batch caller (e.g. one reconcile cycle) pass a pre-fetched
-        area list so this doesn't re-query once per task.
-        """
-        label = (name or "").strip()
-        if not label or label.lower() in ("non-area", "none", "n/a", "-"):
-            return None, "non-area"
-        try:
-            area_rows = areas if areas is not None else self.get_areas()
-            for a in area_rows:
-                if (a.get("name") or "").strip().lower() == label.lower():
-                    return a.get("id"), a.get("name")
-        except Exception as e:
-            logger.warning(f"resolve_area lookup failed (keeping label): {e}")
-        return None, label
 
     # Pre-realignment category taxonomy -> Gantt area (2026-06). Covers the
     # historical TaskCategory enum plus the stragglers found live. Ambiguous

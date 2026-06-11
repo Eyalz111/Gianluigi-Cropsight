@@ -138,8 +138,9 @@ class TestSupabaseCreateTaskCategory:
         insert_data = tasks_table.insert.call_args[0][0]
         assert insert_data["category"] == "PRODUCT & TECHNOLOGY"
 
-    def test_create_task_category_defaults_to_none(self):
-        """create_task() should pass category=None when not specified."""
+    def test_create_task_category_defaults_to_general(self):
+        """create_task() canonicalizes a missing category to 'General'
+        (choke-point rule: every stored category is taxonomy-valid)."""
         client, tasks_table = self._make_client()
 
         client.create_task(
@@ -148,7 +149,7 @@ class TestSupabaseCreateTaskCategory:
         )
 
         insert_data = tasks_table.insert.call_args[0][0]
-        assert insert_data["category"] is None
+        assert insert_data["category"] == "General"
 
 
 # =============================================================================

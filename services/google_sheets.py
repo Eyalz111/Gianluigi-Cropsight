@@ -33,6 +33,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 from config.settings import settings
+from core.dates import parse_human_date
 
 logger = logging.getLogger(__name__)
 
@@ -87,17 +88,11 @@ COLORS = {
 }
 
 # Category labels for data validation — the Gantt-area taxonomy (2026-06
-# realignment). Source of truth is the live `areas` table; this static mirror
-# exists for sheet validation/formatting. 'General' = genuine misfit.
-TASK_CATEGORIES = [
-    "PRODUCT & TECHNOLOGY",
-    "SALES & BUSINESS DEVELOPMENT",
-    "FUNDRAISING & INVESTOR RELATIONS",
-    "LEGAL, CORPORATE & FINANCE",
-    "CLIENT DELIVERY & OPERATIONS",
-    "TEAM & HUMAN RESOURCES",
-    "General",
-]
+# realignment). Source of truth is the live `areas` table; derived from the
+# single static mirror (models.schemas.TaskCategory) so the lists can't drift.
+from models.schemas import TaskCategory as _TaskCategory  # noqa: E402
+
+TASK_CATEGORIES = [c.value for c in _TaskCategory]
 
 # Status labels for data validation ('archived' moves the row to the Archive tab)
 TASK_STATUSES = ["pending", "in_progress", "done", "overdue", "archived"]
@@ -654,7 +649,6 @@ class GoogleSheetsService:
             return []
 
         num_cols = len(TASK_COLUMNS)
-        from core.dates import parse_human_date
         # Skip header row
         tasks = []
         for i, row in enumerate(rows[1:], start=2):
