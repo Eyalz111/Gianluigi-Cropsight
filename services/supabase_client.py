@@ -154,6 +154,12 @@ class SupabaseClient:
             iso_match = re.match(r'^(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:?\d{2}|Z)?)?)', dt)
             if iso_match:
                 return iso_match.group(1)  # Return only the parseable portion
+            # Human-entered dates ("20.6.26", "20/6/2026" — day-first). The
+            # 2026-06-11 incident: these returned NULL and erased deadlines.
+            from core.dates import parse_human_date
+            parsed = parse_human_date(dt)
+            if parsed:
+                return parsed
             # Unparseable (e.g., "Friday February 27th at 4 PM") — return None
             # to avoid Supabase TIMESTAMPTZ parse errors
             logger.warning(f"Could not parse date string: {dt!r}, storing as NULL")
@@ -881,8 +887,6 @@ class SupabaseClient:
         category: str | None = None,
         deadline_confidence: str = "NONE",
         urgency: str = "M",
-        area_id: str | None = None,
-        area_label: str = "non-area",
         label: str | None = None,
     ) -> dict:
         """
@@ -896,15 +900,16 @@ class SupabaseClient:
             meeting_id: Source meeting UUID (optional).
             transcript_timestamp: Source citation (optional).
             status: Initial status (default: 'pending').
-            category: Task category (e.g., 'Product & Tech', 'BD & Sales').
+            category: Task category — canonicalized HERE against the Gantt-area
+                taxonomy (resolve_category), so every creation path (MCP,
+                Telegram agent, debrief, sheets, scripts) stores one taxonomy
+                no matter what the caller passed.
             deadline_confidence: 'EXPLICIT' | 'INFERRED' | 'NONE'. Controls
                 whether reminders + proactive alerts fire. Default 'NONE' means
                 the task has no deadline at all. Callers that set a deadline
                 must also set this to 'EXPLICIT' or 'INFERRED'.
             urgency: 'H' | 'M' | 'L' — time-pressure, SEPARATE from priority
                 (importance). Never implies a deadline.
-            area_id: Gantt area UUID (optional, nullable).
-            area_label: Gantt area name or 'non-area' (the hard area field).
 
         Returns:
             Created task record.
@@ -917,11 +922,9 @@ class SupabaseClient:
             "meeting_id": meeting_id,
             "transcript_timestamp": transcript_timestamp,
             "status": status,
-            "category": category,
+            "category": self.resolve_category(category),
             "deadline_confidence": deadline_confidence,
             "urgency": urgency,
-            "area_id": area_id,
-            "area_label": area_label,
             "label": label,
         }
 
@@ -961,6 +964,9 @@ class SupabaseClient:
             logger.info("No valid tasks to insert after filtering")
             return []
 
+        # Canonicalize categories at this choke point (one areas fetch per batch)
+        # so every batch-creation path stores the Gantt-area taxonomy.
+        _areas = self.get_areas()
         data = [
             {
                 "meeting_id": meeting_id,
@@ -970,12 +976,10 @@ class SupabaseClient:
                 "deadline": self._serialize_datetime(t.get("deadline")),
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
-                "category": t.get("category"),
+                "category": self.resolve_category(t.get("category"), areas=_areas),
                 "label": t.get("label"),
                 "deadline_confidence": t.get("deadline_confidence", "NONE"),
                 "urgency": t.get("urgency", "M"),
-                "area_id": t.get("area_id"),
-                "area_label": t.get("area_label", "non-area"),
             }
             for t in valid_tasks
         ]
@@ -1003,13 +1007,16 @@ class SupabaseClient:
         limit: int = 100,
         include_pending: bool = False,
         include_superseded: bool = False,
+        include_archived: bool = False,
     ) -> list[dict]:
         """
         Get tasks with optional filtering.
 
         Args:
             assignee: Filter by assignee name.
-            status: Filter by status ('pending', 'in_progress', 'done', 'overdue').
+            status: Filter by status ('pending', 'in_progress', 'done', 'overdue',
+                'archived'). Passing 'archived' explicitly returns archived tasks
+                regardless of include_archived.
             category: Filter by task category (e.g., 'Product & Tech').
             include_overdue: Include overdue tasks when filtering by status.
             limit: Maximum number of results.
@@ -1020,6 +1027,10 @@ class SupabaseClient:
                 Tier 3.1, child rows can only be 'pending' or 'approved', so "all" is
                 effectively "both". Use True only from the approval flow internals,
                 extraction, edit apply, QA scheduler orphan detection, and similar.
+            include_archived: When False (default) and no status filter is given,
+                archived tasks (sanctioned removals) are excluded — they should
+                never surface in briefs/digests/sync views. The reconcile engine
+                passes True (it must see archived rows to move them off the sheet).
 
         Returns:
             List of task records.
@@ -1045,6 +1056,10 @@ class SupabaseClient:
                 query = query.in_("status", [status, "overdue"])
             else:
                 query = query.eq("status", status)
+        elif not include_archived:
+            # No status filter -> "everything in the working set". Archived
+            # tasks are removals, not work — exclude unless explicitly asked.
+            query = query.neq("status", "archived")
 
         if category:
             query = query.eq("category", category)
@@ -1106,7 +1121,21 @@ class SupabaseClient:
         if status is not None:
             updates["status"] = status
         if deadline is not None:
-            updates["deadline"] = self._serialize_datetime(deadline)
+            serialized = self._serialize_datetime(deadline)
+            if serialized is None:
+                # The caller PROVIDED a deadline but it didn't parse. Writing
+                # NULL here would erase a real deadline from garbage input
+                # (the 2026-06-11 incident class) — drop the field instead.
+                logger.warning(
+                    f"update_task {task_id}: unparseable deadline "
+                    f"{deadline!r} — deadline left unchanged"
+                )
+            else:
+                updates["deadline"] = serialized
+        # Category carries the Gantt-area taxonomy — canonicalize at this
+        # choke point so every update path stores one taxonomy.
+        if updates.get("category"):
+            updates["category"] = self.resolve_category(updates["category"])
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         result = (
@@ -4083,30 +4112,50 @@ class SupabaseClient:
             logger.error(f"Error getting areas: {e}")
             return []
 
-    def resolve_area(
+    # Pre-realignment category taxonomy -> Gantt area (2026-06). Covers the
+    # historical TaskCategory enum plus the stragglers found live. Ambiguous
+    # legacy buckets (Operations & HR, Strategy & Research) are NOT mapped here —
+    # the realignment backfill classifies those per-task.
+    LEGACY_CATEGORY_MAP = {
+        "product & tech": "PRODUCT & TECHNOLOGY",
+        "product & technology": "PRODUCT & TECHNOLOGY",
+        "technology & product": "PRODUCT & TECHNOLOGY",
+        "r&d": "PRODUCT & TECHNOLOGY",
+        "bd & sales": "SALES & BUSINESS DEVELOPMENT",
+        "sales & bd": "SALES & BUSINESS DEVELOPMENT",
+        "marketing & communications": "SALES & BUSINESS DEVELOPMENT",
+        "legal & compliance": "LEGAL, CORPORATE & FINANCE",
+        "legal & admin": "LEGAL, CORPORATE & FINANCE",
+        "finance": "LEGAL, CORPORATE & FINANCE",
+        "finance & fundraising": "FUNDRAISING & INVESTOR RELATIONS",
+        "finance & business plan": "FUNDRAISING & INVESTOR RELATIONS",
+        "investor relations": "FUNDRAISING & INVESTOR RELATIONS",
+        "fundraising": "FUNDRAISING & INVESTOR RELATIONS",
+    }
+
+    def resolve_category(
         self, name: str | None, areas: list[dict] | None = None
-    ) -> tuple[str | None, str]:
-        """Map a free-text Area name to (area_id, area_label).
+    ) -> str:
+        """Canonicalize a task category against the live Gantt areas.
 
-        Case-insensitive exact match against active areas. Blank / 'non-area' /
-        no-match returns (None, 'non-area' or the given label) — never raises,
-        so the sheet reconcile + MCP task tools can call it inline. Used to turn
-        an Area cell/parameter into the FK + label the tasks table stores.
-
-        `areas` lets a batch caller (e.g. one reconcile cycle) pass a pre-fetched
-        area list so this doesn't re-query once per task.
+        Category IS the Gantt-area taxonomy (2026-06 realignment): exact
+        case-insensitive match against active areas wins, then the legacy
+        taxonomy map, then 'General' for blank/none. An unknown non-empty
+        value is RETURNED AS-IS (sheets-wins: never destroy what Eyal typed)
+        — the QA pass flags non-canonical categories instead.
         """
+        from models.schemas import GENERAL_CATEGORY
         label = (name or "").strip()
-        if not label or label.lower() in ("non-area", "none", "n/a", "-"):
-            return None, "non-area"
+        if not label or label.lower() in ("general", "non-area", "none", "n/a", "-"):
+            return GENERAL_CATEGORY
         try:
             area_rows = areas if areas is not None else self.get_areas()
             for a in area_rows:
                 if (a.get("name") or "").strip().lower() == label.lower():
-                    return a.get("id"), a.get("name")
+                    return a.get("name")
         except Exception as e:
-            logger.warning(f"resolve_area lookup failed (keeping label): {e}")
-        return None, label
+            logger.warning(f"resolve_category lookup failed (keeping label): {e}")
+        return self.LEGACY_CATEGORY_MAP.get(label.lower(), label)
 
     def add_area(
         self,

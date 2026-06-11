@@ -1,6 +1,6 @@
 # Known Issues — Gianluigi v2.2 (Post Session 3 + Live Ops Hardening)
 
-Current as of April 11, 2026.
+Current as of June 11, 2026.
 
 ---
 
@@ -8,6 +8,22 @@ Current as of April 11, 2026.
 
 ### Critical Bugs
 - None currently open (distribution pre-edit and Telegram orphans fixed in Phase 11)
+
+### Recently fixed (2026-06-11, category realignment branch)
+- **NULL-deadline data loss (FIXED):** hand-typed sheet dates like `20.6.26` were
+  pulled by reconcile and silently stored as NULL (`_serialize_datetime` only knew
+  ISO), erasing deadlines. Fix: `core/dates.parse_human_date` (day-first) at every
+  Sheet→DB date boundary; reconcile never pulls an unparseable date (flags it as
+  `bad_dates` instead) and normalizes sloppy-but-valid cells to ISO.
+- **Sheet row deletions resurrected (FIXED by design change):** reconcile re-added
+  any open DB task missing from the sheet. New sanctioned removal: status
+  `archived` — set it in the sheet/MCP/Telegram and reconcile moves the row to the
+  Archive tab and never re-adds it. Plain row deletion still resurrects (safety).
+- **Task category ≠ Gantt areas (FIXED):** the legacy 6-bucket category taxonomy
+  ("BD & Sales"…) was unrelated to the Gantt board areas, while the parallel
+  `area` field stayed 99% `non-area`. Category now IS the Gantt-area taxonomy
+  (live `areas` table + "General"); the separate task `area` surface was removed
+  (`tasks.area_id`/`area_label` columns retained but no longer written).
 
 ### Google Sheets API
 - **Intermittent "broken pipe":** Cloud Run idle connections to Sheets API occasionally break. **Mitigated** in Phase 10 with `_execute_with_retry()` (3 retries, exponential backoff). Monitor — should be rare now.

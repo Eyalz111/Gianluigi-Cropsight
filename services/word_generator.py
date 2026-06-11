@@ -155,7 +155,7 @@ def generate_summary_docx(
         # Branded (PR8) adds Area + Urgency columns + a green header; the
         # off-path stays the original 4-column "Light Grid Accent 1" table.
         if branded:
-            headers = ["Pri", "Action Item", "Area", "Owner", "Deadline", "Urgency"]
+            headers = ["Pri", "Action Item", "Category", "Owner", "Deadline", "Urgency"]
         else:
             headers = ["Pri", "Action Item", "Owner", "Deadline"]
         table = doc.add_table(rows=1, cols=len(headers))
@@ -180,7 +180,7 @@ def generate_summary_docx(
             if branded:
                 row.cells[0].text = t.get("priority", "M")
                 row.cells[1].text = item_text
-                row.cells[2].text = t.get("area_label", "") or "non-area"
+                row.cells[2].text = t.get("category", "") or "General"
                 row.cells[3].text = t.get("assignee", "") or "—"
                 row.cells[4].text = str(t.get("deadline", "") or "—")
                 urgency = (t.get("urgency") or "M").upper()

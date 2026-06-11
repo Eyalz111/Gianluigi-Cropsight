@@ -144,21 +144,24 @@ class Settings(BaseSettings):
     TASK_URGENCY_AREA_ENABLED: bool = Field(
         default=False,
         description=(
-            "SHADOW step of the operational-task upgrade: extraction + manual "
-            "injection populate tasks.urgency (H/M/L, time-pressure separate from "
-            "priority) and tasks.area (a Gantt area or 'non-area'), applying the "
-            "no-invented-dates rule (ASAP -> urgency H, deadline null). Off = "
-            "prompt + storage exactly as today (tasks take the column defaults). "
-            "No output reads these until the later flip flags."
+            "Extraction + manual injection populate tasks.urgency (H/M/L, "
+            "time-pressure separate from priority), applying the no-invented-dates "
+            "rule (ASAP -> urgency H, deadline null). Off = no urgency in the "
+            "extraction prompt (tasks take the column default M). NOTE (2026-06 "
+            "realignment): the separate 'area' field this flag used to cover is "
+            "gone — tasks.category now carries the Gantt-area taxonomy and is "
+            "always extracted/canonicalized, independent of this flag."
         ),
     )
     TASK_SHEET_URGENCY_AREA_ENABLED: bool = Field(
         default=False,
         description=(
-            "Add Urgency (col K) + Area (col L) to the Tasks sheet, APPENDED after "
-            "the col-J UUID identity (never relocated, so reconcile keeps matching). "
-            "Off = today's A:J 10-column layout. After flipping, run "
-            "scripts/repopulate_tasks_sheet.py to materialize K/L from the DB."
+            "Add Urgency (col K) to the Tasks sheet, APPENDED after the col-J "
+            "UUID identity (never relocated, so reconcile keeps matching). "
+            "Off = the A:J 10-column layout. (2026-06 realignment: the Area "
+            "column this flag used to add as col L was removed — Category col G "
+            "carries the Gantt-area taxonomy. Flag name kept to avoid prod env "
+            "churn.)"
         ),
     )
 
@@ -700,7 +703,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED: bool = Field(
         default=False,
-        description="Rank the morning-brief task line by urgency-then-priority (surfacing urgency=H ASAP tasks that have no deadline, which today's overdue filter drops) + annotate by area; add an urgency/area tag to task reminders (the EXPLICIT-deadline gate is unchanged — ASAP never fires a false deadline reminder); add per-area + per-urgency rollups to the weekly digest. OFF = today's outputs unchanged. Reads tasks.urgency/area_label (PR1 floor)."
+        description="Rank the morning-brief task line by urgency-then-priority (surfacing urgency=H ASAP tasks that have no deadline, which today's overdue filter drops) + annotate by category; add an urgency/category tag to task reminders (the EXPLICIT-deadline gate is unchanged — ASAP never fires a false deadline reminder); add per-category + per-urgency rollups to the weekly digest. OFF = today's outputs unchanged. Reads tasks.urgency/category (category = Gantt-area taxonomy since the 2026-06 realignment)."
     )
 
     # ==========================================================================
@@ -715,7 +718,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     SUMMARY_RICH_ENABLED: bool = Field(
         default=False,
-        description="Render the forward-facing rich meeting summary: an executive TL;DR (LLM headline with deterministic fallback, never invents facts), Urgency+Area columns on Action Items, a Decision Intelligence block (rationale/options/confidence/supersession), Risks & Blockers + per-area focus from the topic/area briefs, and a 'What changed since last time' cross-meeting delta. Tier-safe (every block filtered to the meeting's distribution tier). OFF = today's summary unchanged. Reads tasks.urgency/area_label (PR1 floor)."
+        description="Render the forward-facing rich meeting summary: an executive TL;DR (LLM headline with deterministic fallback, never invents facts), Urgency+Category columns on Action Items, a Decision Intelligence block (rationale/options/confidence/supersession), Risks & Blockers + per-category focus from the topic/area briefs, and a 'What changed since last time' cross-meeting delta. Tier-safe (every block filtered to the meeting's distribution tier). OFF = today's summary unchanged. Reads tasks.urgency/category (category = Gantt-area taxonomy since the 2026-06 realignment)."
     )
 
     # ==========================================================================
@@ -727,7 +730,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     SUMMARY_BRANDED_ENABLED: bool = Field(
         default=False,
-        description="Brand the distributed summary .docx + email with the CropSight palette (green #1A7A4C / gold #C9A227 / navy text) and add Area + Urgency columns to the Action Items table (closes the gap where the .docx/email dropped the new fields). OFF = today's plain document + 4-column email table, unchanged. Reads tasks.urgency/area_label (PR1 floor)."
+        description="Brand the distributed summary .docx + email with the CropSight palette (green #1A7A4C / gold #C9A227 / navy text) and add Category + Urgency columns to the Action Items table (closes the gap where the .docx/email dropped the new fields). OFF = today's plain document + 4-column email table, unchanged. Reads tasks.urgency/category (category = Gantt-area taxonomy since the 2026-06 realignment)."
     )
 
     # ==========================================================================

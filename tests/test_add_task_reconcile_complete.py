@@ -1,9 +1,10 @@
-"""PR10 — add_task writes the col-J UUID (+ K/L when enabled).
+"""PR10 — add_task writes the col-J UUID (+ K when the urgency column is enabled).
 
 The load-bearing fix: a row appended without its DB UUID is invisible to the
 v3 reconcile's identity match, so a write-mode reconcile re-creates it as a
 DUPLICATE task. add_task now writes the UUID in column J (the 10-column base
-layout) and urgency/area in K/L when those columns exist.
+layout) and urgency in K when that column exists. There is no Area column —
+the Gantt-area taxonomy lives in Category (2026-06 realignment).
 """
 from unittest.mock import patch, AsyncMock
 
@@ -19,8 +20,8 @@ async def _capture_add_task(**over):
     kwargs = dict(
         task="Ship pilot", assignee="Roye", source_meeting="Sync",
         deadline="2026-06-20", status="pending", priority="H",
-        created_date="2026-06-10", category="Cat", label="Lbl",
-        task_id="uuid-1", urgency="H", area_label="Product & Tech",
+        created_date="2026-06-10", category="PRODUCT & TECHNOLOGY", label="Lbl",
+        task_id="uuid-1", urgency="H",
     )
     kwargs.update(over)
     with patch.object(gs.sheets_service, "_append_row", mock_append), \
@@ -42,12 +43,11 @@ class TestAddTaskWritesUuid:
         assert len(vals) == 10
         assert vals[9] == ""
 
-    async def test_appends_urgency_area_when_columns_enabled(self):
+    async def test_appends_urgency_when_column_enabled(self):
         col_on = dict(gs.TASK_COLUMNS)
-        col_on["urgency"], col_on["area"] = "K", "L"
+        col_on["urgency"] = "K"
         with patch.object(gs, "TASK_COLUMNS", col_on):
             vals = await _capture_add_task()
-        assert len(vals) == 12
-        assert vals[9] == "uuid-1"            # J unchanged
-        assert vals[10] == "H"               # K = urgency
-        assert vals[11] == "Product & Tech"  # L = area
+        assert len(vals) == 11
+        assert vals[9] == "uuid-1"   # J unchanged
+        assert vals[10] == "H"       # K = urgency (no L/area cell post-realignment)

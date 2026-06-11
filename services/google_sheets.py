@@ -33,6 +33,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 from config.settings import settings
+from core.dates import parse_human_date
 
 logger = logging.getLogger(__name__)
 
@@ -86,18 +87,15 @@ COLORS = {
     "header_text": _hex_color("#FFFFFF"),         # White
 }
 
-# Category labels for data validation
-TASK_CATEGORIES = [
-    "Product & Tech",
-    "BD & Sales",
-    "Strategy & Research",
-    "Finance & Fundraising",
-    "Legal & Compliance",
-    "Operations & HR",
-]
+# Category labels for data validation — the Gantt-area taxonomy (2026-06
+# realignment). Source of truth is the live `areas` table; derived from the
+# single static mirror (models.schemas.TaskCategory) so the lists can't drift.
+from models.schemas import TaskCategory as _TaskCategory  # noqa: E402
 
-# Status labels for data validation
-TASK_STATUSES = ["pending", "in_progress", "done", "overdue"]
+TASK_CATEGORIES = [c.value for c in _TaskCategory]
+
+# Status labels for data validation ('archived' moves the row to the Archive tab)
+TASK_STATUSES = ["pending", "in_progress", "done", "overdue", "archived"]
 STAKEHOLDER_STATUSES = ["New", "Active", "Inactive", "Completed"]
 
 # Priority labels for data validation
@@ -256,12 +254,12 @@ TASK_COLUMNS = {
     "id": "J",             # Task UUID — robust Sheet<->DB identity (v3 reconcile)
 }
 
-# Operational floor (PR5): append Urgency=K, Area=L AFTER the col-J UUID identity
+# Operational floor (PR5): append Urgency=K AFTER the col-J UUID identity
 # (never relocate J — reconcile keys the Sheet<->DB match on it). Flag-gated; off =
-# today's A:J 10-column layout, byte-identical.
+# the A:J 10-column layout. The Area column (was L) was removed in the 2026-06
+# category realignment — Category (col G) now carries the Gantt-area taxonomy.
 if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
     TASK_COLUMNS["urgency"] = "K"
-    TASK_COLUMNS["area"] = "L"
 
 # Column indices (0-based) for formatting operations
 TASK_COL_INDEX = {k: ord(v) - ord("A") for k, v in TASK_COLUMNS.items()}
@@ -285,7 +283,7 @@ TASK_TRACKER_HEADERS = [
     "Status", "Category", "Source Meeting", "Created", "ID",
 ]
 if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
-    TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Urgency", "Area"]
+    TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Urgency"]
 
 DECISION_TRACKER_HEADERS = [
     "Label", "Decision", "Rationale", "Confidence",
@@ -459,13 +457,12 @@ class GoogleSheetsService:
         label: str = "",
         task_id: str = "",
         urgency: str = "M",
-        area_label: str = "non-area",
     ) -> bool:
         """
         Add a new task to the Task Tracker sheet.
 
         Column order follows TASK_COLUMNS: Priority, Label, Task, Owner,
-        Deadline, Status, Category, Source Meeting, Created, ID [, Urgency, Area].
+        Deadline, Status, Category, Source Meeting, Created, ID [, Urgency].
 
         Args:
             task: Task description.
@@ -475,15 +472,14 @@ class GoogleSheetsService:
             status: 'pending', 'in_progress', 'done', 'overdue'.
             priority: 'H', 'M', or 'L'.
             created_date: When the task was created (YYYY-MM-DD).
-            category: Task category (e.g., 'Product & Tech').
+            category: Task category — a Gantt area name or 'General'.
             label: Project label (e.g., 'Moldova Pilot').
             task_id: The DB task UUID — written to column J so the v3 reconcile
                 matches this row by identity. WITHOUT it the row is UUID-less and
                 a write-mode reconcile would treat it as new -> a DUPLICATE DB
                 task (PR10 fix; callers now pass the id they just created).
             urgency: 'H', 'M', or 'L' — written to column K when the sheet's
-                urgency/area columns are enabled.
-            area_label: Gantt area or 'non-area' — written to column L likewise.
+                urgency column is enabled.
 
         Returns:
             True if task was added successfully.
@@ -492,8 +488,8 @@ class GoogleSheetsService:
             logger.warning("TASK_TRACKER_SHEET_ID not configured")
             return False
 
-        # A:J always (J=id matches the 10-column base layout); K/L appended only
-        # when the urgency/area columns are enabled (TASK_COLUMNS then has them).
+        # A:J always (J=id matches the 10-column base layout); K appended only
+        # when the urgency column is enabled (TASK_COLUMNS then has it).
         values = [
             priority,
             label,
@@ -508,7 +504,6 @@ class GoogleSheetsService:
         ]
         if "urgency" in TASK_COLUMNS:
             values.append(urgency or "M")
-            values.append(area_label or "non-area")
 
         return await self._append_row(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
@@ -593,15 +588,12 @@ class GoogleSheetsService:
             "status": TASK_COLUMNS["status"],
             "priority": TASK_COLUMNS["priority"],
         }
-        # PR9: the urgency/area cells only exist when TASK_SHEET_URGENCY_AREA_ENABLED
-        # added K/L to TASK_COLUMNS. Map them (with an area_label alias) so a DB-side
-        # edit (e.g. MCP update_task) can keep the Sheet cell in lockstep — otherwise
-        # reconcile would later pull the stale Sheet value back over the edit.
+        # PR9: the urgency cell only exists when TASK_SHEET_URGENCY_AREA_ENABLED
+        # added K to TASK_COLUMNS. Map it so a DB-side edit (e.g. MCP update_task)
+        # can keep the Sheet cell in lockstep — otherwise reconcile would later
+        # pull the stale Sheet value back over the edit.
         if "urgency" in TASK_COLUMNS:
             column_map["urgency"] = TASK_COLUMNS["urgency"]
-        if "area" in TASK_COLUMNS:
-            column_map["area"] = TASK_COLUMNS["area"]
-            column_map["area_label"] = TASK_COLUMNS["area"]
 
         try:
             batch_data = []
@@ -664,6 +656,12 @@ class GoogleSheetsService:
             while len(row) < num_cols:
                 row.append("")
 
+            # Deadline cells are hand-typed ("20.6.26", "2026-06-20", ...).
+            # Normalize to ISO at the read boundary so every consumer compares
+            # and stores one format; keep the raw text so reconcile can rewrite
+            # the cell to ISO. Unparseable text stays raw (deadline == raw) —
+            # consumers must never turn that into a NULL (2026-06-11 incident).
+            _raw_deadline = row[TASK_COL_INDEX["deadline"]]
             _task = {
                 "row_number": i,
                 "priority": row[TASK_COL_INDEX["priority"]],
@@ -671,7 +669,8 @@ class GoogleSheetsService:
                 "task": row[TASK_COL_INDEX["task"]],
                 "assignee": row[TASK_COL_INDEX["owner"]],
                 "source_meeting": row[TASK_COL_INDEX["source_meeting"]],
-                "deadline": row[TASK_COL_INDEX["deadline"]],
+                "deadline": parse_human_date(_raw_deadline) or _raw_deadline,
+                "deadline_raw": _raw_deadline,
                 "status": row[TASK_COL_INDEX["status"]],
                 "category": row[TASK_COL_INDEX["category"]],
                 "created_date": row[TASK_COL_INDEX["created"]],
@@ -679,7 +678,6 @@ class GoogleSheetsService:
             }
             if "urgency" in TASK_COL_INDEX:
                 _task["urgency"] = row[TASK_COL_INDEX["urgency"]]
-                _task["area"] = row[TASK_COL_INDEX["area"]]
             tasks.append(_task)
 
         return tasks
@@ -698,31 +696,6 @@ class GoogleSheetsService:
             return 0
 
         try:
-            # Ensure Archive tab exists
-            tab_name = settings.TASK_TRACKER_TAB_NAME
-            meta = self.service.spreadsheets().get(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                fields="sheets.properties",
-            ).execute()
-
-            archive_exists = any(
-                s.get("properties", {}).get("title") == "Archive"
-                for s in meta.get("sheets", [])
-            )
-            if not archive_exists:
-                self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
-                ).execute()
-                # Add header row (matches TASK_TRACKER_HEADERS + Archived)
-                archive_headers = TASK_TRACKER_HEADERS + ["Archived"]
-                self.service.spreadsheets().values().update(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    range=f"Archive!A1:{chr(ord('A') + len(archive_headers) - 1)}1",
-                    valueInputOption="RAW",
-                    body={"values": [archive_headers]},
-                ).execute()
-
             # Find matching rows in active tab
             all_tasks = await self.get_all_tasks()
             titles_lower = {t.lower() for t in titles_to_archive}
@@ -730,54 +703,95 @@ class GoogleSheetsService:
                 t for t in all_tasks
                 if t.get("task", "").lower() in titles_lower and t.get("status", "").lower() == "done"
             ]
-
-            if not rows_to_archive:
-                return 0
-
-            # Copy rows to Archive tab (matches TASK_TRACKER_HEADERS + Archived)
-            archive_rows = []
-            for t in rows_to_archive:
-                archive_rows.append([
-                    t.get("priority", ""), t.get("label", ""), t.get("task", ""),
-                    t.get("assignee", ""), t.get("deadline", ""), t.get("status", ""),
-                    t.get("category", ""), t.get("source_meeting", ""),
-                    t.get("created_date", ""),
-                    datetime.now().strftime("%Y-%m-%d"),
-                ])
-
-            num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
-            self.service.spreadsheets().values().append(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range=f"Archive!A:{chr(ord('A') + num_archive_cols - 1)}",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": archive_rows},
-            ).execute()
-
-            # Delete archived rows from active tab (bottom-up to preserve row numbers)
-            row_numbers = sorted([t["row_number"] for t in rows_to_archive], reverse=True)
-            sid = self._get_sheet_id_by_name(
-                settings.TASK_TRACKER_SHEET_ID, tab_name
-            )
-            if sid is not None:
-                requests = [
-                    {"deleteDimension": {
-                        "range": {"sheetId": sid, "dimension": "ROWS",
-                                  "startIndex": r - 1, "endIndex": r}
-                    }}
-                    for r in row_numbers
-                ]
-                self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    body={"requests": requests},
-                ).execute()
-
-            logger.info(f"Archived {len(rows_to_archive)} completed tasks")
-            return len(rows_to_archive)
+            return await self.archive_task_rows(rows_to_archive)
 
         except Exception as e:
             logger.error(f"Error archiving tasks: {e}")
             return 0
+
+    def _ensure_archive_tab(self) -> None:
+        """Create the Archive tab (header = Tasks layout + Archived) if missing."""
+        meta = self.service.spreadsheets().get(
+            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+            fields="sheets.properties",
+        ).execute()
+        archive_exists = any(
+            s.get("properties", {}).get("title") == "Archive"
+            for s in meta.get("sheets", [])
+        )
+        if archive_exists:
+            return
+        self.service.spreadsheets().batchUpdate(
+            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
+        ).execute()
+        archive_headers = TASK_TRACKER_HEADERS + ["Archived"]
+        self.service.spreadsheets().values().update(
+            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+            range=f"Archive!A1:{chr(ord('A') + len(archive_headers) - 1)}1",
+            valueInputOption="RAW",
+            body={"values": [archive_headers]},
+        ).execute()
+
+    async def archive_task_rows(self, sheet_rows: list[dict]) -> int:
+        """
+        Move Tasks-tab rows (dicts from get_all_tasks, row_number included) to
+        the Archive tab and delete them from the active tab.
+
+        The archive row mirrors the Tasks layout (including the col-J UUID so
+        an archived task stays identifiable) plus an Archived date column.
+
+        Returns the number of rows moved.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID or not sheet_rows:
+            return 0
+
+        tab_name = settings.TASK_TRACKER_TAB_NAME
+        self._ensure_archive_tab()
+
+        archive_rows = []
+        for t in sheet_rows:
+            _row = [
+                t.get("priority", ""), t.get("label", ""), t.get("task", ""),
+                t.get("assignee", ""), str(t.get("deadline", "") or ""),
+                t.get("status", ""), t.get("category", ""),
+                t.get("source_meeting", ""), t.get("created_date", ""),
+                t.get("id", ""),
+            ]
+            if "urgency" in TASK_COLUMNS:
+                _row.append(t.get("urgency") or "")
+            _row.append(datetime.now().strftime("%Y-%m-%d"))  # Archived date
+            archive_rows.append(_row)
+
+        num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
+        self.service.spreadsheets().values().append(
+            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+            range=f"Archive!A:{chr(ord('A') + num_archive_cols - 1)}",
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": archive_rows},
+        ).execute()
+
+        # Delete archived rows from active tab (bottom-up to preserve row numbers)
+        row_numbers = sorted(
+            [t["row_number"] for t in sheet_rows if t.get("row_number")], reverse=True
+        )
+        sid = self._get_sheet_id_by_name(settings.TASK_TRACKER_SHEET_ID, tab_name)
+        if sid is not None and row_numbers:
+            requests = [
+                {"deleteDimension": {
+                    "range": {"sheetId": sid, "dimension": "ROWS",
+                              "startIndex": r - 1, "endIndex": r}
+                }}
+                for r in row_numbers
+            ]
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={"requests": requests},
+            ).execute()
+
+        logger.info(f"Archived {len(archive_rows)} task rows to Archive tab")
+        return len(archive_rows)
 
     async def rebuild_tasks_sheet(
         self, tasks_from_db: list[dict], force_empty: bool = False
@@ -828,6 +842,11 @@ class GoogleSheetsService:
         try:
             tab_name = settings.TASK_TRACKER_TAB_NAME
 
+            # Archived tasks live on the Archive tab, never the working view.
+            tasks_from_db = [
+                t for t in tasks_from_db if (t.get("status") or "") != "archived"
+            ]
+
             # Sort tasks: active statuses first, then by priority, then newest
             status_order = {"pending": 0, "in_progress": 1, "overdue": 2, "done": 3}
             priority_order = {"H": 0, "M": 1, "L": 2}
@@ -865,7 +884,6 @@ class GoogleSheetsService:
                 ]
                 if "urgency" in TASK_COLUMNS:
                     _row.append(t.get("urgency") or "M")
-                    _row.append(t.get("area_label") or "non-area")
                 rows.append(_row)
 
             # Clear the tab and write fresh data
@@ -1198,7 +1216,6 @@ class GoogleSheetsService:
             ]
             if "urgency" in TASK_COLUMNS:
                 _row.append(task.get("urgency") or "M")
-                _row.append(task.get("area") or task.get("area_label") or "non-area")
             values.append(_row)
 
         return await self._append_rows(
@@ -1253,7 +1270,7 @@ class GoogleSheetsService:
                 led_by,            # owner
                 "",                # deadline — follow-ups often don't have a parseable date
                 "pending",         # status
-                "Operations & HR", # category
+                "General",         # category — follow-up scheduling, no Gantt area
                 source_meeting,    # source meeting
                 created_date,      # created
             ])
@@ -1932,13 +1949,14 @@ class GoogleSheetsService:
                 rule_idx += 1
 
             # --- Conditional formatting: Category column (G) ---
+            # Gantt-area taxonomy (2026-06 realignment)
             category_rules = [
-                ("Product & Tech", COLORS["product_tech"]),
-                ("BD & Sales", COLORS["business_dev"]),
-                ("Strategy & Research", COLORS["marketing"]),
-                ("Finance & Fundraising", COLORS["finance"]),
-                ("Legal & Compliance", COLORS["legal_ip"]),
-                ("Operations & HR", COLORS["operations_hr"]),
+                ("PRODUCT & TECHNOLOGY", COLORS["product_tech"]),
+                ("SALES & BUSINESS DEVELOPMENT", COLORS["business_dev"]),
+                ("FUNDRAISING & INVESTOR RELATIONS", COLORS["finance"]),
+                ("LEGAL, CORPORATE & FINANCE", COLORS["legal_ip"]),
+                ("CLIENT DELIVERY & OPERATIONS", COLORS["marketing"]),
+                ("TEAM & HUMAN RESOURCES", COLORS["operations_hr"]),
             ]
             for text, color in category_rules:
                 requests.append(

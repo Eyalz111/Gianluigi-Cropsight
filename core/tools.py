@@ -12,6 +12,12 @@ Each tool is defined with:
 Tool implementations are in the services/ modules.
 """
 
+from models.schemas import TaskCategory
+
+# Category enum for tool schemas — derived from the single static mirror of
+# the Gantt-area taxonomy so the lists can't drift (2026-06 realignment).
+_CATEGORY_ENUM = [c.value for c in TaskCategory]
+
 
 # =============================================================================
 # v0.1 Tool Definitions
@@ -90,15 +96,8 @@ TOOL_CREATE_TASK = {
             },
             "category": {
                 "type": "string",
-                "enum": [
-                    "Product & Tech",
-                    "BD & Sales",
-                    "Legal & Compliance",
-                    "Finance & Fundraising",
-                    "Operations & HR",
-                    "Strategy & Research"
-                ],
-                "description": "Task category for organizational alignment"
+                "enum": _CATEGORY_ENUM,
+                "description": "Task category — one of the CropSight Gantt board areas, or 'General' for a genuine misfit"
             },
             "meeting_id": {
                 "type": "string",
@@ -129,15 +128,8 @@ TOOL_GET_TASKS = {
             },
             "category": {
                 "type": "string",
-                "enum": [
-                    "Product & Tech",
-                    "BD & Sales",
-                    "Legal & Compliance",
-                    "Finance & Fundraising",
-                    "Operations & HR",
-                    "Strategy & Research"
-                ],
-                "description": "Filter by task category (optional)"
+                "enum": _CATEGORY_ENUM,
+                "description": "Filter by task category — a Gantt board area (optional)"
             }
         },
         "required": []
@@ -159,8 +151,8 @@ TOOL_UPDATE_TASK = {
             },
             "status": {
                 "type": "string",
-                "enum": ["pending", "in_progress", "done"],
-                "description": "New status (optional)"
+                "enum": ["pending", "in_progress", "done", "archived"],
+                "description": "New status (optional). 'archived' removes the task from the working view (sheet + briefs) while keeping it in the DB."
             },
             "deadline": {
                 "type": "string",

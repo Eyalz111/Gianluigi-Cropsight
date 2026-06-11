@@ -1,10 +1,10 @@
-"""PR9 — close the urgency/area edit-back gaps.
+"""PR9 (updated for the 2026-06 category realignment) — urgency/category edit-back.
 
-Two surfaces: (a) the Sheet->DB reconcile now carries urgency/area, and
-(b) `supabase_client.resolve_area` turns a free-text Area into the FK + label
-the MCP task tools and the reconcile both write. Everything is gated on
-TASK_SHEET_URGENCY_AREA_ENABLED (the columns only exist when it's on), so the
-flag-off paths are unchanged.
+Two surfaces: (a) the Sheet->DB reconcile carries urgency (flag-gated K column)
+and Category (always — column G carries the Gantt-area taxonomy), and
+(b) `supabase_client.resolve_category` canonicalizes a free-text Category cell /
+MCP param against the live areas. The per-task "area" concept (area_id /
+area_label FK+label pair) is gone from all task surfaces.
 """
 from unittest.mock import patch, AsyncMock
 
@@ -15,85 +15,116 @@ from services.supabase_client import supabase_client
 from processors import sheets_sync
 
 
-# ---------------------------------------------------------------------------
-# resolve_area — the shared Area-name -> (id, label) resolver
-# ---------------------------------------------------------------------------
-class TestResolveArea:
-    _AREAS = [{"id": "a1", "name": "Product & Tech"}, {"id": "a2", "name": "BD & Sales"}]
+_AREAS = [
+    {"id": "a1", "name": "PRODUCT & TECHNOLOGY"},
+    {"id": "a2", "name": "SALES & BUSINESS DEVELOPMENT"},
+]
 
+
+# ---------------------------------------------------------------------------
+# resolve_category — the shared Category-name -> canonical-name resolver
+# ---------------------------------------------------------------------------
+class TestResolveCategory:
     def test_exact_match_case_insensitive(self):
-        with patch.object(supabase_client, "get_areas", return_value=self._AREAS):
-            assert supabase_client.resolve_area("product & tech") == ("a1", "Product & Tech")
+        with patch.object(supabase_client, "get_areas", return_value=_AREAS):
+            assert (
+                supabase_client.resolve_category("product & technology")
+                == "PRODUCT & TECHNOLOGY"
+            )
 
-    def test_blank_and_sentinels_are_non_area(self):
-        assert supabase_client.resolve_area("") == (None, "non-area")
-        assert supabase_client.resolve_area(None) == (None, "non-area")
-        assert supabase_client.resolve_area("non-area") == (None, "non-area")
+    def test_blank_and_sentinels_are_general(self):
+        for v in ("", None, "non-area", "none", "n/a", "-", "general", "General"):
+            assert supabase_client.resolve_category(v) == "General"
 
-    def test_no_match_keeps_the_label(self):
-        with patch.object(supabase_client, "get_areas", return_value=self._AREAS):
-            assert supabase_client.resolve_area("Marketing") == (None, "Marketing")
+    def test_legacy_taxonomy_is_mapped(self):
+        with patch.object(supabase_client, "get_areas", return_value=_AREAS):
+            assert (
+                supabase_client.resolve_category("bd & sales")
+                == "SALES & BUSINESS DEVELOPMENT"
+            )
+            assert (
+                supabase_client.resolve_category("Product & Tech")
+                == "PRODUCT & TECHNOLOGY"
+            )
 
-    def test_lookup_error_keeps_label(self):
+    def test_unknown_value_kept_as_is(self):
+        # sheets-wins: never destroy what Eyal typed — QA flags it instead
+        with patch.object(supabase_client, "get_areas", return_value=_AREAS):
+            assert supabase_client.resolve_category("Marketing") == "Marketing"
+
+    def test_lookup_error_falls_back_to_legacy_map(self):
         with patch.object(supabase_client, "get_areas", side_effect=RuntimeError("db down")):
-            assert supabase_client.resolve_area("BD & Sales") == (None, "BD & Sales")
+            assert (
+                supabase_client.resolve_category("bd & sales")
+                == "SALES & BUSINESS DEVELOPMENT"
+            )
+            assert supabase_client.resolve_category("Mystery") == "Mystery"
 
 
 # ---------------------------------------------------------------------------
-# _compare_task — the /sync diff path detects urgency/area edits only when on
+# _compare_task — the /sync diff path: category always, urgency only when on
 # ---------------------------------------------------------------------------
 class TestCompareTask:
     def _sheet(self):
-        return {"status": "pending", "assignee": "Roye", "urgency": "H", "area": "BD & Sales"}
+        return {
+            "status": "pending", "assignee": "Roye",
+            "urgency": "H", "category": "SALES & BUSINESS DEVELOPMENT",
+        }
 
     def _db(self):
-        return {"status": "pending", "assignee": "Roye", "urgency": "M", "area_label": "Product & Tech"}
+        return {
+            "status": "pending", "assignee": "Roye",
+            "urgency": "M", "category": "PRODUCT & TECHNOLOGY",
+        }
 
-    def test_off_ignores_urgency_area(self):
+    def test_off_ignores_urgency_but_detects_category(self):
         with patch.object(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
             ch = sheets_sync._compare_task(self._sheet(), self._db())
         assert "urgency" not in ch
-        assert "area_label" not in ch
+        # category is a first-class task column now — compared unconditionally
+        assert ch["category"]["to"] == "SALES & BUSINESS DEVELOPMENT"
 
     def test_on_detects_both(self):
         with patch.object(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", True):
             ch = sheets_sync._compare_task(self._sheet(), self._db())
         assert ch["urgency"]["to"] == "H"
-        assert ch["area_label"]["to"] == "BD & Sales"   # keyed by the DB column
+        assert ch["category"]["to"] == "SALES & BUSINESS DEVELOPMENT"
 
     def test_on_no_change_when_equal(self):
-        eq_sheet = {"urgency": "M", "area": "Product & Tech"}
+        eq_sheet = {"urgency": "M", "category": "PRODUCT & TECHNOLOGY"}
         with patch.object(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", True):
             ch = sheets_sync._compare_task(eq_sheet, self._db())
         assert "urgency" not in ch
-        assert "area_label" not in ch
+        assert "category" not in ch
 
 
 # ---------------------------------------------------------------------------
-# reconcile_tasks — the live path pulls an urgency edit Sheet->DB (gated)
+# reconcile_tasks — the live path pulls urgency (gated) + category edits
 # ---------------------------------------------------------------------------
 class TestReconcilePull:
-    def _setup(self):
+    def _setup(self, sheet_category="", db_category=""):
         sheet = [{
             "row_number": 2, "id": "t1", "task": "X", "assignee": "Roye",
             "status": "pending", "deadline": "", "priority": "M",
-            "category": "", "label": "", "urgency": "H", "area": "",
+            "category": sheet_category, "label": "", "urgency": "H",
         }]
         db = [{
             "id": "t1", "title": "X", "assignee": "Roye", "status": "pending",
-            "deadline": None, "priority": "M", "urgency": "M", "area_label": "non-area",
+            "deadline": None, "priority": "M", "urgency": "M",
+            "category": db_category,
         }]
         # snapshot matches the sheet's action fields → no action-field pulls,
-        # isolating the urgency pull.
+        # isolating the urgency/category pulls.
         snap = {"t1": {"status": "pending", "deadline": None, "priority": "M", "assignee": "Roye"}}
         return sheet, db, snap
 
-    async def _run(self, flag):
-        sheet, db, snap = self._setup()
+    async def _run(self, flag, **kw):
+        sheet, db, snap = self._setup(**kw)
         from services import google_sheets as gs
         with patch.object(gs.sheets_service, "get_all_tasks", AsyncMock(return_value=sheet)), \
              patch.object(sheets_sync.supabase_client, "get_tasks", return_value=db), \
              patch.object(sheets_sync.supabase_client, "get_sheet_snapshots", return_value=snap), \
+             patch.object(sheets_sync.supabase_client, "get_areas", return_value=_AREAS), \
              patch.object(sheets_sync.supabase_client, "log_action", return_value=None), \
              patch.object(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", flag):
             # dry_run → compute only, returns the summary
@@ -104,31 +135,43 @@ class TestReconcilePull:
         assert summary["matched"] == 1
         assert summary["pulled"] == 1   # just the urgency diff
 
-    async def test_off_does_not_pull(self):
+    async def test_off_does_not_pull_urgency(self):
         summary = await self._run(False)
         assert summary["matched"] == 1
         assert summary["pulled"] == 0
 
+    async def test_category_cell_edit_is_canonicalized_and_pulled(self):
+        # Eyal types a legacy name → canonicalized + pulled, regardless of the
+        # urgency flag (category is a first-class column now).
+        summary = await self._run(
+            False, sheet_category="bd & sales", db_category="General"
+        )
+        assert summary["matched"] == 1
+        assert summary["pulled"] == 1   # the category diff (urgency gated off)
+
 
 # ---------------------------------------------------------------------------
-# resolve_area area-cache param — a batch caller avoids re-querying get_areas
+# resolve_category areas-cache param — a batch caller avoids re-querying
 # ---------------------------------------------------------------------------
-class TestResolveAreaCache:
+class TestResolveCategoryCache:
     def test_uses_passed_cache_without_querying(self):
-        cache = [{"id": "a9", "name": "Strategy & Research"}]
+        cache = [{"id": "a9", "name": "CLIENT DELIVERY & OPERATIONS"}]
         with patch.object(supabase_client, "get_areas", side_effect=AssertionError("should not query")):
-            assert supabase_client.resolve_area("strategy & research", areas=cache) == ("a9", "Strategy & Research")
+            assert (
+                supabase_client.resolve_category("client delivery & operations", areas=cache)
+                == "CLIENT DELIVERY & OPERATIONS"
+            )
 
-    def test_empty_cache_means_no_match(self):
+    def test_empty_cache_keeps_unknown_as_is(self):
         with patch.object(supabase_client, "get_areas", side_effect=AssertionError("should not query")):
-            assert supabase_client.resolve_area("Anything", areas=[]) == (None, "Anything")
+            assert supabase_client.resolve_category("Anything", areas=[]) == "Anything"
 
 
 # ---------------------------------------------------------------------------
 # MCP task-tool helpers — the resolution/normalization logic, unit-tested
 # (the tools themselves are closures; this is the extracted core)
 # ---------------------------------------------------------------------------
-from services.mcp_server import _coerce_urgency, _resolve_area_fields
+from services.mcp_server import _coerce_urgency, _resolve_category_field
 
 
 class TestMcpTaskHelpers:
@@ -138,14 +181,14 @@ class TestMcpTaskHelpers:
         assert _coerce_urgency(None) == "M"
         assert _coerce_urgency("bogus") == "M"
 
-    def test_resolve_area_fields_none_is_skip(self):
-        # update_task semantics: area=None leaves the field untouched
-        fields, label = _resolve_area_fields(None, lambda a: (_ for _ in ()).throw(AssertionError()))
+    def test_resolve_category_field_none_is_skip(self):
+        # update_task semantics: category=None leaves the field untouched
+        fields, label = _resolve_category_field(None, lambda c: (_ for _ in ()).throw(AssertionError()))
         assert fields == {}
         assert label is None
 
-    def test_resolve_area_fields_resolves(self):
-        resolver = lambda a: ("a2", "BD & Sales")
-        fields, label = _resolve_area_fields("bd & sales", resolver)
-        assert fields == {"area_id": "a2", "area_label": "BD & Sales"}
-        assert label == "BD & Sales"
+    def test_resolve_category_field_resolves(self):
+        resolver = lambda c: "SALES & BUSINESS DEVELOPMENT"
+        fields, label = _resolve_category_field("bd & sales", resolver)
+        assert fields == {"category": "SALES & BUSINESS DEVELOPMENT"}
+        assert label == "SALES & BUSINESS DEVELOPMENT"

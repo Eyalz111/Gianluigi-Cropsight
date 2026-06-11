@@ -1,7 +1,8 @@
 """PR8 — branded summary artifacts (.docx + email) behind SUMMARY_BRANDED_ENABLED.
 
 Off = today's plain document / 4-column email, byte-for-byte. On = CropSight
-palette + the Area + Urgency columns the structured outputs drop today.
+palette + the Category + Urgency columns (Category = the Gantt-area taxonomy
+carried on task.category since the 2026-06 realignment).
 """
 from unittest.mock import patch
 
@@ -21,7 +22,7 @@ def _sample():
         sensitivity="founders",
         decisions=[{"description": "Adopt Postgres", "participants_involved": ["Roye"]}],
         tasks=[{"title": "Ship pilot", "assignee": "Roye", "deadline": "2026-06-20",
-                "priority": "H", "urgency": "H", "area_label": "Product & Tech"}],
+                "priority": "H", "urgency": "H", "category": "PRODUCT & TECHNOLOGY"}],
         follow_ups=[], open_questions=[], discussion_summary="We discussed the stack.",
     )
 
@@ -46,16 +47,16 @@ class TestDocx:
         headers = [c.text for c in tbl.rows[0].cells]
         assert headers == ["Pri", "Action Item", "Owner", "Deadline"]
 
-    def test_on_adds_area_and_urgency_columns(self):
+    def test_on_adds_category_and_urgency_columns(self):
         with patch.object(settings, "SUMMARY_BRANDED_ENABLED", True):
             data = generate_summary_docx(**_sample())
         tbl = _action_items_table(data)
         assert len(tbl.columns) == 6
         headers = [c.text for c in tbl.rows[0].cells]
-        assert headers == ["Pri", "Action Item", "Area", "Owner", "Deadline", "Urgency"]
+        assert headers == ["Pri", "Action Item", "Category", "Owner", "Deadline", "Urgency"]
         # the data row carries the new fields
         data_row = [c.text for c in tbl.rows[1].cells]
-        assert "Product & Tech" in data_row
+        assert "PRODUCT & TECHNOLOGY" in data_row
         assert "H" in data_row
 
     def test_on_title_is_brand_green(self):

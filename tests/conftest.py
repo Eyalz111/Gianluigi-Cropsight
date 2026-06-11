@@ -11,6 +11,73 @@ from datetime import datetime, timezone
 
 
 # =============================================================================
+# HARD GUARD — no live Google APIs / Telegram from tests. Ever.
+# =============================================================================
+# 2026-06-11 incident: a full local pytest run (with a real .env present)
+# reached the LIVE Google Sheets API through the lazily-built service
+# singletons and rebuilt the production Tasks sheet with 0 rows — wiping it.
+# The same class of leak also sent phantom Telegram prep-pings and crashed
+# the live intelligence-signal pipeline mid-suite. This is the root cause of
+# the recurring "tasks vanished" incidents (2026-04, 2026-06-09).
+#
+# This autouse fixture makes any attempt to BUILD a real Google API client or
+# touch the real Telegram Application raise immediately. Tests that exercise
+# these layers already mock at the singleton/instance level (svc._service =
+# MagicMock(), patch("...sheets_service"), etc.) — those still work, because
+# the guard only blocks the *real client construction* path.
+#
+# Live Supabase access is intentionally NOT blocked: the tier3 suite contains
+# deliberate live-DB integration tests with cleanup. Sheets/Drive/Calendar/
+# Gmail/Telegram have no such sanctioned tests.
+
+class _LiveAccessBlocked(RuntimeError):
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _block_live_external_services(monkeypatch):
+    import services.google_sheets as _gs
+    import services.google_drive as _gd
+    import services.google_calendar as _gc
+    import services.gmail as _gm
+    import services.telegram_bot as _tg
+
+    def _blocked_build(self, *a, **k):
+        raise _LiveAccessBlocked(
+            "Blocked: tests must not build real Google API clients "
+            "(see conftest guard, 2026-06-11 live-sheet wipe incident). "
+            "Mock the service singleton or set <svc>._service to a MagicMock."
+        )
+
+    for mod, cls_name, singleton_name in (
+        (_gs, "GoogleSheetsService", "sheets_service"),
+        (_gd, "GoogleDriveService", "drive_service"),
+        (_gc, "GoogleCalendarService", "calendar_service"),
+        (_gm, "GmailService", "gmail_service"),
+    ):
+        cls = getattr(mod, cls_name)
+        monkeypatch.setattr(cls, "_build_service", _blocked_build)
+        # Drop any real client a previous (pre-guard) build left on the
+        # singleton so the next access goes through the blocked builder.
+        singleton = getattr(mod, singleton_name)
+        if not isinstance(getattr(singleton, "_service", None), (MagicMock, AsyncMock, type(None))):
+            monkeypatch.setattr(singleton, "_service", None)
+
+    def _blocked_app(self):
+        # A test that preset a fake app (bot._app = MagicMock()) keeps it —
+        # only the REAL Application.builder() construction path is blocked.
+        if self._app is not None:
+            return self._app
+        raise _LiveAccessBlocked(
+            "Blocked: tests must not build the real Telegram Application "
+            "(see conftest guard). Set telegram_bot._app to a MagicMock or "
+            "mock the send methods."
+        )
+
+    monkeypatch.setattr(_tg.TelegramBot, "app", property(_blocked_app))
+
+
+# =============================================================================
 # Mock Settings
 # =============================================================================
 

@@ -76,18 +76,18 @@ def _coerce_urgency(value) -> str:
     return u if u in ("H", "M", "L") else "M"
 
 
-def _resolve_area_fields(area, resolver) -> tuple[dict, str | None]:
-    """Turn an Area name into the DB fields the tasks table stores.
+def _resolve_category_field(category, resolver) -> tuple[dict, str | None]:
+    """Canonicalize a Category (= Gantt area, 2026-06 realignment) for update_task.
 
-    `area is None` means "leave area untouched" (update_task semantics) → ({}, None).
-    Otherwise `resolver` (supabase_client.resolve_area) maps it to area_id+area_label.
-    Returns (fields_to_merge_into_updates, resolved_label_or_None). Extracted from
-    the create/update_task tool closures so the resolution logic is unit-testable.
+    `category is None` means "leave it untouched" → ({}, None). Otherwise
+    `resolver` (supabase_client.resolve_category) canonicalizes it against the
+    live areas. Returns (fields_to_merge_into_updates, resolved_label_or_None).
+    Extracted from the tool closures so the resolution logic is unit-testable.
     """
-    if area is None:
+    if category is None:
         return {}, None
-    area_id, area_label = resolver(area)
-    return {"area_id": area_id, "area_label": area_label}, area_label
+    canonical = resolver(category)
+    return {"category": canonical}, canonical
 
 
 def _sanitize_records(records: list[dict], exclude_fields: set | None = None) -> list[dict]:
@@ -2051,9 +2051,12 @@ class MCPServer:
         @mcp.tool(
             name="update_task",
             description=(
-                "[TASKS] Update an existing task's assignee, deadline, status, or priority. "
-                "Use get_tasks() first to find the task_id. "
+                "[TASKS] Update an existing task's assignee, deadline, status, priority, "
+                "urgency, or category. Use get_tasks() first to find the task_id. "
                 "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
+                "status='archived' removes the task from the working view (sheet + briefs) "
+                "while keeping it in the DB for history. category is a Gantt board area "
+                "name (e.g. 'PRODUCT & TECHNOLOGY') or 'General'. "
                 "Always confirm the change with Eyal before calling this tool."
             ),
         )
@@ -2064,7 +2067,7 @@ class MCPServer:
             status: str | None = None,
             priority: str | None = None,
             urgency: str | None = None,
-            area: str | None = None,
+            category: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -2078,25 +2081,34 @@ class MCPServer:
                     updates["status"] = status
                 if priority is not None:
                     updates["priority"] = priority
-                # PR9: urgency (H/M/L time-pressure) + area (a Gantt area name or
-                # 'non-area'). Area resolves to the FK + label the tasks table stores.
+                # urgency (H/M/L time-pressure) + category (the Gantt-area
+                # taxonomy, canonicalized against the live areas table).
                 if urgency is not None:
                     updates["urgency"] = _coerce_urgency(urgency)
-                _area_fields, _area_label = _resolve_area_fields(area, _sc.resolve_area)
-                updates.update(_area_fields)
+                _cat_fields, _cat_label = _resolve_category_field(category, _sc.resolve_category)
+                updates.update(_cat_fields)
 
-                # Parse deadline (natural language support)
+                # Parse deadline: day-first numeric dates FIRST (20.6.26 must
+                # mean 20 June everywhere — same convention as the sheet),
+                # then dateutil fuzzy for natural language ("next Friday").
                 parsed_deadline = None
                 if deadline is not None:
-                    try:
-                        from dateutil.parser import parse as parse_date
-                        parsed_deadline = parse_date(deadline, fuzzy=True).date()
-                        updates["deadline"] = parsed_deadline.isoformat()
-                    except (ValueError, ImportError):
-                        updates["deadline"] = deadline  # Pass as-is, let DB handle
+                    from core.dates import parse_human_date
+                    _iso = parse_human_date(deadline)
+                    if _iso:
+                        from datetime import date as _date
+                        parsed_deadline = _date.fromisoformat(_iso)
+                        updates["deadline"] = _iso
+                    else:
+                        try:
+                            from dateutil.parser import parse as parse_date
+                            parsed_deadline = parse_date(deadline, fuzzy=True).date()
+                            updates["deadline"] = parsed_deadline.isoformat()
+                        except (ValueError, ImportError):
+                            updates["deadline"] = deadline  # update_task drops it if unparseable
 
                 if not updates:
-                    return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority, urgency, area.")
+                    return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority, urgency, category.")
 
                 # Get current task for response context
                 current = _sc.get_task(task_id) if hasattr(_sc, "get_task") else None
@@ -2120,13 +2132,13 @@ class MCPServer:
                                 sheet_fields["priority"] = priority
                             if parsed_deadline is not None:
                                 sheet_fields["deadline"] = parsed_deadline.isoformat()
-                            # PR9: keep the Sheet's K/L cells in lockstep so the
-                            # reconcile pull doesn't revert this edit (no-ops when
-                            # the sheet columns aren't enabled).
+                            # Keep the Sheet's Urgency/Category cells in lockstep
+                            # so the reconcile pull doesn't revert this edit
+                            # (urgency no-ops when the K column isn't enabled).
                             if "urgency" in updates:
                                 sheet_fields["urgency"] = updates["urgency"]
-                            if _area_label is not None:
-                                sheet_fields["area"] = _area_label
+                            if _cat_label is not None:
+                                sheet_fields["category"] = _cat_label
                             await sheets_service.update_task_row(row, **sheet_fields)
                         else:
                             warnings.append("Task not found in Google Sheets — Sheets not synced")
@@ -2177,8 +2189,8 @@ class MCPServer:
                 "(Eyal, Roye, Paolo, Yoram) or empty string if unassigned. "
                 "Deadline accepts: 'March 30', 'next Friday', '2026-04-15'. "
                 "priority=H/M/L is importance; urgency=H/M/L is time-pressure "
-                "(use urgency=H for 'ASAP' WITHOUT inventing a deadline). area is a "
-                "Gantt area name (e.g. 'Product & Tech') or 'non-area'. "
+                "(use urgency=H for 'ASAP' WITHOUT inventing a deadline). category is a "
+                "Gantt board area name (e.g. 'PRODUCT & TECHNOLOGY') or 'General'. "
                 "Always confirm with Eyal before creating."
             ),
         )
@@ -2190,25 +2202,31 @@ class MCPServer:
             category: str | None = None,
             label: str = "",
             urgency: str = "M",
-            area: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
                 from services.google_sheets import sheets_service
 
-                # Parse deadline
+                # Parse deadline: day-first numeric first (sheet convention),
+                # dateutil fuzzy as the natural-language fallback.
                 parsed_deadline = None
                 if deadline:
-                    try:
-                        from dateutil.parser import parse as parse_date
-                        parsed_deadline = parse_date(deadline, fuzzy=True).date()
-                    except (ValueError, ImportError):
-                        pass  # Will pass as None
+                    from core.dates import parse_human_date
+                    _iso = parse_human_date(deadline)
+                    if _iso:
+                        from datetime import date as _date
+                        parsed_deadline = _date.fromisoformat(_iso)
+                    else:
+                        try:
+                            from dateutil.parser import parse as parse_date
+                            parsed_deadline = parse_date(deadline, fuzzy=True).date()
+                        except (ValueError, ImportError):
+                            pass  # Will pass as None
 
-                # PR9: urgency (time-pressure) + area (resolved to FK + label).
-                # create defaults area to non-area, so resolve even when None.
+                # urgency (time-pressure) + category canonicalized against the
+                # live Gantt areas (blank/None -> 'General').
                 _u = _coerce_urgency(urgency)
-                _area_id, _area_label = _sc.resolve_area(area)
+                _category = _sc.resolve_category(category)
 
                 # Create in Supabase
                 task = _sc.create_task(
@@ -2216,10 +2234,8 @@ class MCPServer:
                     assignee=assignee,
                     priority=priority,
                     deadline=parsed_deadline,
-                    category=category,
+                    category=_category,
                     urgency=_u,
-                    area_id=_area_id,
-                    area_label=_area_label,
                 )
 
                 # Sheets sync
@@ -2234,13 +2250,12 @@ class MCPServer:
                         status="pending",
                         priority=priority,
                         created_date=today,
-                        category=category or "",
+                        category=_category,
                         label=label,
-                        # PR10: write the UUID (col J) + urgency/area so the row is
+                        # PR10: write the UUID (col J) + urgency so the row is
                         # reconcile-complete — otherwise it'd be re-created as a dup.
                         task_id=task.get("id", "") if isinstance(task, dict) else "",
                         urgency=_u,
-                        area_label=_area_label,
                     )
                 except Exception as sheets_err:
                     warnings.append(f"Sheets sync failed: {sheets_err}")

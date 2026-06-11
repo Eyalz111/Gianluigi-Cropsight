@@ -655,7 +655,9 @@ def _gather_task_urgency_items(all_tasks: list[dict], today_str: str) -> list[di
                 "deadline": t.get("deadline", ""),
                 "deadline_confidence": t.get("deadline_confidence", "NONE"),
                 "urgency": t.get("urgency") or "M",
-                "area": t.get("area_label") or "non-area",
+                # category = Gantt-area taxonomy (2026-06 realignment); the
+                # render key stays 'area' (it IS the area chip).
+                "area": t.get("category") or "General",
             }
             for t in candidates[:3]
         ]
@@ -698,8 +700,8 @@ def _task_urgency_line(item: dict, esc) -> tuple[int, str]:
         when = "ASAP"          # time-critical but no committed date — never faked
     else:
         when = "no date set"
-    area = item.get("area") or "non-area"
-    area_str = f" · {esc(area)}" if area and area != "non-area" else ""
+    area = item.get("area") or "General"
+    area_str = f" · {esc(area)}" if area and area not in ("non-area", "General") else ""
     icon = "🔴" if urg == "H" else "🟡"
     rank = 0 if urg == "H" else 1
     return rank, f"  {icon} {esc(item['title'])}{assignee} — {when}{area_str}"

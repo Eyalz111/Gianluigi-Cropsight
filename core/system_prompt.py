@@ -467,13 +467,14 @@ EXTRACTION INSTRUCTIONS:
      impression to EXPLICIT. Only mark EXPLICIT when you can point to a
      specific utterance in the transcript.
    - Assign priority: H (high), M (medium), L (low)
-   - Classify into one of these categories:
-     * "Product & Tech" — development, engineering, platform, infrastructure
-     * "BD & Sales" — business development, partnerships, client outreach
-     * "Legal & Compliance" — legal, regulatory, contracts, IP
-     * "Finance & Fundraising" — fundraising, budgets, investor relations
-     * "Operations & HR" — hiring, team operations, processes
-     * "Strategy & Research" — market research, competitive analysis, strategy
+   - Classify into one of these categories (= the CropSight Gantt board areas):
+     * "PRODUCT & TECHNOLOGY" — development, engineering, platform, R&D
+     * "SALES & BUSINESS DEVELOPMENT" — BD, partnerships, client outreach, marketing
+     * "FUNDRAISING & INVESTOR RELATIONS" — fundraising, investors, grants
+     * "LEGAL, CORPORATE & FINANCE" — legal, regulatory, contracts, IP, budgets
+     * "CLIENT DELIVERY & OPERATIONS" — pilots, delivery, client operations
+     * "TEAM & HUMAN RESOURCES" — hiring, team operations, processes
+     * "General" — a genuine misfit for every area above
    - Cite the timestamp
 
 3. Identify FOLLOW-UP MEETINGS proposed or scheduled
@@ -798,7 +799,7 @@ def format_summary(
         priority = t.get("priority", "M")
         ref = t.get("transcript_timestamp", "")
         if rich:
-            area = t.get("area_label") or "non-area"
+            area = t.get("category") or "General"
             urgency = t.get("urgency") or "M"
             tasks_text += (
                 f"| {i} | {title} | {area} | {assignee} | {deadline} | "

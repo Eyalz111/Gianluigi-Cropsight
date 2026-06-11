@@ -1,4 +1,7 @@
-"""PR5 — Tasks sheet gains Urgency (K) + Area (L), appended AFTER the col-J UUID.
+"""PR5 — Tasks sheet gains Urgency (K), appended AFTER the col-J UUID.
+
+Since the 2026-06 category realignment there is NO separate Area column —
+the Gantt-area taxonomy lives in the existing Category column (G).
 
 The load-bearing invariant: the UUID stays in column J (index 9) in BOTH layouts,
 so reconcile's Sheet<->DB identity match can't break. Flag off = today's A:J layout.
@@ -35,10 +38,9 @@ class TestLayout:
             # UUID identity unchanged — the load-bearing invariant
             assert gs.TASK_COLUMNS["id"] == "J"
             assert gs.TASK_COL_INDEX["id"] == 9
-            # appended AFTER it
+            # appended AFTER it: urgency only — no Area column post-realignment
             assert gs.TASK_COLUMNS["urgency"] == "K"
-            assert gs.TASK_COLUMNS["area"] == "L"
+            assert "area" not in gs.TASK_COLUMNS
             assert gs.TASK_COL_INDEX["urgency"] == 10
-            assert gs.TASK_COL_INDEX["area"] == 11
-            assert gs.TASK_TRACKER_HEADERS[-2:] == ["Urgency", "Area"]
-            assert len(gs.TASK_TRACKER_HEADERS) == 12
+            assert gs.TASK_TRACKER_HEADERS[-1] == "Urgency"
+            assert len(gs.TASK_TRACKER_HEADERS) == 11

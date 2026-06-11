@@ -1,15 +1,21 @@
-"""PR3 — shadow: extraction + manual injection populate urgency/area.
+"""PR3 (updated for the 2026-06 category realignment) — extraction + manual
+injection populate urgency + a canonical category.
 
 Tests the two pure seams: the post-extraction normalizer
-(transcript_processor._normalize_task_urgency_area) and the manual-injection
-unifier (debrief._unify_manual_task), incl. the no-invented-dates guardrail.
+(transcript_processor._normalize_task_urgency_area — urgency coercion, category
+canonicalization against the live Gantt areas, the no-invented-dates guardrail)
+and the manual-injection unifier (debrief._unify_manual_task). The per-task
+area_id/area_label pair is gone — category carries the Gantt-area taxonomy.
 """
 from unittest.mock import patch
 
 import processors.debrief as debrief
 from processors.transcript_processor import _normalize_task_urgency_area
 
-AREAS = [{"id": "a-bd", "name": "BD & Sales"}, {"id": "a-pt", "name": "Product & Tech"}]
+AREAS = [
+    {"id": "a-bd", "name": "SALES & BUSINESS DEVELOPMENT"},
+    {"id": "a-pt", "name": "PRODUCT & TECHNOLOGY"},
+]
 
 
 # -------------------------------------------------- extraction normalizer -----
@@ -19,12 +25,22 @@ class TestNormalizer:
         _normalize_task_urgency_area(tasks, AREAS)
         assert [t["urgency"] for t in tasks] == ["H", "M", "M", "L"]
 
-    def test_area_resolves_or_non_area(self):
-        tasks = [{"area": "bd & sales"}, {"area": "nonsense"}, {"area": None}]
+    def test_category_canonicalized(self):
+        tasks = [
+            {"category": "sales & business development"},  # live-area match
+            {"category": "bd & sales"},                    # legacy taxonomy
+            {"category": "nonsense"},                      # unknown — kept as-is
+            {"category": None},                            # blank -> General
+        ]
         _normalize_task_urgency_area(tasks, AREAS)
-        assert tasks[0]["area_id"] == "a-bd" and tasks[0]["area_label"] == "BD & Sales"
-        assert tasks[1]["area_id"] is None and tasks[1]["area_label"] == "non-area"
-        assert tasks[2]["area_label"] == "non-area"
+        assert tasks[0]["category"] == "SALES & BUSINESS DEVELOPMENT"
+        assert tasks[1]["category"] == "SALES & BUSINESS DEVELOPMENT"
+        assert tasks[2]["category"] == "nonsense"
+        assert tasks[3]["category"] == "General"
+        # the area FK/label pair is gone from the task surface
+        for t in tasks:
+            assert "area_id" not in t
+            assert "area_label" not in t
 
     def test_backstop_drops_inferred_deadline_on_urgent(self):
         tasks = [{"urgency": "H", "deadline": "2026-07-01", "deadline_confidence": "INFERRED"}]
@@ -67,14 +83,20 @@ class TestUnifyManualTask:
             out = debrief._unify_manual_task({"title": "do x", "label": "Moldova Pilot"})
         assert out["label"] == "Moldova Pilot"
 
-    def test_area_word_match(self):
-        with _areas([{"id": "a-bd", "name": "BD & Sales"}]):
-            out = debrief._unify_manual_task({"title": "follow up on the BD & Sales pipeline"})
-        assert out["area_id"] == "a-bd"
-        assert out["area_label"] == "BD & Sales"
+    def test_category_hint_canonicalized(self):
+        # the LLM's legacy-taxonomy hint resolves through the legacy map
+        with _areas(AREAS):
+            out = debrief._unify_manual_task({"title": "do x", "category": "bd & sales"})
+        assert out["category"] == "SALES & BUSINESS DEVELOPMENT"
 
-    def test_area_defaults_non_area(self):
+    def test_category_word_match(self):
+        with _areas([{"id": "a-bd", "name": "SALES & BUSINESS DEVELOPMENT"}]):
+            out = debrief._unify_manual_task(
+                {"title": "follow up on the SALES & BUSINESS DEVELOPMENT pipeline"}
+            )
+        assert out["category"] == "SALES & BUSINESS DEVELOPMENT"
+
+    def test_category_defaults_general(self):
         with _areas(AREAS):
             out = debrief._unify_manual_task({"title": "buy more coffee"})
-        assert out["area_id"] is None
-        assert out["area_label"] == "non-area"
+        assert out["category"] == "General"
