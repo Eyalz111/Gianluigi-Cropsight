@@ -64,9 +64,14 @@ def _block_live_external_services(monkeypatch):
             monkeypatch.setattr(singleton, "_service", None)
 
     def _blocked_app(self):
+        # A test that preset a fake app (bot._app = MagicMock()) keeps it —
+        # only the REAL Application.builder() construction path is blocked.
+        if self._app is not None:
+            return self._app
         raise _LiveAccessBlocked(
-            "Blocked: tests must not touch the real Telegram Application "
-            "(see conftest guard). Mock telegram_bot / its send methods."
+            "Blocked: tests must not build the real Telegram Application "
+            "(see conftest guard). Set telegram_bot._app to a MagicMock or "
+            "mock the send methods."
         )
 
     monkeypatch.setattr(_tg.TelegramBot, "app", property(_blocked_app))
