@@ -141,3 +141,84 @@ class TestSchedulerBootReconstruction:
                    return_value={"status": "ok", "details": {"slot": "2026-06-12:midday"}}):
             await sched.start()
         assert sched._last_slot == "2026-06-12:midday"
+
+
+# =============================================================================
+# morning_brief catch-up (no-guard scheduler — runs a missed brief, no double-run)
+# =============================================================================
+
+class TestMorningBriefCatchup:
+    @pytest.mark.asyncio
+    async def test_catchup_runs_when_past_trigger_and_not_run_today(self):
+        import schedulers.morning_brief_scheduler as mod
+        sched = mod.MorningBriefScheduler()
+
+        runs = {"n": 0}
+
+        async def fake_run():
+            runs["n"] += 1
+            sched._running = False  # stop after the catch-up fires
+        sched._run_brief = fake_run
+        sched._heartbeat = lambda *a, **k: None
+
+        fixed = _dt.datetime(2026, 6, 12, 8, 0, tzinfo=mod._ISRAEL_TZ)  # 08:00 IST, past 07:00
+        with patch.object(mod, "datetime") as mock_dt, \
+             patch.object(mod.settings, "MORNING_BRIEF_HOUR", 7), \
+             patch("schedulers.fire_once.last_ok_day_key", return_value=None):  # not run today
+            mock_dt.now.return_value = fixed
+            await sched.start()
+
+        assert runs["n"] == 1, "a missed brief past the trigger must be caught up, not skipped"
+        assert sched._last_run_date == "2026-06-12"
+
+    @pytest.mark.asyncio
+    async def test_no_double_run_when_already_ran_today(self):
+        import schedulers.morning_brief_scheduler as mod
+        sched = mod.MorningBriefScheduler()
+
+        runs = {"n": 0}
+
+        async def fake_run():
+            runs["n"] += 1
+        sched._run_brief = fake_run
+        sched._heartbeat = lambda *a, **k: None
+
+        async def fake_sleep():
+            sched._running = False  # break the loop at the sleep step
+        sched._sleep_until_trigger = fake_sleep
+
+        fixed = _dt.datetime(2026, 6, 12, 8, 0, tzinfo=mod._ISRAEL_TZ)
+        with patch.object(mod, "datetime") as mock_dt, \
+             patch.object(mod.settings, "MORNING_BRIEF_HOUR", 7), \
+             patch("schedulers.fire_once.last_ok_day_key", return_value="2026-06-12"):  # already ran today
+            mock_dt.now.return_value = fixed
+            await sched.start()
+
+        assert runs["n"] == 0, "must not re-run today's brief after a restart"
+
+    @pytest.mark.asyncio
+    async def test_no_stale_brief_past_grace_window(self):
+        import schedulers.morning_brief_scheduler as mod
+        sched = mod.MorningBriefScheduler()
+
+        runs = {"n": 0}
+
+        async def fake_run():
+            runs["n"] += 1
+        sched._run_brief = fake_run
+        sched._heartbeat = lambda *a, **k: None
+
+        async def fake_sleep():
+            sched._running = False
+        sched._sleep_until_trigger = fake_sleep
+
+        # 13:00 IST — 6h past the 07:00 trigger, beyond the 4h grace window.
+        fixed = _dt.datetime(2026, 6, 12, 13, 0, tzinfo=mod._ISRAEL_TZ)
+        with patch.object(mod, "datetime") as mock_dt, \
+             patch.object(mod.settings, "MORNING_BRIEF_HOUR", 7), \
+             patch("schedulers.fire_once.last_ok_day_key", return_value=None):
+            mock_dt.now.return_value = fixed
+            await sched.start()
+
+        assert runs["n"] == 0, "a brief 6h late must NOT be sent (stale)"
+        assert sched._last_run_date == "2026-06-12", "today must be marked handled so it waits for tomorrow"

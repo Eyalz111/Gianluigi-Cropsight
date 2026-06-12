@@ -24,12 +24,19 @@ logger = logging.getLogger(__name__)
 # by an hour near Fri/Sat midnight. [audit P4-02]
 _ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 
+# How long after the trigger a restart will still "catch up" a missed brief. Past
+# this, the day is marked handled (no stale night-time "morning" brief). [audit P4-03]
+_CATCHUP_GRACE_HOURS = 4
+
 
 class MorningBriefScheduler:
     """Triggers morning brief at MORNING_BRIEF_HOUR IST daily."""
 
     def __init__(self):
         self._running = False
+        # YYYY-MM-DD (IST) of the last brief cycle, reconstructed on boot — the
+        # restart-safe fire-once guard. [audit P4-03]
+        self._last_run_date: str | None = None
 
     async def start(self) -> None:
         """Loop: sleep until next trigger time, then run."""
@@ -37,19 +44,60 @@ class MorningBriefScheduler:
             logger.warning("Morning brief scheduler already running")
             return
         self._running = True
+        # Restart-safe fire-once: rebuild the "ran today" guard from the last
+        # successful heartbeat so a Cloud Run cycle neither double-fires nor
+        # (via the catch-up below) silently skips today's brief. [audit P4-03]
+        try:
+            from schedulers.fire_once import last_ok_day_key
+            self._last_run_date = last_ok_day_key("morning_brief") or self._last_run_date
+            if self._last_run_date:
+                logger.info(f"Morning brief: reconstructed last-run date {self._last_run_date} on boot")
+        except Exception as e:
+            logger.warning(f"Morning brief fire-once reconstruct failed (non-fatal): {e}")
         logger.info(
             f"Morning brief scheduler started (hour: {settings.MORNING_BRIEF_HOUR} IST)"
         )
 
         while self._running:
             try:
+                now_ist = datetime.now(_ISRAEL_TZ)
+                today = now_ist.strftime("%Y-%m-%d")
+                trigger_today = now_ist.replace(
+                    hour=settings.MORNING_BRIEF_HOUR, minute=0, second=0, microsecond=0
+                )
+                # CATCH-UP: if a restart landed just after today's trigger and the
+                # brief hasn't run, fire it NOW — the old code's `now >= trigger →
+                # +1day` silently SKIPPED that day. Bounded to a grace window so a
+                # restart late in the day doesn't push a stale "morning" brief at
+                # night; past the window we mark today handled and wait for
+                # tomorrow. [audit P4-03]
+                if now_ist >= trigger_today and self._last_run_date != today:
+                    if now_ist < trigger_today + timedelta(hours=_CATCHUP_GRACE_HOURS):
+                        await self._run_brief()
+                        self._heartbeat()
+                    else:
+                        logger.info(
+                            f"Morning brief: past the {_CATCHUP_GRACE_HOURS}h catch-up window "
+                            f"for {today} — skipping to tomorrow"
+                        )
+                    self._last_run_date = today
+                    continue
+
                 await self._sleep_until_trigger()
                 if not self._running:
                     break
+
+                # Guard against a double-run (e.g. the catch-up already fired today).
+                today = datetime.now(_ISRAEL_TZ).strftime("%Y-%m-%d")
+                if self._last_run_date == today:
+                    await asyncio.sleep(3600)
+                    continue
+
                 await self._run_brief()
+                self._last_run_date = today
                 # Heartbeat AFTER a completed cycle so a wedged sleep-until loop
-                # is visible to /status and the QA scheduler. Was previously
-                # un-monitored entirely. [audit P4-01]
+                # is visible to /status and the QA scheduler, AND so the fire-once
+                # guard can be reconstructed from it on the next boot. [audit P4-01/P4-03]
                 self._heartbeat()
             except asyncio.CancelledError:
                 break
