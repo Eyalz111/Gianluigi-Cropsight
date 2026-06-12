@@ -1318,6 +1318,7 @@ class SupabaseClient:
         self,
         source_meeting_id: str,
         follow_ups: list[dict],
+        sensitivity: str | None = None,
     ) -> list[dict]:
         """
         Create multiple follow-up meetings in a single batch.
@@ -1325,6 +1326,10 @@ class SupabaseClient:
         Args:
             source_meeting_id: UUID of the source meeting.
             follow_ups: List of follow-up meeting dicts.
+            sensitivity: Meeting tier to stamp on each row at insert. [audit P1-05]
+                Only pass once the follow_up_meetings.sensitivity column exists
+                (gated by FOLLOW_UP_SENSITIVITY_ENABLED) — writing an unknown
+                column would reject the whole insert.
 
         Returns:
             List of created follow-up meeting records.
@@ -1341,6 +1346,13 @@ class SupabaseClient:
             }
             for f in follow_ups
         ]
+
+        # [audit P1-05] Stamp the tier atomically at insert (mirrors P1-01 for the
+        # other 3 child tables) so a propagate failure can't leave a CEO meeting's
+        # follow-up team-visible.
+        if sensitivity:
+            for _row in data:
+                _row["sensitivity"] = sensitivity
 
         result = self.client.table("follow_up_meetings").insert(data).execute()
         logger.info(f"Created {len(result.data)} follow-up meetings")

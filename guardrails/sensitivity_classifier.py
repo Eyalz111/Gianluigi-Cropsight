@@ -332,8 +332,9 @@ def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
         Dict with counts of updated items.
     """
     from services.supabase_client import supabase_client
+    from config.settings import settings
 
-    counts = {"tasks": 0, "decisions": 0, "open_questions": 0}
+    counts = {"tasks": 0, "decisions": 0, "open_questions": 0, "follow_up_meetings": 0}
     # [audit P1-01] Track which tables failed so callers can ALERT instead of
     # the leak going silent (each UPDATE used to swallow its error with only a log).
     failed: list[str] = []
@@ -373,6 +374,22 @@ def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
     except Exception as e:
         logger.error(f"Failed to propagate sensitivity to open_questions: {e}")
         failed.append("open_questions")
+
+    # [audit P1-05] 4th child table. Gated on the flag because the column only
+    # exists after the migration; follow_up_meetings keys on source_meeting_id
+    # (NOT meeting_id like the other three).
+    if settings.FOLLOW_UP_SENSITIVITY_ENABLED:
+        try:
+            result = (
+                supabase_client.client.table("follow_up_meetings")
+                .update({"sensitivity": sensitivity})
+                .eq("source_meeting_id", meeting_id)
+                .execute()
+            )
+            counts["follow_up_meetings"] = len(result.data) if result.data else 0
+        except Exception as e:
+            logger.error(f"Failed to propagate sensitivity to follow_up_meetings: {e}")
+            failed.append("follow_up_meetings")
 
     total = sum(counts.values())
     if total > 0:

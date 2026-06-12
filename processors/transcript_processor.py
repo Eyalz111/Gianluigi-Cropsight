@@ -1187,11 +1187,14 @@ async def store_meeting_data(
         supabase_client.create_tasks_batch(meeting_id, tasks, sensitivity=sensitivity)
         logger.info(f"Stored {len(tasks)} tasks")
 
-    # Store follow-up meetings
-    # NOTE: follow_up_meetings has no sensitivity column yet (audit P1-05);
-    # tier is carried only by propagate where the column exists.
+    # Store follow-up meetings. [audit P1-05] Only stamp the tier once the
+    # follow_up_meetings.sensitivity column exists (migration applied + flag on);
+    # otherwise pass None so the insert doesn't reference a missing column.
     if follow_ups:
-        supabase_client.create_follow_ups_batch(meeting_id, follow_ups)
+        _fu_sensitivity = sensitivity if settings.FOLLOW_UP_SENSITIVITY_ENABLED else None
+        supabase_client.create_follow_ups_batch(
+            meeting_id, follow_ups, sensitivity=_fu_sensitivity
+        )
         logger.info(f"Stored {len(follow_ups)} follow-up meetings")
 
     # Store open questions
