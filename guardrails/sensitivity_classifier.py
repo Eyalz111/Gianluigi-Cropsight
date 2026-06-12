@@ -304,10 +304,17 @@ def classify_sensitivity_llm(content: str) -> str:
             return "ceo"
         if result in ("normal", "team"):
             return "founders"
-        return "founders"
+        # Fail CLOSED: an unrecognized response must never downgrade the tier
+        # (the keyword pre-pass already ran). Restrict to CEO-only. [audit P5-01]
+        logger.warning(
+            f"LLM sensitivity classification returned unrecognized response {result!r}; "
+            "failing closed to 'ceo'"
+        )
+        return "ceo"
     except Exception as e:
-        logger.warning(f"LLM sensitivity classification failed: {e}")
-        return "founders"
+        # Fail CLOSED on any error — never leak CEO content to the team. [audit P5-01]
+        logger.warning(f"LLM sensitivity classification failed: {e}; failing closed to 'ceo'")
+        return "ceo"
 
 
 def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:

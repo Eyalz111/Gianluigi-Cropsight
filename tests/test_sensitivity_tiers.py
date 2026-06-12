@@ -241,12 +241,24 @@ class TestClassifySensitivityLLM:
             result = classify_sensitivity_llm("x" * 600)
         assert result == "founders"
 
-    def test_llm_failure_returns_founders(self):
+    def test_llm_failure_fails_closed_to_ceo(self):
+        # [audit P5-01] On an LLM error the classifier must FAIL CLOSED: the
+        # keyword pre-pass already ran, so an Anthropic outage must never
+        # DOWNGRADE the tier and leak CEO content to the founding team.
         from guardrails.sensitivity_classifier import classify_sensitivity_llm
         with patch("core.llm.call_llm") as mock_llm:
             mock_llm.side_effect = Exception("API error")
             result = classify_sensitivity_llm("x" * 600)
-        assert result == "founders"
+        assert result == "ceo"
+
+    def test_llm_unrecognized_response_fails_closed_to_ceo(self):
+        # [audit P5-01] An unparseable/garbled LLM response must also fail
+        # closed to 'ceo' rather than the old fail-open 'founders'.
+        from guardrails.sensitivity_classifier import classify_sensitivity_llm
+        with patch("core.llm.call_llm") as mock_llm:
+            mock_llm.return_value = ("¯\\_(ツ)_/¯ not a tier", {})
+            result = classify_sensitivity_llm("x" * 600)
+        assert result == "ceo"
 
 
 class TestInterpersonalSignalFlag:
