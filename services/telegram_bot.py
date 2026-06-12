@@ -1950,6 +1950,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             # Surface pending approvals before debrief (wrapped — a stale DB
             # row or a schema drift here should NOT kill the whole handler).
             try:
+                from services.supabase_client import supabase_client  # [audit P3-06]
                 pending = supabase_client.get_pending_approval_summary()
                 if pending:
                     pending_note = (
@@ -4339,17 +4340,54 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 f"Pushed *{task_text[:50]}* to {new_deadline}. Sheets updated."
             )
         elif intent == "discuss":
+            # Mirror the taskdiscuss BUTTON path: open_questions require a
+            # source meeting_id, so anchor to the task's source meeting and
+            # only confirm on success — never a silent NameError + false
+            # "added to agenda". [audit P3-06]
+            from services.supabase_client import supabase_client
             try:
+                task_db_id = task_info.get("task_id")
+                source_meeting_id = None
+                if task_db_id:
+                    lookup = (
+                        supabase_client.client.table("tasks")
+                        .select("meeting_id")
+                        .eq("id", task_db_id)
+                        .limit(1)
+                        .execute()
+                    )
+                    if lookup.data:
+                        source_meeting_id = lookup.data[0].get("meeting_id")
+                if not source_meeting_id:
+                    raise ValueError(
+                        f"No source meeting_id for task {task_db_id} — cannot anchor open_question"
+                    )
                 supabase_client.create_open_question(
+                    meeting_id=source_meeting_id,
                     question=f"Discuss overdue task: {task_text}",
                     raised_by="Eyal",
                 )
-            except Exception:
-                pass
-            await self.send_message(
-                update.effective_chat.id,
-                f"Added *{task_text[:50]}* to next meeting agenda."
-            )
+                await self.send_message(
+                    update.effective_chat.id,
+                    f"Added *{task_text[:50]}* to next meeting agenda."
+                )
+            except Exception as e:
+                logger.error(f"Failed to create discussion item from task reply: {e}")
+                await self.send_message(
+                    update.effective_chat.id,
+                    f"⚠️ Couldn't add *{task_text[:50]}* to the agenda — please add it manually.",
+                )
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL,
+                        "telegram_bot.task_reply_discuss",
+                        f"Failed to create open_question for discuss reply on "
+                        f"'{task_text[:60]}': {e}",
+                        error=e,
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Alert on discuss-reply failure also failed: {alert_err}")
         else:
             await self.send_message(
                 update.effective_chat.id,
@@ -4525,6 +4563,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             return
 
         from processors.debrief import finalize_debrief, confirm_debrief
+        from services.supabase_client import supabase_client  # [audit P3-06]
 
         chat_id = query.message.chat_id
 

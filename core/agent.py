@@ -24,11 +24,15 @@ Usage:
 import logging
 from typing import Any
 
-from anthropic import Anthropic
+# Retained as a test seam — several tests patch `core.agent.Anthropic` to
+# block real client creation. The agent itself no longer builds a client;
+# all LLM calls route through core.llm. [audit P6-01]
+from anthropic import Anthropic  # noqa: F401
 
 from config.settings import settings
 from config.team import get_team_member
 from core.conversation_agent import ConversationAgent
+from core.llm import call_llm
 from core.router import classify_intent
 from core.system_prompt import (
     get_system_prompt,
@@ -57,7 +61,8 @@ class GianluigiAgent:
         """
         Initialize the agent with Claude client and configuration.
         """
-        self.client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        # No per-agent Anthropic client: all calls go through core.llm's
+        # singleton (cost tracking + prompt cache + one connection pool). [audit P6-01]
         self.model = settings.model_agent
         self.system_prompt = get_system_prompt()
         # Prompt caching: cache the ~4,300-token system prompt across calls
@@ -433,15 +438,15 @@ class GianluigiAgent:
             open_questions=open_questions,
         )
 
-        # Generate prep document with Claude (background task, uses background tier)
-        response = self.client.messages.create(
+        # Generate prep document with Claude (background tier). Routed through
+        # core.llm so the call is cost-tracked and the system prompt is cached. [audit P6-01]
+        prep_document, _ = call_llm(
+            prompt=prep_prompt,
             model=settings.model_background,
             max_tokens=2048,
+            call_site="meeting_prep",
             system=self.system_prompt,
-            messages=[{"role": "user", "content": prep_prompt}],
         )
-
-        prep_document = self._extract_text_response(response)
 
         # Log the action
         supabase_client.log_action(
@@ -1042,18 +1047,6 @@ class GianluigiAgent:
                     })
 
         return {"results": results[:20], "count": len(results)}
-
-    # =========================================================================
-    # Helper Methods
-    # =========================================================================
-
-    def _extract_text_response(self, response) -> str:
-        """Extract text content from Claude response."""
-        text_parts = []
-        for block in response.content:
-            if hasattr(block, "text"):
-                text_parts.append(block.text)
-        return "\n".join(text_parts)
 
 
 # Singleton instance for easy import

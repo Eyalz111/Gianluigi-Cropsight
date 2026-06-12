@@ -715,10 +715,22 @@ class MCPServer:
 
                 # --- gantt row->topic tag mapping ---
                 if content_type == "gantt_tag_mapping":
-                    from processors.gantt_tagging import apply_row_tags
-
                     content = pending.get("content") or {}
                     sheet_name = content.get("sheet_name")
+
+                    # Reject must NOT perform the write. [audit P3-05]
+                    if decision != "approve":
+                        supabase_client.delete_pending_approval(proposal_id)
+                        supabase_client.log_action(
+                            "gantt_tag_proposal_rejected",
+                            details={"proposal_id": proposal_id, "sheet_name": sheet_name},
+                            triggered_by="eyal",
+                        )
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
+                        return _success({"decision": "rejected"})
+
+                    from processors.gantt_tagging import apply_row_tags
+
                     mapping = edits if edits is not None else content.get("candidates", [])
                     result = await apply_row_tags(sheet_name, mapping)
                     supabase_client.delete_pending_approval(proposal_id)

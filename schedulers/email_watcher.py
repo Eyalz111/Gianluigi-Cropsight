@@ -126,6 +126,23 @@ class EmailWatcher:
 
                 # Check if this is an approval reply
                 if self._is_approval_reply(subject):
+                    # I1/I2: only Eyal can approve/distribute. A co-founder CC'd
+                    # on (or forwarded) an approval-request email must NOT be
+                    # able to reply "approve" and trigger distribution to the
+                    # whole team. [audit P5-02]
+                    eyal_email = (settings.EYAL_EMAIL or "").lower()
+                    if not eyal_email or sender_email.lower() != eyal_email:
+                        logger.warning(
+                            f"Ignoring approval reply from non-Eyal sender {sender_email}"
+                        )
+                        supabase_client.log_action(
+                            action="approval_reply_rejected_non_eyal",
+                            details={"sender": sender_email, "subject": subject},
+                            triggered_by="system",
+                        )
+                        await gmail_service.mark_as_read(msg_id)
+                        self._processed_ids.add(msg_id)
+                        continue
                     await self._handle_approval_reply(msg_id, body, member_name, subject)
                 # Check if it has attachments
                 elif attachments:

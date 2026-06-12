@@ -891,19 +891,43 @@ class GoogleSheetsService:
             end_col = chr(ord("A") + num_cols - 1)
             clear_range = f"'{tab_name}'!A:{end_col}"
 
-            self.service.spreadsheets().values().clear(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range=clear_range,
-            ).execute()
+            # Route BOTH clear and write through the retry wrapper so an
+            # idle-wake broken pipe between them can't wipe the sheet. [audit P3-02]
+            self._execute_with_retry(
+                self.service.spreadsheets().values().clear(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=clear_range,
+                )
+            )
 
-            # Write all data (header + tasks)
+            # Write all data (header + tasks). If this fails AFTER the clear
+            # succeeded, the live view is empty — fire a CRITICAL alert with the
+            # row count so an operator can rebuild immediately. [audit P3-02]
             write_range = f"'{tab_name}'!A1:{end_col}{len(rows)}"
-            self.service.spreadsheets().values().update(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range=write_range,
-                valueInputOption="RAW",
-                body={"values": rows},
-            ).execute()
+            try:
+                self._execute_with_retry(
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=write_range,
+                        valueInputOption="RAW",
+                        body={"values": rows},
+                    )
+                )
+            except Exception as write_err:
+                logger.critical(
+                    f"Tasks sheet CLEARED but write FAILED — {len(sorted_tasks)} rows "
+                    f"missing from the live view: {write_err}"
+                )
+                try:
+                    from services.supabase_client import supabase_client
+                    supabase_client.log_action(
+                        action="sheets_rebuild_write_failed",
+                        details={"sheet": "Tasks", "row_count": len(sorted_tasks), "error": str(write_err)},
+                        triggered_by="system",
+                    )
+                except Exception:
+                    pass
+                raise
 
             logger.info(f"Rebuilt Tasks sheet: {len(sorted_tasks)} tasks written")
 
@@ -998,17 +1022,40 @@ class GoogleSheetsService:
             num_cols = len(DECISION_COLUMNS)
             end_col = chr(ord("A") + num_cols - 1)
 
-            self.service.spreadsheets().values().clear(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range=f"Decisions!A:{end_col}",
-            ).execute()
+            # Route BOTH clear and write through the retry wrapper. The
+            # Decisions sheet has NO reconcile self-heal, so a clear-then-failed-
+            # write is a PERMANENT wipe — retry + CRITICAL alert. [audit P3-02]
+            self._execute_with_retry(
+                self.service.spreadsheets().values().clear(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"Decisions!A:{end_col}",
+                )
+            )
 
-            self.service.spreadsheets().values().update(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range=f"Decisions!A1:{end_col}{len(rows)}",
-                valueInputOption="RAW",
-                body={"values": rows},
-            ).execute()
+            try:
+                self._execute_with_retry(
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=f"Decisions!A1:{end_col}{len(rows)}",
+                        valueInputOption="RAW",
+                        body={"values": rows},
+                    )
+                )
+            except Exception as write_err:
+                logger.critical(
+                    f"Decisions sheet CLEARED but write FAILED — {len(sorted_decisions)} rows "
+                    f"PERMANENTLY missing (no reconcile self-heal): {write_err}"
+                )
+                try:
+                    from services.supabase_client import supabase_client
+                    supabase_client.log_action(
+                        action="sheets_rebuild_write_failed",
+                        details={"sheet": "Decisions", "row_count": len(sorted_decisions), "error": str(write_err)},
+                        triggered_by="system",
+                    )
+                except Exception:
+                    pass
+                raise
 
             logger.info(f"Rebuilt Decisions sheet: {len(sorted_decisions)} decisions written")
 
