@@ -34,6 +34,7 @@ from typing import Any
 
 from config.settings import settings
 from core.llm import call_llm
+from guardrails.prompt_safety import wrap_untrusted, ANTI_INJECTION_CLAUSE
 from services.supabase_client import supabase_client
 from services.embeddings import embedding_service
 
@@ -206,9 +207,13 @@ async def generate_document_summary(
     if len(content) > max_chars:
         truncated += "\n\n[... document truncated for summarization ...]"
 
-    prompt = f"""Summarize the following document for CropSight's internal knowledge base.
+    # [audit P5-04] The title + body are untrusted (ingested document) — delimit
+    # them so an embedded "ignore the above" can't redirect the summary.
+    prompt = f"""{ANTI_INJECTION_CLAUSE}
 
-Document title: {title}
+Summarize the following document for CropSight's internal knowledge base.
+
+Document title: {wrap_untrusted(title, 'document_title')}
 
 Guidelines:
 - Write a concise summary (up to {max_length} words)
@@ -219,7 +224,7 @@ Guidelines:
 - If it's a contract/MOU, include parties, key terms, and dates
 
 Document content:
-{truncated}"""
+{wrap_untrusted(truncated, 'document')}"""
 
     try:
         summary, _ = call_llm(

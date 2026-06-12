@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 
 from config.prompt_registry import prompt_registry
+from guardrails.prompt_safety import wrap_untrusted, ANTI_INJECTION_CLAUSE
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,12 @@ def system_prompt_synthesis() -> str:
     Establishes the news anchor / editor-in-chief character.
     Tries YAML registry first, falls back to inline generation.
     """
+    # [audit P5-04] Append the anti-injection clause to whichever base prompt is
+    # used, so the synthesis is told to treat the (web-sourced) research blocks as
+    # untrusted data.
     yaml_prompt = prompt_registry.get("signal_synthesis_system")
     if yaml_prompt:
-        return yaml_prompt
+        return yaml_prompt + "\n\n" + ANTI_INJECTION_CLAUSE
     banned_list = ", ".join(f'"{p}"' for p in BANNED_PHRASES)
 
     return f"""You are the editor-in-chief and lead correspondent of the CropSight Intelligence Signal — a weekly market intelligence publication for a 4-person AgTech startup that builds ML-powered crop yield forecasting.
@@ -62,7 +66,7 @@ ABSOLUTE RULES:
 
 BANNED PHRASES (never use these): {banned_list}
 
-FORMAT: Write in clean markdown. Use ## for section headers. Use bullet points for lists. Keep paragraphs short (2-3 sentences max)."""
+FORMAT: Write in clean markdown. Use ## for section headers. Use bullet points for lists. Keep paragraphs short (2-3 sentences max).""" + "\n\n" + ANTI_INJECTION_CLAUSE
 
 
 def user_prompt_synthesis(context: dict, research_results: dict) -> str:
@@ -79,10 +83,12 @@ def user_prompt_synthesis(context: dict, research_results: dict) -> str:
     Returns:
         Formatted user prompt string.
     """
-    # Format research results
+    # Format research results. [audit P5-04] Perplexity returns text indexed from
+    # the open web — untrusted. Delimit each block so a planted instruction in a
+    # web page can't steer the signal synthesis (which feeds a separate approval).
     research_text = ""
     for section, content in research_results.items():
-        research_text += f"\n### Research: {section}\n{content}\n"
+        research_text += f"\n### Research: {section}\n{wrap_untrusted(content, 'web_research')}\n"
 
     # Format context
     crops = ", ".join(context.get("active_crops", []))

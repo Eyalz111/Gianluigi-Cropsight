@@ -15,6 +15,7 @@ from functools import lru_cache
 
 from config.settings import settings
 from core.llm import call_llm
+from guardrails.prompt_safety import wrap_untrusted, ANTI_INJECTION_CLAUSE
 
 logger = logging.getLogger(__name__)
 
@@ -184,8 +185,13 @@ async def extract_email_intelligence(
         '"text": "...", "assignee": "...", "speaker": "...", "entity": "...", '
         '"related_to": "...", "sensitive": false}'
     )
+    # [audit P5-04] The email path has NO approval gate before the morning brief,
+    # so harden it: an adversarial body cannot pose as instructions.
+    system = system + "\n\n" + ANTI_INJECTION_CLAUSE
 
-    prompt = f"Sender: {sender}\nSubject: {subject}\n\nBody:\n{body[:3000]}"
+    prompt = wrap_untrusted(
+        f"Sender: {sender}\nSubject: {subject}\n\nBody:\n{body[:3000]}", "email"
+    )
 
     try:
         text, _usage = call_llm(
