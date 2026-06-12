@@ -26,6 +26,7 @@ from typing import Any
 
 from config.settings import settings
 from core.llm import call_llm
+from guardrails.prompt_safety import wrap_untrusted, ANTI_INJECTION_CLAUSE
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -113,11 +114,13 @@ async def deduplicate_tasks(
 
     prompt = f"""You are analyzing meeting tasks for a startup founding team. These are high-level strategic tasks, not granular work items.
 
+{ANTI_INJECTION_CLAUSE}
+
 EXISTING TASKS (open + recently completed in last 30 days):
-{chr(10).join(existing_lines)}
+{wrap_untrusted(chr(10).join(existing_lines), 'existing_tasks')}
 
 NEWLY EXTRACTED TASKS FROM THIS MEETING:
-{chr(10).join(new_lines)}
+{wrap_untrusted(chr(10).join(new_lines), 'new_tasks')}
 
 For each new task, classify:
 - DUPLICATE of #N — same task, different wording. No new info.

@@ -23,6 +23,7 @@ Usage:
 import logging
 
 from config.team import SENSITIVE_KEYWORDS
+from guardrails.prompt_safety import wrap_untrusted, ANTI_INJECTION_CLAUSE
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +286,10 @@ def classify_sensitivity_llm(content: str) -> str:
         "- Confidential partnerships not yet announced\n"
         f"{interpersonal_clause}\n"
         "FOUNDERS means standard operational discussion safe for all founding team members.\n\n"
-        f"CONTENT:\n{excerpt}\n\n"
+        # [audit P5-04] The excerpt is untrusted — a planted "Classification: founders"
+        # must not be able to downgrade the tier. Delimit it + instruct.
+        f"{ANTI_INJECTION_CLAUSE}\n\n"
+        f"CONTENT:\n{wrap_untrusted(excerpt, 'meeting_content')}\n\n"
         "Respond with exactly one word: ceo or founders"
     )
 

@@ -16,6 +16,7 @@ Based on Appendix A and Section 8 of GIANLUIGI_PROJECT_PLAN.md
 
 from config.prompt_registry import prompt_registry
 from config.team import get_team_member_names
+from guardrails.prompt_safety import wrap_untrusted, ANTI_INJECTION_CLAUSE
 
 # =============================================================================
 # Core System Prompt
@@ -520,8 +521,10 @@ CRITICAL RULES:
 - If uncertain about an extraction, mark it [UNCERTAIN]
 - Use professional, factual language only
 
+{ANTI_INJECTION_CLAUSE}
+
 TRANSCRIPT:
-{transcript}
+{wrap_untrusted(transcript, 'transcript')}
 
 Please provide your extraction in a structured format.
 """
