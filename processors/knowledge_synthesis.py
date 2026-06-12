@@ -266,14 +266,46 @@ def _gather_topic_sources(topic_id: str) -> list[dict]:
     return sources
 
 
-async def _rag_chunks(topic_name: str) -> list[str]:
-    """Best-effort top-k semantic chunks for the topic. Never raises."""
+async def _rag_chunks(topic_name: str, max_level: int = 3) -> list[str]:
+    """Best-effort top-k semantic chunks for the topic, filtered to source
+    meetings whose tier does NOT exceed the topic's tier (max_level). Never raises.
+
+    match_embeddings doesn't return sensitivity, so derive it from each hit's
+    source meeting and drop chunks above max_level — otherwise a CEO-tier meeting
+    chunk bleeds into a lower-tier topic brief (whose tier comes from its OWN
+    source meetings) and then flows to team-facing area briefs. Mirrors
+    knowledge_readback._relevant_chunks. [audit P2-09]
+    """
     try:
         from services.embeddings import embedding_service
 
         emb = await embedding_service.embed_text(topic_name)
         hits = supabase_client.search_embeddings(emb, limit=_RAG_CHUNKS, source_type="meeting")
-        return [h.get("chunk_text", "") for h in hits if h.get("chunk_text")]
+
+        # Back-resolve the source-meeting tier for each hit.
+        src_ids = list({h.get("source_id") for h in hits if h.get("source_id")})
+        tiers: dict[str, str] = {}
+        if src_ids:
+            rows = (
+                supabase_client.client.table("meetings")
+                .select("id, sensitivity")
+                .in_("id", src_ids)
+                .execute()
+                .data
+                or []
+            )
+            tiers = {r["id"]: r.get("sensitivity") for r in rows}
+
+        out = []
+        for h in hits:
+            tier = tiers.get(h.get("source_id"))
+            # Unknown tier → treat as FOUNDERS (level 3), i.e. conservative.
+            if _SENS_ORDER.get((tier or "founders").lower(), 3) > max_level:
+                continue
+            txt = h.get("chunk_text", "")
+            if txt:
+                out.append(txt)
+        return out
     except Exception as e:
         logger.warning(f"[synthesis] RAG enrichment skipped for '{topic_name}': {e}")
         return []
@@ -290,7 +322,12 @@ async def synthesize_topic_brief(topic: dict, use_rag: bool = True) -> dict | No
         if not sources:
             logger.info(f"[synthesis] topic '{topic_name}' has no source meetings — skipping")
             return None
-        chunks = await _rag_chunks(topic_name) if use_rag else []
+        # The topic's tier is the max across its OWN source meetings; RAG chunks
+        # pulled from other (possibly higher-tier) meetings must not exceed it. [audit P2-09]
+        topic_level = _SENS_ORDER.get(
+            _max_sensitivity([_to_sensitivity(s.get("tier")) for s in sources]).value, 3
+        )
+        chunks = await _rag_chunks(topic_name, topic_level) if use_rag else []
 
         prompt = _build_topic_prompt(topic_name, sources, chunks)
         response, _usage = call_llm(

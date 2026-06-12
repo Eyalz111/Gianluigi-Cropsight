@@ -123,6 +123,19 @@ async def process_document(
     # Step 2: Classify document type
     document_type = await classify_document_type(content, title)
 
+    # Step 2b: Classify sensitivity tier so the I3 invariant ("sensitivity
+    # follows data") holds for documents too. Flag-gated + fail-closed (the
+    # classifier returns 'ceo' on error/unknown per P5-01). Stays None — no
+    # column write — until the migration is applied and the flag flipped. [audit P1-09]
+    sensitivity = None
+    if getattr(settings, "DOCUMENT_SENSITIVITY_ENABLED", False):
+        try:
+            from guardrails.sensitivity_classifier import classify_sensitivity_llm
+            sensitivity = classify_sensitivity_llm(content)
+        except Exception as e:
+            logger.warning(f"Document sensitivity classification failed → 'ceo' (fail-closed): {e}")
+            sensitivity = "ceo"
+
     # Step 3: Store document record in Supabase
     document = supabase_client.create_document(
         title=title,
@@ -133,11 +146,12 @@ async def process_document(
         document_type=document_type,
         content_hash=content_hash,
         version=version,
+        sensitivity=sensitivity,
     )
     document_id = document["id"]
 
-    # Step 4: Chunk and embed, then store
-    chunk_count = await store_document_embeddings(document_id, content)
+    # Step 4: Chunk and embed, then store (tier stamped on each chunk's metadata)
+    chunk_count = await store_document_embeddings(document_id, content, sensitivity=sensitivity)
 
     logger.info(
         f"Document processed: {title} v{version} — "
@@ -552,7 +566,8 @@ def find_related_documents(
 
 async def store_document_embeddings(
     document_id: str,
-    content: str
+    content: str,
+    sensitivity: str | None = None,
 ) -> int:
     """
     Chunk document and store embeddings in Supabase pgvector.
@@ -560,6 +575,8 @@ async def store_document_embeddings(
     Args:
         document_id: UUID of the document.
         content: Document text content.
+        sensitivity: Tier to stamp on each chunk's metadata (audit P1-09). When
+            None the metadata is left as-is (feature dark).
 
     Returns:
         Number of chunks stored.
@@ -578,7 +595,14 @@ async def store_document_embeddings(
             logger.warning(f"No chunks generated for document {document_id}")
             return 0
 
-        # Prepare records for batch insert
+        # Prepare records for batch insert. Stamp the tier on the chunk metadata
+        # (JSONB — no migration needed) so the tier travels with each chunk. [audit P1-09]
+        def _meta(chunk: dict) -> dict:
+            meta = dict(chunk.get("metadata", {}) or {})
+            if sensitivity:
+                meta["sensitivity"] = sensitivity
+            return meta
+
         embedding_records = [
             {
                 "source_type": "document",
@@ -588,7 +612,7 @@ async def store_document_embeddings(
                 "embedding": chunk["embedding"],
                 "speaker": None,
                 "timestamp_range": None,
-                "metadata": chunk.get("metadata", {}),
+                "metadata": _meta(chunk),
             }
             for chunk in embedded_chunks
         ]
