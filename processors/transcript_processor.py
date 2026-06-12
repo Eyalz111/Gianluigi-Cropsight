@@ -251,13 +251,15 @@ async def process_transcript(
             _areas = []
         _normalize_task_urgency_area(tasks_to_store, _areas)
 
-    # Store extracted data (with deduplicated tasks)
+    # Store extracted data (with deduplicated tasks). [audit P1-01] Pass the
+    # meeting tier so children are tagged atomically at insert.
     await store_meeting_data(
         meeting_id=meeting_id,
         decisions=extracted.get("decisions", []),
         tasks=tasks_to_store,
         follow_ups=extracted.get("follow_ups", []),
         open_questions=extracted.get("open_questions", []),
+        sensitivity=sensitivity,
     )
 
     # Step 7b2: Link decision chains for supersessions (Phase 12 A6)
@@ -268,8 +270,24 @@ async def process_transcript(
     except Exception as e:
         logger.error(f"Decision chain linking failed (non-fatal): {e}")
 
-    # Step 7b3: Propagate meeting sensitivity to extracted items
-    propagate_meeting_sensitivity(meeting_id, sensitivity)
+    # Step 7b3: Propagate meeting sensitivity to extracted items. Belt-and-
+    # suspenders now — the tier was already stamped atomically at insert above.
+    # [audit P1-01] If the redundant pass fails, surface it instead of swallowing
+    # (the rows are still protected by the atomic insert, but a silent failure
+    # here used to be the actual leak vector).
+    _prop = propagate_meeting_sensitivity(meeting_id, sensitivity)
+    if _prop.get("failed_tables"):
+        try:
+            from services.alerting import send_system_alert, AlertSeverity
+            await send_system_alert(
+                AlertSeverity.WARNING,
+                "transcript_processor.propagate_sensitivity",
+                f"Sensitivity propagation failed for {_prop['failed_tables']} on "
+                f"meeting {meeting_id} (tier={sensitivity}). Rows are still protected "
+                f"by the atomic insert; investigate the DB write.",
+            )
+        except Exception as _alert_err:
+            logger.error(f"Alert on propagate failure also failed: {_alert_err}")
 
     # Step 7c: Entity extraction and linking (v0.3 Tier 2)
     from processors.entity_extraction import extract_and_link_entities
@@ -1143,7 +1161,8 @@ async def store_meeting_data(
     decisions: list[dict],
     tasks: list[dict],
     follow_ups: list[dict],
-    open_questions: list[dict]
+    open_questions: list[dict],
+    sensitivity: str = "founders",
 ) -> None:
     """
     Store extracted data in Supabase tables.
@@ -1154,25 +1173,30 @@ async def store_meeting_data(
         tasks: List of task dicts to store.
         follow_ups: List of follow-up meeting dicts to store.
         open_questions: List of open question dicts to store.
+        sensitivity: Meeting tier, stamped on each child at insert so the tier is
+            atomic with the row (a later propagate failure can't leave CEO content
+            at the team-visible default). [audit P1-01]
     """
     # Store decisions
     if decisions:
-        supabase_client.create_decisions_batch(meeting_id, decisions)
+        supabase_client.create_decisions_batch(meeting_id, decisions, sensitivity=sensitivity)
         logger.info(f"Stored {len(decisions)} decisions")
 
     # Store tasks
     if tasks:
-        supabase_client.create_tasks_batch(meeting_id, tasks)
+        supabase_client.create_tasks_batch(meeting_id, tasks, sensitivity=sensitivity)
         logger.info(f"Stored {len(tasks)} tasks")
 
     # Store follow-up meetings
+    # NOTE: follow_up_meetings has no sensitivity column yet (audit P1-05);
+    # tier is carried only by propagate where the column exists.
     if follow_ups:
         supabase_client.create_follow_ups_batch(meeting_id, follow_ups)
         logger.info(f"Stored {len(follow_ups)} follow-up meetings")
 
     # Store open questions
     if open_questions:
-        supabase_client.create_open_questions_batch(meeting_id, open_questions)
+        supabase_client.create_open_questions_batch(meeting_id, open_questions, sensitivity=sensitivity)
         logger.info(f"Stored {len(open_questions)} open questions")
 
 
