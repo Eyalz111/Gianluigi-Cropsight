@@ -52,6 +52,16 @@ class IntelligenceSignalScheduler:
             return
 
         self._running = True
+        # Restart-safe fire-once: rebuild the "generated this week" guard from the
+        # last successful heartbeat so a Cloud Run cycle in the Thursday-evening
+        # window can't send Eyal a SECOND weekly-signal approval ping. [audit P4-03]
+        try:
+            from schedulers.fire_once import last_ok_week_key
+            self._last_generated_week = last_ok_week_key("intelligence_signal") or self._last_generated_week
+            if self._last_generated_week:
+                logger.info(f"Intelligence signal: reconstructed last-run week {self._last_generated_week} on boot")
+        except Exception as e:
+            logger.warning(f"Intelligence signal fire-once reconstruct failed (non-fatal): {e}")
         logger.info(
             f"Intelligence signal scheduler started "
             f"(day={settings.INTELLIGENCE_SIGNAL_DAY}, "
