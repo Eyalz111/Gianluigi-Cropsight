@@ -751,12 +751,14 @@ async def _submit_for_approval(
         "watchlist_changes": watchlist_changes,
     }
 
+    approval_created = False
     try:
         supabase_client.create_pending_approval(
             approval_id=signal_id,
             content_type="intelligence_signal",
             content=approval_content,
         )
+        approval_created = True
     except Exception as e:
         logger.error(f"Failed to create pending approval for {signal_id}: {e}")
 
@@ -764,6 +766,23 @@ async def _submit_for_approval(
     supabase_client.update_intelligence_signal(signal_id, {
         "approval_id": signal_id,
     })
+
+    from services.orchestrator.spine import comms_spine
+
+    # If the approval row could NOT be created, the normal "tap to approve" ping
+    # would dead-end (approve_intelligence_signal fails "not found in pending
+    # approvals") and the reminders would have no row to chase. Alert Eyal that the
+    # signal needs manual attention and skip the misleading ping/reminders. [audit P2-17]
+    if not approval_created:
+        try:
+            await comms_spine.send_to_eyal(
+                f"⚠️ Intelligence Signal W{week_number} was generated but its approval "
+                f"could not be registered — the approve button won't work. Open "
+                f"{drive_link} to review, or re-trigger the signal."
+            )
+        except Exception as e:
+            logger.error(f"Failed to alert Eyal about un-registered signal {signal_id}: {e}")
+        return
 
     # Telegram notification (notification-only, not full content)
     notification = format_telegram_notification(
@@ -774,8 +793,6 @@ async def _submit_for_approval(
         research_source=research_source,
         watchlist_changes=watchlist_changes,
     )
-
-    from services.orchestrator.spine import comms_spine
 
     # send_to_eyal swallows exceptions and returns False. Check the return
     # value so a silently-failed ping doesn't vanish without a reminder.
