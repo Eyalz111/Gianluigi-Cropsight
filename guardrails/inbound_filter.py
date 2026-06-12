@@ -380,13 +380,18 @@ def log_inbound_interaction(
                 "deflected_off_topic", "uncertain_relevance").
     """
     try:
+        # Eyal's DM is his private channel — don't accumulate a plaintext log of
+        # his sensitive queries (investor terms, compensation) in audit_log with
+        # no TTL. Store only the classification outcome for the DM; keep a short
+        # preview for group/email where it aids debugging non-Eyal traffic. [audit P5-08]
+        message_preview = "" if channel == "telegram_dm" else (preview or "")[:100]
         # supabase_client.log_action() is SYNC — do not await
         supabase_client.log_action(
             action="inbound_interaction",
             details={
                 "sender": sender,
                 "channel": channel,
-                "message_preview": preview[:100],
+                "message_preview": message_preview,
                 "verified": verified,
                 "relevant": relevant,
                 "outcome": action,
