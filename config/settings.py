@@ -481,6 +481,16 @@ class Settings(BaseSettings):
         description="Enable interpersonal signal detection in extraction (CEO tier). Default OFF — enable when ready to test."
     )
 
+    FOLLOW_UP_SENSITIVITY_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Carry the meeting tier onto follow_up_meetings rows (audit P1-01/P1-05). "
+            "Default OFF — requires the follow_up_meetings.sensitivity column "
+            "(scripts/migrate_followup_sensitivity_p1_05.sql) applied first; flip ON "
+            "after the migration so inserts/propagation don't hit a missing column."
+        ),
+    )
+
     # ==========================================================================
     # Intelligence Signal
     # ==========================================================================
