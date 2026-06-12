@@ -66,9 +66,10 @@ async def link_meeting_to_topics(
             thread = _find_thread_by_name(label)
 
             if thread:
-                # Update existing thread
-                _update_thread_for_meeting(thread, meeting_id)
+                # Mention FIRST, then recompute the thread's count from the
+                # mention set (order matters — the count reads the mentions). [audit P1-07]
                 _create_mention(thread["id"], meeting_id, decisions, tasks, label)
+                _update_thread_for_meeting(thread, meeting_id)
                 linked_threads.append(thread)
             else:
                 # Try fuzzy match via canonical names
@@ -76,8 +77,8 @@ async def link_meeting_to_topics(
                 if canonical and canonical != label:
                     thread = _find_thread_by_name(canonical)
                     if thread:
-                        _update_thread_for_meeting(thread, meeting_id)
                         _create_mention(thread["id"], meeting_id, decisions, tasks, label)
+                        _update_thread_for_meeting(thread, meeting_id)
                         linked_threads.append(thread)
                         continue
 
@@ -630,11 +631,30 @@ def _create_thread(topic_name: str, meeting_id: str) -> dict:
     return thread
 
 
+def _distinct_mention_count(topic_id: str) -> int:
+    """Number of DISTINCT meetings that mention this topic (the true frequency)."""
+    rows = (
+        supabase_client.client.table("topic_thread_mentions")
+        .select("meeting_id")
+        .eq("topic_id", topic_id)
+        .execute()
+        .data
+        or []
+    )
+    return len({r.get("meeting_id") for r in rows if r.get("meeting_id")})
+
+
 def _update_thread_for_meeting(thread: dict, meeting_id: str) -> None:
-    """Update an existing thread with a new meeting reference."""
+    """Refresh an existing thread's last-meeting + meeting_count.
+
+    meeting_count is recomputed from the DISTINCT mention set rather than a blind
+    +1 — a re-extraction of the same meeting used to inflate it, surfacing a
+    fabricated "discussed in N meetings" as fact. Must run AFTER the mention for
+    this meeting has been (idempotently) created. [audit P1-07]
+    """
     supabase_client.client.table("topic_threads").update({
         "last_meeting_id": meeting_id,
-        "meeting_count": (thread.get("meeting_count", 1) or 1) + 1,
+        "meeting_count": _distinct_mention_count(thread["id"]),
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }).eq("id", thread["id"]).execute()
 
@@ -665,6 +685,13 @@ def _create_mention(
     if related_tasks:
         context_parts.append(f"Tasks: {'; '.join(related_tasks[:2])}")
 
+    # Idempotent on (topic_id, meeting_id): drop any prior mention for this
+    # exact pair first, so a re-extraction REPLACES it rather than inserting a
+    # duplicate (which would inflate the distinct-count too if meeting_id were
+    # ever null). [audit P1-07]
+    supabase_client.client.table("topic_thread_mentions").delete().eq(
+        "topic_id", topic_id
+    ).eq("meeting_id", meeting_id).execute()
     supabase_client.client.table("topic_thread_mentions").insert({
         "topic_id": topic_id,
         "meeting_id": meeting_id,
