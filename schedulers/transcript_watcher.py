@@ -94,7 +94,16 @@ class TranscriptWatcher:
             try:
                 await self._poll_once()
                 try:
-                    supabase_client.upsert_scheduler_heartbeat("transcript_watcher")
+                    # Reflect a sustained Drive list-poll outage in the heartbeat
+                    # so /status shows it (the list call swallows the error to []
+                    # to avoid a per-poll alert flood). [audit P4-06]
+                    if getattr(drive_service, "last_transcript_poll_failed", False) is True:
+                        supabase_client.upsert_scheduler_heartbeat(
+                            "transcript_watcher", status="error",
+                            details={"error": "Drive transcript poll failing (API unavailable)"},
+                        )
+                    else:
+                        supabase_client.upsert_scheduler_heartbeat("transcript_watcher")
                 except Exception:
                     pass  # Never let monitoring kill the thing being monitored
             except Exception as e:

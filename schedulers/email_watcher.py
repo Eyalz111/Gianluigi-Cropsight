@@ -44,6 +44,13 @@ class EmailWatcher:
         self.check_interval = check_interval or settings.EMAIL_CHECK_INTERVAL
         self._running = False
         self._processed_ids: set[str] = set()  # Track processed message IDs
+        # Per-message consecutive-failure counts. A message that throws is left
+        # unread + not in _processed_ids, so without this it re-routes every poll
+        # (risking a duplicate reply). After _POISON_THRESHOLD failures we
+        # quarantine it (mark read) and alert once. [audit P4-04]
+        self._failure_counts: dict[str, int] = {}
+
+    _POISON_THRESHOLD = 3
 
     async def start(self) -> None:
         """Start the email watcher loop."""
@@ -165,9 +172,32 @@ class EmailWatcher:
                 # Mark as read
                 await gmail_service.mark_as_read(msg_id)
                 self._processed_ids.add(msg_id)
+                self._failure_counts.pop(msg_id, None)
 
             except Exception as e:
                 logger.error(f"Error processing email {msg_id}: {e}")
+                count = self._failure_counts.get(msg_id, 0) + 1
+                self._failure_counts[msg_id] = count
+                if count >= self._POISON_THRESHOLD:
+                    # Poison message — quarantine (mark read + dedup) so it stops
+                    # re-routing every poll, and alert ONCE. [audit P4-04]
+                    try:
+                        await gmail_service.mark_as_read(msg_id)
+                    except Exception:
+                        pass
+                    self._processed_ids.add(msg_id)
+                    self._failure_counts.pop(msg_id, None)
+                    try:
+                        from core.health_monitor import check_and_alert
+                        await check_and_alert(
+                            "email_watcher",
+                            Exception(
+                                f"Giving up on message {msg_id} after {count} failures "
+                                f"(quarantined, will not retry this session): {e}"
+                            ),
+                        )
+                    except Exception:
+                        pass
 
     def _is_approval_reply(self, subject: str) -> bool:
         """Check if the email is a reply to an approval request."""

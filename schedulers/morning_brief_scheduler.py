@@ -12,14 +12,17 @@ Usage:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Israel Standard Time is UTC+2 (or UTC+3 during DST)
-IST_OFFSET = timedelta(hours=2)
+# DST-aware Israel time. A hardcoded UTC+2 offset fired the brief 1h late for the
+# ~7 months/year Israel is on DST (UTC+3) and nudged the Shabbat skip boundary off
+# by an hour near Fri/Sat midnight. [audit P4-02]
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 
 
 class MorningBriefScheduler:
@@ -44,12 +47,28 @@ class MorningBriefScheduler:
                 if not self._running:
                     break
                 await self._run_brief()
+                # Heartbeat AFTER a completed cycle so a wedged sleep-until loop
+                # is visible to /status and the QA scheduler. Was previously
+                # un-monitored entirely. [audit P4-01]
+                self._heartbeat()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Morning brief scheduler error: {e}")
+                self._heartbeat(status="error", details={"error": str(e)})
                 # Sleep a bit before retrying to avoid tight error loops
                 await asyncio.sleep(300)
+
+    @staticmethod
+    def _heartbeat(status: str = "ok", details: dict | None = None) -> None:
+        """Record a heartbeat so a stalled loop is detectable. Best-effort."""
+        try:
+            from services.supabase_client import supabase_client
+            supabase_client.upsert_scheduler_heartbeat(
+                "morning_brief", status=status, details=details
+            )
+        except Exception as e:
+            logger.debug(f"morning_brief heartbeat write failed: {e}")
 
     def stop(self) -> None:
         """Stop the scheduler."""
@@ -58,8 +77,7 @@ class MorningBriefScheduler:
 
     async def _sleep_until_trigger(self) -> None:
         """Calculate and sleep until next MORNING_BRIEF_HOUR IST."""
-        now_utc = datetime.now(timezone.utc)
-        now_ist = now_utc + IST_OFFSET
+        now_ist = datetime.now(_ISRAEL_TZ)
 
         # Calculate next trigger time in IST
         trigger_ist = now_ist.replace(
@@ -73,9 +91,9 @@ class MorningBriefScheduler:
         if now_ist >= trigger_ist:
             trigger_ist += timedelta(days=1)
 
-        # Convert back to UTC for sleep calculation
-        trigger_utc = trigger_ist - IST_OFFSET
-        sleep_seconds = (trigger_utc - now_utc).total_seconds()
+        # ZoneInfo-aware subtraction yields the correct wall-clock delta across
+        # a DST boundary.
+        sleep_seconds = max(0, (trigger_ist - now_ist).total_seconds())
 
         logger.info(
             f"Morning brief: next trigger in {sleep_seconds / 3600:.1f} hours "
@@ -86,7 +104,7 @@ class MorningBriefScheduler:
     def _should_skip_today(self) -> bool:
         """Check if today is a skip day (e.g. Shabbat)."""
         import calendar
-        now_ist = datetime.now(timezone.utc) + IST_OFFSET
+        now_ist = datetime.now(_ISRAEL_TZ)
         today_name = calendar.day_name[now_ist.weekday()]
         return today_name in settings.morning_brief_skip_days_list
 

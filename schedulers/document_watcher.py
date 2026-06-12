@@ -51,6 +51,13 @@ class DocumentWatcher:
         """
         self.poll_interval = poll_interval or settings.DOCUMENT_POLL_INTERVAL
         self._running = False
+        # Per-file consecutive-failure counts. A document that throws is NOT
+        # marked processed, so without this it re-fails every poll and floods
+        # alert_critical_error forever. After _POISON_THRESHOLD failures we
+        # quarantine it (mark processed) and alert once. [audit P4-04]
+        self._failure_counts: dict[str, int] = {}
+
+    _POISON_THRESHOLD = 3
 
     async def start(self) -> None:
         """
@@ -71,7 +78,16 @@ class DocumentWatcher:
             try:
                 await self._poll_once()
                 try:
-                    supabase_client.upsert_scheduler_heartbeat("document_watcher")
+                    # Reflect a sustained Drive list-poll outage in the heartbeat
+                    # so /status shows it (the list call swallows the error to []
+                    # to avoid a per-poll alert flood). [audit P4-06]
+                    if getattr(drive_service, "last_document_poll_failed", False) is True:
+                        supabase_client.upsert_scheduler_heartbeat(
+                            "document_watcher", status="error",
+                            details={"error": "Drive document poll failing (API unavailable)"},
+                        )
+                    else:
+                        supabase_client.upsert_scheduler_heartbeat("document_watcher")
                 except Exception:
                     pass  # Never let monitoring kill the thing being monitored
             except Exception as e:
@@ -114,22 +130,48 @@ class DocumentWatcher:
 
         results = []
         for file in new_files:
+            file_id = file.get("id")
+            file_name = file.get("name")
             try:
                 result = await self._process_new_document(file)
+                # Success — clear any prior failure streak for this file.
+                self._failure_counts.pop(file_id, None)
                 results.append(result)
             except Exception as e:
-                logger.error(f"Error processing document {file.get('name')}: {e}")
+                logger.error(f"Error processing document {file_name}: {e}")
                 results.append({
-                    "file_id": file.get("id"),
-                    "file_name": file.get("name"),
+                    "file_id": file_id,
+                    "file_name": file_name,
                     "status": "error",
                     "error": str(e),
                 })
+                count = self._failure_counts.get(file_id, 0) + 1
+                self._failure_counts[file_id] = count
+
                 from core.error_alerting import alert_critical_error
-                await alert_critical_error(
-                    component="document_pipeline",
-                    error_message=f"Failed to process '{file.get('name')}': {e}",
-                )
+                if count >= self._POISON_THRESHOLD:
+                    # Poison file — quarantine so it stops re-failing every poll,
+                    # and alert ONCE that we're giving up. [audit P4-04]
+                    try:
+                        drive_service.mark_document_processed(file_id)
+                    except Exception:
+                        pass
+                    self._failure_counts.pop(file_id, None)
+                    await alert_critical_error(
+                        component="document_pipeline",
+                        error_message=(
+                            f"Giving up on '{file_name}' after {count} failed attempts "
+                            f"(quarantined, will not retry this session): {e}"
+                        ),
+                    )
+                elif count == 1:
+                    # Alert on the FIRST failure only; suppress the noisy middle
+                    # retries so a transient blip doesn't flood, but a real
+                    # problem is still surfaced immediately.
+                    await alert_critical_error(
+                        component="document_pipeline",
+                        error_message=f"Failed to process '{file_name}': {e}",
+                    )
 
         return results
 

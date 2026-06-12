@@ -61,6 +61,12 @@ class GoogleDriveService:
         self._processed_file_ids: set[str] = set()
         # Track processed document files to avoid reprocessing
         self._processed_doc_ids: set[str] = set()
+        # True when the most recent list poll FAILED (after retries) rather than
+        # genuinely returning no new files. The watchers reflect this in their
+        # heartbeat so a sustained Drive outage is visible in /status instead of
+        # looking like "no new files". [audit P4-06]
+        self.last_transcript_poll_failed: bool = False
+        self.last_document_poll_failed: bool = False
 
     @property
     def service(self):
@@ -222,10 +228,15 @@ class GoogleDriveService:
                 if f["id"] not in self._processed_file_ids
             ]
 
+            self.last_transcript_poll_failed = False
             logger.info(f"Found {len(new_files)} new transcript files")
             return new_files
 
         except Exception as e:
+            # Distinguish a real API failure from a genuinely empty folder so the
+            # watcher can surface a sustained outage rather than reading the empty
+            # list as "no new files". [audit P4-06]
+            self.last_transcript_poll_failed = True
             logger.error(f"Error checking for new transcripts: {e}")
             return []
 
@@ -270,10 +281,13 @@ class GoogleDriveService:
                 if f["id"] not in self._processed_doc_ids
             ]
 
+            self.last_document_poll_failed = False
             logger.info(f"Found {len(new_files)} new document files")
             return new_files
 
         except Exception as e:
+            # Distinguish a real API failure from a genuinely empty folder. [audit P4-06]
+            self.last_document_poll_failed = True
             logger.error(f"Error checking for new documents: {e}")
             return []
 

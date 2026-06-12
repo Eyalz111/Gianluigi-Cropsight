@@ -81,14 +81,24 @@ class KnowledgeNightlyScheduler:
 
             summary = await run_consolidation()
 
+            # Heartbeat must go to the scheduler_heartbeats table (what
+            # get_scheduler_heartbeats / the health checks read), NOT audit_log.
+            # log_action("scheduler_heartbeat") wrote to the wrong table, so this
+            # loop was invisible to /status and the QA scheduler. [audit P4-01]
             from services.supabase_client import supabase_client
-            supabase_client.log_action(
-                action="scheduler_heartbeat",
-                details={"scheduler": "knowledge_nightly", **summary},
-                triggered_by="auto",
+            supabase_client.upsert_scheduler_heartbeat(
+                "knowledge_nightly",
+                details=summary if isinstance(summary, dict) else {},
             )
         except Exception as e:
             logger.error(f"Knowledge nightly consolidation failed: {e}")
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.upsert_scheduler_heartbeat(
+                    "knowledge_nightly", status="error", details={"error": str(e)}
+                )
+            except Exception:
+                pass
             try:
                 from core.health_monitor import check_and_alert
                 await check_and_alert("knowledge_nightly", e)

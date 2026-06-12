@@ -12,14 +12,17 @@ Usage:
 import asyncio
 import calendar
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Israel Standard Time is UTC+2 (or UTC+3 during DST)
-IST_OFFSET = timedelta(hours=2)
+# DST-aware Israel time. A hardcoded UTC+2 offset fired the prompt 1h late for the
+# ~7 months/year Israel is on DST (UTC+3) and nudged the Saturday skip boundary off
+# by an hour near Fri/Sat midnight. [audit P4-02]
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 
 
 class DebriefPromptScheduler:
@@ -57,8 +60,7 @@ class DebriefPromptScheduler:
 
     async def _sleep_until_trigger(self) -> None:
         """Calculate and sleep until next DEBRIEF_EVENING_PROMPT_HOUR IST."""
-        now_utc = datetime.now(timezone.utc)
-        now_ist = now_utc + IST_OFFSET
+        now_ist = datetime.now(_ISRAEL_TZ)
 
         trigger_ist = now_ist.replace(
             hour=settings.DEBRIEF_EVENING_PROMPT_HOUR,
@@ -70,8 +72,7 @@ class DebriefPromptScheduler:
         if now_ist >= trigger_ist:
             trigger_ist += timedelta(days=1)
 
-        trigger_utc = trigger_ist - IST_OFFSET
-        sleep_seconds = (trigger_utc - now_utc).total_seconds()
+        sleep_seconds = max(0, (trigger_ist - now_ist).total_seconds())
 
         logger.info(
             f"Debrief prompt: next trigger in {sleep_seconds / 3600:.1f} hours "
@@ -81,7 +82,7 @@ class DebriefPromptScheduler:
 
     def _should_skip_today(self) -> bool:
         """Check if today is Saturday (Shabbat) — skip debrief."""
-        now_ist = datetime.now(timezone.utc) + IST_OFFSET
+        now_ist = datetime.now(_ISRAEL_TZ)
         return calendar.day_name[now_ist.weekday()] == "Saturday"
 
     async def _send_prompt(self) -> None:
