@@ -334,6 +334,9 @@ def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
     from services.supabase_client import supabase_client
 
     counts = {"tasks": 0, "decisions": 0, "open_questions": 0}
+    # [audit P1-01] Track which tables failed so callers can ALERT instead of
+    # the leak going silent (each UPDATE used to swallow its error with only a log).
+    failed: list[str] = []
 
     try:
         result = (
@@ -345,6 +348,7 @@ def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
         counts["tasks"] = len(result.data) if result.data else 0
     except Exception as e:
         logger.error(f"Failed to propagate sensitivity to tasks: {e}")
+        failed.append("tasks")
 
     try:
         result = (
@@ -356,6 +360,7 @@ def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
         counts["decisions"] = len(result.data) if result.data else 0
     except Exception as e:
         logger.error(f"Failed to propagate sensitivity to decisions: {e}")
+        failed.append("decisions")
 
     try:
         result = (
@@ -367,10 +372,11 @@ def propagate_meeting_sensitivity(meeting_id: str, sensitivity: str) -> dict:
         counts["open_questions"] = len(result.data) if result.data else 0
     except Exception as e:
         logger.error(f"Failed to propagate sensitivity to open_questions: {e}")
+        failed.append("open_questions")
 
     total = sum(counts.values())
     if total > 0:
         logger.info(
             f"Propagated sensitivity={sensitivity} to {total} items for meeting {meeting_id}: {counts}"
         )
-    return counts
+    return {**counts, "failed_tables": failed}

@@ -3815,7 +3815,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
             try:
                 _sc.update_meeting(meeting_id, sensitivity=new_sens)
-                propagate_meeting_sensitivity(meeting_id, new_sens)
+                _prop = propagate_meeting_sensitivity(meeting_id, new_sens)
             except Exception as e:
                 logger.error(f"Sensitivity toggle DB update failed for {meeting_id}: {e}")
                 try:
@@ -3831,6 +3831,26 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     logger.error(f"Alert on sens_toggle failure also failed: {alert_err}")
                 await query.answer(f"Failed to update sensitivity: {e}")
                 return
+
+            # [audit P1-01] propagate no longer raises on a per-table DB failure.
+            # The toggle path has NO atomic-insert backstop, so a failed table means
+            # those children keep the OLD tier — a leak when tightening the tier.
+            if _prop.get("failed_tables"):
+                logger.error(
+                    f"Sensitivity toggle propagate failed for {meeting_id}: "
+                    f"{_prop['failed_tables']} kept the old tier"
+                )
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL,
+                        "telegram_bot.sens_toggle",
+                        f"Sensitivity toggle to {new_sens} on meeting {meeting_id} did NOT "
+                        f"propagate to {_prop['failed_tables']} — those rows keep the old "
+                        f"tier and may be over-shared. Re-toggle or fix the DB.",
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Alert on sens_toggle propagate failure also failed: {alert_err}")
 
             # Update button text in-place
             tier_labels = {

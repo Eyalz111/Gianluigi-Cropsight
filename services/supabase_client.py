@@ -540,6 +540,7 @@ class SupabaseClient:
         self,
         meeting_id: str,
         decisions: list[dict],
+        sensitivity: str | None = None,
     ) -> list[dict]:
         """
         Create multiple decisions in a single batch.
@@ -547,6 +548,7 @@ class SupabaseClient:
         Args:
             meeting_id: UUID of the source meeting.
             decisions: List of decision dicts with description, context, etc.
+            sensitivity: Meeting tier to stamp on each row at insert. [audit P1-01]
 
         Returns:
             List of created decision records.
@@ -560,6 +562,11 @@ class SupabaseClient:
                 "participants_involved": d.get("participants_involved"),
                 "transcript_timestamp": d.get("transcript_timestamp"),
             }
+            # [audit P1-01] Stamp the tier ATOMICALLY at insert so a later
+            # propagate_meeting_sensitivity failure can't leave CEO content at
+            # the DB default ('normal' -> founders/team-visible).
+            if sensitivity:
+                row["sensitivity"] = sensitivity
             # Phase 9A: decision intelligence fields
             if d.get("rationale"):
                 row["rationale"] = d["rationale"]
@@ -947,6 +954,7 @@ class SupabaseClient:
         self,
         meeting_id: str,
         tasks: list[dict],
+        sensitivity: str | None = None,
     ) -> list[dict]:
         """
         Create multiple tasks in a single batch.
@@ -954,6 +962,7 @@ class SupabaseClient:
         Args:
             meeting_id: UUID of the source meeting.
             tasks: List of task dicts with title, assignee, etc.
+            sensitivity: Meeting tier to stamp on each row at insert. [audit P1-01]
 
         Returns:
             List of created task records.
@@ -983,6 +992,12 @@ class SupabaseClient:
             }
             for t in valid_tasks
         ]
+
+        # [audit P1-01] Stamp the tier ATOMICALLY at insert (belt; propagate is
+        # the suspenders) so a propagate failure can't leave CEO tasks team-visible.
+        if sensitivity:
+            for _row in data:
+                _row["sensitivity"] = sensitivity
 
         # v2.3.1 label-coverage audit — surface the Franciacorta bug (task
         # rows landing with label=NULL despite topic_threading seeing them).
@@ -1404,6 +1419,7 @@ class SupabaseClient:
         self,
         meeting_id: str,
         questions: list[dict],
+        sensitivity: str | None = None,
     ) -> list[dict]:
         """
         Create multiple open questions in a single batch.
@@ -1411,6 +1427,7 @@ class SupabaseClient:
         Args:
             meeting_id: UUID of the source meeting.
             questions: List of question dicts with question, raised_by.
+            sensitivity: Meeting tier to stamp on each row at insert. [audit P1-01]
 
         Returns:
             List of created open question records.
@@ -1424,6 +1441,12 @@ class SupabaseClient:
             }
             for q in questions
         ]
+
+        # [audit P1-01] Stamp the tier ATOMICALLY at insert (belt; propagate is
+        # the suspenders) so a propagate failure can't leave CEO questions visible.
+        if sensitivity:
+            for _row in data:
+                _row["sensitivity"] = sensitivity
 
         result = self.client.table("open_questions").insert(data).execute()
         logger.info(f"Created {len(result.data)} open questions")
