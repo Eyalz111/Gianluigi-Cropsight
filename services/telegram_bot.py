@@ -994,6 +994,7 @@ class TelegramBot:
         updates: dict,
         is_new: bool = True,
         source_meeting_id: str | None = None,
+        approval_id: str | None = None,
     ) -> bool:
         """Send stakeholder update request to Eyal with approve/reject buttons."""
         action = "New Stakeholder" if is_new else "Update Stakeholder"
@@ -1014,18 +1015,21 @@ class TelegramBot:
 
         message = "\n".join(lines)
 
-        # Create callback data — encode org name (truncated for Telegram 64-byte limit)
-        org_key = organization[:30].replace(":", "_")
+        # Callback payload = the persisted pending-approval id so the approve
+        # handler can fetch + apply the update (restart-safe). Falls back to an
+        # org-keyed id for older callers; the org_key is truncated to keep the
+        # callback within Telegram's 64-byte limit. [audit P3-08]
+        callback_id = approval_id or f"stakeholder:{organization[:30].replace(':', '_')}"
 
         keyboard = [
             [
                 InlineKeyboardButton(
                     "Approve",
-                    callback_data=f"stakeholder_approve:{org_key}"
+                    callback_data=f"stakeholder_approve:{callback_id}"
                 ),
                 InlineKeyboardButton(
                     "Reject",
-                    callback_data=f"stakeholder_reject:{org_key}"
+                    callback_data=f"stakeholder_reject:{callback_id}"
                 ),
             ],
         ]
@@ -3569,6 +3573,23 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         action, meeting_id = data.split(":", 1)
 
+        # I1/I2: every inline-button action below is a CEO operation, and these
+        # cards are only ever sent to Eyal's DM. A card can occasionally surface
+        # in a shared chat (e.g. Eyal runs /sync in the group), so guard identity
+        # centrally — only Eyal may action ANY callback. Eyal tapping in the group
+        # still passes (from_user is him). The review/debrief sub-handlers keep
+        # their own checks as defense-in-depth. Guarded only when eyal_chat_id is
+        # configured, so a missing config can't brick every button. [audit P3-14]
+        if self.eyal_chat_id and str(query.from_user.id) != str(self.eyal_chat_id):
+            logger.warning(
+                f"Ignoring callback {action!r} from non-Eyal user {query.from_user.id}"
+            )
+            try:
+                await query.answer("Only Eyal can use these controls.", show_alert=True)
+            except Exception:
+                pass
+            return
+
         # Import here to avoid circular imports
         from services.supabase_client import supabase_client
 
@@ -3834,31 +3855,71 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             logger.info(f"Sensitivity cycled to '{new_sens}' for meeting {meeting_id}")
 
         elif action == "stakeholder_approve":
-            org_key = meeting_id  # The part after the colon
-            await query.edit_message_text(
-                f"Approved stakeholder update for: {org_key}"
-            )
+            # [audit P3-08] Actually APPLY the approved update. The old code only
+            # logged + edited the message, silently dropping every approved
+            # stakeholder change. The payload was persisted to pending_approvals
+            # at request time (restart-safe), so fetch it and write it through.
+            approval_id = meeting_id  # full "stakeholder:<org_key>" id from the callback
+            row = supabase_client.get_pending_approval(approval_id)
+            content = (row or {}).get("content") or {}
+            organization = content.get("organization") or approval_id
+            updates = content.get("updates") or {}
 
-            # Look up pending update and apply it
-            supabase_client.log_action(
-                action="stakeholder_approved",
-                details={"organization": org_key},
-                triggered_by="eyal",
-            )
-            logger.info(f"Stakeholder update approved: {org_key}")
+            if not row or not updates:
+                await query.edit_message_text(
+                    f"Couldn't apply that stakeholder update for {organization} — it "
+                    f"expired or was already handled. Please re-run it if still needed."
+                )
+                logger.warning(f"stakeholder_approve: no pending payload for {approval_id!r}")
+            else:
+                from services.google_sheets import sheets_service
+                applied = await sheets_service.apply_stakeholder_update(organization, updates)
+                if applied:
+                    supabase_client.delete_pending_approval(approval_id)
+                    supabase_client.log_action(
+                        action="stakeholder_approved",
+                        details={"organization": organization, "fields": list(updates.keys())},
+                        triggered_by="eyal",
+                    )
+                    await query.edit_message_text(
+                        f"Approved — updated {organization} in the Stakeholder Tracker."
+                    )
+                    logger.info(f"Stakeholder update applied: {organization}")
+                else:
+                    # Keep the pending row so it can be retried; surface the failure.
+                    await query.edit_message_text(
+                        f"Approved, but the Stakeholder Tracker write failed for "
+                        f"{organization} — it's still pending, try again."
+                    )
+                    logger.error(
+                        f"stakeholder_approve: apply_stakeholder_update failed for {organization}"
+                    )
+                    try:
+                        from services.alerting import send_system_alert, AlertSeverity
+                        await send_system_alert(
+                            AlertSeverity.CRITICAL,
+                            "telegram_bot.stakeholder_approve",
+                            f"apply_stakeholder_update failed for {organization} after Eyal "
+                            f"approved; pending row {approval_id} retained for retry.",
+                        )
+                    except Exception as alert_err:
+                        logger.error(f"Alert on stakeholder approve failure also failed: {alert_err}")
 
         elif action == "stakeholder_reject":
-            org_key = meeting_id  # The part after the colon
-            await query.edit_message_text(
-                f"Rejected stakeholder update for: {org_key}"
-            )
-
+            # [audit P3-08] Discard the persisted pending update on reject.
+            approval_id = meeting_id
+            row = supabase_client.get_pending_approval(approval_id)
+            organization = ((row or {}).get("content") or {}).get("organization") or approval_id
+            supabase_client.delete_pending_approval(approval_id)
             supabase_client.log_action(
                 action="stakeholder_rejected",
-                details={"organization": org_key},
+                details={"organization": organization},
                 triggered_by="eyal",
             )
-            logger.info(f"Stakeholder update rejected: {org_key}")
+            await query.edit_message_text(
+                f"Rejected the stakeholder update for {organization}."
+            )
+            logger.info(f"Stakeholder update rejected: {organization}")
 
         # ── Phase 3: Task reminder inline actions ──────────────────
         elif action in ("taskdone", "taskdelay", "taskdiscuss"):
