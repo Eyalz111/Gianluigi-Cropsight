@@ -293,6 +293,20 @@ async def compile_morning_brief() -> dict:
                 "events": event_list,
             })
             stats["calendar_events"] = len(event_list)
+        elif getattr(calendar_service, "last_fetch_failed", False) is True:
+            # The empty list came from an API failure (e.g. idle-wake broken
+            # pipe), NOT a genuinely empty calendar. Surface it via the alerts
+            # channel (handled by both brief renderers) so Eyal knows the brief
+            # couldn't check his meetings rather than reading the silent absence
+            # as "nothing today". [audit P3-03]
+            sections.append({
+                "type": "alerts",
+                "alerts": [{
+                    "severity": "high",
+                    "message": "Calendar unavailable — today's meetings could not be checked.",
+                }],
+            })
+            stats["calendar_unavailable"] = True
     except Exception as e:
         logger.warning(f"Calendar fetch for morning brief failed: {e}")
 

@@ -563,11 +563,13 @@ class GoogleDriveService:
                 resumable=True
             )
 
-            file = self.service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id, name, webViewLink, createdTime"
-            ).execute()
+            file = self._execute_with_retry(
+                lambda: self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id, name, webViewLink, createdTime"
+                )
+            )
 
             logger.info(f"Uploaded file: {filename} ({file.get('id')})")
             return file
@@ -601,11 +603,13 @@ class GoogleDriveService:
                 resumable=True,
             )
 
-            file = self.service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id, name, webViewLink, createdTime",
-            ).execute()
+            file = self._execute_with_retry(
+                lambda: self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id, name, webViewLink, createdTime",
+                )
+            )
 
             logger.info(f"Uploaded Google Doc: {filename} ({file.get('id')})")
             return file
@@ -645,11 +649,13 @@ class GoogleDriveService:
                 resumable=True,
             )
 
-            file = self.service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id, name, webViewLink, createdTime",
-            ).execute()
+            file = self._execute_with_retry(
+                lambda: self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id, name, webViewLink, createdTime",
+                )
+            )
 
             logger.info(f"Uploaded file: {filename} ({file.get('id')})")
             return file
@@ -702,11 +708,13 @@ class GoogleDriveService:
                 resumable=True
             )
 
-            file = self.service.files().update(
-                fileId=file_id,
-                media_body=media,
-                fields="id, name, webViewLink, modifiedTime"
-            ).execute()
+            file = self._execute_with_retry(
+                lambda: self.service.files().update(
+                    fileId=file_id,
+                    media_body=media,
+                    fields="id, name, webViewLink, modifiedTime"
+                )
+            )
 
             logger.info(f"Updated file: {file_id}")
             return file
@@ -737,13 +745,15 @@ class GoogleDriveService:
         try:
             query = f"'{folder_id}' in parents and trashed = false"
 
-            results = self.service.files().list(
-                q=query,
-                spaces="drive",
-                fields="files(id, name, mimeType, createdTime, modifiedTime, webViewLink)",
-                orderBy="modifiedTime desc",
-                pageSize=max_results,
-            ).execute()
+            results = self._execute_with_retry(
+                lambda: self.service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id, name, mimeType, createdTime, modifiedTime, webViewLink)",
+                    orderBy="modifiedTime desc",
+                    pageSize=max_results,
+                )
+            )
 
             return results.get("files", [])
 
@@ -789,10 +799,12 @@ class GoogleDriveService:
                 "parents": [parent_folder_id],
                 "mimeType": "application/vnd.google-apps.folder",
             }
-            folder = self.service.files().create(
-                body=folder_metadata,
-                fields="id, name, webViewLink",
-            ).execute()
+            folder = self._execute_with_retry(
+                lambda: self.service.files().create(
+                    body=folder_metadata,
+                    fields="id, name, webViewLink",
+                )
+            )
             logger.info(f"Created subfolder: {name}")
             return folder
         except Exception as e:
@@ -948,12 +960,14 @@ class GoogleDriveService:
                 f"and mimeType = 'application/vnd.google-apps.folder' "
                 f"and trashed = false"
             )
-            result = self.service.files().list(
-                q=query,
-                spaces="drive",
-                fields="files(id, name)",
-                pageSize=1,
-            ).execute()
+            result = self._execute_with_retry(
+                lambda: self.service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id, name)",
+                    pageSize=1,
+                )
+            )
             if result.get("files"):
                 folder_id = result["files"][0]["id"]
                 self._rejected_subfolder_cache = folder_id
@@ -966,10 +980,12 @@ class GoogleDriveService:
                 "mimeType": "application/vnd.google-apps.folder",
                 "parents": [settings.RAW_TRANSCRIPTS_FOLDER_ID],
             }
-            created = self.service.files().create(
-                body=metadata,
-                fields="id",
-            ).execute()
+            created = self._execute_with_retry(
+                lambda: self.service.files().create(
+                    body=metadata,
+                    fields="id",
+                )
+            )
             folder_id = created["id"]
             self._rejected_subfolder_cache = folder_id
             logger.info(f"Created Rejected subfolder in Raw Transcripts: {folder_id}")
@@ -1014,12 +1030,14 @@ class GoogleDriveService:
                 f"and name = '{escaped_name}' "
                 f"and trashed = false"
             )
-            search = self.service.files().list(
-                q=query,
-                spaces="drive",
-                fields="files(id, name, parents)",
-                pageSize=5,
-            ).execute()
+            search = self._execute_with_retry(
+                lambda: self.service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id, name, parents)",
+                    pageSize=5,
+                )
+            )
             files = search.get("files", [])
             if not files:
                 result["error"] = f"File '{file_name}' not found in Raw Transcripts folder"
@@ -1050,12 +1068,14 @@ class GoogleDriveService:
             # 3. Move the file: add new parent, remove old parents
             # (Drive uses parents-as-list; to move we add new and remove old)
             remove_parents = ",".join(p for p in current_parents if p != rejected_folder_id)
-            self.service.files().update(
-                fileId=file_id,
-                addParents=rejected_folder_id,
-                removeParents=remove_parents,
-                fields="id, parents",
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.files().update(
+                    fileId=file_id,
+                    addParents=rejected_folder_id,
+                    removeParents=remove_parents,
+                    fields="id, parents",
+                )
+            )
 
             result["moved"] = True
             logger.info(

@@ -57,6 +57,11 @@ class GoogleCalendarService:
         self._service = None
         self._credentials: Credentials | None = None
         self._using_eyal_token: bool = False
+        # True when the most recent event-read FAILED (after retries) rather
+        # than genuinely returning no events. Callers (morning brief, prep)
+        # check this to avoid rendering an idle-wake fetch failure as
+        # "no meetings today". [audit P3-03]
+        self.last_fetch_failed: bool = False
 
     @property
     def service(self):
@@ -64,6 +69,59 @@ class GoogleCalendarService:
         if self._service is None:
             self._service = self._build_service()
         return self._service
+
+    def _execute_with_retry(self, request_factory, max_retries: int = 3, base_delay: float = 1.0):
+        """
+        Execute a Google Calendar API request with retry on transient errors.
+
+        Mirrors services/google_drive.py::_execute_with_retry. Calendar was the
+        ONLY Google service with no retry wrapper, so a Cloud Run idle-then-wake
+        cycle (stale httplib2 socket) made every read throw → caught → `[]`,
+        indistinguishable from a genuinely empty calendar. On broken pipe /
+        connection reset / transport failure this nulls the service so the next
+        `request_factory()` call builds a fresh service with a fresh transport.
+
+        Caller passes a ZERO-ARG callable that constructs the API request
+        (e.g. `lambda: self.service.events().list(...)`) so the request is
+        rebuilt against the fresh service after a rebuild.
+
+        Retries on: ConnectionError, TimeoutError, OSError (incl.
+        BrokenPipeError), and HTTP 5xx / rate-limit errors. [audit P3-03]
+        """
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                return request_factory().execute()
+            except (ConnectionError, TimeoutError, OSError) as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Calendar API retry {attempt + 1}/{max_retries}: "
+                        f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                    )
+                    self._service = None  # Force rebuild — stale socket
+                    time.sleep(delay)
+                else:
+                    raise
+            except Exception as e:
+                error_str = str(e).lower()
+                if any(k in error_str for k in (
+                    "broken pipe", "connection reset", "transport",
+                    "503", "429", "500", "502", "504",
+                )):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            f"Calendar API transient error retry {attempt + 1}/{max_retries}: "
+                            f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
+                        )
+                        self._service = None
+                        time.sleep(delay)
+                    else:
+                        raise
+                else:
+                    raise  # Non-transient (4xx, auth, etc.) — don't retry
 
     def _build_service(self):
         """Build the Google Calendar API service.
@@ -131,37 +189,45 @@ class GoogleCalendarService:
             now = datetime.now(timezone.utc)
             time_max = now + timedelta(days=days)
 
-            events_result = self.service.events().list(
-                calendarId="primary",
-                timeMin=now.isoformat(),
-                timeMax=time_max.isoformat(),
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy="startTime",
-            ).execute()
+            events_result = self._execute_with_retry(
+                lambda: self.service.events().list(
+                    calendarId="primary",
+                    timeMin=now.isoformat(),
+                    timeMax=time_max.isoformat(),
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+            )
 
             events = events_result.get("items", [])
             events = [e for e in events if not self._is_declined_by_owner(e)]
             parsed_events = [self._parse_event(e) for e in events]
 
+            self.last_fetch_failed = False
             logger.info(f"Retrieved {len(parsed_events)} upcoming events")
             return parsed_events
 
         except Exception as e:
+            self.last_fetch_failed = True
             logger.error(f"Error getting upcoming events: {e}")
             return []
 
     async def get_event(self, event_id: str) -> dict | None:
         """Get details for a specific calendar event."""
         try:
-            event = self.service.events().get(
-                calendarId="primary",
-                eventId=event_id
-            ).execute()
+            event = self._execute_with_retry(
+                lambda: self.service.events().get(
+                    calendarId="primary",
+                    eventId=event_id
+                )
+            )
 
+            self.last_fetch_failed = False
             return self._parse_event(event)
 
         except Exception as e:
+            self.last_fetch_failed = True
             logger.error(f"Error getting event {event_id}: {e}")
             return None
 
@@ -174,22 +240,26 @@ class GoogleCalendarService:
             )
             end_of_day = start_of_day + timedelta(days=1)
 
-            events_result = self.service.events().list(
-                calendarId="primary",
-                timeMin=start_of_day.isoformat(),
-                timeMax=end_of_day.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-            ).execute()
+            events_result = self._execute_with_retry(
+                lambda: self.service.events().list(
+                    calendarId="primary",
+                    timeMin=start_of_day.isoformat(),
+                    timeMax=end_of_day.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+            )
 
             events = events_result.get("items", [])
             events = [e for e in events if not self._is_declined_by_owner(e)]
             parsed_events = [self._parse_event(e) for e in events]
 
+            self.last_fetch_failed = False
             logger.info(f"Found {len(parsed_events)} events for {date.date()}")
             return parsed_events
 
         except Exception as e:
+            self.last_fetch_failed = True
             logger.error(f"Error getting events for date {date}: {e}")
             return []
 
@@ -211,21 +281,25 @@ class GoogleCalendarService:
             now = datetime.now(timezone.utc)
             cutoff = now + timedelta(hours=hours_ahead)
 
-            events_result = self.service.events().list(
-                calendarId="primary",
-                timeMin=now.isoformat(),
-                timeMax=cutoff.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-            ).execute()
+            events_result = self._execute_with_retry(
+                lambda: self.service.events().list(
+                    calendarId="primary",
+                    timeMin=now.isoformat(),
+                    timeMax=cutoff.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+            )
 
             events = events_result.get("items", [])
             events = [e for e in events if not self._is_declined_by_owner(e)]
             parsed_events = [self._parse_event(e) for e in events]
 
+            self.last_fetch_failed = False
             return parsed_events
 
         except Exception as e:
+            self.last_fetch_failed = True
             logger.error(f"Error getting events needing prep: {e}")
             return []
 

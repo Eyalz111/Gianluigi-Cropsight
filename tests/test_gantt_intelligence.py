@@ -181,7 +181,12 @@ class TestGenerateNowNextLater:
 # =============================================================================
 
 class TestSheetsRetry:
-    """Tests for _execute_with_retry in GoogleSheetsService."""
+    """Tests for _execute_with_retry in GoogleSheetsService.
+
+    The helper takes a ZERO-ARG factory (callable) that constructs the request,
+    so it can rebuild the request against a fresh service after an idle-wake
+    socket rebuild (mirrors the Drive helper). [audit P3-07]
+    """
 
     def test_succeeds_first_try(self):
         """Should return result on first successful call."""
@@ -191,7 +196,7 @@ class TestSheetsRetry:
         svc._credentials = None  # Skip credential check
 
         mock_request = type("MockReq", (), {"execute": lambda self: {"values": [["a"]]}})()
-        result = svc._execute_with_retry(mock_request)
+        result = svc._execute_with_retry(lambda: mock_request)
         assert result == {"values": [["a"]]}
 
     def test_retries_on_connection_error(self):
@@ -211,9 +216,38 @@ class TestSheetsRetry:
             return {"values": []}
 
         mock_request = type("MockReq", (), {"execute": mock_execute})()
-        result = svc._execute_with_retry(mock_request, base_delay=0.01)
+        result = svc._execute_with_retry(lambda: mock_request, base_delay=0.01)
         assert result == {"values": []}
         assert call_count == 3
+
+    def test_factory_rebuilds_request_each_attempt(self):
+        """On a transient failure the factory is re-invoked (so the request is
+        rebuilt against a fresh service), and _service is nulled for rebuild."""
+        from services.google_sheets import GoogleSheetsService
+
+        svc = GoogleSheetsService()
+        svc._credentials = None
+        svc._service = object()  # sentinel; should be nulled on the retry
+
+        factory_calls = 0
+
+        def failing_execute(self_inner):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def ok_execute(self_inner):
+            return {"ok": True}
+
+        def factory():
+            nonlocal factory_calls
+            factory_calls += 1
+            if factory_calls == 1:
+                return type("R", (), {"execute": failing_execute})()
+            return type("R", (), {"execute": ok_execute})()
+
+        result = svc._execute_with_retry(factory, base_delay=0.001)
+        assert result == {"ok": True}
+        assert factory_calls == 2
+        assert svc._service is None  # nulled so the next .service access rebuilds
 
     def test_does_not_retry_on_value_error(self):
         """Non-transient errors should not be retried."""
@@ -227,4 +261,4 @@ class TestSheetsRetry:
         })()
 
         with pytest.raises(ValueError):
-            svc._execute_with_retry(mock_request)
+            svc._execute_with_retry(lambda: mock_request)
