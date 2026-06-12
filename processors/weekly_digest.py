@@ -18,11 +18,15 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from config.settings import settings
+from models.schemas import filter_by_sensitivity
 from services.supabase_client import supabase_client
 from services.google_calendar import calendar_service
 from guardrails.calendar_filter import is_cropsight_meeting
 
 logger = logging.getLogger(__name__)
+
+# I3 team cap: drop only CEO-tier (4); keep public/team/founders. [audit P2-01]
+_FOUNDERS = 3
 
 
 async def generate_weekly_digest(
@@ -57,11 +61,18 @@ async def generate_weekly_digest(
 
     logger.info(f"Generating weekly digest for week of {week_of}")
 
-    # 2. Gather data from all sources
+    # 2. Gather data from all sources.
+    # [audit P2-01] The digest is emailed to the whole team — cap every item at
+    # FOUNDERS so a CEO-tagged decision/task/question never reaches Roye/Paolo/
+    # Yoram. Eyal's own paths (morning brief / weekly review / pulse) stay full.
     meetings = await get_meetings_for_week(week_start, week_end)
-    decisions = await get_decisions_for_week(week_start, week_end)
-    task_summary = await get_task_summary()
-    open_questions = await get_open_questions_summary()
+    decisions = filter_by_sensitivity(
+        await get_decisions_for_week(week_start, week_end), _FOUNDERS
+    )
+    task_summary = await get_task_summary(tier_cap=_FOUNDERS)
+    open_questions = filter_by_sensitivity(
+        await get_open_questions_summary(), _FOUNDERS
+    )
     upcoming = await get_upcoming_meetings(days=7)
 
     # v0.3: Gather cross-reference activity for the week
@@ -190,7 +201,7 @@ async def get_decisions_for_week(
         return []
 
 
-async def get_task_summary() -> dict:
+async def get_task_summary(tier_cap: int | None = None) -> dict:
     """
     Get summary of task statuses.
 
@@ -200,6 +211,12 @@ async def get_task_summary() -> dict:
     - due_next_week: tasks due in the next 7 days
 
     Note: supabase_client methods are SYNC (never await).
+
+    Args:
+        tier_cap: When set (e.g. 3 = founders), CEO-tier tasks are dropped from
+            every bucket AND from the by_area/by_urgency rollup counts. Team-facing
+            callers (the weekly digest) pass this; Eyal-only callers pass None and
+            see everything. [audit P2-01]
 
     Returns:
         Dict with completed_this_week, overdue, and due_next_week lists.
@@ -238,6 +255,16 @@ async def get_task_summary() -> dict:
                 except (ValueError, AttributeError):
                     pass
         result["due_next_week"] = due_next_week
+
+        # [audit P2-01] Apply the team tier cap BEFORE the rollup so both the
+        # lists and the by_area/by_urgency counts exclude CEO-tier tasks.
+        if tier_cap is not None:
+            done_tasks = filter_by_sensitivity(done_tasks, tier_cap)
+            overdue_tasks = filter_by_sensitivity(overdue_tasks, tier_cap)
+            pending_tasks = filter_by_sensitivity(pending_tasks, tier_cap)
+            result["completed_this_week"] = done_tasks
+            result["overdue"] = overdue_tasks
+            result["due_next_week"] = filter_by_sensitivity(due_next_week, tier_cap)
 
         # Operational floor (PR6): per-category + per-urgency rollups over the
         # open workload (overdue + still-pending), alongside the status buckets.
