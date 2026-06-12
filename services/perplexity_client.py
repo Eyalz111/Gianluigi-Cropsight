@@ -176,10 +176,19 @@ class PerplexityClient:
         tasks = [_bounded_search(q) for q in queries]
         results_raw = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # gather preserves order, so results_raw[i] ↔ queries[i]. A section whose
+        # task raised used to be DROPPED from the dict — the caller couldn't tell
+        # "errored" from "not requested", so it never counted against the success
+        # ratio. Insert an explicit failed result for it instead. [audit P3-17]
         results = {}
-        for item in results_raw:
+        for q, item in zip(queries, results_raw):
             if isinstance(item, Exception):
-                logger.error(f"Batch search task failed: {item}")
+                section = q.get("section", "?")
+                logger.error(f"Batch search task failed for section '{section}': {item}")
+                results[section] = PerplexityResult(
+                    query=q.get("query", ""), content="",
+                    success=False, error=str(item),
+                )
             else:
                 section, result = item
                 results[section] = result
