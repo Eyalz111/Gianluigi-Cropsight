@@ -1254,6 +1254,11 @@ class SupabaseClient:
         Raises:
             ValueError: If the task does not exist. Callers must catch.
         """
+        # Clearing the deadline must clear the confidence too — leaving a stale
+        # 'EXPLICIT' on a NULL deadline is contradictory and can make the reminder
+        # scheduler treat a deadline-less task as reminder-eligible. [audit P3-16]
+        if deadline is None:
+            confidence = "NONE"
         updates = {
             "deadline": self._serialize_datetime(deadline),
             "deadline_confidence": confidence,
