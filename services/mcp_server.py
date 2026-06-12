@@ -322,11 +322,14 @@ class MCPServer:
                     )
                     if refresh:
                         snapshot_result = await generate_operational_snapshot()
-                        context["operational_context"] = snapshot_result.get("content", "")
+                        # content is None on failure — don't surface that as the
+                        # operational brief. [audit P2-11]
+                        if snapshot_result.get("content"):
+                            context["operational_context"] = snapshot_result["content"]
                     else:
                         snapshot = get_latest_snapshot()
-                        if snapshot:
-                            context["operational_context"] = snapshot.get("content", "")
+                        if snapshot and snapshot.get("content"):
+                            context["operational_context"] = snapshot["content"]
                 except Exception as snap_err:
                     logger.debug(f"Operational snapshot unavailable: {snap_err}")
 
