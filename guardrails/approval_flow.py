@@ -41,8 +41,60 @@ from services.google_sheets import sheets_service
 from services.supabase_client import supabase_client
 from guardrails.sensitivity_classifier import get_distribution_list
 from services.conversation_memory import conversation_memory
+from models.schemas import filter_by_sensitivity
 
 logger = logging.getLogger(__name__)
+
+# I3 team cap: drop only CEO-tier (4); keep public/team/founders. [audit P2-02/P2-03]
+_FOUNDERS = 3
+
+
+def _render_team_safe_summary(
+    meeting_title: str, meeting_date: str, team_content: dict
+) -> str:
+    """
+    Build a team-facing meeting summary from ALREADY CEO-filtered structured content.
+
+    [audit P2-02] The narrative `summary`/`discussion_summary` prose is generated from
+    the whole transcript and can restate a CEO-tagged item even when the structured
+    lists were filtered. This deterministic render uses ONLY the filtered
+    decisions/tasks/open_questions, so it cannot contain CEO content — no LLM call,
+    no original prose. Used for the team email body + its .docx attachment when CEO
+    items were stripped.
+    """
+    parts = [f"# {meeting_title}", f"_{meeting_date}_", ""]
+
+    decisions = team_content.get("decisions", []) or []
+    tasks = team_content.get("tasks", []) or []
+    questions = team_content.get("open_questions", []) or []
+
+    if decisions:
+        parts.append("## Decisions")
+        for d in decisions:
+            text = d.get("decision") or d.get("description") or d.get("title") or ""
+            if text:
+                parts.append(f"- {text}")
+        parts.append("")
+    if tasks:
+        parts.append("## Action Items")
+        for t in tasks:
+            text = t.get("title") or t.get("task") or ""
+            who = t.get("assignee") or "Unassigned"
+            if text:
+                parts.append(f"- {text} — {who}")
+        parts.append("")
+    if questions:
+        parts.append("## Open Questions")
+        for q in questions:
+            text = q.get("question") or q.get("text") or ""
+            if text:
+                parts.append(f"- {text}")
+        parts.append("")
+
+    parts.append(
+        "_Some items from this meeting are restricted; the full record is held by Eyal._"
+    )
+    return "\n".join(parts).strip()
 
 
 class ApprovalStatus(Enum):
@@ -2012,6 +2064,14 @@ async def distribute_approved_content(
     # Even if the meeting is FOUNDERS/PUBLIC tier, individual items may be CEO.
     # Team gets a filtered copy; Eyal always gets everything.
     team_content = content
+    # Team-facing prose + attachment default to the originals; rebuilt below if we
+    # strip CEO items — the summary/discussion prose and the .docx are generated
+    # from the whole transcript and can restate a CEO item the structured filter
+    # removed. [audit P2-02]
+    team_summary = summary
+    team_discussion = content.get("discussion_summary", "")
+    team_exec = exec_summary
+    team_docx_bytes = _docx_bytes_for_email
     ceo_tiers = ("ceo", "ceo_only", "restricted", "sensitive")  # Include legacy values
     if sensitivity not in ceo_tiers:
         filtered_decisions = [d for d in content.get("decisions", []) if d.get("sensitivity") not in ceo_tiers]
@@ -2025,6 +2085,32 @@ async def distribute_approved_content(
         if has_filtered:
             team_content = {**content, "decisions": filtered_decisions, "tasks": filtered_tasks, "open_questions": filtered_questions}
             logger.info(f"Filtered CEO items from team distribution for {meeting_id}")
+
+            # [audit P2-02] Rebuild the team narrative + .docx from the filtered
+            # content so no CEO prose reaches the team email body or attachment.
+            team_summary = _render_team_safe_summary(meeting_title, meeting_date, team_content)
+            team_discussion = ""  # free-text discussion can't be tier-filtered
+            team_exec = (
+                f"{len(filtered_decisions)} decisions, {len(filtered_tasks)} action items"
+            )
+            try:
+                from services.word_generator import generate_summary_docx
+                team_docx_bytes = generate_summary_docx(
+                    meeting_title=meeting_title,
+                    meeting_date=meeting_date,
+                    participants=meeting_record.get("participants", []) if meeting_record else [],
+                    duration_minutes=meeting_record.get("duration_minutes", 0) if meeting_record else 0,
+                    sensitivity=sensitivity,
+                    decisions=filtered_decisions,
+                    tasks=filtered_tasks,
+                    follow_ups=follow_ups,
+                    open_questions=filtered_questions,
+                    discussion_summary=team_summary,
+                    stakeholders_mentioned=content.get("stakeholders", []),
+                )
+            except Exception as e:
+                logger.error(f"Could not build team-safe docx for {meeting_id}: {e}")
+                team_docx_bytes = None  # better no attachment than a leaky one
 
     # 6. Send Telegram notification
     try:
@@ -2066,13 +2152,13 @@ async def distribute_approved_content(
             email_result = await gmail_service.send_meeting_summary(
                 recipients=distribution_emails,
                 meeting_title=meeting_title,
-                summary_content=summary,
+                summary_content=team_summary,  # [audit P2-02] CEO-safe prose
                 drive_link=results.get("drive_link", ""),
                 meeting_date=meeting_date,
-                executive_summary=exec_summary,
+                executive_summary=team_exec,
                 tasks=team_content.get("tasks", []),
-                docx_bytes=_docx_bytes_for_email,
-                discussion_summary=team_content.get("discussion_summary", ""),
+                docx_bytes=team_docx_bytes,  # [audit P2-02] CEO-safe attachment
+                discussion_summary=team_discussion,
             )
             results["email_sent"] = email_result
             results["emails_to"] = distribution_emails
@@ -2840,8 +2926,11 @@ async def distribute_approved_review(
             f"Decisions: {decisions_count}\n\n"
         )
 
-        # Add decisions
-        decisions = week_in_review.get("decisions", [])
+        # Add decisions.
+        # [audit P2-03] This digest is uploaded to the team-shared Drive folder and
+        # the team is emailed its link, so cap every item at FOUNDERS — the email
+        # body is counts-only, but the linked doc must not carry CEO-tier items.
+        decisions = filter_by_sensitivity(week_in_review.get("decisions", []), _FOUNDERS)
         if decisions:
             digest_content += "Key Decisions:\n"
             for d in decisions[:20]:
@@ -2850,8 +2939,8 @@ async def distribute_approved_review(
 
         # Add task summary
         task_summary = week_in_review.get("task_summary", {})
-        completed = task_summary.get("completed_this_week", [])
-        overdue = task_summary.get("overdue", [])
+        completed = filter_by_sensitivity(task_summary.get("completed_this_week", []), _FOUNDERS)
+        overdue = filter_by_sensitivity(task_summary.get("overdue", []), _FOUNDERS)
         if completed:
             digest_content += f"Tasks Completed ({len(completed)}):\n"
             for t in completed[:20]:
