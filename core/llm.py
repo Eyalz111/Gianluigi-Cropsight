@@ -109,7 +109,16 @@ def call_llm(
         ]
 
     response = client.messages.create(**kwargs)
-    response_text = response.content[0].text
+    # Guard against an empty/truncated content block (an overloaded or truncated
+    # response can return content=[]) — a bare content[0].text raises a confusing
+    # IndexError out of call_llm instead of a clean, retryable error. [audit P6-08]
+    if response.content and hasattr(response.content[0], "text"):
+        response_text = response.content[0].text
+    else:
+        raise RuntimeError(
+            f"Claude API returned no text content (stop_reason="
+            f"{getattr(response, 'stop_reason', '?')})"
+        )
 
     # Extract usage info
     usage = {
