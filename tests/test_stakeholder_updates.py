@@ -429,86 +429,189 @@ class TestApplyStakeholderUpdateNew:
 
 
 # =============================================================================
-# Test: Callback handling — stakeholder_approve and stakeholder_reject
+# Test: the request persists the payload (so approve can apply it). [audit P3-08]
 # =============================================================================
 
+class TestSubmitPersistsPendingApproval:
+    @pytest.mark.asyncio
+    async def test_submit_creates_pending_approval(self):
+        with (
+            patch("guardrails.approval_flow.sheets_service") as mock_sheets,
+            patch("guardrails.approval_flow.comms_spine") as mock_telegram,
+            patch("guardrails.approval_flow.supabase_client") as mock_supabase,
+        ):
+            mock_sheets.get_stakeholder_info = AsyncMock(return_value=[])
+            mock_telegram.send_stakeholder_approval_request = AsyncMock(return_value=True)
+            mock_supabase.log_action = MagicMock(return_value={"id": "log-1"})
+            mock_supabase.delete_pending_approval = MagicMock(return_value=False)
+            mock_supabase.create_pending_approval = MagicMock(return_value={"id": "pa-1"})
+
+            from guardrails.approval_flow import submit_stakeholder_updates_for_approval
+
+            result = await submit_stakeholder_updates_for_approval(
+                stakeholder_name="Rita",
+                organization="AgriTech Labs",
+                updates={"priority": "H"},
+                source_meeting_id="m-1",
+            )
+
+        # Persisted under the org-keyed id, with content_type 'stakeholder_update'
+        mock_supabase.create_pending_approval.assert_called_once()
+        kw = mock_supabase.create_pending_approval.call_args.kwargs
+        assert kw["approval_id"] == "stakeholder:AgriTech Labs"
+        assert kw["content_type"] == "stakeholder_update"
+        assert kw["content"]["organization"] == "AgriTech Labs"
+        assert kw["content"]["updates"] == {"priority": "H"}
+        # ...and the card carries that same id so the approve handler can find it
+        send_kw = mock_telegram.send_stakeholder_approval_request.call_args.kwargs
+        assert send_kw["approval_id"] == "stakeholder:AgriTech Labs"
+        assert result["approval_id"] == "stakeholder:AgriTech Labs"
+
+
+# =============================================================================
+# Test: Callback handling — approve APPLIES, reject DISCARDS. [audit P3-08]
+# =============================================================================
+
+# conftest sets settings.TELEGRAM_EYAL_CHAT_ID = "123456789"; pin it on the bot
+# so these tests don't depend on fixture timing.
+_EYAL_ID = "123456789"
+
+
+def _make_bot():
+    from services.telegram_bot import TelegramBot
+
+    bot = TelegramBot()
+    bot.eyal_chat_id = _EYAL_ID
+    return bot
+
+
+def _stakeholder_callback(data: str, from_user_id=_EYAL_ID):
+    """Build a mock callback-query Update for the stakeholder branches."""
+    query = AsyncMock()
+    query.data = data
+    query.from_user = MagicMock()
+    query.from_user.id = from_user_id
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+
+    update = MagicMock()
+    update.callback_query = query
+
+    context = MagicMock()
+    context.user_data = {}
+    return update, query, context
+
+
 class TestStakeholderCallbackHandling:
-    """Test the callback query handler for stakeholder approve/reject buttons."""
+    """Approve now WRITES the update; reject discards the persisted payload."""
 
     @pytest.mark.asyncio
-    async def test_stakeholder_approve_callback(self):
-        """Should process stakeholder_approve callback and log action."""
+    async def test_stakeholder_approve_applies_persisted_update(self):
+        bot = _make_bot()
+        update, query, context = _stakeholder_callback(
+            "stakeholder_approve:stakeholder:AgriTech Labs"
+        )
+
         mock_supabase = MagicMock()
+        mock_supabase.get_pending_approval = MagicMock(return_value={
+            "approval_id": "stakeholder:AgriTech Labs",
+            "content_type": "stakeholder_update",
+            "content": {
+                "organization": "AgriTech Labs",
+                "updates": {"next_action": "Schedule demo", "priority": "H"},
+            },
+        })
+        mock_supabase.delete_pending_approval = MagicMock(return_value=True)
         mock_supabase.log_action = MagicMock(return_value={"id": "log-3"})
-        mock_supabase.update_meeting = MagicMock()
 
-        from services.telegram_bot import TelegramBot
+        mock_sheets = MagicMock()
+        mock_sheets.apply_stakeholder_update = AsyncMock(return_value=True)
 
-        bot = TelegramBot()
-
-        # Create mock update for callback query
-        query = AsyncMock()
-        query.data = "stakeholder_approve:AgriTech Labs"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-
-        update = MagicMock()
-        update.callback_query = query
-
-        context = MagicMock()
-        context.user_data = {}
-
-        # Patch supabase_client in the module where it gets imported from
-        with patch(
-            "services.supabase_client.supabase_client",
-            mock_supabase,
-        ):
+        with patch("services.supabase_client.supabase_client", mock_supabase), \
+             patch("services.google_sheets.sheets_service", mock_sheets):
             await bot._handle_callback_query(update, context)
 
-        query.answer.assert_awaited_once()
-        query.edit_message_text.assert_awaited_once_with(
-            "Approved stakeholder update for: AgriTech Labs"
+        # The update is actually written to the Stakeholder Tracker
+        mock_sheets.apply_stakeholder_update.assert_awaited_once_with(
+            "AgriTech Labs", {"next_action": "Schedule demo", "priority": "H"}
         )
-        mock_supabase.log_action.assert_called_once()
-        log_kwargs = mock_supabase.log_action.call_args.kwargs
-        assert log_kwargs["action"] == "stakeholder_approved"
-        assert log_kwargs["details"]["organization"] == "AgriTech Labs"
-        assert log_kwargs["triggered_by"] == "eyal"
+        # Pending row cleaned up + logged + success message
+        mock_supabase.delete_pending_approval.assert_called_once_with(
+            "stakeholder:AgriTech Labs"
+        )
+        assert mock_supabase.log_action.call_args.kwargs["action"] == "stakeholder_approved"
+        msg = query.edit_message_text.call_args.args[0]
+        assert "Approved" in msg and "AgriTech Labs" in msg
 
     @pytest.mark.asyncio
-    async def test_stakeholder_reject_callback(self):
-        """Should process stakeholder_reject callback and log action."""
+    async def test_stakeholder_approve_no_payload_does_not_write(self):
+        bot = _make_bot()
+        update, query, context = _stakeholder_callback(
+            "stakeholder_approve:stakeholder:Gone Inc"
+        )
+
         mock_supabase = MagicMock()
-        mock_supabase.log_action = MagicMock(return_value={"id": "log-4"})
-        mock_supabase.update_meeting = MagicMock()
+        mock_supabase.get_pending_approval = MagicMock(return_value=None)  # expired/lost
+        mock_sheets = MagicMock()
+        mock_sheets.apply_stakeholder_update = AsyncMock(return_value=True)
 
-        from services.telegram_bot import TelegramBot
-
-        bot = TelegramBot()
-
-        query = AsyncMock()
-        query.data = "stakeholder_reject:AgriTech Labs"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-
-        update = MagicMock()
-        update.callback_query = query
-
-        context = MagicMock()
-        context.user_data = {}
-
-        with patch(
-            "services.supabase_client.supabase_client",
-            mock_supabase,
-        ):
+        with patch("services.supabase_client.supabase_client", mock_supabase), \
+             patch("services.google_sheets.sheets_service", mock_sheets):
             await bot._handle_callback_query(update, context)
 
-        query.answer.assert_awaited_once()
-        query.edit_message_text.assert_awaited_once_with(
-            "Rejected stakeholder update for: AgriTech Labs"
+        mock_sheets.apply_stakeholder_update.assert_not_awaited()
+        msg = query.edit_message_text.call_args.args[0].lower()
+        assert "expired" in msg or "couldn't" in msg
+
+    @pytest.mark.asyncio
+    async def test_stakeholder_reject_discards_pending(self):
+        bot = _make_bot()
+        update, query, context = _stakeholder_callback(
+            "stakeholder_reject:stakeholder:AgriTech Labs"
         )
-        mock_supabase.log_action.assert_called_once()
-        log_kwargs = mock_supabase.log_action.call_args.kwargs
-        assert log_kwargs["action"] == "stakeholder_rejected"
-        assert log_kwargs["details"]["organization"] == "AgriTech Labs"
-        assert log_kwargs["triggered_by"] == "eyal"
+
+        mock_supabase = MagicMock()
+        mock_supabase.get_pending_approval = MagicMock(return_value={
+            "content": {"organization": "AgriTech Labs"},
+        })
+        mock_supabase.delete_pending_approval = MagicMock(return_value=True)
+        mock_supabase.log_action = MagicMock(return_value={"id": "log-4"})
+
+        with patch("services.supabase_client.supabase_client", mock_supabase):
+            await bot._handle_callback_query(update, context)
+
+        mock_supabase.delete_pending_approval.assert_called_once_with(
+            "stakeholder:AgriTech Labs"
+        )
+        assert mock_supabase.log_action.call_args.kwargs["action"] == "stakeholder_rejected"
+        assert "Rejected" in query.edit_message_text.call_args.args[0]
+
+
+class TestCallbackEyalGuard:
+    """[audit P3-14] Only Eyal may action ANY inline-button callback."""
+
+    @pytest.mark.asyncio
+    async def test_non_eyal_callback_is_blocked(self):
+        bot = _make_bot()
+        # A non-Eyal user taps a stakeholder Approve in some shared chat
+        update, query, context = _stakeholder_callback(
+            "stakeholder_approve:stakeholder:AgriTech Labs",
+            from_user_id="99999999",  # not Eyal
+        )
+
+        mock_supabase = MagicMock()
+        mock_sheets = MagicMock()
+        mock_sheets.apply_stakeholder_update = AsyncMock(return_value=True)
+
+        with patch("services.supabase_client.supabase_client", mock_supabase), \
+             patch("services.google_sheets.sheets_service", mock_sheets):
+            await bot._handle_callback_query(update, context)
+
+        # The guard short-circuits: no write, no DB lookup
+        mock_sheets.apply_stakeholder_update.assert_not_awaited()
+        mock_supabase.get_pending_approval.assert_not_called()
+        # ...and the user gets an explanatory alert
+        assert any(
+            c.args and "Only Eyal" in str(c.args[0])
+            for c in query.answer.call_args_list
+        )

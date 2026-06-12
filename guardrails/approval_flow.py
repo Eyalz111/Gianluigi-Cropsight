@@ -2625,6 +2625,32 @@ async def submit_stakeholder_updates_for_approval(
 
     action = "add" if is_new else "update"
 
+    # [audit P3-08] Persist the pending update BEFORE sending the card so the
+    # approve callback can actually apply it — and survive a Cloud Run restart.
+    # The key must match the callback payload built in
+    # send_stakeholder_approval_request (org_key truncated to the same 30 chars).
+    org_key = organization[:30].replace(":", "_")
+    approval_id = f"stakeholder:{org_key}"
+    try:
+        # Replace any stale pending update for the same org (idempotent re-request).
+        supabase_client.delete_pending_approval(approval_id)
+        supabase_client.create_pending_approval(
+            approval_id=approval_id,
+            content_type="stakeholder_update",
+            content={
+                "title": f"Stakeholder update: {organization}",
+                "organization": organization,
+                "stakeholder_name": stakeholder_name,
+                "updates": updates,
+                "is_new": is_new,
+                "source_meeting_id": source_meeting_id,
+            },
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to persist pending stakeholder update for {organization}: {e}"
+        )
+
     # Send approval request via Telegram
     result = await comms_spine.send_stakeholder_approval_request(
         stakeholder_name=stakeholder_name,
@@ -2632,6 +2658,7 @@ async def submit_stakeholder_updates_for_approval(
         updates=updates,
         is_new=is_new,
         source_meeting_id=source_meeting_id,
+        approval_id=approval_id,
     )
 
     # Log the action
@@ -2647,7 +2674,7 @@ async def submit_stakeholder_updates_for_approval(
     )
 
     return {
-        "approval_id": f"stakeholder:{organization}",
+        "approval_id": approval_id,
         "status": "pending",
         "action": action,
         "is_new": is_new,
