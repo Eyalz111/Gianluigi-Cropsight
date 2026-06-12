@@ -1048,18 +1048,6 @@ class GianluigiAgent:
 
         return {"results": results[:20], "count": len(results)}
 
-    # =========================================================================
-    # Helper Methods
-    # =========================================================================
-
-    def _extract_text_response(self, response) -> str:
-        """Extract text content from Claude response."""
-        text_parts = []
-        for block in response.content:
-            if hasattr(block, "text"):
-                text_parts.append(block.text)
-        return "\n".join(text_parts)
-
 
 # Singleton instance for easy import
 gianluigi_agent = GianluigiAgent()
