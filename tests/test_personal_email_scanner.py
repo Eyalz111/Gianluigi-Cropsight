@@ -117,6 +117,30 @@ class TestPersonalEmailScanner:
     @pytest.mark.asyncio
     @patch("schedulers.personal_email_scanner.supabase_client")
     @patch("schedulers.personal_email_scanner.build_filter_keywords")
+    async def test_fetch_offloaded_to_thread(self, mock_bfk, mock_db, mock_settings):
+        """The blocking Gmail fetch runs OFF the event loop (asyncio.to_thread)
+        so a 503 mid-scan can't block the whole loop. [audit P4-07]"""
+        mock_bfk.return_value = ["cropsight"]
+        mock_db.get_tracked_thread_ids.return_value = set()
+
+        from schedulers.personal_email_scanner import PersonalEmailScanner
+        import schedulers.personal_email_scanner as mod
+
+        scanner = PersonalEmailScanner()
+        scanner._fetch_messages_sync = MagicMock(return_value=[])  # no messages → early return
+
+        async def _passthrough(func, *a, **k):
+            return func(*a, **k)
+
+        with patch.object(mod.asyncio, "to_thread", new=AsyncMock(side_effect=_passthrough)) as spy:
+            result = await scanner.run_daily_scan()
+
+        assert result["fetched"] == 0
+        assert spy.await_count >= 1, "the Gmail fetch must be offloaded via asyncio.to_thread"
+
+    @pytest.mark.asyncio
+    @patch("schedulers.personal_email_scanner.supabase_client")
+    @patch("schedulers.personal_email_scanner.build_filter_keywords")
     async def test_dedup_already_scanned(self, mock_bfk, mock_db, mock_settings):
         """Emails already in email_scans are skipped via dedup check."""
         mock_bfk.return_value = ["cropsight"]

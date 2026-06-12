@@ -10,6 +10,7 @@ Usage:
     stats = await personal_email_scanner.run_daily_scan()
 """
 
+import asyncio
 import base64
 import logging
 from datetime import date, datetime, timedelta
@@ -176,7 +177,10 @@ class PersonalEmailScanner:
 
             # 3. Fetch yesterday's messages (metadata only)
             yesterday = (date.today() - timedelta(days=1)).strftime("%Y/%m/%d")
-            messages = self._fetch_messages_sync(since=yesterday)
+            # Off-load the blocking Gmail calls (+ the retry backoff sleep) to a
+            # thread so a 503 mid-scan can't block the whole event loop — this
+            # runs on the loop, invoked from the morning brief. [audit P4-07]
+            messages = await asyncio.to_thread(self._fetch_messages_sync, since=yesterday)
             stats["fetched"] = len(messages)
 
             if not messages:
@@ -270,7 +274,7 @@ class PersonalEmailScanner:
                 full_body = None
                 if classification in ("relevant", "borderline"):
                     try:
-                        full_body = self._get_full_body_sync(msg_id)
+                        full_body = await asyncio.to_thread(self._get_full_body_sync, msg_id)
                         if full_body:
                             extracted_items = await extract_email_intelligence(
                                 sender=sender_email or sender,
