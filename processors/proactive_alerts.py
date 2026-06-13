@@ -511,14 +511,18 @@ def _check_stale_tasks() -> list[dict]:
         if days_open < 7:
             continue
 
-        # Check if task has any task_mention records
+        # Check if task has any task_mention records. A QUERY failure (schema
+        # drift / RLS misconfig) must NOT be read as "zero mentions" — that would
+        # flag EVERY open task as stale and flood Eyal's weekly alert with false
+        # positives. Skip this task on a query error instead. [audit P2-16]
         try:
             mentions = supabase_client.client.table("task_mentions").select(
                 "id", count="exact"
             ).eq("task_id", task["id"]).execute()
             mention_count = mentions.count or 0
-        except Exception:
-            mention_count = 0
+        except Exception as e:
+            logger.debug(f"task_mentions query failed for {task.get('id')}: {e}")
+            continue
 
         if mention_count == 0:
             stale_tasks.append({
