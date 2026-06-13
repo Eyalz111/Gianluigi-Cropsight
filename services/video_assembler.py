@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 
 # ── Design constants ───────────────────────────────────────────────────
 
+# Hard cap on the MoviePy write_videofile() executor call. A corrupt-audio /
+# codec deadlock would otherwise hold a default-executor thread forever — the
+# signal-finalize coroutine never returns and the signal sticks in
+# 'approved_finalizing'. wait_for unblocks the coroutine (the leaked thread is
+# acceptable vs a permanent hang). [audit P3-13]
+_VIDEO_WRITE_TIMEOUT_S = 300
+
 SLIDE_WIDTH = 1920
 SLIDE_HEIGHT = 1080
 
@@ -386,14 +393,17 @@ class VideoAssembler:
             moviepy_output = os.path.join(tmp_dir, "moviepy_raw.mp4")
             moviepy_temp_audio = os.path.join(tmp_dir, "moviepy_temp_audio.m4a")
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: final.write_videofile(
-                    moviepy_output, fps=fps, codec="libx264",
-                    audio_codec="aac", logger=None,
-                    temp_audiofile=moviepy_temp_audio,
-                    remove_temp=True,
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: final.write_videofile(
+                        moviepy_output, fps=fps, codec="libx264",
+                        audio_codec="aac", logger=None,
+                        temp_audiofile=moviepy_temp_audio,
+                        remove_temp=True,
+                    ),
                 ),
+                timeout=_VIDEO_WRITE_TIMEOUT_S,
             )
 
             dur = audio_clip.duration
@@ -694,17 +704,20 @@ class VideoAssembler:
             moviepy_output = os.path.join(tmp_dir, "moviepy_raw.mp4")
             moviepy_temp_audio = os.path.join(tmp_dir, "moviepy_temp_audio.m4a")
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: final.write_videofile(
-                    moviepy_output,
-                    fps=24,
-                    codec="libx264",
-                    audio_codec="aac",
-                    logger=None,
-                    temp_audiofile=moviepy_temp_audio,
-                    remove_temp=True,
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: final.write_videofile(
+                        moviepy_output,
+                        fps=24,
+                        codec="libx264",
+                        audio_codec="aac",
+                        logger=None,
+                        temp_audiofile=moviepy_temp_audio,
+                        remove_temp=True,
+                    ),
                 ),
+                timeout=_VIDEO_WRITE_TIMEOUT_S,
             )
 
             final_duration = final.duration
