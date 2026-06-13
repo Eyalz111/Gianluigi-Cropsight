@@ -184,11 +184,21 @@ def generate_commitments_due(max_items: int = 3) -> list[dict]:
     overdue = supabase_client.get_overdue_commitments()
     items = []
     for c in overdue[:max_items]:
-        days_overdue = (date.today() - date.fromisoformat(c["deadline"])).days
+        # Slice [:10] + guard so a deadline with a time component or junk can't
+        # ValueError and crash the commitments section of the morning brief.
+        # Same class as generate_deal_pulse's fix. [audit P2-08 sibling]
+        raw_deadline = (c.get("deadline") or "")[:10]
+        try:
+            days_overdue = (date.today() - date.fromisoformat(raw_deadline)).days
+        except (ValueError, TypeError):
+            logger.warning(
+                f"Skipping commitment with unparseable deadline: {c.get('deadline')!r}"
+            )
+            continue
         items.append({
-            "organization": c["organization"],
-            "commitment": c["commitment"][:80],
-            "deadline": c["deadline"],
+            "organization": c.get("organization", ""),
+            "commitment": (c.get("commitment") or "")[:80],
+            "deadline": c.get("deadline"),
             "days_overdue": days_overdue,
             "promised_to": c.get("promised_to", ""),
         })

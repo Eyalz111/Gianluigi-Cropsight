@@ -143,9 +143,13 @@ Write the brief now:"""
 
     except Exception as e:
         logger.error(f"Failed to generate operational snapshot: {e}")
+        # content=None (NOT the error string) so a caller can't render
+        # "Snapshot generation failed: ..." to Eyal AS the operational brief.
+        # Callers must treat None as "no snapshot". [audit P2-11]
         return {
             "date": today,
-            "content": f"Snapshot generation failed: {e}",
+            "content": None,
+            "error": str(e),
             "tokens_used": 0,
         }
 

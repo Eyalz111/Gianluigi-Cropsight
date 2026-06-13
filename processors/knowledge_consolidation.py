@@ -113,7 +113,25 @@ existing sensitivity and citation. No prose, no code fences."""
         cleaned["narrative"] = data.get("narrative", brief.get("narrative", ""))
         cleaned["current_status"] = data.get("current_status", brief.get("current_status", "active"))
         if isinstance(data.get("facts"), list) and data["facts"]:
-            cleaned["facts"] = data["facts"]
+            # Haiku sometimes drops the REQUIRED `sensitivity` on a fact, which
+            # made TopicBrief(**cleaned) ValidationError → return None for EVERY
+            # touched topic every night — a broken hot path silently burning Haiku
+            # tokens with reconciled=0. Default a missing tier to the brief's own
+            # tier (NOT 'founders' blindly — that could downgrade a CEO fact and
+            # leak it). Conservative: never tier a fact LOWER than the brief. [audit P2-10]
+            brief_tier = brief.get("sensitivity") or "founders"
+            _valid = {"public", "team", "founders", "ceo"}
+            fixed_facts = []
+            for f in data["facts"]:
+                if isinstance(f, dict):
+                    s = str(f.get("sensitivity") or "").lower()
+                    # Missing tier silently defaults to FOUNDERS (a DOWNGRADE/leak
+                    # if the source was CEO); an INVALID tier raises ValidationError
+                    # (the nightly no-op). Both → the brief's own tier (conservative).
+                    if s not in _valid:
+                        f = {**f, "sensitivity": brief_tier}
+                fixed_facts.append(f)
+            cleaned["facts"] = fixed_facts
         return TopicBrief(**cleaned).model_dump(mode="json")
     except Exception as e:
         logger.warning(f"[nightly] reconcile failed for '{topic_name}': {e}")
@@ -140,7 +158,7 @@ async def run_consolidation(apply: bool | None = None) -> dict:
         or []
     )
 
-    staled = deduped = reconciled = updated = 0
+    staled = deduped = reconciled = updated = reconcile_failed = 0
     changes: list[dict] = []
 
     for t in topics:
@@ -169,6 +187,10 @@ async def run_consolidation(apply: bool | None = None) -> dict:
                 brief = recon
                 changed = True
                 reconciled += 1
+            else:
+                # A None here is a real reconcile failure (parse/validation/LLM),
+                # not a no-op — surface it instead of silently counting nothing. [audit P2-10]
+                reconcile_failed += 1
 
         if changed:
             brief["version"] = int(brief.get("version", 0)) + 1
@@ -189,9 +211,15 @@ async def run_consolidation(apply: bool | None = None) -> dict:
         "staled": staled,
         "deduped": deduped,
         "reconciled": reconciled,
+        "reconcile_failed": reconcile_failed,
         "updated": updated,
         "applied": apply,
     }
+    if reconcile_failed:
+        logger.warning(
+            f"[nightly] {reconcile_failed} topic reconcile(s) failed "
+            f"(parse/validation/LLM) — see per-topic warnings above"
+        )
     try:
         supabase_client.log_action(
             action="knowledge_nightly" if apply else "shadow_nightly",
