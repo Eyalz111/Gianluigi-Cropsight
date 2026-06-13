@@ -363,11 +363,14 @@ def _extract_active_crops() -> list[str]:
     ]
 
     try:
-        # Check recent task titles and decisions for crop mentions
+        # Check recent task titles and decisions for crop mentions.
+        # approved-only — don't let UNapproved (pending-extraction) task text
+        # influence an outbound research query. [audit P2-18]
         recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         result = (
             supabase_client.client.table("tasks")
             .select("title")
+            .eq("approval_status", "approved")
             .gte("created_at", recent_cutoff)
             .limit(50)
             .execute()
@@ -397,10 +400,12 @@ def _extract_active_regions() -> list[str]:
     ]
 
     try:
+        # approved-only — don't let unapproved task text influence research. [audit P2-18]
         recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         result = (
             supabase_client.client.table("tasks")
             .select("title")
+            .eq("approval_status", "approved")
             .gte("created_at", recent_cutoff)
             .limit(50)
             .execute()
