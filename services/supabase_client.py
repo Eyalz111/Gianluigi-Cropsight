@@ -71,8 +71,11 @@ class SupabaseClient:
         """
         result = {}
         try:
+            # TaskStatus is "done", not "completed" — the old literal matched no
+            # rows, so meeting-prep's "what got done since the last meeting" block
+            # was permanently empty. [audit P6-02]
             completed = self.client.table("tasks").select("*").eq(
-                "status", "completed"
+                "status", "done"
             ).gte("updated_at", since_date).limit(limit).execute()
             result["tasks_completed"] = completed.data if completed.data else []
         except Exception:
@@ -2546,14 +2549,22 @@ class SupabaseClient:
         Returns:
             List of pending approval records with auto_publish_at set.
         """
-        result = (
-            self.client.table("pending_approvals")
-            .select("*")
-            .eq("status", "pending")
-            .not_.is_("auto_publish_at", "null")
-            .execute()
-        )
-        return result.data
+        # try/except + `or []` so a transient Supabase blip during cold-start
+        # reconstruction can't raise out of a fire-and-forget reconstruct task
+        # and silently leave auto-publish timers un-rebuilt for the instance's
+        # life. Mirrors get_signals_by_status. [audit P3-09]
+        try:
+            result = (
+                self.client.table("pending_approvals")
+                .select("*")
+                .eq("status", "pending")
+                .not_.is_("auto_publish_at", "null")
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.warning(f"get_pending_auto_publishes failed: {e}")
+            return []
 
     def get_signals_by_status(self, status: str) -> list[dict]:
         """
@@ -2583,14 +2594,20 @@ class SupabaseClient:
         Returns:
             List of pending approval records.
         """
-        result = (
-            self.client.table("pending_approvals")
-            .select("*")
-            .eq("status", "pending")
-            .order("created_at", desc=True)
-            .execute()
-        )
-        return result.data
+        # try/except + `or []` so a cold-start blip can't kill approval-reminder
+        # reconstruction. [audit P3-09]
+        try:
+            result = (
+                self.client.table("pending_approvals")
+                .select("*")
+                .eq("status", "pending")
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.warning(f"get_pending_approvals_for_reminders failed: {e}")
+            return []
 
     def expire_pending_approvals(self) -> list[dict]:
         """
@@ -2908,8 +2925,16 @@ class SupabaseClient:
             "triggered_by": triggered_by,
         }
 
-        result = self.client.table("audit_log").insert(data).execute()
-        return result.data[0]
+        # Defensive: an audit-insert blip must not raise out of a caller that
+        # logs AFTER its primary write (e.g. create_deal) — that would make the
+        # caller treat the whole op as failed and duplicate-create on retry.
+        # mcp_auth.log_call already wraps this; inline DB-layer callers didn't. [audit P3-10]
+        try:
+            result = self.client.table("audit_log").insert(data).execute()
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.warning(f"log_action insert failed (non-fatal): {e}")
+            return {}
 
     def get_recent_prep_pings(self, days: int = 2) -> list[dict]:
         """Recent 'prep_ping_sent' audit rows → restart-safe fire-once state.

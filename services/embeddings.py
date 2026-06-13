@@ -126,24 +126,45 @@ class EmbeddingService:
         if not texts:
             return []
 
-        # Clean all texts
-        cleaned_texts = [self._clean_text(t) for t in texts if t and t.strip()]
+        zero = [0.0] * self.dimension
 
-        if not cleaned_texts:
-            return []
+        # Track the ORIGINAL index of each non-empty text. The embedding API
+        # can't take empty strings, but every caller zips this result with the
+        # ORIGINAL chunk list — silently dropping empties mid-list would shift
+        # all later chunks onto the WRONG vector and drop the last one,
+        # corrupting semantic search for that meeting with no error. Embed only
+        # the non-empty texts, then re-expand to the original length/order with
+        # a zero-vector placeholder for empties so result[i] ↔ texts[i]. [audit P3-11]
+        non_empty = [(i, self._clean_text(t)) for i, t in enumerate(texts) if t and t.strip()]
+
+        if not non_empty:
+            return [list(zero) for _ in texts]
 
         try:
             response = await self.client.embeddings.create(
                 model=self.model,
-                input=cleaned_texts,
+                input=[t for _, t in non_empty],
                 dimensions=self.dimension
             )
-            # Sort by index to maintain order
+            # Sort by index to maintain order relative to the request.
             sorted_data = sorted(response.data, key=lambda x: x.index)
-            return [item.embedding for item in sorted_data]
+            embedded = [item.embedding for item in sorted_data]
         except Exception as e:
             logger.error(f"Error generating batch embeddings: {e}")
             raise
+
+        if len(embedded) != len(non_empty):
+            # Defensive: the API returned a different count than requested.
+            # Raise rather than return a misaligned list. [audit P3-11]
+            raise ValueError(
+                f"Embedding count mismatch: requested {len(non_empty)}, "
+                f"got {len(embedded)}"
+            )
+
+        result = [list(zero) for _ in texts]
+        for (orig_i, _), vec in zip(non_empty, embedded):
+            result[orig_i] = vec
+        return result
 
     # =========================================================================
     # Text Chunking

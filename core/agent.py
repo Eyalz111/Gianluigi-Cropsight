@@ -573,17 +573,27 @@ class GianluigiAgent:
     async def _tool_search_meetings(self, input: dict) -> dict:
         """Semantic search over meeting transcripts."""
         query = input.get("query", "")
+        date_from = input.get("date_from")
+        date_to = input.get("date_to")
+        has_dates = bool(date_from or date_to)
 
         # Generate embedding for query
         query_embedding = await embedding_service.embed_text(query)
 
-        # Search embeddings
+        # The search_meetings tool advertises date_from/date_to, but the
+        # match_embeddings RPC doesn't date-filter — the args were silently
+        # ignored, so a date-scoped question ("the Moldova pilot in April")
+        # returned all-time results and Claude answered about the wrong period.
+        # Over-fetch then post-filter by the source meeting's date. [audit P6-03]
         results = supabase_client.search_embeddings(
             query_embedding=query_embedding,
             similarity_threshold=0.65,
-            limit=10,
+            limit=50 if has_dates else 10,
             source_type="meeting",
         )
+
+        if has_dates:
+            results = self._filter_chunks_by_meeting_date(results, date_from, date_to)[:10]
 
         # Format results
         formatted = []
@@ -597,6 +607,35 @@ class GianluigiAgent:
             })
 
         return {"results": formatted, "count": len(formatted)}
+
+    @staticmethod
+    def _filter_chunks_by_meeting_date(
+        results: list[dict], date_from: str | None, date_to: str | None
+    ) -> list[dict]:
+        """Keep only chunks whose source meeting falls in [date_from, date_to].
+
+        Fail-open: if the dates can't be parsed or the meeting lookup fails,
+        return the results unfiltered rather than silently dropping everything.
+        [audit P6-03]
+        """
+        from datetime import datetime, timedelta
+
+        try:
+            df = datetime.fromisoformat(date_from) if date_from else None
+            dt = None
+            if date_to:
+                # Inclusive of the whole date_to day.
+                dt = datetime.fromisoformat(date_to) + timedelta(days=1) - timedelta(seconds=1)
+        except (ValueError, TypeError):
+            return results
+
+        try:
+            in_range = supabase_client.list_meetings(date_from=df, date_to=dt, limit=1000)
+            ids = {m.get("id") for m in in_range}
+        except Exception:
+            return results
+
+        return [r for r in results if r.get("source_id") in ids]
 
     async def _tool_get_meeting_summary(self, input: dict) -> dict:
         """Retrieve a meeting summary by ID."""
