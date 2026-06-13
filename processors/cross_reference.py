@@ -104,6 +104,16 @@ async def deduplicate_tasks(
             f'{i}. [id: {tid}] "{title}" ({assignee}, {category}, {status})'
         )
 
+    # New tasks are lettered A.. (existing are numbered 1.. so the two never
+    # collide in the LLM's references). Past 'Z' the label leaves the alphabet;
+    # the back-mapping safely rejects any non-single-alpha index, so tasks 27+
+    # fall through to the NEW path (no dedup, but no data loss). Warn so the
+    # rare >26-new-tasks meeting that loses dedup coverage is visible. [audit P1-13]
+    if len(new_tasks) > 26:
+        logger.warning(
+            f"deduplicate_tasks: {len(new_tasks)} new tasks exceed the A–Z index "
+            f"space; tasks past #26 are treated as NEW without dedup."
+        )
     new_lines = []
     for i, t in enumerate(new_tasks):
         letter = chr(65 + i)  # A, B, C, ...

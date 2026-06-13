@@ -1058,6 +1058,14 @@ class SlideCompositor:
             return chart
 
         except Exception as e:
+            # The happy path closes fig, but a failure between subplots() and
+            # that close leaks the figure — across many signal renders that
+            # grows memory. Close any open figure on the error path too. [audit P3-19]
+            try:
+                import matplotlib.pyplot as plt
+                plt.close("all")
+            except Exception:
+                pass
             logger.warning(f"Chart render failed: {e}")
             return None
 

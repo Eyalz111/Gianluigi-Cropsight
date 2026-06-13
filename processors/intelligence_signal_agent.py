@@ -117,6 +117,9 @@ async def generate_intelligence_signal(signal_id: str | None = None) -> dict:
         "research_results": truncated_results,
         "perplexity_queries_run": len(all_queries),
     })
+    # research_results IS the succeeded-sections dict — thread how complete the
+    # research was through to the approval ping (no new DB column). [audit P2-13]
+    research_coverage = (len(research_results), len(all_queries))
 
     # 6. Synthesize report with Opus (timeout-guarded)
     try:
@@ -197,6 +200,7 @@ async def generate_intelligence_signal(signal_id: str | None = None) -> dict:
             flags=flags,
             research_source=research_source,
             watchlist_changes=watchlist_changes,
+            research_coverage=research_coverage,
         )
         supabase_client.update_intelligence_signal(signal_id, {
             "status": "pending_approval",
@@ -753,6 +757,7 @@ async def _submit_for_approval(
     flags: list[dict],
     research_source: str,
     watchlist_changes: dict | None,
+    research_coverage: tuple[int, int] | None = None,
 ) -> None:
     """Submit signal for CEO approval via pending_approvals + Telegram notification."""
     # Create pending approval
@@ -807,6 +812,15 @@ async def _submit_for_approval(
         research_source=research_source,
         watchlist_changes=watchlist_changes,
     )
+
+    # Surface partial research so Eyal sees "5/10 sections" BEFORE approving a
+    # signal that synthesized over half-empty research (the ≥50% floor still
+    # ships it). Only when it's actually partial — no noise on a clean run. The
+    # suffix rides through the plain-text fallback (tag-strip) too. [audit P2-13]
+    if research_coverage:
+        _succ, _total = research_coverage
+        if _total and _succ < _total:
+            notification += f"\n\n📊 Research coverage: {_succ}/{_total} sections succeeded."
 
     # send_to_eyal swallows exceptions and returns False. Check the return
     # value so a silently-failed ping doesn't vanish without a reminder.

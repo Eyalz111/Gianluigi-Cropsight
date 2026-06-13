@@ -604,13 +604,28 @@ def _match_canonical_name(label: str) -> str | None:
         if label_lower in name_lower or name_lower in label_lower:
             return p["name"]
 
-    # Word overlap (>50% of words match)
-    label_words = set(label_lower.split())
+    # Word overlap. The old raw >50% rule false-merged short labels that share a
+    # generic prefix — "CropSight Investor Deck" vs "...Investor Call" overlap
+    # 2/3 → one fabricated thread. Strip only TRULY generic tokens (esp.
+    # "cropsight", which is in nearly every label and inflates every overlap;
+    # NOT the discriminating domain words like deck/call/demo), then require a
+    # stronger match: ratio >0.6 AND at least 2 shared significant words so a
+    # single shared word can't merge two short labels. [audit P1-14]
+    _GENERIC = {
+        "the", "a", "an", "and", "or", "of", "to", "for", "with", "on", "in",
+        "cropsight", "project", "projects",
+    }
+
+    def _significant(words: set[str]) -> set[str]:
+        return {w for w in words if w not in _GENERIC}
+
+    label_words = _significant(set(label_lower.split()))
     for p in projects:
-        name_words = set(p["name"].lower().split())
+        name_words = _significant(set(p["name"].lower().split()))
         if label_words and name_words:
             overlap = len(label_words & name_words)
-            if overlap / max(len(label_words), len(name_words)) > 0.5:
+            ratio = overlap / max(len(label_words), len(name_words))
+            if overlap >= 2 and ratio > 0.6:
                 return p["name"]
 
     return None
