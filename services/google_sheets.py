@@ -354,9 +354,18 @@ class GoogleSheetsService:
                 logger.warning(f"Token refresh failed, rebuilding service: {e}")
                 self._service = None  # Force full rebuild on next access
 
-    def _execute_with_retry(self, request, max_retries: int = 3, base_delay: float = 1.0):
+    def _execute_with_retry(self, request_factory, max_retries: int = 3, base_delay: float = 1.0):
         """
-        Execute a Google API request with retry on transient errors.
+        Execute a Google Sheets API request with retry on transient errors.
+
+        Caller passes a ZERO-ARG callable that CONSTRUCTS and returns the API
+        request (e.g. `lambda: self.service.spreadsheets().values().update(...)`)
+        so the request is rebuilt against a fresh service after an idle-wake
+        socket rebuild. On broken pipe / connection reset / transport failure
+        this nulls self._service so the next `request_factory()` call builds a
+        fresh service with a fresh httplib2 transport — Cloud Run idle-then-wake
+        cycles leave stale sockets in the pool. Mirrors
+        services/google_drive.py::_execute_with_retry. [audit P3-07]
 
         Retries on: ConnectionError, TimeoutError, OSError, BrokenPipeError,
         and HTTP 5xx / rate limit errors from the Sheets API.
@@ -366,14 +375,15 @@ class GoogleSheetsService:
         for attempt in range(max_retries):
             try:
                 self._ensure_fresh_credentials()
-                return request.execute()
+                return request_factory().execute()
             except (ConnectionError, TimeoutError, OSError) as e:
                 if attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
                     logger.warning(
                         f"Sheets API retry {attempt + 1}/{max_retries}: "
-                        f"{type(e).__name__}: {e}. Retrying in {delay:.1f}s..."
+                        f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
                     )
+                    self._service = None  # Force rebuild — stale socket
                     time.sleep(delay)
                 else:
                     raise
@@ -387,8 +397,9 @@ class GoogleSheetsService:
                         delay = base_delay * (2 ** attempt)
                         logger.warning(
                             f"Sheets API transient error retry {attempt + 1}/{max_retries}: "
-                            f"{type(e).__name__}: {e}. Retrying in {delay:.1f}s..."
+                            f"{type(e).__name__}: {e}. Rebuilding service, retrying in {delay:.1f}s..."
                         )
+                        self._service = None
                         time.sleep(delay)
                     else:
                         raise
@@ -535,12 +546,14 @@ class GoogleSheetsService:
         try:
             col = TASK_COLUMNS["status"]
             range_name = f"'{settings.TASK_TRACKER_TAB_NAME}'!{col}{row_number}"
-            self.service.spreadsheets().values().update(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range=range_name,
-                valueInputOption="RAW",
-                body={"values": [[status]]}
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().update(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=range_name,
+                    valueInputOption="RAW",
+                    body={"values": [[status]]}
+                )
+            )
 
             logger.info(f"Updated task row {row_number}: status={status}")
             return True
@@ -607,13 +620,15 @@ class GoogleSheetsService:
                     })
 
             if batch_data:
-                self.service.spreadsheets().values().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    body={
-                        "valueInputOption": "RAW",
-                        "data": batch_data,
-                    },
-                ).execute()
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().values().batchUpdate(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        body={
+                            "valueInputOption": "RAW",
+                            "data": batch_data,
+                        },
+                    )
+                )
                 logger.info(f"Updated task row {row_number}: {list(fields.keys())}")
                 return True
             return False
@@ -711,27 +726,33 @@ class GoogleSheetsService:
 
     def _ensure_archive_tab(self) -> None:
         """Create the Archive tab (header = Tasks layout + Archived) if missing."""
-        meta = self.service.spreadsheets().get(
-            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-            fields="sheets.properties",
-        ).execute()
+        meta = self._execute_with_retry(
+            lambda: self.service.spreadsheets().get(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                fields="sheets.properties",
+            )
+        )
         archive_exists = any(
             s.get("properties", {}).get("title") == "Archive"
             for s in meta.get("sheets", [])
         )
         if archive_exists:
             return
-        self.service.spreadsheets().batchUpdate(
-            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-            body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
-        ).execute()
+        self._execute_with_retry(
+            lambda: self.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
+            )
+        )
         archive_headers = TASK_TRACKER_HEADERS + ["Archived"]
-        self.service.spreadsheets().values().update(
-            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-            range=f"Archive!A1:{chr(ord('A') + len(archive_headers) - 1)}1",
-            valueInputOption="RAW",
-            body={"values": [archive_headers]},
-        ).execute()
+        self._execute_with_retry(
+            lambda: self.service.spreadsheets().values().update(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range=f"Archive!A1:{chr(ord('A') + len(archive_headers) - 1)}1",
+                valueInputOption="RAW",
+                body={"values": [archive_headers]},
+            )
+        )
 
     async def archive_task_rows(self, sheet_rows: list[dict]) -> int:
         """
@@ -764,13 +785,15 @@ class GoogleSheetsService:
             archive_rows.append(_row)
 
         num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
-        self.service.spreadsheets().values().append(
-            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-            range=f"Archive!A:{chr(ord('A') + num_archive_cols - 1)}",
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": archive_rows},
-        ).execute()
+        self._execute_with_retry(
+            lambda: self.service.spreadsheets().values().append(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                range=f"Archive!A:{chr(ord('A') + num_archive_cols - 1)}",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": archive_rows},
+            )
+        )
 
         # Delete archived rows from active tab (bottom-up to preserve row numbers)
         row_numbers = sorted(
@@ -785,10 +808,12 @@ class GoogleSheetsService:
                 }}
                 for r in row_numbers
             ]
-            self.service.spreadsheets().batchUpdate(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                body={"requests": requests},
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
 
         logger.info(f"Archived {len(archive_rows)} task rows to Archive tab")
         return len(archive_rows)
@@ -894,7 +919,7 @@ class GoogleSheetsService:
             # Route BOTH clear and write through the retry wrapper so an
             # idle-wake broken pipe between them can't wipe the sheet. [audit P3-02]
             self._execute_with_retry(
-                self.service.spreadsheets().values().clear(
+                lambda: self.service.spreadsheets().values().clear(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
                     range=clear_range,
                 )
@@ -906,7 +931,7 @@ class GoogleSheetsService:
             write_range = f"'{tab_name}'!A1:{end_col}{len(rows)}"
             try:
                 self._execute_with_retry(
-                    self.service.spreadsheets().values().update(
+                    lambda: self.service.spreadsheets().values().update(
                         spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
                         range=write_range,
                         valueInputOption="RAW",
@@ -1026,7 +1051,7 @@ class GoogleSheetsService:
             # Decisions sheet has NO reconcile self-heal, so a clear-then-failed-
             # write is a PERMANENT wipe — retry + CRITICAL alert. [audit P3-02]
             self._execute_with_retry(
-                self.service.spreadsheets().values().clear(
+                lambda: self.service.spreadsheets().values().clear(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
                     range=f"Decisions!A:{end_col}",
                 )
@@ -1034,7 +1059,7 @@ class GoogleSheetsService:
 
             try:
                 self._execute_with_retry(
-                    self.service.spreadsheets().values().update(
+                    lambda: self.service.spreadsheets().values().update(
                         spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
                         range=f"Decisions!A1:{end_col}{len(rows)}",
                         valueInputOption="RAW",
@@ -1394,13 +1419,15 @@ class GoogleSheetsService:
         try:
             tab = settings.STAKEHOLDER_TAB_NAME
             logger.info(f"Adding {len(values)} new stakeholders (filtered from {len(stakeholders)} extracted)")
-            self.service.spreadsheets().values().append(
-                spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-                range=f"'{tab}'!A:P",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": values}
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().append(
+                    spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
+                    range=f"'{tab}'!A:P",
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": values}
+                )
+            )
 
             logger.info(f"Added {len(values)} new stakeholders to tracker")
             return True
@@ -1426,20 +1453,22 @@ class GoogleSheetsService:
         Returns:
             The numeric sheetId of the first sheet tab.
         """
-        request = self.service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            fields="sheets.properties.sheetId",
+        metadata = self._execute_with_retry(
+            lambda: self.service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets.properties.sheetId",
+            )
         )
-        metadata = self._execute_with_retry(request)
         return metadata["sheets"][0]["properties"]["sheetId"]
 
     def _get_sheet_title(self, spreadsheet_id: str, sheet_id: int) -> str | None:
         """Get the title of a sheet by its numeric sheetId."""
-        request = self.service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            fields="sheets.properties",
+        metadata = self._execute_with_retry(
+            lambda: self.service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets.properties",
+            )
         )
-        metadata = self._execute_with_retry(request)
         for sheet in metadata.get("sheets", []):
             props = sheet.get("properties", {})
             if props.get("sheetId") == sheet_id:
@@ -1457,11 +1486,12 @@ class GoogleSheetsService:
         Returns:
             The numeric sheetId, or None if the tab doesn't exist.
         """
-        request = self.service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            fields="sheets.properties",
+        metadata = self._execute_with_retry(
+            lambda: self.service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets.properties",
+            )
         )
-        metadata = self._execute_with_retry(request)
         for sheet in metadata.get("sheets", []):
             props = sheet.get("properties", {})
             if props.get("title") == tab_name:
@@ -1482,10 +1512,12 @@ class GoogleSheetsService:
         Returns:
             List of deleteConditionalFormatRule request dicts.
         """
-        metadata = self.service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            fields="sheets.conditionalFormats",
-        ).execute()
+        metadata = self._execute_with_retry(
+            lambda: self.service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets.conditionalFormats",
+            )
+        )
 
         # Count existing rules on the first sheet
         sheets = metadata.get("sheets", [])
@@ -1525,11 +1557,12 @@ class GoogleSheetsService:
             2D list of cell values.
         """
         try:
-            request = self.service.spreadsheets().values().get(
-                spreadsheetId=sheet_id,
-                range=range_name
+            result = self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().get(
+                    spreadsheetId=sheet_id,
+                    range=range_name
+                )
             )
-            result = self._execute_with_retry(request)
             return result.get("values", [])
 
         except Exception as e:
@@ -1554,13 +1587,14 @@ class GoogleSheetsService:
             True if write was successful.
         """
         try:
-            request = self.service.spreadsheets().values().update(
-                spreadsheetId=sheet_id,
-                range=range_name,
-                valueInputOption="RAW",
-                body={"values": values}
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().update(
+                    spreadsheetId=sheet_id,
+                    range=range_name,
+                    valueInputOption="RAW",
+                    body={"values": values}
+                )
             )
-            self._execute_with_retry(request)
 
             logger.info(f"Wrote {len(values)} rows to {range_name}")
             return True
@@ -1609,14 +1643,15 @@ class GoogleSheetsService:
         """
         try:
             range_name = f"'{tab_name}'!A:I" if tab_name else "A:I"
-            request = self.service.spreadsheets().values().append(
-                spreadsheetId=sheet_id,
-                range=range_name,
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": values}
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().append(
+                    spreadsheetId=sheet_id,
+                    range=range_name,
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": values}
+                )
             )
-            self._execute_with_retry(request)
 
             logger.info(f"Appended {len(values)} rows to sheet")
             return True
@@ -1627,12 +1662,14 @@ class GoogleSheetsService:
 
     async def _update_cell(self, sheet_id: str, range_name: str, value: str) -> None:
         """Update a single cell value."""
-        self.service.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range=range_name,
-            valueInputOption="RAW",
-            body={"values": [[value]]},
-        ).execute()
+        self._execute_with_retry(
+            lambda: self.service.spreadsheets().values().update(
+                spreadsheetId=sheet_id,
+                range=range_name,
+                valueInputOption="RAW",
+                body={"values": [[value]]},
+            )
+        )
 
     async def _append_row_to_range(
         self,
@@ -1641,13 +1678,15 @@ class GoogleSheetsService:
         values: list,
     ) -> None:
         """Append a row to a specific range in a sheet."""
-        self.service.spreadsheets().values().append(
-            spreadsheetId=sheet_id,
-            range=range_name,
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [values]},
-        ).execute()
+        self._execute_with_retry(
+            lambda: self.service.spreadsheets().values().append(
+                spreadsheetId=sheet_id,
+                range=range_name,
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [values]},
+            )
+        )
 
     async def apply_stakeholder_update(
         self,
@@ -1759,10 +1798,12 @@ class GoogleSheetsService:
             return None
 
         try:
-            meta = self.service.spreadsheets().get(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                fields="sheets.properties",
-            ).execute()
+            meta = self._execute_with_retry(
+                lambda: self.service.spreadsheets().get(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    fields="sheets.properties",
+                )
+            )
 
             for sheet in meta.get("sheets", []):
                 props = sheet.get("properties", {})
@@ -1771,14 +1812,16 @@ class GoogleSheetsService:
                     return props["sheetId"]
 
             # Create the tab
-            resp = self.service.spreadsheets().batchUpdate(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                body={
-                    "requests": [
-                        {"addSheet": {"properties": {"title": "Decisions"}}}
-                    ]
-                },
-            ).execute()
+            resp = self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={
+                        "requests": [
+                            {"addSheet": {"properties": {"title": "Decisions"}}}
+                        ]
+                    },
+                )
+            )
 
             new_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
             logger.info(f"Created Decisions tab (sheetId={new_sheet_id})")
@@ -1788,12 +1831,14 @@ class GoogleSheetsService:
                 "Label", "Decision", "Rationale", "Confidence",
                 "Source Meeting", "Date", "Status",
             ]
-            self.service.spreadsheets().values().update(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range="Decisions!A1:G1",
-                valueInputOption="RAW",
-                body={"values": [headers]},
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().update(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range="Decisions!A1:G1",
+                    valueInputOption="RAW",
+                    body={"values": [headers]},
+                )
+            )
 
             return new_sheet_id
 
@@ -1842,13 +1887,15 @@ class GoogleSheetsService:
                     d.get("decision_status", "Active"),
                 ])
 
-            self.service.spreadsheets().values().append(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range="Decisions!A:G",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": rows},
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().append(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range="Decisions!A:G",
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": rows},
+                )
+            )
 
             logger.info(f"Added {len(rows)} decisions to Decisions tab")
             return True
@@ -2015,10 +2062,12 @@ class GoogleSheetsService:
 
             # --- Remove existing banding then add fresh (idempotent) ---
             try:
-                meta = self.service.spreadsheets().get(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    fields="sheets.bandedRanges",
-                ).execute()
+                meta = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        fields="sheets.bandedRanges",
+                    )
+                )
                 for sheet in meta.get("sheets", []):
                     for br in sheet.get("bandedRanges", []):
                         requests.append({
@@ -2031,10 +2080,12 @@ class GoogleSheetsService:
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
 
-            self.service.spreadsheets().batchUpdate(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                body={"requests": requests},
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
 
             logger.info("Applied professional formatting to Task Tracker")
             return True
@@ -2168,10 +2219,12 @@ class GoogleSheetsService:
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
 
-            self.service.spreadsheets().batchUpdate(
-                spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
-                body={"requests": requests},
-            ).execute()
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.STAKEHOLDER_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
 
             logger.info("Applied professional formatting to Stakeholder Tracker")
             return True

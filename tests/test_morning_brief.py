@@ -384,6 +384,75 @@ class TestUpcomingReviewInBrief:
             assert "upcoming_review" not in types
 
 
+class TestCalendarUnavailableSignal:
+    """Section 3: an idle-wake calendar fetch failure surfaces as an alert
+    instead of silently rendering as 'no meetings today' (audit P3-03)."""
+
+    @pytest.mark.asyncio
+    async def test_calendar_fetch_failure_surfaces_alert(self):
+        mock_cal = MagicMock()
+        mock_cal.get_todays_events = AsyncMock(return_value=[])
+        # Real bool True — the fetch FAILED (not a genuinely empty calendar).
+        mock_cal.last_fetch_failed = True
+
+        mock_scheduler = MagicMock()
+        mock_scheduler._is_review_event = MagicMock(return_value=False)
+
+        with patch("processors.morning_brief.supabase_client") as mock_db, \
+             patch.dict("sys.modules", {
+                 "services.google_calendar": MagicMock(calendar_service=mock_cal),
+                 "schedulers.weekly_review_scheduler": MagicMock(weekly_review_scheduler=mock_scheduler),
+             }):
+            mock_db.get_unapproved_email_scans.return_value = []
+            mock_db.get_active_weekly_review_session.return_value = None
+            mock_db.get_pending_prep_outlines.return_value = []
+
+            from processors.morning_brief import compile_morning_brief
+            brief = await compile_morning_brief()
+
+        # An alerts section carrying the calendar-unavailable message must exist.
+        alert_msgs = [
+            a.get("message", "")
+            for s in brief["sections"] if s.get("type") == "alerts"
+            for a in s.get("alerts", [])
+        ]
+        assert any("Calendar unavailable" in m for m in alert_msgs), (
+            f"expected a calendar-unavailable alert; got sections "
+            f"{[s.get('type') for s in brief['sections']]}"
+        )
+        assert brief["stats"].get("calendar_unavailable") is True
+
+    @pytest.mark.asyncio
+    async def test_genuinely_empty_calendar_no_alert(self):
+        """An empty calendar that did NOT fail produces no calendar alert."""
+        mock_cal = MagicMock()
+        mock_cal.get_todays_events = AsyncMock(return_value=[])
+        mock_cal.last_fetch_failed = False  # genuinely empty, no failure
+
+        mock_scheduler = MagicMock()
+        mock_scheduler._is_review_event = MagicMock(return_value=False)
+
+        with patch("processors.morning_brief.supabase_client") as mock_db, \
+             patch.dict("sys.modules", {
+                 "services.google_calendar": MagicMock(calendar_service=mock_cal),
+                 "schedulers.weekly_review_scheduler": MagicMock(weekly_review_scheduler=mock_scheduler),
+             }):
+            mock_db.get_unapproved_email_scans.return_value = []
+            mock_db.get_active_weekly_review_session.return_value = None
+            mock_db.get_pending_prep_outlines.return_value = []
+
+            from processors.morning_brief import compile_morning_brief
+            brief = await compile_morning_brief()
+
+        alert_msgs = [
+            a.get("message", "")
+            for s in brief["sections"] if s.get("type") == "alerts"
+            for a in s.get("alerts", [])
+        ]
+        assert not any("Calendar unavailable" in m for m in alert_msgs)
+        assert brief["stats"].get("calendar_unavailable") is not True
+
+
 class TestUpcomingReviewFormatting:
     """Test formatting of upcoming_review section."""
 
