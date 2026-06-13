@@ -98,14 +98,22 @@ class KnowledgeWeeklyScheduler:
             except Exception as e:
                 logger.warning(f"Topic clustering proposals skipped (non-fatal): {e}")
 
+            # Heartbeat to scheduler_heartbeats (what the health checks read),
+            # not audit_log. [audit P4-01]
             from services.supabase_client import supabase_client
-            supabase_client.log_action(
-                action="scheduler_heartbeat",
-                details={"scheduler": "knowledge_weekly", **{k: summary.get(k) for k in ("resynthesized_topics", "proposals")}},
-                triggered_by="auto",
+            supabase_client.upsert_scheduler_heartbeat(
+                "knowledge_weekly",
+                details={k: summary.get(k) for k in ("resynthesized_topics", "proposals")},
             )
         except Exception as e:
             logger.error(f"Knowledge weekly synthesis failed: {e}")
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.upsert_scheduler_heartbeat(
+                    "knowledge_weekly", status="error", details={"error": str(e)}
+                )
+            except Exception:
+                pass
             try:
                 from core.health_monitor import check_and_alert
                 await check_and_alert("knowledge_weekly", e)

@@ -120,6 +120,8 @@ class TestRunGeneration:
 class TestHeartbeat:
     @pytest.mark.asyncio
     async def test_logs_heartbeat_on_success(self, scheduler):
+        # Heartbeat must go to the scheduler_heartbeats table (via
+        # upsert_scheduler_heartbeat), NOT audit_log via log_action. [audit P4-01]
         with patch(
             "processors.intelligence_signal_agent.generate_intelligence_signal",
             new_callable=AsyncMock,
@@ -132,11 +134,14 @@ class TestHeartbeat:
             with patch(
                 "services.supabase_client.supabase_client"
             ) as mock_sc:
-                mock_sc.log_action.return_value = {}
-
                 await scheduler._run_generation()
 
-                mock_sc.log_action.assert_called_once()
-                call_args = mock_sc.log_action.call_args
-                assert call_args.kwargs["action"] == "scheduler_heartbeat"
-                assert "intelligence_signal" in str(call_args.kwargs["details"])
+                mock_sc.upsert_scheduler_heartbeat.assert_called_once()
+                call_args = mock_sc.upsert_scheduler_heartbeat.call_args
+                assert call_args.args[0] == "intelligence_signal"
+                # The old wrong-table heartbeat must NOT be used.
+                hb_logs = [
+                    c for c in mock_sc.log_action.call_args_list
+                    if c.kwargs.get("action") == "scheduler_heartbeat"
+                ]
+                assert hb_logs == []

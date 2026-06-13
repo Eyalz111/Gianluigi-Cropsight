@@ -102,23 +102,29 @@ class ReconcileScheduler:
         logger.info(f"Reconcile triggering ({slot})")
         from services.supabase_client import supabase_client
         try:
+            # Heartbeat to scheduler_heartbeats (what the health checks read),
+            # not audit_log. Both slots share the "reconcile" heartbeat row so the
+            # loop is visible regardless of which slot last fired. [audit P4-01]
             if name == "predigest":
                 await self._run_gantt()
-                supabase_client.log_action(
-                    "scheduler_heartbeat",
-                    details={"scheduler": "gantt_reconcile", "slot": slot},
-                    triggered_by="auto",
+                supabase_client.upsert_scheduler_heartbeat(
+                    "reconcile", details={"slot": slot, "kind": "gantt"}
                 )
             else:
                 from processors.sheets_sync import reconcile_tasks
                 summary = await reconcile_tasks()
-                supabase_client.log_action(
-                    "scheduler_heartbeat",
-                    details={"scheduler": "reconcile", "slot": slot, **summary},
-                    triggered_by="auto",
+                supabase_client.upsert_scheduler_heartbeat(
+                    "reconcile",
+                    details={"slot": slot, **(summary if isinstance(summary, dict) else {})},
                 )
         except Exception as e:
             logger.error(f"Reconcile failed ({slot}): {e}")
+            try:
+                supabase_client.upsert_scheduler_heartbeat(
+                    "reconcile", status="error", details={"slot": slot, "error": str(e)}
+                )
+            except Exception:
+                pass
             try:
                 from core.health_monitor import check_and_alert
                 await check_and_alert("reconcile", e)

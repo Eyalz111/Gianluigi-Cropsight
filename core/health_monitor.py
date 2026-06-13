@@ -12,11 +12,60 @@ Usage:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Expected heartbeat interval per scheduler (seconds). A heartbeat older than 2x
+# its interval is flagged stale. The daily/weekly sleep-until schedulers were
+# previously omitted, so a wedged knowledge/reconcile/brief loop defaulted to the
+# 1h fallback and was either invisible or falsely-stale. [audit P4-01]
+_EXPECTED_INTERVALS = {
+    # poll-interval
+    "transcript_watcher": 300,      # 5 min
+    "document_watcher": 300,        # 5 min
+    "email_watcher": 300,           # 5 min
+    "task_sync": 3600,              # ~1 hour
+    "meeting_prep": 14400,          # 4 hours
+    "prep_ping": 3600,              # 1 hour check
+    "weekly_digest": 3600,          # 1 hour check
+    "weekly_review": 3600,          # 1 hour check
+    "weekly_pulse": 3600,           # 1 hour check
+    "task_reminder": 3600,          # 1 hour
+    "orphan_cleanup": 86400,        # 24 hours
+    "alert_scheduler": 43200,       # 12 hours
+    "rollout": 86400,               # daily
+    # daily/weekly sleep-until (now heartbeat to the right table, P4-01)
+    "morning_brief": 86400,         # daily
+    "debrief_prompt": 86400,        # daily
+    "intelligence_signal": 604800,  # weekly
+    "knowledge_nightly": 86400,     # daily
+    "knowledge_weekly": 604800,     # weekly
+    "reconcile": 86400,             # runs midday + pre-digest daily
+}
+
+
+def _heartbeat_stale(last_run: str, name: str, now_utc: datetime | None = None) -> bool:
+    """True if a scheduler's last heartbeat is older than 2x its expected interval.
+
+    UTC-aware throughout: heartbeats store UTC timestamptz and the container may
+    boot in Asia/Jerusalem, so a naive compare drifted by hours. [audit P4-01/P6-06]
+    """
+    if not last_run:
+        return True
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    try:
+        last_dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        age = (now_utc - last_dt).total_seconds()
+        return age > _EXPECTED_INTERVALS.get(name, 3600) * 2
+    except (ValueError, TypeError):
+        return False
 
 
 def collect_health_data() -> dict:
@@ -50,7 +99,10 @@ def collect_health_data() -> dict:
 
     # 3. Error count from action_log (last 24h)
     try:
-        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        # UTC-aware cutoff: the rows store UTC timestamptz, and the container can
+        # boot in Asia/Jerusalem — a naive datetime.now() put the cutoff hours in
+        # the future and silently dropped the most recent errors. [audit P6-06]
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         result = (
             supabase_client.client.table("audit_log")
             .select("id", count="exact")
@@ -84,7 +136,7 @@ def collect_health_data() -> dict:
 
     # 6. Recent meetings processed (last 7 days)
     try:
-        cutoff = (datetime.now() - timedelta(days=7)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         meetings = supabase_client.list_meetings(limit=100)
         recent = [m for m in meetings if m.get("created_at", "") > cutoff]
         data["metrics"]["meetings_7d"] = len(recent)
@@ -94,48 +146,17 @@ def collect_health_data() -> dict:
     # 7. Scheduler heartbeats
     try:
         heartbeats = supabase_client.get_scheduler_heartbeats()
-        now = datetime.now()
+        now_utc = datetime.now(timezone.utc)
         scheduler_status = []
-
-        # Expected intervals per scheduler (seconds)
-        expected_intervals = {
-            "transcript_watcher": 300,      # 5 min
-            "document_watcher": 300,        # 5 min
-            "email_watcher": 300,           # 5 min
-            "meeting_prep": 14400,          # 4 hours
-            "weekly_digest": 3600,          # 1 hour check
-            "weekly_review": 3600,          # 1 hour check
-            "orphan_cleanup": 86400,        # 24 hours
-            "alert_scheduler": 43200,       # 12 hours
-            "task_reminder": 3600,          # 1 hour
-        }
 
         for hb in heartbeats:
             name = hb.get("scheduler_name", "?")
             last_run = hb.get("last_run_at", "")
-            status = hb.get("status", "ok")
-            stale = False
-
-            if last_run:
-                try:
-                    last_dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                    if last_dt.tzinfo:
-                        from datetime import timezone
-                        last_dt = last_dt.replace(tzinfo=None)
-                        now_compare = datetime.utcnow()
-                    else:
-                        now_compare = now
-                    age_seconds = (now_compare - last_dt).total_seconds()
-                    expected = expected_intervals.get(name, 3600)
-                    stale = age_seconds > expected * 2
-                except (ValueError, TypeError):
-                    pass
-
             scheduler_status.append({
                 "name": name,
                 "last_run": last_run,
-                "status": status,
-                "stale": stale,
+                "status": hb.get("status", "ok"),
+                "stale": _heartbeat_stale(last_run, name, now_utc),
                 "details": hb.get("details"),
             })
 

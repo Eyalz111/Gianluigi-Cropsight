@@ -138,21 +138,24 @@ class IntelligenceSignalScheduler:
                 f"{signal_id} — {status}"
             )
 
-            # Heartbeat logging
+            # Heartbeat to scheduler_heartbeats (what the health checks read),
+            # not audit_log. [audit P4-01]
             from services.supabase_client import supabase_client
 
-            supabase_client.log_action(
-                action="scheduler_heartbeat",
-                details={
-                    "scheduler": "intelligence_signal",
-                    "signal_id": signal_id,
-                    "status": status,
-                },
-                triggered_by="auto",
+            supabase_client.upsert_scheduler_heartbeat(
+                "intelligence_signal",
+                details={"signal_id": signal_id, "run_status": status},
             )
 
         except Exception as e:
             logger.error(f"Intelligence signal generation failed: {e}")
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.upsert_scheduler_heartbeat(
+                    "intelligence_signal", status="error", details={"error": str(e)}
+                )
+            except Exception:
+                pass
             # Alert via health monitor
             try:
                 from core.health_monitor import check_and_alert
