@@ -491,6 +491,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    DOCUMENT_SENSITIVITY_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Classify ingested documents' sensitivity at ingest and stamp it on the "
+            "documents row + each embedding's metadata (audit P1-09 — the I3 invariant "
+            "'sensitivity follows data' for the documents path). Default OFF — requires "
+            "the documents.sensitivity column (scripts/migrate_document_sensitivity_p1_09.sql) "
+            "applied first; flip ON after the migration so create_document doesn't write a "
+            "missing column."
+        ),
+    )
+
     # ==========================================================================
     # Intelligence Signal
     # ==========================================================================

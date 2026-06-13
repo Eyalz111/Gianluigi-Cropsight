@@ -1553,6 +1553,7 @@ class SupabaseClient:
         document_type: str | None = None,
         content_hash: str | None = None,
         version: int = 1,
+        sensitivity: str | None = None,
     ) -> dict:
         """
         Create a document record.
@@ -1566,6 +1567,9 @@ class SupabaseClient:
             document_type: Classification category.
             content_hash: SHA-256 hash for dedup (Phase 13 B2).
             version: Document version number (Phase 13 B2).
+            sensitivity: Tier (audit P1-09). Only written when provided, so the
+                column write stays dark until the migration is applied and
+                DOCUMENT_SENSITIVITY_ENABLED is flipped on at the caller.
 
         Returns:
             Created document record.
@@ -1581,6 +1585,10 @@ class SupabaseClient:
         }
         if content_hash:
             data["content_hash"] = content_hash
+        # Gated: omitted (no column write) unless the caller passes a tier, so a
+        # deploy before the migration can't hit a missing column. [audit P1-09]
+        if sensitivity:
+            data["sensitivity"] = sensitivity
 
         result = self.client.table("documents").insert(data).execute()
         logger.info(f"Created document: {title}")
