@@ -84,29 +84,54 @@ async def compute_sheets_diff() -> dict:
     # to the Archive tab yet must still MATCH its row — otherwise the row
     # classifies as "new in Sheets" and apply re-creates the task (resurrecting
     # a sanctioned removal under a fresh UUID).
-    db_tasks = supabase_client.get_tasks(status=None, limit=500, include_archived=True)
+    # limit must comfortably exceed the live task count (incl. archived) — a
+    # truncated DB list drops real tasks from db_by_id, so their sheet rows match
+    # nothing and apply would re-CREATE them as duplicates. [audit P1-11]
+    db_tasks = supabase_client.get_tasks(status=None, limit=2000, include_archived=True)
 
-    # Build lookup dicts by matching key
-    sheets_by_key = {}
+    # UUID-FIRST matching. A sheet row carrying its col-J UUID is matched to the
+    # DB task by id (exact). The old title+assignee-only key collapsed two tasks
+    # that share a title+assignee into ONE key (dict overwrite), so an edit to one
+    # row could be applied to the WRONG task, or one side's edit silently dropped.
+    # Only sheet rows WITHOUT a usable col-J id fall back to the title+assignee key. [audit P1-03]
+    db_by_id = {dt["id"]: dt for dt in db_tasks if dt.get("id")}
+    matched_db_ids: set = set()
+    sheets_by_key = {}            # only sheet rows lacking a resolvable col-J id
+
     for st in sheets_tasks:
-        key = _task_key(st)
-        if key and key != "|":
-            sheets_by_key[key] = st
+        sid = (st.get("id") or "").strip()
+        if sid and sid in db_by_id:
+            dt = db_by_id[sid]
+            matched_db_ids.add(sid)
+            changes = _compare_task(st, dt)
+            if changes:
+                result["tasks"]["modified"].append({
+                    "sheets": st, "db": dt, "changes": changes, "db_id": dt.get("id"),
+                })
+            else:
+                result["tasks"]["in_sync"] += 1
+        else:
+            key = _task_key(st)
+            if key and key != "|":
+                sheets_by_key[key] = st
 
+    # DB tasks already matched by UUID are excluded from the key-based fallback so
+    # they can't also surface as db_only.
     db_by_key = {}
     for dt in db_tasks:
+        if dt.get("id") in matched_db_ids:
+            continue
         key = _task_key(dt)
         if key and key != "|":
             db_by_key[key] = dt
 
-    # Compare
+    # Fallback: title+assignee matching for rows without a col-J id (newly added).
     all_keys = set(sheets_by_key.keys()) | set(db_by_key.keys())
     for key in all_keys:
         in_sheets = key in sheets_by_key
         in_db = key in db_by_key
 
         if in_sheets and in_db:
-            # Both exist — check for differences
             st = sheets_by_key[key]
             dt = db_by_key[key]
             changes = _compare_task(st, dt)
@@ -784,7 +809,38 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             )
             new_id = created.get("id")
             if new_id and st.get("row_number"):
-                _cell("id", st["row_number"], new_id)
+                # ATOMICITY: write the col-J UUID back to the sheet row NOW,
+                # synchronously, per-create — NOT via the deferred cell_writes
+                # batch (flushed at step 3, after an `await add_tasks_batch`).
+                # If the process cycles in that window the DB has the task but
+                # the sheet row has no UUID, so next reconcile treats the row as
+                # new and creates a DUPLICATE. Writing it here means create +
+                # writeback land together; on writeback failure we roll the DB
+                # create back so the row is retried cleanly instead. [audit P1-02]
+                try:
+                    await sheets_service._update_cell(
+                        settings.TASK_TRACKER_SHEET_ID,
+                        f"'{tab}'!{TASK_COLUMNS['id']}{st['row_number']}",
+                        new_id,
+                    )
+                except Exception as we:
+                    logger.error(
+                        f"[reconcile] col-J UUID writeback failed for new task "
+                        f"{new_id} (row {st['row_number']}) — rolling back the DB "
+                        f"create so the row retries cleanly: {we}"
+                    )
+                    try:
+                        # Just-created task has no FK children — a plain delete is safe.
+                        supabase_client.client.table("tasks").delete().eq(
+                            "id", new_id
+                        ).execute()
+                    except Exception as de:
+                        logger.error(
+                            f"[reconcile] rollback delete failed for {new_id} — a "
+                            f"UUID-less DB task may duplicate next cycle: {de}"
+                        )
+                    summary["created"] -= 1
+                    continue
                 snapshot_writes.append((new_id, st["row_number"], st.get("status"),
                                         st.get("deadline"), st.get("priority"), st.get("assignee")))
         except Exception as e:
@@ -861,6 +917,17 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     if readd_rows:
         try:
             await sheets_service.add_tasks_batch(readd_rows)
+            # Seed a snapshot per re-added row from the values we just wrote.
+            # Without it next cycle reads snap={} → every action field compares
+            # unequal to None → pulled as a phantom "Eyal edit" + marked manual,
+            # freezing the field against future DB→Sheet refresh. [audit P1-04]
+            for rr in readd_rows:
+                rid = rr.get("id")
+                if rid:
+                    supabase_client.upsert_sheet_snapshot(
+                        rid, None, rr.get("status"), rr.get("deadline"),
+                        rr.get("priority"), rr.get("assignee"),
+                    )
         except Exception as e:
             logger.warning(f"[reconcile] re-add batch failed: {e}")
     # 3. Single batched Sheet write for all cell refreshes + create-id write-backs.
@@ -879,7 +946,11 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         try:
             await sheets_service.archive_task_rows(archive_moves)
         except Exception as e:
-            logger.warning(f"[reconcile] archive move failed (rows stay put): {e}")
+            # archive_task_rows fires its own CRITICAL with the exact rows/UUIDs
+            # when the append-then-delete move only half-completes; it self-heals
+            # next cycle (idempotent append + delete retry). Nothing to roll back
+            # here — archived rows are not in snapshot_writes.
+            logger.error(f"[reconcile] archive move incomplete (see CRITICAL above): {e}")
     # 4. Rewrite snapshots LAST (with a light retry so a transient miss doesn't
     #    leave a stale snapshot that re-attributes the change next cycle, #5).
     for (tid, row, sstatus, sdeadline, spriority, sassignee) in snapshot_writes:
