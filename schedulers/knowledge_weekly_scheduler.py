@@ -33,6 +33,16 @@ class KnowledgeWeeklyScheduler:
             logger.warning("Knowledge weekly scheduler already running")
             return
         self._running = True
+        # Restart-safe fire-once: rebuild the "ran this week" guard from the last
+        # successful heartbeat so a Cloud Run cycle can't re-run this week's
+        # synthesis. [audit P4-03]
+        try:
+            from schedulers.fire_once import last_ok_week_key
+            self._last_generated_week = last_ok_week_key("knowledge_weekly") or self._last_generated_week
+            if self._last_generated_week:
+                logger.info(f"Knowledge weekly: reconstructed last-run week {self._last_generated_week} on boot")
+        except Exception as e:
+            logger.warning(f"Knowledge weekly fire-once reconstruct failed (non-fatal): {e}")
         logger.info(
             f"Knowledge weekly scheduler started "
             f"(day={settings.KNOWLEDGE_WEEKLY_DAY}, hour={settings.KNOWLEDGE_WEEKLY_HOUR} IST)"

@@ -36,6 +36,20 @@ class ReconcileScheduler:
             logger.warning("Reconcile scheduler already running")
             return
         self._running = True
+        # Restart-safe fire-once: rebuild the last-run slot from the last
+        # successful heartbeat so a Cloud Run cycle can't RE-RUN the live-sheet
+        # reconcile for a slot that already ran. The guard's failure direction is
+        # SKIP, which is the safe one for a sheet-writing pass. [audit P4-03]
+        try:
+            from schedulers.fire_once import last_ok_heartbeat
+            hb = last_ok_heartbeat("reconcile")
+            if hb:
+                slot = (hb.get("details") or {}).get("slot")
+                if slot:
+                    self._last_slot = slot
+                    logger.info(f"Reconcile: reconstructed last-run slot {slot} on boot")
+        except Exception as e:
+            logger.warning(f"Reconcile fire-once reconstruct failed (non-fatal): {e}")
         logger.info(
             f"Reconcile scheduler started (tasks={settings.RECONCILE_ENABLED} "
             f"midday={settings.RECONCILE_MIDDAY_HOUR}/pre-nightly={settings.RECONCILE_PRENIGHTLY_HOUR}; "

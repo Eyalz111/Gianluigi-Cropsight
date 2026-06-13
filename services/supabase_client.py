@@ -3948,6 +3948,26 @@ class SupabaseClient:
         )
         return result.data or []
 
+    def get_scheduler_heartbeat(self, name: str) -> dict | None:
+        """Get a single scheduler's heartbeat row (or None). SYNC; never raises.
+
+        Used for restart-safe fire-once reconstruction — a sleep-until scheduler
+        rebuilds its in-memory 'already ran this period' guard from its last
+        heartbeat on boot so a Cloud Run cycle can't re-fire. [audit P4-03]
+        """
+        try:
+            result = (
+                self.client.table("scheduler_heartbeats")
+                .select("*")
+                .eq("scheduler_name", name)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.warning(f"get_scheduler_heartbeat({name}) failed: {e}")
+            return None
+
     # =========================================================================
     # Token Usage (Cost Queries)
     # =========================================================================

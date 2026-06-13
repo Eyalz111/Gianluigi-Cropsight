@@ -32,6 +32,16 @@ class KnowledgeNightlyScheduler:
             logger.warning("Knowledge nightly scheduler already running")
             return
         self._running = True
+        # Restart-safe fire-once: rebuild the "ran today" guard from the last
+        # successful heartbeat so a Cloud Run cycle can't re-run tonight's
+        # consolidation. [audit P4-03]
+        try:
+            from schedulers.fire_once import last_ok_day_key
+            self._last_run_date = last_ok_day_key("knowledge_nightly") or self._last_run_date
+            if self._last_run_date:
+                logger.info(f"Knowledge nightly: reconstructed last-run date {self._last_run_date} on boot")
+        except Exception as e:
+            logger.warning(f"Knowledge nightly fire-once reconstruct failed (non-fatal): {e}")
         logger.info(
             f"Knowledge nightly scheduler started (hour={settings.KNOWLEDGE_NIGHTLY_HOUR} IST)"
         )
