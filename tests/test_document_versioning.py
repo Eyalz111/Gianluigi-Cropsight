@@ -38,18 +38,19 @@ class TestDocumentTypes:
 class TestContentHashDedup:
 
     @pytest.mark.asyncio
+    @patch("processors.document_processor._document_embedding_count", return_value=5)
     @patch("processors.document_processor.store_document_embeddings", new_callable=AsyncMock)
     @patch("processors.document_processor.classify_document_type", new_callable=AsyncMock)
     @patch("processors.document_processor.generate_document_summary", new_callable=AsyncMock)
     @patch("processors.document_processor.supabase_client")
     async def test_duplicate_content_returns_existing(
-        self, mock_sc, mock_summary, mock_classify, mock_embed
+        self, mock_sc, mock_summary, mock_classify, mock_embed, mock_count
     ):
-        """If content hash matches existing doc, return existing without re-processing."""
+        """If content hash matches an EMBEDDED existing doc, return it without re-processing."""
         content = "This is a test document about crop yields."
         content_hash = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
 
-        # Mock hash lookup returns existing doc
+        # Mock hash lookup returns existing doc (already embedded → count=5)
         mock_sc.client.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
             data=[{"id": "existing-doc", "title": "Crop Yields", "summary": "About crops", "document_type": "research_paper"}]
         )
