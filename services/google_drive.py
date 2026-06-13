@@ -372,8 +372,12 @@ class GoogleDriveService:
         """
         try:
             content = await self._download_file_with_retry(file_id)
-            # Mark as processed only on success
-            self._processed_file_ids.add(file_id)
+            # Do NOT mark processed here — that was BEFORE the transcript pipeline
+            # ran, so a crash between download and submit silently skipped the
+            # file for the container's uptime. The authoritative mark is
+            # mark_file_processed() after _run_processing_pipeline completes, and
+            # process_transcript's DB "already_processed" check makes a re-download
+            # idempotent. [audit P4-05]
             return content
         except Exception as e:
             logger.error(f"Error downloading file {file_id} (after retries): {e}")

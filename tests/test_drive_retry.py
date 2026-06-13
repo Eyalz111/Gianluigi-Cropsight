@@ -63,14 +63,16 @@ class TestDriveDownloadRetry:
         assert result == b""
 
     @pytest.mark.asyncio
-    async def test_download_file_returns_content_on_success(self):
-        """download_file returns content and marks processed on success."""
+    async def test_download_file_returns_content_without_marking_processed(self):
+        """download_file returns content but does NOT mark processed — the mark
+        moved to mark_file_processed() AFTER the pipeline completes, so a crash
+        between download and submit no longer silently skips the file. [audit P4-05]"""
         svc = self._make_service()
         svc._download_file_with_retry = AsyncMock(return_value="content here")
 
         result = await svc.download_file("file123")
         assert result == "content here"
-        assert "file123" in svc._processed_file_ids
+        assert "file123" not in svc._processed_file_ids   # marked later, by the pipeline
 
     @pytest.mark.asyncio
     async def test_download_file_returns_empty_on_failure(self):
