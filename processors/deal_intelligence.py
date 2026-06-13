@@ -134,11 +134,22 @@ def generate_deal_pulse(max_items: int = 3) -> list[dict]:
     for deal in overdue:
         if len(items) >= max_items:
             break
-        days_overdue = (date.today() - date.fromisoformat(deal["next_action_date"])).days
+        # Slice [:10] + guard so a next_action_date carrying a time component
+        # (e.g. "2026-06-12T00:00:00") or junk can't ValueError and crash the
+        # whole deal-pulse section (and silently suppress the morning brief). [audit P2-08]
+        raw_date = (deal.get("next_action_date") or "")[:10]
+        try:
+            days_overdue = (date.today() - date.fromisoformat(raw_date)).days
+        except (ValueError, TypeError):
+            logger.warning(
+                f"Skipping deal with unparseable next_action_date: "
+                f"{deal.get('next_action_date')!r}"
+            )
+            continue
         items.append({
             "type": "overdue",
-            "name": deal["name"],
-            "organization": deal["organization"],
+            "name": deal.get("name", "?"),
+            "organization": deal.get("organization", ""),
             "detail": f"{deal.get('next_action', 'Follow up')} — {days_overdue}d overdue",
         })
 

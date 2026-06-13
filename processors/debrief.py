@@ -648,7 +648,7 @@ async def _inject_debrief_items(
     )
     meeting_id = pseudo_meeting["id"]
 
-    counts = {"tasks": 0, "decisions": 0, "gantt_proposals": 0, "information": 0}
+    counts = {"tasks": 0, "decisions": 0, "gantt_proposals": 0, "information": 0, "failed": 0}
     embed_texts = []
 
     # One areas fetch for the whole batch (resolve/phrase-match per item).
@@ -714,6 +714,10 @@ async def _inject_debrief_items(
                     counts["information"] += 1
 
         except Exception as e:
+            # Count the failure so it surfaces in the result instead of a silent
+            # under-count (Eyal told "Injected: 2 tasks" when a 3rd was lost —
+            # the same data-loss class as the 2026-04 debrief incident). [audit P2-06]
+            counts["failed"] += 1
             logger.error(f"Failed to inject debrief item: {item} — {e}")
 
     # Embed debrief content
@@ -778,6 +782,9 @@ async def _inject_debrief_items(
     if counts["information"]:
         summary_parts.append(f"{counts['information']} info items")
 
+    # Surface any items that failed to save so a partial loss is visible. [audit P2-06]
+    failed_note = f" ⚠️ {counts['failed']} item(s) FAILED to save" if counts.get("failed") else ""
+
     # v2.3 PR 3: log approval observation. Quick-inject and full-debrief are
     # both CEO-authored content explicitly confirmed by Eyal — treat them as
     # 'approved' observations. session_id distinguishes the flow: None means
@@ -798,7 +805,11 @@ async def _inject_debrief_items(
         logger.warning(f"[observation] debrief log failed (non-fatal): {e}")
 
     return {
-        "summary": f"Injected: {', '.join(summary_parts)}." if summary_parts else "No items to inject.",
+        "summary": (
+            f"Injected: {', '.join(summary_parts)}.{failed_note}"
+            if summary_parts else
+            (f"No items injected.{failed_note}" if failed_note else "No items to inject.")
+        ),
         "counts": counts,
         "meeting_id": meeting_id,
     }

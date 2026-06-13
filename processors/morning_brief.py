@@ -485,7 +485,17 @@ async def compile_morning_brief() -> dict:
                 "items": items,
             })
     except Exception as e:
-        logger.debug(f"Task urgency for morning brief failed: {e}")
+        # A Supabase blip here used to silently drop the whole urgency/overdue
+        # section — the brief looked normal and Eyal never learned overdue tasks
+        # weren't checked. Surface it as an alert instead. [audit P2-12]
+        logger.warning(f"Task urgency for morning brief failed: {e}")
+        sections.append({
+            "type": "alerts",
+            "alerts": [{
+                "severity": "high",
+                "message": "Task urgency check failed — overdue tasks were not surfaced today.",
+            }],
+        })
 
     # 11b. Topic surfacing.
     #  - v1 path: legacy state_json blocked/stale block (hard cap 3).
@@ -823,12 +833,20 @@ def format_morning_brief(brief: dict) -> str:
             for item in section.get("items", []):
                 icon = "🔴" if item.get("type") == "overdue" else ""
                 prefix = f"  {icon} " if icon else "  "
-                deal_items.append(f"{prefix}{item['name']} ({item['organization']}): {item['detail']}")
+                # .get() so one malformed deal item can't KeyError and (via the
+                # caller's broad except) silently suppress the WHOLE brief. [audit P2-07]
+                name = item.get("name", "?")
+                org = item.get("organization", "")
+                detail = item.get("detail", "")
+                deal_items.append(f"{prefix}{name} ({org}): {detail}")
 
         elif section_type == "commitments_due":
             for item in section.get("items", []):
                 to_str = f" to {item['promised_to']}" if item.get("promised_to") else ""
-                deal_items.append(f"  🔴 {item['commitment']}{to_str} ({item['days_overdue']}d overdue)")
+                overdue = item.get("days_overdue", "?")
+                deal_items.append(
+                    f"  🔴 {item.get('commitment', '?')}{to_str} ({overdue}d overdue)"
+                )
 
         elif section_type == "gantt_milestones":
             for item in section.get("items", []):
@@ -1032,15 +1050,19 @@ def _assemble_v2_groups(sections: list[dict]) -> dict:
         elif st == "deal_pulse":
             for item in section.get("items", []):
                 icon = "🔴 " if item.get("type") == "overdue" else ""
+                # .get() so a malformed deal item can't KeyError and suppress the
+                # whole brief via the caller's broad except. [audit P2-07]
                 groups["deals"].append(
-                    f"  {icon}{_esc(item['name'])} ({_esc(item['organization'])}): {_esc(item['detail'])}"
+                    f"  {icon}{_esc(item.get('name', '?'))} "
+                    f"({_esc(item.get('organization', ''))}): {_esc(item.get('detail', ''))}"
                 )
 
         elif st == "commitments_due":
             for item in section.get("items", []):
                 to_str = f" to {_esc(item['promised_to'])}" if item.get("promised_to") else ""
                 groups["deals"].append(
-                    f"  🔴 {_esc(item['commitment'])}{to_str} ({item['days_overdue']}d overdue)"
+                    f"  🔴 {_esc(item.get('commitment', '?'))}{to_str} "
+                    f"({item.get('days_overdue', '?')}d overdue)"
                 )
 
         elif st == "gantt_milestones":

@@ -350,6 +350,20 @@ async def distribute_intelligence_signal(signal_id: str) -> dict:
 
     if not email_sent:
         logger.error(f"Failed to send signal email for {signal_id}")
+        # Alert Eyal in real time — otherwise an approved signal silently never
+        # reaches the team and he only learns at the next QA sweep (<=24h). We
+        # deliberately LEAVE the status at 'approved_finalizing' (do NOT flip to
+        # 'error') so reconstruct_intelligence_finalize_jobs still re-picks it for
+        # an automatic retry. [audit P2-04]
+        try:
+            from services.orchestrator.spine import comms_spine
+            await comms_spine.send_to_eyal(
+                f"⚠️ Intelligence Signal {signal_id} was approved but the email "
+                f"failed to send — it has NOT reached the team. I'll retry it "
+                f"automatically; reply if you want me to investigate."
+            )
+        except Exception as alert_err:
+            logger.error(f"Failed to alert Eyal about signal send failure: {alert_err}")
         return {"status": "error", "error": "Email send failed"}
 
     # Telegram confirmation
