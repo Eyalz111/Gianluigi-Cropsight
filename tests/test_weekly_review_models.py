@@ -199,7 +199,8 @@ class TestWeeklyReviewSessionCRUD:
         assert result is None
 
     def test_get_stale_tasks(self, mock_supabase):
-        mock_supabase._client.table.return_value.select.return_value.eq.return_value.lt.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        # approved-only filter adds a second .eq() (status, approval_status). [audit P3-15]
+        mock_supabase._client.table.return_value.select.return_value.eq.return_value.eq.return_value.lt.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
             data=[{"id": "task-1", "title": "Stale task"}]
         )
         result = mock_supabase.get_stale_tasks(days=14)

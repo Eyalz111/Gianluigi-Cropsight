@@ -2015,7 +2015,9 @@ class MCPServer:
 
                 _sc.log_action(
                     action="topic_threads_merged",
-                    details={"source": source_id, "target": target_id, "source": "mcp"},
+                    # the duplicate "source" key dropped source_id from the audit
+                    # trail — the channel is "via" now. [audit P3-19]
+                    details={"source": source_id, "target": target_id, "via": "mcp"},
                     triggered_by="eyal",
                 )
                 mcp_auth.log_call("merge_topic_threads", {"source": source_id, "target": target_id})
@@ -2120,7 +2122,16 @@ class MCPServer:
                             parsed_deadline = parse_date(deadline, fuzzy=True).date()
                             updates["deadline"] = parsed_deadline.isoformat()
                         except (ValueError, ImportError):
-                            updates["deadline"] = deadline  # update_task drops it if unparseable
+                            # A non-empty deadline that no parser understood used
+                            # to be passed through and silently NULLed by
+                            # update_task — tell the caller instead of dropping
+                            # it. Empty string = explicit clear → fall through. [audit P3-19]
+                            if deadline.strip():
+                                return _error(
+                                    f"Couldn't parse the deadline {deadline!r}. "
+                                    f"Use an explicit date like 2026-07-20 or 20.7.26."
+                                )
+                            updates["deadline"] = deadline  # clear
 
                 if not updates:
                     return _error("No fields to update. Provide at least one of: assignee, deadline, status, priority, urgency, category.")

@@ -74,9 +74,12 @@ class SupabaseClient:
             # TaskStatus is "done", not "completed" — the old literal matched no
             # rows, so meeting-prep's "what got done since the last meeting" block
             # was permanently empty. [audit P6-02]
+            # approved-only: never surface pending-extraction items as fact. [audit P3-15]
             completed = self.client.table("tasks").select("*").eq(
                 "status", "done"
-            ).gte("updated_at", since_date).limit(limit).execute()
+            ).eq("approval_status", "approved").gte(
+                "updated_at", since_date
+            ).limit(limit).execute()
             result["tasks_completed"] = completed.data if completed.data else []
         except Exception:
             result["tasks_completed"] = []
@@ -84,17 +87,17 @@ class SupabaseClient:
         try:
             overdue = self.client.table("tasks").select("*").eq(
                 "status", "pending"
-            ).lte("deadline", datetime.now().isoformat()).gte(
-                "deadline", since_date
-            ).limit(limit).execute()
+            ).eq("approval_status", "approved").lte(
+                "deadline", datetime.now().isoformat()
+            ).gte("deadline", since_date).limit(limit).execute()
             result["tasks_newly_overdue"] = overdue.data if overdue.data else []
         except Exception:
             result["tasks_newly_overdue"] = []
 
         try:
-            decisions = self.client.table("decisions").select("*").gte(
-                "created_at", since_date
-            ).limit(limit).execute()
+            decisions = self.client.table("decisions").select("*").eq(
+                "approval_status", "approved"
+            ).gte("created_at", since_date).limit(limit).execute()
             result["new_decisions"] = decisions.data if decisions.data else []
         except Exception:
             result["new_decisions"] = []
@@ -1026,22 +1029,38 @@ class SupabaseClient:
         # Canonicalize categories at this choke point (one areas fetch per batch)
         # so every batch-creation path stores the Gantt-area taxonomy.
         _areas = self.get_areas()
-        data = [
-            {
+
+        def _row(t: dict) -> dict:
+            raw_deadline = t.get("deadline")
+            ser_deadline = self._serialize_datetime(raw_deadline)
+            conf = t.get("deadline_confidence", "NONE")
+            # An extraction deadline emitted as vague text ("end of July 2026")
+            # serializes to None. Don't let it land NULL-but-EXPLICIT (a
+            # contradictory state the reminder-confidence filter mis-handles):
+            # force NONE so the task surfaces cleanly in get_tasks_without_deadline
+            # for the daily-QA gap-fill, and log it distinctly. [audit P1-08]
+            if raw_deadline and ser_deadline is None:
+                logger.warning(
+                    f"create_tasks_batch: dropped unparseable deadline "
+                    f"{raw_deadline!r} on task {t.get('title')!r} "
+                    f"(meeting {meeting_id}) — flagged for QA gap-fill"
+                )
+                conf = "NONE"
+            return {
                 "meeting_id": meeting_id,
                 "title": t.get("title"),
                 "assignee": t.get("assignee", ""),
                 "priority": t.get("priority", "M"),
-                "deadline": self._serialize_datetime(t.get("deadline")),
+                "deadline": ser_deadline,
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
                 "category": self.resolve_category(t.get("category"), areas=_areas),
                 "label": t.get("label"),
-                "deadline_confidence": t.get("deadline_confidence", "NONE"),
+                "deadline_confidence": conf,
                 "urgency": t.get("urgency", "M"),
             }
-            for t in valid_tasks
-        ]
+
+        data = [_row(t) for t in valid_tasks]
 
         # [audit P1-01] Stamp the tier ATOMICALLY at insert (belt; propagate is
         # the suspenders) so a propagate failure can't leave CEO tasks team-visible.
@@ -1134,10 +1153,12 @@ class SupabaseClient:
 
     def get_tasks_without_assignee(self, limit: int = 50) -> list[dict]:
         """Get open tasks with empty or null assignee."""
+        # approved-only: QA gap-fill must not surface pending-extraction tasks. [audit P3-15]
         result = (
             self.client.table("tasks")
             .select("*, meetings(title, date)")
             .in_("status", ["pending", "in_progress", "overdue"])
+            .eq("approval_status", "approved")
             .or_("assignee.is.null,assignee.eq.")
             .order("created_at", desc=True)
             .limit(limit)
@@ -1147,10 +1168,12 @@ class SupabaseClient:
 
     def get_tasks_without_deadline(self, limit: int = 50) -> list[dict]:
         """Get open tasks with no deadline set."""
+        # approved-only: QA gap-fill must not surface pending-extraction tasks. [audit P3-15]
         result = (
             self.client.table("tasks")
             .select("*, meetings(title, date)")
             .in_("status", ["pending", "in_progress", "overdue"])
+            .eq("approval_status", "approved")
             .is_("deadline", "null")
             .order("created_at", desc=True)
             .limit(limit)
@@ -2680,25 +2703,21 @@ class SupabaseClient:
         """
         now = datetime.now().isoformat()
         try:
+            # Single atomic UPDATE…WHERE (returns the updated rows) instead of a
+            # select-then-per-row-update loop — a crash mid-loop used to leave
+            # some conceptually-expired rows still 'pending' (one stray reminder
+            # each). [audit P3-18]
             result = (
                 self.client.table("pending_approvals")
-                .select("*")
+                .update({"status": "expired"})
                 .eq("status", "pending")
                 .not_.is_("expires_at", "null")
                 .lt("expires_at", now)
                 .execute()
             )
-            if not result.data:
-                return []
-
-            expired = []
-            for row in result.data:
-                self.client.table("pending_approvals").update(
-                    {"status": "expired"}
-                ).eq("approval_id", row["approval_id"]).execute()
-                expired.append(row)
-                logger.info(f"Expired approval: {row['approval_id']} ({row['content_type']})")
-
+            expired = result.data or []
+            if expired:
+                logger.info(f"Expired {len(expired)} pending approval(s)")
             return expired
         except Exception as e:
             logger.error(f"Error expiring pending approvals: {e}")
@@ -3038,30 +3057,37 @@ class SupabaseClient:
         Appends a -N suffix if a row already exists for the same base id (a
         same-day regenerate), so a second brief never overwrites the first's vote.
         """
-        existing = (
-            self.client.table("morning_brief_feedback")
-            .select("brief_id")
-            .like("brief_id", f"{base_brief_id}%")
-            .execute()
-            .data
-            or []
-        )
-        ids = {r["brief_id"] for r in existing}
-        brief_id = base_brief_id
-        n = 2
-        while brief_id in ids:
-            brief_id = f"{base_brief_id}-{n}"
-            n += 1
-        self.client.table("morning_brief_feedback").insert(
-            {
-                "brief_id": brief_id,
-                "brief_date": brief_date,
-                "variant": variant,
-                "section_count": section_count,
-                "vote": None,
-            }
-        ).execute()
-        return brief_id
+        # Best-effort: the feedback row is a nice-to-have (it powers 👍/👎). A DB
+        # blip here must NOT suppress the brief itself — return the computed
+        # brief_id regardless so the caller can still send. [audit P3-18]
+        try:
+            existing = (
+                self.client.table("morning_brief_feedback")
+                .select("brief_id")
+                .like("brief_id", f"{base_brief_id}%")
+                .execute()
+                .data
+                or []
+            )
+            ids = {r["brief_id"] for r in existing}
+            brief_id = base_brief_id
+            n = 2
+            while brief_id in ids:
+                brief_id = f"{base_brief_id}-{n}"
+                n += 1
+            self.client.table("morning_brief_feedback").insert(
+                {
+                    "brief_id": brief_id,
+                    "brief_date": brief_date,
+                    "variant": variant,
+                    "section_count": section_count,
+                    "vote": None,
+                }
+            ).execute()
+            return brief_id
+        except Exception as e:
+            logger.error(f"Could not create brief feedback row for {base_brief_id}: {e}")
+            return base_brief_id
 
     def set_brief_feedback_vote(
         self, brief_id: str, vote: str, pending_noise: bool = False
@@ -3343,11 +3369,14 @@ class SupabaseClient:
             logger.warning(f"Decision search failed: {e}")
 
         # 5. Keyword search in tasks (ILIKE — small table, cheap)
+        # approved-only: memory search must not return pending-extraction tasks
+        # as fact (list_decisions at step 4 already filters approved). [audit P3-15]
         try:
             task_results = (
                 self.client.table("tasks")
                 .select("*, meetings(title)")
                 .ilike("title", f"%{query_text}%")
+                .eq("approval_status", "approved")
                 .limit(limit)
                 .execute()
             )
@@ -3877,10 +3906,12 @@ class SupabaseClient:
         """Get tasks that have been pending for more than N days."""
         from datetime import datetime, timedelta
         cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        # approved-only: a stale-task alert must not count pending-extraction rows. [audit P3-15]
         result = (
             self.client.table("tasks")
             .select("*")
             .eq("status", "pending")
+            .eq("approval_status", "approved")
             .lt("created_at", cutoff)
             .order("created_at", desc=False)
             .limit(50)

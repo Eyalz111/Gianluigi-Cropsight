@@ -230,7 +230,10 @@ async def synthesize_prepare_brief(event: dict) -> str:
     try:
         from processors.meeting_continuity import build_meeting_continuity_context  # LLM-FREE (:67)
         participant_first = [p["first"] for p in anchored["participants"]]
-        continuity = build_meeting_continuity_context(title, participant_first) or ""
+        # signature is (participants, current_meeting_id, max_sensitivity_level) —
+        # the old call passed (title_str, participants_list), so it raised and the
+        # continuity block was ALWAYS silently empty. [audit P2-05]
+        continuity = build_meeting_continuity_context(participant_first, None, _CEO_LEVEL) or ""
     except Exception as e:
         logger.debug(f"prepare brief: continuity skipped: {e}")
 

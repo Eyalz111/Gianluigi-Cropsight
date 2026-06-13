@@ -528,6 +528,15 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
             "response": f"This debrief has already been {current_status}.",
             "action": f"debrief_{current_status}",
         }
+    # A prior attempt failed mid-injection (status parked at injection_failed so
+    # it isn't re-claimed and silently re-injected). Surface it honestly rather
+    # than the misleading "already approved" the CAS-miss used to give. [audit P2-14]
+    if current_status == "injection_failed":
+        return {
+            "response": "The last save attempt failed partway through. "
+                        "Please check the logs before retrying to avoid duplicates.",
+            "action": "error",
+        }
 
     if not approved:
         supabase_client.update_debrief_session(session_id, status="cancelled")
@@ -566,8 +575,16 @@ async def confirm_debrief(session_id: str, approved: bool) -> dict:
         }
     except Exception as e:
         logger.error(f"Debrief injection failed: {e}", exc_info=True)
+        # Release the CAS claim to a distinct terminal state — leaving it at
+        # "approving" stuck the session: the next confirm_debrief's CAS
+        # (confirming→approving) couldn't re-match and falsely reported
+        # "already approved" with 0 items saved. [audit P2-14]
+        try:
+            supabase_client.update_debrief_session(session_id, status="injection_failed")
+        except Exception as se:
+            logger.error(f"Could not park debrief session as injection_failed: {se}")
         return {
-            "response": "Error saving debrief items. Please try again or check with the logs.",
+            "response": "Error saving debrief items. Please check the logs before retrying.",
             "action": "error",
         }
 
