@@ -638,7 +638,7 @@ class Settings(BaseSettings):
         default=False, description="Enable the pre-weekly-digest Gantt status rollup + timeframe reconcile"
     )
     GANTT_SHADOW_MODE: bool = Field(
-        default=True, description="Gantt rollup/reconcile computes + logs but does NOT write the sheet/snapshot. Keep True until cutover (duplicated sheet first)."
+        default=True, description="Gantt rollup/reconcile computes + logs but does NOT write the sheet/snapshot. Keep True until cutover (duplicated sheet first). WARNING: GANTT_CUTOVER_PREVIEW (the supposed last-line preview/abort gate) is UNIMPLEMENTED — flipping this to False writes the board directly with NO preview DM. [audit P6-07]"
     )
     GANTT_PREDIGEST_HOUR: int = Field(
         default=13, description="IST hour to refresh the Gantt (must be < WEEKLY_DIGEST_HOUR so the digest reads a fresh Gantt)"
@@ -647,7 +647,7 @@ class Settings(BaseSettings):
         default="DZ", description="Hidden column holding each Gantt row's topic UUID (must sit past the last week column on every sheet)"
     )
     GANTT_CUTOVER_PREVIEW: bool = Field(
-        default=True, description="During cutover, DM Eyal a preview of the pre-digest Gantt write (reply STOP to cancel); drop after 3 clean cycles"
+        default=True, description="UNIMPLEMENTED (audit P6-07): intended to DM Eyal a preview of the pre-digest Gantt write (reply STOP to cancel), but there are ZERO code refs — this flag gates NOTHING today. Wire the preview before any GANTT_SHADOW_MODE=False cutover; until then it is latent only because shadow mode blocks board writes."
     )
     # v3 revised (improve EXISTING Gantt): restructure (add rows), linkage, nudges, high-bar pops
     GANTT_RESTRUCTURE_ENABLED: bool = Field(
@@ -885,6 +885,27 @@ class Settings(BaseSettings):
         for name, value, feature in optional_vars:
             if not value:
                 warnings.append(f"Missing {name} - {feature} will not work")
+
+        # Approval-gate BYPASS flags — all default safe. Surface loudly when one
+        # is enabled so an operator who flips it knows the "Gianluigi proposes,
+        # Eyal approves" (I1) contract is being relaxed: these distribute/apply
+        # WITHOUT an explicit per-item human tap. [audit P5-05]
+        if str(self.APPROVAL_MODE).lower() == "auto_review":
+            warnings.append(
+                "APPROVAL_MODE=auto_review — meetings AUTO-DISTRIBUTE to the team on "
+                "the auto-publish timeout with no explicit per-item approval (silence "
+                "= consent). This relaxes the I1 approval gate."
+            )
+        if self.INTELLIGENCE_SIGNAL_AUTO_DISTRIBUTE:
+            warnings.append(
+                "INTELLIGENCE_SIGNAL_AUTO_DISTRIBUTE=true — the weekly signal "
+                "distributes without Eyal's approval tap. Relaxes the I1 gate."
+            )
+        if self.CONTINUITY_AUTO_APPLY_ENABLED:
+            warnings.append(
+                "CONTINUITY_AUTO_APPLY_ENABLED=true — continuity changes apply "
+                "without an explicit approval. Relaxes the I1 gate."
+            )
 
         return warnings
 

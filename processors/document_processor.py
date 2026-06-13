@@ -97,17 +97,43 @@ async def process_document(
     # Phase 13 B2: Check for existing document with same content hash
     existing_by_hash = _find_existing_by_hash(content_hash)
     if existing_by_hash:
-        logger.info(
-            f"Document '{title}' has identical content to existing "
-            f"'{existing_by_hash.get('title')}' (hash match) — skipping"
+        existing_id = existing_by_hash["id"]
+        embed_count = _document_embedding_count(existing_id)
+        # Only a TRUE dedup-skip when the existing row actually has embeddings.
+        # If a prior run cycled between create_document and
+        # store_document_embeddings the row exists with 0 chunks, and the old
+        # unconditional skip left it permanently unsearchable — re-uploading the
+        # identical file couldn't fix it either (same content_hash). Re-embed
+        # into that row instead. (embed_count is None = couldn't read the count
+        # → skip, to avoid duplicating embeddings on a transient blip.) [audit P1-06]
+        if embed_count is None or embed_count > 0:
+            logger.info(
+                f"Document '{title}' has identical content to existing "
+                f"'{existing_by_hash.get('title')}' (hash match) — skipping"
+            )
+            return {
+                "document_id": existing_id,
+                "title": existing_by_hash.get("title", title),
+                "summary": existing_by_hash.get("summary", ""),
+                "document_type": existing_by_hash.get("document_type", "other"),
+                "chunk_count": embed_count or 0,
+                "deduplicated": True,
+            }
+        logger.warning(
+            f"Document '{title}' matches existing {existing_id} but it has 0 "
+            f"embeddings (prior run cycled mid-pipeline) — re-embedding"
+        )
+        chunk_count = await store_document_embeddings(
+            existing_id, content, sensitivity=existing_by_hash.get("sensitivity")
         )
         return {
-            "document_id": existing_by_hash["id"],
+            "document_id": existing_id,
             "title": existing_by_hash.get("title", title),
             "summary": existing_by_hash.get("summary", ""),
             "document_type": existing_by_hash.get("document_type", "other"),
-            "chunk_count": 0,
-            "deduplicated": True,
+            "chunk_count": chunk_count,
+            "deduplicated": False,
+            "repaired": True,
         }
 
     # Phase 13 B2: Check for existing document with same title+source (versioning)
@@ -166,6 +192,24 @@ async def process_document(
         "chunk_count": chunk_count,
         "version": version,
     }
+
+
+def _document_embedding_count(document_id: str) -> int | None:
+    """Count stored embeddings for a document. Returns None if the count can't be
+    read (caller then treats it as 'assume embedded' to avoid duplicates). [audit P1-06]"""
+    try:
+        result = (
+            supabase_client.client.table("embeddings")
+            .select("id", count="exact")
+            .eq("source_type", "document")
+            .eq("source_id", document_id)
+            .limit(1)
+            .execute()
+        )
+        return result.count
+    except Exception as e:
+        logger.debug(f"Embedding count lookup failed for {document_id}: {e}")
+        return None
 
 
 def _find_existing_by_hash(content_hash: str) -> dict | None:
