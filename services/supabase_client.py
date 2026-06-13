@@ -338,6 +338,25 @@ class SupabaseClient:
                 except Exception as e:
                     logger.debug(f"Pre-count for {table} skipped: {e}")
 
+            # Capture the topic threads this meeting mentioned BEFORE the mentions
+            # are deleted, so we can recompute their meeting_count and drop now-
+            # orphaned (zero-mention) threads afterward — otherwise a reject leaves
+            # an orphan thread with meeting_count=1 and zero mentions, shown in
+            # list_active_threads as a fabricated topic. [audit P1-07]
+            affected_topic_ids: set = set()
+            try:
+                _m = (
+                    self.client.table("topic_thread_mentions")
+                    .select("topic_id")
+                    .eq("meeting_id", meeting_id)
+                    .execute()
+                    .data
+                    or []
+                )
+                affected_topic_ids = {r.get("topic_id") for r in _m if r.get("topic_id")}
+            except Exception as e:
+                logger.debug(f"affected-topic capture skipped: {e}")
+
             # Embeddings are polymorphic (source_type: 'meeting' | 'document')
             # so they have no FK on meetings(id). Always delete explicitly.
             try:
@@ -422,6 +441,34 @@ class SupabaseClient:
                     f"{counts['topic_thread_mentions']} topic_mentions, "
                     f"{counts['meetings']} meetings"
                 )
+
+            # After the mentions are gone, fix the affected threads: recompute
+            # meeting_count from the remaining DISTINCT mentions, and drop any
+            # thread now down to zero mentions (an orphan from this reject). [audit P1-07]
+            dropped_threads = 0
+            for tid in affected_topic_ids:
+                try:
+                    rows = (
+                        self.client.table("topic_thread_mentions")
+                        .select("meeting_id")
+                        .eq("topic_id", tid)
+                        .execute()
+                        .data
+                        or []
+                    )
+                    distinct = len({r.get("meeting_id") for r in rows if r.get("meeting_id")})
+                    if distinct == 0:
+                        self.client.table("topic_threads").delete().eq("id", tid).execute()
+                        dropped_threads += 1
+                    else:
+                        self.client.table("topic_threads").update(
+                            {"meeting_count": distinct}
+                        ).eq("id", tid).execute()
+                except Exception as e:
+                    logger.debug(f"topic_thread cleanup for {tid} skipped: {e}")
+            if dropped_threads:
+                logger.info(f"Dropped {dropped_threads} orphan topic thread(s) after cascade")
+            counts["orphan_threads_dropped"] = dropped_threads
 
         except Exception as e:
             logger.error(f"Error during cascade delete of {meeting_id}: {e}")
