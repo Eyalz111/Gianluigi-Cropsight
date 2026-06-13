@@ -164,6 +164,8 @@ async def start_services() -> None:
     # When MCP_AUTH_TOKEN is set, use the MCP server (includes health routes).
     # Otherwise, fall back to the lightweight aiohttp health server.
     _http_server = None
+    mcp_task = None  # pre-init: a create_task failure below must not NameError
+                     # at the `tasks.append(mcp_task)` site and abort boot. [audit P4-08]
     if settings.MCP_AUTH_TOKEN:
         from services.mcp_server import mcp_server
         _http_server = mcp_server
@@ -216,8 +218,8 @@ async def start_services() -> None:
     # Create tasks for all background services
     tasks = []
 
-    # Include MCP server task if it was started
-    if settings.MCP_AUTH_TOKEN:
+    # Include MCP server task if it was started (None if create_task failed). [audit P4-08]
+    if settings.MCP_AUTH_TOKEN and mcp_task is not None:
         tasks.append(mcp_task)
 
     # Start Telegram bot
@@ -593,6 +595,30 @@ async def stop_services() -> None:
         try:
             from schedulers.intelligence_signal_scheduler import intelligence_signal_scheduler
             intelligence_signal_scheduler.stop()
+        except Exception:
+            pass
+
+    # Stop knowledge + reconcile schedulers if started — these were created in
+    # the boot path but had no matching stop() here, so they leaked their loop on
+    # shutdown (cancelled only when the event loop tore down). [audit P4-08]
+    if settings.KNOWLEDGE_NIGHTLY_ENABLED:
+        try:
+            from schedulers.knowledge_nightly_scheduler import knowledge_nightly_scheduler
+            knowledge_nightly_scheduler.stop()
+        except Exception:
+            pass
+
+    if settings.KNOWLEDGE_WEEKLY_ENABLED:
+        try:
+            from schedulers.knowledge_weekly_scheduler import knowledge_weekly_scheduler
+            knowledge_weekly_scheduler.stop()
+        except Exception:
+            pass
+
+    if settings.RECONCILE_ENABLED or settings.GANTT_RECONCILE_ENABLED:
+        try:
+            from schedulers.reconcile_scheduler import reconcile_scheduler
+            reconcile_scheduler.stop()
         except Exception:
             pass
 

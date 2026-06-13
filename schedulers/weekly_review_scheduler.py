@@ -45,10 +45,12 @@ class WeeklyReviewScheduler:
             f"(interval: {self.check_interval}s)"
         )
 
-        # Wait for Telegram bot readiness (Phase 5 lesson)
+        # Wait for Telegram bot readiness (Phase 5 lesson). Bounded — a never-ready
+        # bot must not park the scheduler before its loop ever starts (meeting_prep
+        # already uses a 30s bound). [audit P4-08]
         try:
             from services.telegram_bot import telegram_bot
-            await telegram_bot.wait_until_ready()
+            await telegram_bot.wait_until_ready(timeout=30)
         except Exception as e:
             logger.warning(f"Telegram readiness wait failed: {e}")
 

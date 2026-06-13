@@ -78,7 +78,9 @@ def collect_health_data() -> dict:
     from services.supabase_client import supabase_client
 
     data = {
-        "timestamp": datetime.now().isoformat(),
+        # tz-aware UTC, consistent with the cutoffs below — a naive local stamp
+        # on a non-UTC container mislabels the report time. [audit P4-08]
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "components": {},
         "metrics": {},
     }
