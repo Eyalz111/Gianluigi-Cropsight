@@ -770,8 +770,32 @@ class GoogleSheetsService:
         tab_name = settings.TASK_TRACKER_TAB_NAME
         self._ensure_archive_tab()
 
+        # IDEMPOTENCY (P1-10): the move is append-then-delete. If a prior cycle's
+        # delete leg failed after its append succeeded, those UUIDs already live
+        # in Archive AND are still active here. Skip re-appending them (otherwise
+        # the Archive tab accrues a duplicate every cycle), but still delete their
+        # active copies below so the ghost self-heals. The col-J UUID is the key.
+        existing_archive_ids: set[str] = set()
+        try:
+            resp = self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().get(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range="Archive!J2:J",
+                )
+            )
+            existing_archive_ids = {
+                (r[0] or "").strip()
+                for r in (resp.get("values", []) or [])
+                if r and (r[0] or "").strip()
+            }
+        except Exception as e:
+            # Non-fatal: worst case we re-append a duplicate (the old behaviour).
+            logger.warning(f"[archive] could not read existing Archive UUIDs: {e}")
+
         archive_rows = []
         for t in sheet_rows:
+            if (t.get("id") or "").strip() in existing_archive_ids:
+                continue  # already in Archive from a half-completed prior move
             _row = [
                 t.get("priority", ""), t.get("label", ""), t.get("task", ""),
                 t.get("assignee", ""), str(t.get("deadline", "") or ""),
@@ -784,18 +808,23 @@ class GoogleSheetsService:
             _row.append(datetime.now().strftime("%Y-%m-%d"))  # Archived date
             archive_rows.append(_row)
 
-        num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
-        self._execute_with_retry(
-            lambda: self.service.spreadsheets().values().append(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                range=f"Archive!A:{chr(ord('A') + num_archive_cols - 1)}",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": archive_rows},
+        if archive_rows:
+            num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().append(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"Archive!A:{chr(ord('A') + num_archive_cols - 1)}",
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": archive_rows},
+                )
             )
-        )
 
-        # Delete archived rows from active tab (bottom-up to preserve row numbers)
+        # Delete archived rows from active tab (bottom-up to preserve row numbers).
+        # This leg is isolated: an append that succeeded leaves the rows safely in
+        # Archive, so a delete failure must be LOUD (rows now duplicated on both
+        # tabs) — fire a CRITICAL with the exact rows/UUIDs for operator cleanup,
+        # and re-raise so the caller doesn't log it as a benign "rows stay put".
         row_numbers = sorted(
             [t["row_number"] for t in sheet_rows if t.get("row_number")], reverse=True
         )
@@ -808,12 +837,24 @@ class GoogleSheetsService:
                 }}
                 for r in row_numbers
             ]
-            self._execute_with_retry(
-                lambda: self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    body={"requests": requests},
+            try:
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().batchUpdate(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        body={"requests": requests},
+                    )
                 )
-            )
+            except Exception as e:
+                stuck = [
+                    {"row": t.get("row_number"), "id": t.get("id"), "task": t.get("task")}
+                    for t in sheet_rows if t.get("row_number")
+                ]
+                logger.critical(
+                    "[archive] DELETE leg failed after append — rows now exist on "
+                    "BOTH tabs and need manual removal from the active tab. "
+                    f"Affected: {stuck}. Error: {e}"
+                )
+                raise
 
         logger.info(f"Archived {len(archive_rows)} task rows to Archive tab")
         return len(archive_rows)

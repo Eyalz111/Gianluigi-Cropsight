@@ -148,7 +148,21 @@ async def main():
     args = parser.parse_args()
 
     from services.supabase_client import supabase_client
-    from services.google_sheets import sheets_service
+    from services.google_sheets import sheets_service, TASK_COLUMNS
+
+    # ENV GUARD (audit P6-04): this script clears+rewrites the LIVE Tasks sheet.
+    # Prod runs with TASK_SHEET_URGENCY_AREA_ENABLED on, which gives the sheet its
+    # K (Urgency) / L (Area) columns. Rebuilding WITHOUT the flag would drop those
+    # columns and break the col-J UUID lockstep — the "tasks vanished" incident
+    # class. Refuse to run unless the flag is set (the guarded siblings do the same).
+    if not getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False) or "urgency" not in TASK_COLUMNS:
+        logger.error(
+            "rebuild_sheets.py refuses to run without TASK_SHEET_URGENCY_AREA_ENABLED=true "
+            "(prod layout). Re-run as:\n"
+            "    $env:TASK_SHEET_URGENCY_AREA_ENABLED='true'; python scripts/rebuild_sheets.py\n"
+            "Without it the rebuild would drop the Urgency/Area columns and regress the layout."
+        )
+        sys.exit(1)
 
     # Step 0: Verify connection
     logger.info("Verifying Google Sheets connection...")

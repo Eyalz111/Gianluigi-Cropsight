@@ -45,6 +45,9 @@ def _setup(monkeypatch, sheet, db, snap):
     fake.add_tasks_batch = AsyncMock(return_value=True)
     fake.add_task = AsyncMock(return_value=True)
     fake.archive_task_rows = AsyncMock(return_value=0)
+    # P1-02: the create path now writes the col-J UUID synchronously per-create
+    # via _update_cell (not the deferred cell_writes batch), so it must be awaitable.
+    fake._update_cell = AsyncMock(return_value=None)
     monkeypatch.setattr(gs, "sheets_service", fake)
 
     sc = ss.supabase_client
