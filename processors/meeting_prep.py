@@ -553,7 +553,7 @@ def format_prep_document(
         for d in relevant_decisions:
             source = d.get("source_meeting", "Unknown meeting")
             date_val = d.get("date", "")
-            lines.append(f"- **{d.get('description')}** ({source}, {date_val})")
+            lines.append(f"- **{d.get('description') or '(no text)'}** ({source}, {date_val})")
         lines.append("")
 
     # Open questions
@@ -564,7 +564,7 @@ def format_prep_document(
         ])
         for q in open_questions:
             raised_by = q.get("raised_by", "Unknown")
-            lines.append(f"- {q.get('question')} (raised by {raised_by})")
+            lines.append(f"- {q.get('question') or '(no text)'} (raised by {raised_by})")
         lines.append("")
 
     # Related documents

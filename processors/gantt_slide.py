@@ -175,6 +175,11 @@ def _add_section_table(
 
     start_week, end_week = week_range
     num_weeks = end_week - start_week + 1
+    # Guard a degenerate range (end <= start-1): num_weeks <= 0 would later
+    # ZeroDivide / make negative column widths. Skip the table. [audit P2-19]
+    if num_weeks <= 0:
+        logger.warning(f"Skipping section '{section_name}' — invalid week range {week_range}")
+        return y_offset
     num_cols = 2 + num_weeks  # Item name + Owner + week columns
     num_rows = 1 + len(items)  # Header + items
 

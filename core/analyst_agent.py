@@ -13,7 +13,7 @@ Phase 1: Thin wrapper around existing transcript_processor.
 import logging
 
 from config.settings import settings
-from core.llm import call_llm, get_client
+from core.llm import call_llm
 
 logger = logging.getLogger(__name__)
 
