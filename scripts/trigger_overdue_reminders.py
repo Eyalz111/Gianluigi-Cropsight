@@ -14,9 +14,11 @@ clicks the new buttons, the handler does a fresh DB lookup by UUID and
 the action goes through.
 
 Usage:
-    python scripts/trigger_overdue_reminders.py
+    python scripts/trigger_overdue_reminders.py            # DRY RUN (prints, sends nothing)
+    python scripts/trigger_overdue_reminders.py --apply    # actually send to Eyal
 """
 
+import argparse
 import asyncio
 import logging
 import os
@@ -29,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-async def main() -> int:
+async def main(apply: bool = False) -> int:
     from datetime import datetime, date
     from services.supabase_client import supabase_client
     from services.google_sheets import sheets_service
@@ -63,6 +65,12 @@ async def main() -> int:
     if not overdue:
         logger.info("Nothing to send.")
         return 0
+
+    if not apply:
+        logger.info(
+            "DRY RUN (no --apply): would send %d live Telegram reminder(s) to Eyal. "
+            "Re-run with --apply to actually send.", len(overdue)
+        )
 
     # Resolve task_ids in bulk for any unique assignees
     sent_count = 0
@@ -108,6 +116,11 @@ async def main() -> int:
             InlineKeyboardButton("Discuss", callback_data=f"taskdiscuss:{db_task_id}"),
         ]])
 
+        if not apply:
+            logger.info(f"[DRY-RUN] would send reminder for: {task_text[:60]} ({assignee})")
+            sent_count += 1
+            continue
+
         try:
             await comms_spine.send_raw(
                 chat_id=telegram_bot.eyal_chat_id,
@@ -120,9 +133,16 @@ async def main() -> int:
         except Exception as e:
             logger.error(f"Failed to send reminder for '{task_text[:60]}': {e}")
 
-    logger.info(f"Done. Sent {sent_count} fresh reminders.")
+    verb = "Would send" if not apply else "Sent"
+    logger.info(f"Done. {verb} {sent_count} fresh reminders.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    parser = argparse.ArgumentParser(description="Send fresh overdue-task reminders to Eyal")
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="Actually send the live Telegram reminders (default: dry run).",
+    )
+    _args = parser.parse_args()
+    sys.exit(asyncio.run(main(apply=_args.apply)))

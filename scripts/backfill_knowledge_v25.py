@@ -137,7 +137,25 @@ def run_backfill() -> dict:
 
 
 if __name__ == "__main__":
+    import argparse
+
     logging.basicConfig(level=logging.INFO)
+    _parser = argparse.ArgumentParser(
+        description="Backfill v2.5 knowledge (seed Areas + assign topic threads)"
+    )
+    # --apply opt-in (dry-run default) so a forgetful bare run no longer writes
+    # areas / topic-area assignments / knowledge_links to the live DB. [audit P6-05]
+    _parser.add_argument("--apply", action="store_true", help="Actually write to DB (default: dry run)")
+    _args = _parser.parse_args()
+
+    if not _args.apply:
+        print(
+            "DRY RUN (no --apply): this would seed Areas and assign/link topic "
+            "threads in the live DB. Re-run with --apply to write.\n"
+            "Nothing was written."
+        )
+        sys.exit(0)
+
     print("Backfilling v2.5 knowledge (areas from Gantt + topic assignment)...")
     res = run_backfill()
     print(f"Done: {res}")

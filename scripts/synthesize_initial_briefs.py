@@ -48,12 +48,18 @@ async def _run(args) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cold-start knowledge brief synthesis (v2.5 PR2)")
     parser.add_argument("--limit", type=int, default=None, help="Max topics to synthesize (hand-validation)")
-    parser.add_argument("--dry-run", action="store_true", help="Synthesize + log, but do NOT write to DB")
+    parser.add_argument("--apply", action="store_true", help="Actually WRITE briefs to DB + burn LLM (default: dry run)")
+    parser.add_argument("--dry-run", action="store_true", help="(default) Synthesize + log, but do NOT write to DB")
     parser.add_argument("--force", action="store_true", help="Re-synthesize even if a brief already exists")
     parser.add_argument("--topics-only", action="store_true", help="Synthesize topic briefs only")
     parser.add_argument("--areas-only", action="store_true", help="Synthesize area briefs only")
     parser.add_argument("--no-rag", action="store_true", help="Skip semantic-chunk enrichment")
     args = parser.parse_args()
+
+    # Dry-run is now the DEFAULT (write requires explicit --apply); --dry-run still
+    # forces it. Inverted from the old opt-OUT --dry-run so a forgetful bare run no
+    # longer writes DB + burns LLM. [audit P6-05]
+    args.dry_run = args.dry_run or not args.apply
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
