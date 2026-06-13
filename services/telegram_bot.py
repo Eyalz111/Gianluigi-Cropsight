@@ -798,8 +798,12 @@ class TelegramBot:
             for i, t in enumerate(tasks, 1):
                 label = t.get("label", "")
                 title = _escape_html(t.get("title", ""))
-                assignee = t.get("assignee", "") or "—"
-                priority = t.get("priority", "M")
+                # assignee is transcript-extracted (untrusted) and rendered in HTML
+                # parse mode — escape it like every sibling field, else a crafted
+                # "<a href=…>" renders a live link or a stray '<'/'&' breaks the
+                # parse and the approval card silently fails to send. [audit P5-03]
+                assignee = _escape_html(t.get("assignee", "") or "—")
+                priority = _escape_html(str(t.get("priority", "M")))
                 label_prefix = f"<b>{_escape_html(label)}</b>: " if label else ""
                 lines.append(f"  {i}. [{priority}] {label_prefix}{title} -> {assignee}")
             lines.append("")
@@ -810,7 +814,7 @@ class TelegramBot:
             for f in follow_ups:
                 label = f.get("label", "")
                 title = _escape_html(f.get("title", ""))
-                led_by = f.get("led_by", "TBD")
+                led_by = _escape_html(f.get("led_by", "TBD"))  # untrusted — escape [audit P5-03]
                 label_prefix = f"<b>{_escape_html(label)}</b>: " if label else ""
                 lines.append(f"  - {label_prefix}{title} (led by {led_by})")
             lines.append("")
@@ -821,7 +825,7 @@ class TelegramBot:
             for q in open_questions:
                 label = q.get("label", "")
                 question = _escape_html(q.get("question", ""))
-                raised_by = q.get("raised_by", "")
+                raised_by = _escape_html(q.get("raised_by", ""))  # untrusted — escape [audit P5-03]
                 label_prefix = f"<b>{_escape_html(label)}</b>: " if label else ""
                 lines.append(f"  - {label_prefix}{question}")
                 if raised_by:
