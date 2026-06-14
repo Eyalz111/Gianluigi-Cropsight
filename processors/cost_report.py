@@ -15,9 +15,48 @@ from core.cost_calculator import compute_cost_summary
 
 logger = logging.getLogger(__name__)
 
-# Rough always-on Cloud Run estimate (see docs/COST_ANALYSIS_2026_06.md). Not in
-# token_usage — surfaced as context so the LLM number isn't mistaken for total.
+# Fallback note when the real GCP billing export isn't wired yet (estimate from
+# docs/COST_ANALYSIS_2026_06.md). Not in token_usage — surfaced so the LLM number
+# isn't mistaken for the total.
 _INFRA_NOTE = "Cloud Run (always-on) ~$25–70/mo + Supabase $0–25 are NOT in this figure."
+
+
+def _infra_lines() -> tuple[str, list[str]]:
+    """Return (telegram_line, doc_lines) for infrastructure cost — REAL GCP
+    month-to-date when the billing export is configured, else the estimate."""
+    try:
+        from services.gcp_billing import get_gcp_mtd_costs
+        gcp = get_gcp_mtd_costs()
+    except Exception as e:
+        logger.warning(f"GCP cost lookup failed: {e}")
+        gcp = {"available": False}
+
+    if gcp.get("available"):
+        cr = gcp.get("cloud_run_usd") or 0.0
+        total = gcp.get("total_usd") or 0.0
+        tg = f"☁️ <b>GCP this month (actual):</b> {_money(total)} — Cloud Run {_money(cr)}"
+        doc = [
+            "## Infrastructure — GCP (actual, month-to-date)",
+            "",
+            f"**Total GCP:** {_money(total)}  ·  **Cloud Run:** {_money(cr)}",
+            "",
+            "| Service | Cost (MTD) |",
+            "|---|---|",
+        ]
+        for name, cost in (gcp.get("by_service") or [])[:8]:
+            doc.append(f"| {name} | {_money(cost)} |")
+        return tg, doc
+
+    # Not wired yet — show the estimate + how to make it real.
+    tg = f"<i>{_INFRA_NOTE}</i>"
+    doc = [
+        "## Infrastructure — estimate",
+        "",
+        f"> {_INFRA_NOTE}",
+        "> Set `GCP_BILLING_EXPORT_TABLE` (after enabling BigQuery billing export) "
+        "to replace this estimate with the real Cloud Run / GCP month-to-date spend.",
+    ]
+    return tg, doc
 
 
 def _money(x: float) -> str:
@@ -66,7 +105,8 @@ def build_cost_report() -> dict:
         for site, d in top_sites:
             tg.append(f"  • {site}: {_money(d.get('cost', 0.0))}")
         tg.append("")
-    tg.append(f"<i>{_INFRA_NOTE}</i>")
+    infra_tg, infra_doc = _infra_lines()
+    tg.append(infra_tg)
     telegram_text = "\n".join(tg)
 
     # ---- Markdown doc (fuller, for the Drive archive) ----
@@ -77,7 +117,7 @@ def build_cost_report() -> dict:
         f"**Week-over-week:** {wow}  ",
         f"**Prior 7 days:** {_money(prev7)}",
         "",
-        "> " + _INFRA_NOTE,
+        *infra_doc,
         "",
         "## By model",
         "",

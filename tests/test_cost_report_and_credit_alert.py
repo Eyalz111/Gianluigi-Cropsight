@@ -80,12 +80,32 @@ class TestCostReportBuild:
         # 14-day daily_trend = 14 × 0.5 → last7=3.5, prev7=3.5; 7-day summary drives the body
         monkeypatch.setattr(cr, "compute_cost_summary", lambda recs: self._fake_summary(5.0))
 
+        # GCP export not configured → estimate fallback
+        monkeypatch.setattr(
+            "services.gcp_billing.get_gcp_mtd_costs",
+            lambda: {"available": False, "reason": "not set"},
+        )
         r = cr.build_cost_report()
         assert r["total_7d"] == pytest.approx(3.5)
         assert "Weekly Claude spend" in r["telegram"]
         assert "transcript_extraction" in r["telegram"]
         assert "# CropSight — Weekly Cost Report" in r["doc"]
-        assert "NOT in this figure" in r["telegram"]  # infra caveat present
+        assert "NOT in this figure" in r["telegram"]  # estimate fallback
+
+    def test_build_report_with_real_gcp(self, monkeypatch):
+        from processors import cost_report as cr
+        monkeypatch.setattr(cr.supabase_client, "get_token_usage_summary", lambda days=7: [])
+        monkeypatch.setattr(cr, "compute_cost_summary", lambda recs: self._fake_summary(5.0))
+        monkeypatch.setattr(
+            "services.gcp_billing.get_gcp_mtd_costs",
+            lambda: {"available": True, "cloud_run_usd": 41.2, "total_usd": 47.8,
+                     "by_service": [("Cloud Run", 41.2), ("Cloud SQL", 6.6)], "reason": "ok"},
+        )
+        r = cr.build_cost_report()
+        assert "actual" in r["telegram"]
+        assert "$41.20" in r["telegram"]                 # real Cloud Run number shown
+        assert "GCP (actual" in r["doc"]
+        assert "NOT in this figure" not in r["telegram"]  # estimate replaced
 
 
 # =============================================================================
