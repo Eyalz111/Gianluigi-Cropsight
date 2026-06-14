@@ -340,14 +340,20 @@ async def start_services() -> None:
     else:
         logger.warning("  Task reminder scheduler disabled (Google Sheets not available)")
 
-    # Alert scheduler — time-window filters added (C2), safe to enable
-    from schedulers.alert_scheduler import alert_scheduler
-    logger.info("  Starting alert scheduler...")
-    alert_task = asyncio.create_task(
-        alert_scheduler.start(),
-        name="alert_scheduler"
-    )
-    tasks.append(alert_task)
+    # Alert scheduler — RETIRED by default (ALERT_SCHEDULER_ENABLED=false). The
+    # standalone hourly 'Heads up' push re-fired on every restart (in-memory daily
+    # guard) and its content was backlog noise; actionable overdue items live in
+    # the morning brief + weekly review.
+    if settings.ALERT_SCHEDULER_ENABLED:
+        from schedulers.alert_scheduler import alert_scheduler
+        logger.info("  Starting alert scheduler...")
+        alert_task = asyncio.create_task(
+            alert_scheduler.start(),
+            name="alert_scheduler"
+        )
+        tasks.append(alert_task)
+    else:
+        logger.info("  Alert scheduler retired (ALERT_SCHEDULER_ENABLED=false)")
 
     # Start orphan cleanup scheduler (always — only needs Supabase + Telegram)
     from schedulers.orphan_cleanup_scheduler import orphan_cleanup_scheduler
