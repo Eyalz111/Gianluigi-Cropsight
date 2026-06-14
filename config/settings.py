@@ -795,6 +795,23 @@ class Settings(BaseSettings):
         default=3600, description="Seconds between weekly-Pulse day/hour-window checks (hourly; reuses WEEKLY_DIGEST_DAY for the day)."
     )
 
+    # Weekly cost/pricing report → Telegram + CropSight Ops Drive (no LLM).
+    COST_REPORT_ENABLED: bool = Field(
+        default=False, description="Enable the weekly cost-report scheduler (Claude-spend summary to Eyal + Drive archive)."
+    )
+    COST_REPORT_DAY: int = Field(
+        default=6, description="Weekday (Mon=0 … Sun=6) to send the cost report. Default 6 = Sunday (Israeli work-week start)."
+    )
+    COST_REPORT_HOUR: int = Field(
+        default=8, description="IST hour to send the weekly cost report (default 08:00)."
+    )
+    COST_REPORT_WINDOW_HOURS: int = Field(
+        default=3, description="Hour window after COST_REPORT_HOUR within which the report may fire on the check cadence."
+    )
+    COST_REPORT_CHECK_INTERVAL: int = Field(
+        default=3600, description="Seconds between cost-report day/hour-window checks (hourly)."
+    )
+
     # ==========================================================================
     # Rollout orchestrator (v2.5 Phase 3, chunk 5) — staged env-flag rollouts.
     # Daily reminder + tap-to-apply via Cloud Run admin API. Restart-safe via
