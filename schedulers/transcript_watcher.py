@@ -222,16 +222,28 @@ class TranscriptWatcher:
             }
 
         if is_cropsight is None:
-            # Uncertain - ask Eyal
-            logger.info(f"Uncertain meeting, asking Eyal: {file_name}")
+            # Uncertain — ask Eyal ONCE. Previously this re-asked every poll
+            # (~15 min) because the file was never marked processed, so
+            # get_new_transcripts kept re-listing it. Stash the payload for the
+            # Yes/No callback, then mark it processed so the watcher stops
+            # re-listing/re-asking. The callback processes it from the stash on
+            # "Yes" (or marks it skipped on "No"); a remembered classification
+            # makes future similar titles auto-resolve without asking.
+            if file_id in self._pending_classifications:
+                # Already asked this instance — don't spam a second card.
+                return {
+                    "file_id": file_id, "file_name": file_name,
+                    "status": "pending_classification", "reason": "Already asked",
+                }
+            logger.info(f"Uncertain meeting, asking Eyal once: {file_name}")
             await ask_eyal_about_meeting(event, comms_spine)
-            # Store for later processing when Eyal responds
             self._pending_classifications[file_id] = {
                 "file": file,
                 "content": content,
                 "metadata": metadata,
                 "event": event,
             }
+            drive_service.mark_file_processed(file_id)  # stop the every-poll re-ask
             return {
                 "file_id": file_id,
                 "file_name": file_name,
