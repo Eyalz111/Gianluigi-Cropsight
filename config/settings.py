@@ -288,6 +288,16 @@ class Settings(BaseSettings):
     ALERT_CHECK_INTERVAL: int = Field(
         default=43200, description="Alert scheduler check interval (seconds)"
     )
+    ALERT_SCHEDULER_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Standalone 'Heads up' proactive-alerts push. RETIRED (default off): its "
+            "once-per-day guard was in-memory so every Cloud Run restart re-fired it, "
+            "and its content (cumulative open-question/stale-task counts + entity-frequency "
+            "stats) is backlog noise. Actionable overdue items already surface in the "
+            "morning brief (Task Urgency / Deal Pulse) + weekly review."
+        ),
+    )
     ORPHAN_CLEANUP_INTERVAL: int = Field(
         default=86400, description="Orphan cleanup scheduler interval (seconds)"
     )
