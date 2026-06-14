@@ -34,6 +34,7 @@ Analyst, and Operator agents.
 """
 
 import logging
+import time
 from typing import Any
 
 from anthropic import Anthropic
@@ -44,6 +45,72 @@ logger = logging.getLogger(__name__)
 
 # Singleton client — reuses HTTP connections across all calls
 _client: Anthropic | None = None
+
+# --- Out-of-credits alerting -------------------------------------------------
+# When the Anthropic account runs out of credits EVERY call_llm fails, which
+# silently takes down every AI feature (extraction, brief, agent replies, the
+# intelligence signal). Detect that here — the single Anthropic gateway — and
+# alert Eyal ONCE so an empty balance is never silent again. Best-effort and
+# deduped; never raises into the LLM path.
+_main_loop = None                       # set by main.py at startup
+_last_credit_alert_ts: float = 0.0
+_CREDIT_ALERT_COOLDOWN_S = 6 * 3600     # alert at most once per 6h
+
+
+def register_alert_loop(loop) -> None:
+    """main.py registers the app's event loop so sync/executor-thread call_llm
+    failures can schedule the async Telegram alert onto it."""
+    global _main_loop
+    _main_loop = loop
+
+
+def _is_credit_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "credit balance is too low" in s or ("credit" in s and "too low" in s)
+
+
+def _note_anthropic_credit_exhausted(exc: Exception) -> None:
+    """Alert Eyal that Claude credits are exhausted (deduped, best-effort)."""
+    global _last_credit_alert_ts
+    try:
+        now = time.time()
+        if now - _last_credit_alert_ts < _CREDIT_ALERT_COOLDOWN_S:
+            return
+        _last_credit_alert_ts = now
+        logger.critical(
+            "Anthropic credit balance exhausted — ALL AI features are down until "
+            "credits are added (console.anthropic.com → Plans & Billing)."
+        )
+        # Durable audit row (sync — reliable from any thread), so a backstop
+        # check can surface it even if the live Telegram ping can't be scheduled.
+        try:
+            from services.supabase_client import supabase_client
+            supabase_client.log_action(
+                "anthropic_credit_exhausted",
+                details={"error": str(exc)[:300]},
+                triggered_by="system",
+            )
+        except Exception:
+            pass
+        # Best-effort live Telegram DM to Eyal, scheduled onto the main loop
+        # (call_llm runs sync, often in an executor thread with no running loop).
+        if _main_loop is not None:
+            import asyncio
+            from services.alerting import send_system_alert, AlertSeverity
+            msg = (
+                "🚨 Out of Anthropic (Claude) credits — every AI feature is paused "
+                "(replies, morning brief, meeting extraction, the intelligence signal). "
+                "Top up at console.anthropic.com → Plans & Billing to resume."
+            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    send_system_alert(AlertSeverity.CRITICAL, "anthropic_billing", msg),
+                    _main_loop,
+                )
+            except Exception as sched_err:
+                logger.error(f"Could not schedule credit alert: {sched_err}")
+    except Exception as e:
+        logger.error(f"Credit-exhaustion alert handling failed: {e}")
 
 
 def get_client() -> Anthropic:
@@ -108,7 +175,12 @@ def call_llm(
             }
         ]
 
-    response = client.messages.create(**kwargs)
+    try:
+        response = client.messages.create(**kwargs)
+    except Exception as e:
+        if _is_credit_error(e):
+            _note_anthropic_credit_exhausted(e)
+        raise
     # Guard against an empty/truncated content block (an overloaded or truncated
     # response can return content=[]) — a bare content[0].text raises a confusing
     # IndexError out of call_llm instead of a clean, retryable error. [audit P6-08]
@@ -168,13 +240,18 @@ def call_llm_with_tools(
     """
     client = get_client()
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        tools=tools,
-        messages=messages,
-    )
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            tools=tools,
+            messages=messages,
+        )
+    except Exception as e:
+        if _is_credit_error(e):
+            _note_anthropic_credit_exhausted(e)
+        raise
 
     # Extract usage info
     usage = {

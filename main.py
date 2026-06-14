@@ -160,6 +160,14 @@ async def start_services() -> None:
 
     logger.info("Starting Gianluigi services...")
 
+    # Register the event loop with the LLM gateway so an out-of-credits failure
+    # (which happens on a sync/executor thread) can schedule a Telegram alert.
+    try:
+        from core.llm import register_alert_loop
+        register_alert_loop(asyncio.get_running_loop())
+    except Exception as e:
+        logger.warning(f"Could not register alert loop with core.llm: {e}")
+
     # Start HTTP server early (Cloud Run needs HTTP on PORT for liveness probe).
     # When MCP_AUTH_TOKEN is set, use the MCP server (includes health routes).
     # Otherwise, fall back to the lightweight aiohttp health server.
@@ -298,6 +306,17 @@ async def start_services() -> None:
             name="weekly_pulse_scheduler"
         )
         tasks.append(pulse_task)
+
+    # Weekly cost report: Sunday-morning Claude-spend summary to Eyal + Drive
+    # archive. No LLM (reads token_usage) so it works even when credits are out.
+    if settings.COST_REPORT_ENABLED:
+        from schedulers.cost_report_scheduler import cost_report_scheduler
+        logger.info("  Starting cost report scheduler...")
+        cost_report_task = asyncio.create_task(
+            cost_report_scheduler.start(),
+            name="cost_report_scheduler"
+        )
+        tasks.append(cost_report_task)
 
     # Rollout orchestrator (chunk 5): daily reminder + tap-to-apply for staged
     # env-flag cutovers. Independent of Calendar — Cloud Run admin only.
@@ -619,6 +638,13 @@ async def stop_services() -> None:
         try:
             from schedulers.reconcile_scheduler import reconcile_scheduler
             reconcile_scheduler.stop()
+        except Exception:
+            pass
+
+    if settings.COST_REPORT_ENABLED:
+        try:
+            from schedulers.cost_report_scheduler import cost_report_scheduler
+            cost_report_scheduler.stop()
         except Exception:
             pass
 
