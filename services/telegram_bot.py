@@ -3548,6 +3548,62 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         except Exception as e:
             logger.warning(f"brief_more expand failed: {e}")
 
+    async def _handle_meeting_classification(self, query, action: str, file_id: str) -> None:
+        """Resolve an uncertain meeting the transcript watcher asked Eyal about.
+
+        'Yes, CropSight' -> process the stashed transcript; 'No, Personal' -> skip
+        and mark the file processed. Either way the answer is REMEMBERED by title so
+        future similar titles auto-resolve without asking. Fixes the dead buttons +
+        the every-15-min re-ask loop.
+        """
+        from schedulers.transcript_watcher import transcript_watcher
+        from guardrails.calendar_filter import remember_meeting_classification
+        from services.google_drive import drive_service
+
+        is_cropsight = action == "meeting_yes"
+        pending = (transcript_watcher._pending_classifications or {}).get(file_id)
+        title = None
+        if pending:
+            title = (pending.get("metadata") or {}).get("title") \
+                or (pending.get("event") or {}).get("title")
+
+        # Remember by title (survives restart; future similar titles auto-resolve).
+        if title:
+            try:
+                remember_meeting_classification(title, is_cropsight)
+            except Exception as e:
+                logger.warning(f"Could not remember classification for {title!r}: {e}")
+
+        label = title or "that meeting"
+        if is_cropsight:
+            if pending:
+                await query.edit_message_text(f"✅ Got it — processing '{label}' as a CropSight meeting.")
+                try:
+                    await transcript_watcher._run_processing_pipeline(
+                        file_id=file_id,
+                        file_name=(pending.get("file") or {}).get("name", title or file_id),
+                        content=pending["content"],
+                        metadata=pending["metadata"],
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to process classified meeting {file_id}: {e}")
+                    await self.send_message(query.message.chat_id, f"⚠️ Couldn't process it: {e}")
+            else:
+                # Restart lost the stash — it'll re-list and (if title remembered) resolve next poll.
+                await query.edit_message_text("✅ Marked CropSight. It'll be processed on the next sync.")
+        else:
+            # Personal — make sure it's marked processed so the watcher won't re-ask.
+            try:
+                drive_service.mark_file_processed(file_id)
+            except Exception:
+                pass
+            await query.edit_message_text("✅ Marked personal — skipped, I won't ask again.")
+
+        try:
+            transcript_watcher._pending_classifications.pop(file_id, None)
+        except Exception:
+            pass
+
     async def _handle_callback_query(
         self,
         update: Update,
@@ -3616,6 +3672,13 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 )
             else:
                 await query.edit_message_text("Okay, discarded that voice note.")
+            return
+
+        # ---- Uncertain-meeting classification (transcript watcher Yes/No) ----
+        # These buttons previously had NO handler, so the watcher re-asked every
+        # poll and the buttons did nothing. meeting_id here is the Drive file_id.
+        if action in ("meeting_yes", "meeting_no"):
+            await self._handle_meeting_classification(query, action, meeting_id)
             return
 
         # ---- Prep outline callbacks (Phase 5) ----
