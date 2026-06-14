@@ -831,6 +831,9 @@ class Settings(BaseSettings):
     GCP_PROJECT_ID: str = Field(
         default="gianluigi-488420", description="GCP project for Cloud Run admin API calls."
     )
+    GCP_BILLING_EXPORT_TABLE: str = Field(
+        default="", description="Full BigQuery billing-export table path (project.dataset.gcp_billing_export_v1_XXXXXX). When set + the Cloud Run SA has bigquery read, the weekly cost report shows the REAL Cloud Run / GCP month-to-date spend instead of an estimate."
+    )
     GCP_REGION: str = Field(
         default="europe-west1", description="Cloud Run region for admin API calls."
     )
