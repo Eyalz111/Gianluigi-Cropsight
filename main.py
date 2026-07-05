@@ -329,14 +329,18 @@ async def start_services() -> None:
         )
         tasks.append(rollout_task)
 
-    # Task reminder scheduler — time-window filters added (C2), safe to enable
-    if init_status.get("google_sheets"):
+    # Task reminder scheduler — time-window filters added (C2), safe to enable.
+    # Gated by TASK_REMINDER_ENABLED so the push can be silenced without a code
+    # change (overdue items still surface in the morning brief).
+    if init_status.get("google_sheets") and settings.TASK_REMINDER_ENABLED:
         logger.info("  Starting task reminder scheduler...")
         reminder_task = asyncio.create_task(
             task_reminder_scheduler.start(),
             name="task_reminder_scheduler"
         )
         tasks.append(reminder_task)
+    elif not settings.TASK_REMINDER_ENABLED:
+        logger.info("  Task reminder scheduler disabled (TASK_REMINDER_ENABLED=false)")
     else:
         logger.warning("  Task reminder scheduler disabled (Google Sheets not available)")
 

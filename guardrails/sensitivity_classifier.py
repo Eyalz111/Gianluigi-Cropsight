@@ -116,42 +116,32 @@ def get_sensitivity_reason(event: dict) -> str | None:
     return None
 
 
-def get_distribution_list(sensitivity: str, team_emails: list[str]) -> list[str]:
+def get_distribution_list(sensitivity: str, team_emails: list[str] | None = None) -> list[str]:
     """
-    Get the email distribution list based on sensitivity tier and environment.
+    Get the email distribution list for a meeting/item at this sensitivity.
 
-    In development mode, all emails go to Eyal only.
+    Delegates to the roster+band model (guardrails/distribution.recipients_for_band):
+    recipients = every ACTIVE roster member cleared for the sensitivity's band —
+    CEO → Eyal only, Founders → founding team, Company (schema 'team'/'public') →
+    all staff. Nested clearance; dev/non-production → Eyal only.
 
-    Tier logic:
-    - PUBLIC, TEAM, FOUNDERS → full team
-    - CEO → Eyal only
+    Until the roster gains members above the founding four (Matti=founders,
+    Marco/Hadar/Ido=team) this returns the SAME list as the old hardcoded logic
+    (ceo→Eyal / else→the four env emails), so it is safe to ship before the
+    roster cutover.
 
     Args:
-        sensitivity: Tier string ('public', 'team', 'founders', 'ceo')
-            Also accepts legacy values ('normal' → founders, 'sensitive'/'ceo_only' → ceo)
-        team_emails: Full list of team member emails.
+        sensitivity: Sensitivity/band value ('public'|'team'|'founders'|'ceo';
+            legacy 'normal'→founders, 'sensitive'/'ceo_only'/'restricted'→ceo).
+        team_emails: Retained for signature compatibility (historical callers pass
+            settings.team_emails); no longer the source of truth — the roster is.
 
     Returns:
         List of emails to distribute to.
     """
-    from config.settings import settings
+    from guardrails.distribution import band_for_sensitivity, recipients_for_band
 
-    # Development mode: always Eyal-only
-    if settings.ENVIRONMENT != "production":
-        return [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
-
-    # Normalize legacy values
-    tier = sensitivity.lower()
-    if tier in ("normal", "team"):
-        tier = "founders"
-    elif tier in ("sensitive", "ceo_only", "restricted", "legal"):
-        tier = "ceo"
-
-    if tier == "ceo":
-        return [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
-    else:
-        # PUBLIC, TEAM, FOUNDERS → full team
-        return [e for e in team_emails if e]
+    return recipients_for_band(band_for_sensitivity(sensitivity))
 
 
 def classify_attendees_sensitivity(attendees: list[dict]) -> str:

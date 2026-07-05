@@ -712,15 +712,16 @@ class TestDistributeApprovedDigest:
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            # Recipients are roster-driven now (Founders band). [distribution-groups]
+            patch(
+                "guardrails.distribution.recipients_for_band",
+                return_value=["eyal@cropsight.ai", "noga@cropsight.ai"],
+            ),
         ):
             mock_gmail.send_weekly_digest = AsyncMock(return_value=True)
             mock_tg.send_to_group = AsyncMock(return_value=True)
             mock_db.log_action = MagicMock()
             mock_settings.ENVIRONMENT = "production"
-            mock_settings.team_emails = [
-                "eyal@cropsight.ai",
-                "noga@cropsight.ai",
-            ]
 
             from guardrails.approval_flow import distribute_approved_digest
 
@@ -766,13 +767,15 @@ class TestDistributeApprovedDigest:
             assert "https://drive.google.com/file/digest-001" in tg_msg
 
     @pytest.mark.asyncio
-    async def test_skips_email_when_no_team_emails(self):
-        """Should not send email when team_emails is empty."""
+    async def test_skips_email_when_no_recipients(self):
+        """Should not send email when the band resolves to no cleared recipients."""
         with (
             patch("guardrails.approval_flow.comms_spine") as mock_tg,
             patch("guardrails.approval_flow.gmail_service") as mock_gmail,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.settings") as mock_settings,
+            # No cleared recipients for this send (roster-driven). [distribution-groups]
+            patch("guardrails.distribution.recipients_for_band", return_value=[]),
         ):
             mock_gmail.send_weekly_digest = AsyncMock(return_value=True)
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
@@ -780,7 +783,6 @@ class TestDistributeApprovedDigest:
             mock_db.log_action = MagicMock()
             mock_settings.ENVIRONMENT = "development"
             mock_settings.EYAL_EMAIL = ""  # No email configured
-            mock_settings.team_emails = []  # No team emails
 
             from guardrails.approval_flow import distribute_approved_digest
 

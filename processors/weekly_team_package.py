@@ -37,8 +37,15 @@ _SIGNAL_FRESH_DAYS = 14
 
 
 def _team_recipients() -> list[str]:
-    """The founding team — explicitly Roye/Paolo/Yoram. Eyal is NOT a recipient."""
-    return [e for e in (settings.ROYE_EMAIL, settings.PAOLO_EMAIL, settings.YORAM_EMAIL) if e]
+    """The founding team, Eyal excluded (this is the team-facing copy).
+
+    Roster-driven (Founders band minus Eyal) so new founders like Matti are
+    included without a code change. [distribution-groups 2026-07-05] — was the
+    hardcoded Roye/Paolo/Yoram env triple.
+    """
+    from guardrails.distribution import recipients_for_band
+
+    return recipients_for_band("founders", exclude_eyal=True)
 
 
 def _area_team_lines(areas: list[dict]) -> list[str]:
