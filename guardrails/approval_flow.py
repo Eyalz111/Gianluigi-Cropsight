@@ -2074,10 +2074,28 @@ async def distribute_approved_content(
     cap_level = level_for_band(band)
     distribution_emails = recipients_for_band(band)
 
-    # 5b. Cap items to the band's clearance level so no recipient sees an item
-    # above their tier. Eyal (CEO band) gets everything; a Founders send strips
-    # CEO items; a Company send strips Founders+CEO items. Generalizes the old
-    # CEO-only strip to the full nested ladder. [audit P2-02, distribution-groups]
+    # 5a. CUSTOM override (Phase 2b): an explicit per-summary recipient set chosen
+    # on the Telegram picker, persisted in pending_approvals.content['__distribution'].
+    # Recipients = exactly those people; cap = the LOWEST selected tier (leak-safe)
+    # unless Eyal set the full-detail override. [distribution-groups custom]
+    _custom = content.get("__distribution") if isinstance(content, dict) else None
+    if _custom and _custom.get("recipients"):
+        from guardrails.distribution import resolve_custom_recipients
+        _emails, cap_level = resolve_custom_recipients(
+            _custom.get("recipients"), override=bool(_custom.get("override"))
+        )
+        if _emails:
+            distribution_emails = _emails
+            band = "custom"
+            logger.info(
+                f"Custom distribution for {meeting_id}: {len(_emails)} recipient(s), "
+                f"cap_level={cap_level}, override={bool(_custom.get('override'))}"
+            )
+
+    # 5b. Cap items to the clearance level so no recipient sees an item above
+    # their tier. Level 4 (Eyal / custom-override) gets everything; Founders
+    # strips CEO; Company strips Founders+CEO; a custom send caps to the lowest
+    # selected tier. [audit P2-02, distribution-groups]
     team_content = content
     # Team-facing prose + attachment default to the originals; rebuilt below if we
     # strip items — the summary/discussion prose and the .docx are generated from
@@ -2086,7 +2104,7 @@ async def distribute_approved_content(
     team_discussion = content.get("discussion_summary", "")
     team_exec = exec_summary
     team_docx_bytes = _docx_bytes_for_email
-    if band != "ceo":
+    if cap_level < 4:
         filtered_decisions = filter_by_sensitivity(content.get("decisions", []), cap_level)
         filtered_tasks = filter_by_sensitivity(content.get("tasks", []), cap_level)
         filtered_questions = filter_by_sensitivity(content.get("open_questions", []), cap_level)

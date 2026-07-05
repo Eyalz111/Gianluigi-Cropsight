@@ -3885,6 +3885,102 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 await query.answer(f"Band set to {band}")
             logger.info(f"Distribution band set to '{band}' (sens={new_sens}) for {real_mid}")
 
+        elif action == "dcust":
+            # Open the Custom recipient picker; seed the selection from the
+            # meeting's current band so Eyal tweaks from there. [distribution custom]
+            from services.supabase_client import supabase_client as _sc2
+            from guardrails.distribution import band_for_sensitivity, member_keys_for_band
+            selected, override = self._get_custom_selection(meeting_id)
+            if not selected:
+                m = _sc2.get_meeting(meeting_id) or {}
+                selected = set(member_keys_for_band(band_for_sensitivity(m.get("sensitivity", "founders"))))
+                self._set_custom_selection(meeting_id, selected, override)
+            await query.edit_message_reply_markup(
+                reply_markup=self._build_custom_keyboard(meeting_id, selected, override)
+            )
+            await query.answer("Pick recipients")
+
+        elif action == "dtog":
+            # Toggle one member. meeting_id holds "{member_key}:{real_mid}".
+            try:
+                key, real_mid = meeting_id.split(":", 1)
+            except ValueError:
+                await query.answer("Bad data")
+                return
+            selected, override = self._get_custom_selection(real_mid)
+            selected.discard(key) if key in selected else selected.add(key)
+            self._set_custom_selection(real_mid, selected, override)
+            await query.edit_message_reply_markup(
+                reply_markup=self._build_custom_keyboard(real_mid, selected, override)
+            )
+            await query.answer()
+
+        elif action == "dqadd":
+            # "{founders|company|clear}:{real_mid}"
+            try:
+                what, real_mid = meeting_id.split(":", 1)
+            except ValueError:
+                await query.answer("Bad data")
+                return
+            selected, override = self._get_custom_selection(real_mid)
+            if what == "clear":
+                selected = set()
+            else:
+                from guardrails.distribution import member_keys_for_band
+                selected |= set(member_keys_for_band(what))
+            self._set_custom_selection(real_mid, selected, override)
+            await query.edit_message_reply_markup(
+                reply_markup=self._build_custom_keyboard(real_mid, selected, override)
+            )
+            await query.answer()
+
+        elif action == "dovr":
+            selected, override = self._get_custom_selection(meeting_id)
+            override = not override
+            self._set_custom_selection(meeting_id, selected, override)
+            await query.edit_message_reply_markup(
+                reply_markup=self._build_custom_keyboard(meeting_id, selected, override)
+            )
+            await query.answer("Full detail ON — everyone selected gets the complete summary"
+                               if override else "Full detail off — capped to each person's tier")
+
+        elif action == "dback":
+            # Cancel Custom -> clear the selection and return to the band picker.
+            from services.supabase_client import supabase_client as _sc2
+            self._set_custom_selection(meeting_id, [], False)
+            m = _sc2.get_meeting(meeting_id) or {}
+            await query.edit_message_reply_markup(
+                reply_markup=self._build_approval_keyboard(meeting_id, m.get("sensitivity", "founders"))
+            )
+            await query.answer("Back to bands")
+
+        elif action == "dsend":
+            # Approve + distribute to the custom selection. It is already persisted
+            # in pending_approvals.content['__distribution'] and honored by
+            # distribute_approved_content, so reuse the exact approve path.
+            selected, override = self._get_custom_selection(meeting_id)
+            if not selected:
+                await query.answer("Pick at least one recipient", show_alert=True)
+                return
+            await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
+            await query.edit_message_text(f"Done — sending to {len(selected)} custom recipient(s).")
+            conversation_memory.clear(str(self.eyal_chat_id))
+            try:
+                from guardrails.approval_flow import process_response
+                result = await process_response(
+                    meeting_id=meeting_id, response="approve", response_source="telegram",
+                )
+                dist = result.get("distribution", {}) or {}
+                n = len(dist.get("emails_to", []) or [])
+                await self.send_to_eyal(
+                    f"Distribution complete — emailed {n} recipient(s)"
+                    + (" (full detail)" if override else " (tier-capped)") + ".",
+                    parse_mode=None,
+                )
+            except Exception as e:
+                logger.error(f"Custom distribution failed for {meeting_id}: {e}")
+                await self.send_to_eyal(f"Error during custom distribution: {e}", parse_mode=None)
+
         elif action == "sens_toggle":
             # Cycle sensitivity tier: founders → ceo → team → public → founders
             # T2.5: wrap DB write in try/except + CRITICAL alert so silent
@@ -5101,7 +5197,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         return {"ceo": "ceo", "founders": "founders", "company": "team"}.get(band, "founders")
 
     def _build_approval_keyboard(self, meeting_id: str, sensitivity: str):
-        """Approve/Edit/Reject + the CEO/Founders/Company band row (current marked)."""
+        """Approve/Edit/Reject + the CEO/Founders/Company band row + Custom…"""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         from guardrails.distribution import band_for_sensitivity
 
@@ -5113,6 +5209,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             )
             for band, name in self._BAND_PICKER
         ]
+        band_row.append(InlineKeyboardButton("Custom…", callback_data=f"dcust:{meeting_id}"))
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("Approve", callback_data=f"approve:{meeting_id}"),
@@ -5121,6 +5218,58 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             [InlineKeyboardButton("Reject", callback_data=f"reject:{meeting_id}")],
             band_row,
         ])
+
+    # ── Custom recipient picker (Phase 2b) ────────────────────────────────────
+    # Selection persists in pending_approvals.content['__distribution'] so a Cloud
+    # Run restart mid-pick can't lose it. [distribution-groups custom]
+    def _get_custom_selection(self, meeting_id: str):
+        """(selected member_keys set, override bool) from the persisted selection."""
+        from services.supabase_client import supabase_client as _sc
+        row = _sc.get_pending_approval(meeting_id) or {}
+        dist = (row.get("content") or {}).get("__distribution") or {}
+        return set(dist.get("recipients") or []), bool(dist.get("override"))
+
+    def _set_custom_selection(self, meeting_id: str, keys, override: bool) -> None:
+        """Persist the custom selection (empty keys == cleared)."""
+        from services.supabase_client import supabase_client as _sc
+        row = _sc.get_pending_approval(meeting_id) or {}
+        content = dict(row.get("content") or {})
+        content["__distribution"] = {"recipients": sorted(set(keys or [])), "override": bool(override)}
+        _sc.update_pending_approval(meeting_id, content=content)
+
+    def _build_custom_keyboard(self, meeting_id: str, selected, override: bool):
+        """Live checklist of roster members + quick-add + override + send/back."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from config.team import TEAM_MEMBERS
+
+        selected = set(selected or [])
+        rows, line = [], []
+        for k, m in TEAM_MEMBERS.items():
+            if (m.get("status") or "active") != "active":
+                continue
+            label = (m.get("name") or k)
+            first = label.split()[0] if label else k
+            mark = "✅" if k in selected else "☐"
+            line.append(InlineKeyboardButton(f"{mark} {first}", callback_data=f"dtog:{k}:{meeting_id}"))
+            if len(line) == 2:
+                rows.append(line)
+                line = []
+        if line:
+            rows.append(line)
+        rows.append([
+            InlineKeyboardButton("+ Founders", callback_data=f"dqadd:founders:{meeting_id}"),
+            InlineKeyboardButton("+ Company", callback_data=f"dqadd:company:{meeting_id}"),
+            InlineKeyboardButton("Clear", callback_data=f"dqadd:clear:{meeting_id}"),
+        ])
+        rows.append([InlineKeyboardButton(
+            ("⚠️ Full detail: ON" if override else "Full detail: off"),
+            callback_data=f"dovr:{meeting_id}",
+        )])
+        rows.append([
+            InlineKeyboardButton(f"✅ Send to {len(selected)}", callback_data=f"dsend:{meeting_id}"),
+            InlineKeyboardButton("‹ Back", callback_data=f"dback:{meeting_id}"),
+        ])
+        return InlineKeyboardMarkup(rows)
 
     def register_user(self, telegram_user_id: int, team_member_id: str) -> None:
         """

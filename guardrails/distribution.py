@@ -99,3 +99,67 @@ def recipients_for_band(band: str, *, exclude_eyal: bool = False) -> list[str]:
 def cap_items_for_band(items: list[dict], band: str) -> list[dict]:
     """Strip items whose sensitivity is above the band's clearance level."""
     return filter_by_sensitivity(items or [], level_for_band(band))
+
+
+def member_keys_for_band(band: str) -> list[str]:
+    """Active roster member_keys cleared for `band` (for the Custom picker default)."""
+    try:
+        from config.team import TEAM_MEMBERS
+
+        need = level_for_band(band)
+        return [
+            k
+            for k, m in TEAM_MEMBERS.items()
+            if (m.get("status") or "active") == "active"
+            and TIER_LEVELS.get((m.get("tier") or "founders").lower(), 3) >= need
+        ]
+    except Exception as e:
+        logger.error(f"member_keys_for_band({band}) failed: {e}")
+        return []
+
+
+def resolve_custom_recipients(
+    member_keys: list[str] | None, *, override: bool = False
+) -> tuple[list[str], int]:
+    """Emails + content ceiling for an explicit CUSTOM recipient set (the picker).
+
+    Leak-safe by default: the content cap is the LOWEST clearance among the
+    selected people, so nobody in a mixed-tier custom send sees above their own
+    tier. `override=True` (Eyal's deliberate "send full to all selected") lifts
+    the cap to CEO(4) — everyone selected gets the complete summary.
+
+    Dev/non-production -> Eyal only (same guard as recipients_for_band).
+
+    Returns (emails, cap_level). Empty emails if nothing resolvable.
+    """
+    from config.settings import settings
+
+    eyal = (settings.EYAL_EMAIL or "").strip()
+    if settings.ENVIRONMENT != "production":
+        return ([eyal] if eyal else [], 4)
+
+    keys = {(k or "").lower().strip() for k in (member_keys or []) if k}
+    emails: list[str] = []
+    levels: list[int] = []
+    seen: set[str] = set()
+    try:
+        from config.team import TEAM_MEMBERS
+
+        for key, m in TEAM_MEMBERS.items():
+            if key.lower() not in keys:
+                continue
+            if (m.get("status") or "active") != "active":
+                continue
+            email = (m.get("email") or "").strip()
+            if not email or email.lower() in seen:
+                continue
+            seen.add(email.lower())
+            emails.append(email)
+            levels.append(TIER_LEVELS.get((m.get("tier") or "founders").lower(), 3))
+    except Exception as e:
+        logger.error(f"resolve_custom_recipients failed: {e}")
+
+    if not emails:
+        return ([], 2)
+    cap = 4 if override else min(levels)
+    return (emails, cap)
