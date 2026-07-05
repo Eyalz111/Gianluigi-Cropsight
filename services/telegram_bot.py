@@ -871,45 +871,9 @@ class TelegramBot:
 
         message = "\n".join(lines)
 
-        # Create inline keyboard with sensitivity tier button
-        tier_labels = {
-            "public": "\U0001f30d PUBLIC \u2014 safe for anyone",
-            "team": "\U0001f465 TEAM \u2014 all employees",
-            "founders": "\U0001f465 FOUNDERS \u2014 founding team",
-            "ceo": "\U0001f512 CEO \u2014 Eyal only",
-        }
-        # Normalize legacy values
-        tier = sensitivity.lower()
-        if tier in ("normal", "team"):
-            tier = "founders"
-        elif tier in ("sensitive", "ceo_only", "restricted", "legal"):
-            tier = "ceo"
-        sens_label = tier_labels.get(tier, tier_labels["founders"])
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "Approve",
-                    callback_data=f"approve:{meeting_id}"
-                ),
-                InlineKeyboardButton(
-                    "Request Changes",
-                    callback_data=f"edit:{meeting_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "Reject",
-                    callback_data=f"reject:{meeting_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    sens_label,
-                    callback_data=f"sens_toggle:{meeting_id}"
-                ),
-            ],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Approve/Edit/Reject + the CEO/Founders/Company distribution band picker.
+        # [distribution-groups 2026-07-05] Replaces the single 4-way sensitivity toggle.
+        reply_markup = self._build_approval_keyboard(meeting_id, sensitivity)
 
         # Delete old approval messages for this meeting (cleanup on resubmit after edit)
         old_msg_ids = self._approval_message_ids.pop(meeting_id, [])
@@ -3862,6 +3826,65 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             # Store meeting_id in context for edit handling
             context.user_data["pending_edit_meeting_id"] = meeting_id
 
+        elif action == "sens_set":
+            # Distribution band picker (CEO/Founders/Company). `meeting_id` holds
+            # "{band}:{real_meeting_id}" here (dispatch split only once).
+            # [distribution-groups 2026-07-05]
+            from services.supabase_client import supabase_client as _sc
+            from guardrails.sensitivity_classifier import propagate_meeting_sensitivity
+            from guardrails.distribution import recipients_for_band
+
+            try:
+                band, real_mid = meeting_id.split(":", 1)
+            except ValueError:
+                await query.answer("Bad band data")
+                return
+            new_sens = self._sensitivity_for_band(band)
+
+            try:
+                _sc.update_meeting(real_mid, sensitivity=new_sens)
+                _prop = propagate_meeting_sensitivity(real_mid, new_sens)
+            except Exception as e:
+                logger.error(f"Band set DB update failed for {real_mid}: {e}")
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL, "telegram_bot.sens_set",
+                        f"Band set to '{band}' DB write failed for {real_mid}: {e}. "
+                        f"UI may show {band} but the DB is unchanged.", error=e,
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Alert on sens_set failure also failed: {alert_err}")
+                await query.answer(f"Failed to set band: {e}")
+                return
+
+            # A partial propagate leaves some children at the OLD tier — a leak when
+            # tightening. Same CRITICAL-alert contract as the legacy toggle. [audit P1-01]
+            if _prop.get("failed_tables"):
+                logger.error(
+                    f"Band set propagate failed for {real_mid}: {_prop['failed_tables']} kept old tier"
+                )
+                try:
+                    from services.alerting import send_system_alert, AlertSeverity
+                    await send_system_alert(
+                        AlertSeverity.CRITICAL, "telegram_bot.sens_set",
+                        f"Band set to '{band}' on {real_mid} did NOT propagate to "
+                        f"{_prop['failed_tables']} — those rows keep the old tier and may be "
+                        f"over-shared. Re-set the band or fix the DB.",
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Alert on sens_set propagate failure also failed: {alert_err}")
+
+            await query.edit_message_reply_markup(
+                reply_markup=self._build_approval_keyboard(real_mid, new_sens)
+            )
+            try:
+                n = len(recipients_for_band(band))
+                await query.answer(f"→ {band.capitalize()} band · {n} recipient(s)")
+            except Exception:
+                await query.answer(f"Band set to {band}")
+            logger.info(f"Distribution band set to '{band}' (sens={new_sens}) for {real_mid}")
+
         elif action == "sens_toggle":
             # Cycle sensitivity tier: founders → ceo → team → public → founders
             # T2.5: wrap DB write in try/except + CRITICAL alert so silent
@@ -5066,6 +5089,38 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             True if user is Eyal (admin).
         """
         return str(telegram_user_id) == str(self.eyal_chat_id)
+
+    # ── Distribution band picker (approval card) ──────────────────────────────
+    # The three nested bands map to the meeting's sensitivity field:
+    #   CEO -> 'ceo', Founders -> 'founders', Company -> 'team'.
+    # [distribution-groups 2026-07-05]
+    _BAND_PICKER = [("ceo", "CEO-only"), ("founders", "Founders"), ("company", "Company")]
+
+    @staticmethod
+    def _sensitivity_for_band(band: str) -> str:
+        return {"ceo": "ceo", "founders": "founders", "company": "team"}.get(band, "founders")
+
+    def _build_approval_keyboard(self, meeting_id: str, sensitivity: str):
+        """Approve/Edit/Reject + the CEO/Founders/Company band row (current marked)."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from guardrails.distribution import band_for_sensitivity
+
+        current = band_for_sensitivity(sensitivity)
+        band_row = [
+            InlineKeyboardButton(
+                (f"● {name}" if band == current else name),
+                callback_data=f"sens_set:{band}:{meeting_id}",
+            )
+            for band, name in self._BAND_PICKER
+        ]
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Approve", callback_data=f"approve:{meeting_id}"),
+                InlineKeyboardButton("Request Changes", callback_data=f"edit:{meeting_id}"),
+            ],
+            [InlineKeyboardButton("Reject", callback_data=f"reject:{meeting_id}")],
+            band_row,
+        ])
 
     def register_user(self, telegram_user_id: int, team_member_id: str) -> None:
         """
