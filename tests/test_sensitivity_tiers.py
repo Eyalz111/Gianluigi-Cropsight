@@ -125,45 +125,58 @@ class TestGetCombinedSensitivity:
 class TestGetDistributionList:
     """Tests for distribution list based on sensitivity tier."""
 
-    def test_founders_tier_sends_to_all(self):
+    # Roster-driven now (CEO ⊂ Founders ⊂ Company). 'noga' is a level-2 (Company)
+    # staff member: in Company sends, out of Founders sends. [distribution-groups]
+    _ROSTER = {
+        "eyal": {"email": "eyal@cropsight.com", "tier": "ceo", "status": "active"},
+        "roye": {"email": "roye@cropsight.com", "tier": "founders", "status": "active"},
+        "noga": {"email": "noga@cropsight.com", "tier": "team", "status": "active"},
+    }
+
+    def test_founders_tier_sends_to_founding_team(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
-            result = get_distribution_list("founders", ["eyal@cropsight.com", "roye@cropsight.com"])
-        assert len(result) == 2
+            result = get_distribution_list("founders")
+        assert set(result) == {"eyal@cropsight.com", "roye@cropsight.com"}  # not the Company-only 'noga'
 
     def test_ceo_tier_sends_to_eyal(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
-            result = get_distribution_list("ceo", ["eyal@cropsight.com", "roye@cropsight.com"])
+            result = get_distribution_list("ceo")
         assert result == ["eyal@cropsight.com"]
 
-    def test_public_tier_sends_to_all(self):
+    def test_public_tier_sends_to_company(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
-            result = get_distribution_list("public", ["eyal@cropsight.com", "roye@cropsight.com"])
-        assert len(result) == 2
+            result = get_distribution_list("public")
+        assert set(result) == {"eyal@cropsight.com", "roye@cropsight.com", "noga@cropsight.com"}
 
-    def test_team_tier_sends_to_all(self):
+    def test_team_tier_sends_to_company(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
-            result = get_distribution_list("team", ["eyal@cropsight.com", "roye@cropsight.com"])
-        assert len(result) == 2
+            result = get_distribution_list("team")
+        assert set(result) == {"eyal@cropsight.com", "roye@cropsight.com", "noga@cropsight.com"}
 
     def test_legacy_normal_maps_to_founders(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
-            result = get_distribution_list("normal", ["eyal@cropsight.com", "roye@cropsight.com"])
-        assert len(result) == 2
+            result = get_distribution_list("normal")
+        assert set(result) == {"eyal@cropsight.com", "roye@cropsight.com"}  # normal->Founders, not Company
 
     def test_legacy_sensitive_maps_to_ceo(self):
         from guardrails.sensitivity_classifier import get_distribution_list

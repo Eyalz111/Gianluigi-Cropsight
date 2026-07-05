@@ -511,6 +511,19 @@ class TranscriptWatcher:
                 "participants": [],
             }
 
+        # Pattern: Date jammed onto the START of the title with NO separator.
+        # Tactiq exports look like "2026-07-03CropSight weekly meeting" — the two
+        # separator patterns above miss, so the meeting would silently take
+        # TODAY's date (the re-drop date-drift bug). Tried last so the "date - title"
+        # and "title - date" forms still win when a separator is present.
+        date_nosep = re.match(r'^(\d{4}-\d{2}-\d{2})\s*(.+)$', name)
+        if date_nosep:
+            return {
+                "date": date_nosep.group(1),
+                "title": date_nosep.group(2).strip(),
+                "participants": [],
+            }
+
         # No date found - use today
         return {
             "date": datetime.now(_ISRAEL_TZ).strftime("%Y-%m-%d"),

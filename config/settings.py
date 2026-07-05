@@ -285,6 +285,12 @@ class Settings(BaseSettings):
     TASK_REMINDER_CHECK_INTERVAL: int = Field(
         default=28800, description="Task reminder scheduler check interval (seconds)"
     )
+    TASK_REMINDER_ENABLED: bool = Field(
+        default=True,
+        description="Enable Telegram task-reminder pushes. Overdue items also "
+        "appear in the morning brief, so this can be turned off to cut push "
+        "noise without losing visibility.",
+    )
     ALERT_CHECK_INTERVAL: int = Field(
         default=43200, description="Alert scheduler check interval (seconds)"
     )
@@ -429,6 +435,18 @@ class Settings(BaseSettings):
     APPROVAL_REMINDER_ENABLED: bool = Field(
         default=True,
         description="Enable gentle Telegram reminders for unreviewed approvals"
+    )
+    APPROVAL_PREP_GANTT_EMAIL_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Send the duplicate '[APPROVAL NEEDED]' EMAIL to Eyal for the "
+            "meeting_prep and gantt_update approval types. Default False so those "
+            "two land on Telegram ONLY — aligning email with the muted Telegram "
+            "prep-ping / gantt-nudge categories (2026-07-05). Does NOT affect the "
+            "meeting_summary / weekly_digest approval emails, nor the team "
+            "distribution emails sent after Eyal approves. Flip True to restore "
+            "the prep/gantt approval emails without a code change."
+        ),
     )
 
     # ==========================================================================

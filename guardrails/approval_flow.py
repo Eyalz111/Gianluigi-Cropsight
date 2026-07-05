@@ -628,11 +628,16 @@ async def submit_for_approval(
             card, reply_markup=reply_markup, parse_mode="HTML"
         )
 
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title=f"Meeting Prep: {meeting_title}",
-            summary_preview=f"Prep document ready for: {meeting_title}. Review and approve via Telegram.",
-            meeting_id=meeting_id,
-        )
+        # Prep approvals ride Telegram only unless re-enabled — the duplicate
+        # email mirrored the muted prep-ping category (2026-07-05). [APPROVAL_PREP_GANTT_EMAIL_ENABLED]
+        if settings.APPROVAL_PREP_GANTT_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title=f"Meeting Prep: {meeting_title}",
+                summary_preview=f"Prep document ready for: {meeting_title}. Review and approve via Telegram.",
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     elif content_type == "weekly_digest":
         # Weekly digest — send preview to Eyal for approval
@@ -692,11 +697,16 @@ async def submit_for_approval(
             summary_preview=preview,
             meeting_id=meeting_id,
         )
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title=f"Gantt Update Proposal ({changes_count} cells)",
-            summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("&gt;", ">"),
-            meeting_id=meeting_id,
-        )
+        # Gantt approvals ride Telegram only unless re-enabled — the duplicate
+        # email mirrored the muted gantt-nudge category (2026-07-05). [APPROVAL_PREP_GANTT_EMAIL_ENABLED]
+        if settings.APPROVAL_PREP_GANTT_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title=f"Gantt Update Proposal ({changes_count} cells)",
+                summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("&gt;", ">"),
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     elif content_type == "morning_brief":
         # Morning brief — consolidated daily touchpoint
@@ -2056,27 +2066,48 @@ async def distribute_approved_content(
     except Exception as e:
         logger.error(f"Error adding stakeholders to Sheets: {e}")
 
-    # 5. Get distribution list based on sensitivity
-    team_emails = settings.team_emails
-    distribution_emails = get_distribution_list(sensitivity, team_emails)
+    # 5. Recipients for this meeting's band (roster + nested tier) and the
+    #    content ceiling for that band. [distribution-groups 2026-07-05]
+    #    CEO -> Eyal; Founders -> founding team; Company -> all staff.
+    from guardrails.distribution import band_for_sensitivity, level_for_band, recipients_for_band
+    band = band_for_sensitivity(sensitivity)
+    cap_level = level_for_band(band)
+    distribution_emails = recipients_for_band(band)
 
-    # 5b. Filter CEO items from team distribution content
-    # Even if the meeting is FOUNDERS/PUBLIC tier, individual items may be CEO.
-    # Team gets a filtered copy; Eyal always gets everything.
+    # 5a. CUSTOM override (Phase 2b): an explicit per-summary recipient set chosen
+    # on the Telegram picker, persisted in pending_approvals.content['__distribution'].
+    # Recipients = exactly those people; cap = the LOWEST selected tier (leak-safe)
+    # unless Eyal set the full-detail override. [distribution-groups custom]
+    _custom = content.get("__distribution") if isinstance(content, dict) else None
+    if _custom and _custom.get("recipients"):
+        from guardrails.distribution import resolve_custom_recipients
+        _emails, cap_level = resolve_custom_recipients(
+            _custom.get("recipients"), override=bool(_custom.get("override"))
+        )
+        if _emails:
+            distribution_emails = _emails
+            band = "custom"
+            logger.info(
+                f"Custom distribution for {meeting_id}: {len(_emails)} recipient(s), "
+                f"cap_level={cap_level}, override={bool(_custom.get('override'))}"
+            )
+
+    # 5b. Cap items to the clearance level so no recipient sees an item above
+    # their tier. Level 4 (Eyal / custom-override) gets everything; Founders
+    # strips CEO; Company strips Founders+CEO; a custom send caps to the lowest
+    # selected tier. [audit P2-02, distribution-groups]
     team_content = content
     # Team-facing prose + attachment default to the originals; rebuilt below if we
-    # strip CEO items — the summary/discussion prose and the .docx are generated
-    # from the whole transcript and can restate a CEO item the structured filter
-    # removed. [audit P2-02]
+    # strip items — the summary/discussion prose and the .docx are generated from
+    # the whole transcript and can restate an item the structured filter removed.
     team_summary = summary
     team_discussion = content.get("discussion_summary", "")
     team_exec = exec_summary
     team_docx_bytes = _docx_bytes_for_email
-    ceo_tiers = ("ceo", "ceo_only", "restricted", "sensitive")  # Include legacy values
-    if sensitivity not in ceo_tiers:
-        filtered_decisions = [d for d in content.get("decisions", []) if d.get("sensitivity") not in ceo_tiers]
-        filtered_tasks = [t for t in content.get("tasks", []) if t.get("sensitivity") not in ceo_tiers]
-        filtered_questions = [q for q in content.get("open_questions", []) if q.get("sensitivity") not in ceo_tiers]
+    if cap_level < 4:
+        filtered_decisions = filter_by_sensitivity(content.get("decisions", []), cap_level)
+        filtered_tasks = filter_by_sensitivity(content.get("tasks", []), cap_level)
+        filtered_questions = filter_by_sensitivity(content.get("open_questions", []), cap_level)
         has_filtered = (
             len(filtered_decisions) != len(content.get("decisions", []))
             or len(filtered_tasks) != len(content.get("tasks", []))
@@ -2084,10 +2115,10 @@ async def distribute_approved_content(
         )
         if has_filtered:
             team_content = {**content, "decisions": filtered_decisions, "tasks": filtered_tasks, "open_questions": filtered_questions}
-            logger.info(f"Filtered CEO items from team distribution for {meeting_id}")
+            logger.info(f"Capped distribution content to '{band}' band (level {cap_level}) for {meeting_id}")
 
-            # [audit P2-02] Rebuild the team narrative + .docx from the filtered
-            # content so no CEO prose reaches the team email body or attachment.
+            # [audit P2-02] Rebuild the team narrative + .docx from the capped
+            # content so no above-band prose reaches the email body or attachment.
             team_summary = _render_team_safe_summary(meeting_title, meeting_date, team_content)
             team_discussion = ""  # free-text discussion can't be tier-filtered
             team_exec = (
@@ -2109,7 +2140,7 @@ async def distribute_approved_content(
                     stakeholders_mentioned=content.get("stakeholders", []),
                 )
             except Exception as e:
-                logger.error(f"Could not build team-safe docx for {meeting_id}: {e}")
+                logger.error(f"Could not build tier-capped docx for {meeting_id}: {e}")
                 team_docx_bytes = None  # better no attachment than a leaky one
 
     # 6. Send Telegram notification
@@ -2465,10 +2496,10 @@ async def distribute_approved_digest(
 
     # Send email — Eyal-only in development mode
     try:
-        if settings.ENVIRONMENT != "production":
-            digest_emails = [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
-        else:
-            digest_emails = settings.team_emails
+        # Founders-band recipients (roster-driven; dev-mode -> Eyal only).
+        # [distribution-groups 2026-07-05] Was settings.team_emails (4 env addrs).
+        from guardrails.distribution import recipients_for_band
+        digest_emails = recipients_for_band("founders")
         if digest_emails:
             await gmail_service.send_weekly_digest(
                 recipients=digest_emails,
@@ -2982,10 +3013,10 @@ async def distribute_approved_review(
 
     # 6. Email to team (sensitivity-aware)
     try:
-        if settings.ENVIRONMENT != "production":
-            review_emails = [settings.EYAL_EMAIL] if settings.EYAL_EMAIL else []
-        else:
-            review_emails = settings.team_emails
+        # Founders-band recipients (roster-driven; dev-mode -> Eyal only).
+        # [distribution-groups 2026-07-05] Was settings.team_emails (4 env addrs).
+        from guardrails.distribution import recipients_for_band
+        review_emails = recipients_for_band("founders")
 
         if review_emails:
             week_in_review = agenda_data.get("week_in_review", {})
