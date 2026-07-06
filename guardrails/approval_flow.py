@@ -1452,6 +1452,7 @@ async def process_response(
                 )
                 return {
                     "action": "edit_requested",
+                    "resubmitted": False,  # apply_edits errored — nothing was re-sent
                     "edits": edits,
                     "next_step": f"Edit failed: {updated_content['error']}. Please try again.",
                 }
@@ -1492,12 +1493,14 @@ async def process_response(
 
             return {
                 "action": "edit_requested",
+                "resubmitted": True,  # apply_edits + submit_for_approval succeeded — a new card was sent
                 "edits": edits,
                 "next_step": "Edits applied, resubmitted for approval",
             }
         else:
             return {
                 "action": "edit_requested",
+                "resubmitted": False,  # couldn't parse the edits — nothing was re-sent
                 "edits": [],
                 "next_step": "Could not parse edits, please clarify",
             }
