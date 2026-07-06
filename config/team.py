@@ -31,6 +31,8 @@ _HARDCODED_TEAM_MEMBERS = {
     "eyal": {
         "name": "Eyal Zror",
         "role": "CEO",
+        "tier": "ceo",  # distribution clearance — must be set so the hardcoded-roster
+                        # fallback doesn't demote Eyal to founders. [code-review 2026-07-06]
         "role_description": (
             "Strategy, fundraising, investor relations, overall leadership. "
             "Owns company direction, key partnerships, and board communication."
@@ -42,6 +44,7 @@ _HARDCODED_TEAM_MEMBERS = {
     "roye": {
         "name": "Roye Tadmor",
         "role": "CTO",
+        "tier": "founders",
         "role_description": (
             "All technical execution: ML models, data pipeline, cloud infrastructure, "
             "accuracy metrics, platform development. Owns the product roadmap."
@@ -53,6 +56,7 @@ _HARDCODED_TEAM_MEMBERS = {
     "paolo": {
         "name": "Paolo Vailetti",
         "role": "BD",
+        "tier": "founders",
         "role_description": (
             "Business development, partnerships, Italy/Europe markets, client outreach. "
             "Owns the Moldova pilot relationship and partner pipeline."
@@ -64,6 +68,7 @@ _HARDCODED_TEAM_MEMBERS = {
     "yoram": {
         "name": "Prof. Yoram Weiss",
         "role": "Senior Advisor",
+        "tier": "founders",
         "role_description": (
             "Academic guidance, agronomy expertise, research methodology. "
             "Advisory role only — does not execute operational tasks. "

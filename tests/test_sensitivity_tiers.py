@@ -180,23 +180,26 @@ class TestGetDistributionList:
 
     def test_legacy_sensitive_maps_to_ceo(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
-            result = get_distribution_list("sensitive", ["eyal@cropsight.com", "roye@cropsight.com"])
+            result = get_distribution_list("sensitive")
         assert result == ["eyal@cropsight.com"]
 
     def test_legacy_ceo_only_maps_to_ceo(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
-            result = get_distribution_list("ceo_only", ["eyal@cropsight.com", "roye@cropsight.com"])
+            result = get_distribution_list("ceo_only")
         assert result == ["eyal@cropsight.com"]
 
     def test_legacy_restricted_maps_to_ceo(self):
         from guardrails.sensitivity_classifier import get_distribution_list
-        with patch("config.settings.settings") as mock_settings:
+        with patch("config.settings.settings") as mock_settings, \
+             patch("config.team.TEAM_MEMBERS", self._ROSTER):
             mock_settings.ENVIRONMENT = "production"
             mock_settings.EYAL_EMAIL = "eyal@cropsight.com"
             result = get_distribution_list("restricted", ["eyal@cropsight.com", "roye@cropsight.com"])
