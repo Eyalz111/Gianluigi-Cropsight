@@ -277,8 +277,9 @@ class TestCheckInbox:
              ) as mock_process:
             mock_gmail.get_unread_messages = AsyncMock(return_value=mock_messages)
             mock_gmail.mark_as_read = AsyncMock(return_value=True)
-            # Return a pending approval whose id starts with our ref prefix
-            mock_supa.get_pending_approvals.return_value = [
+            # The [ref:] prefix lookup now queries pending_approvals directly.
+            (mock_supa.client.table.return_value.select.return_value.eq.return_value
+             .ilike.return_value.limit.return_value.execute.return_value.data) = [
                 {"approval_id": meeting_id, "status": "pending"}
             ]
 
