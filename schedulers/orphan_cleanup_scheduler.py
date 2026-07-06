@@ -301,13 +301,20 @@ class OrphanCleanupScheduler:
         """
         lines = ["*Orphan Cleanup Report*\n"]
 
+        has_stale_approval = False
         for notif in notifications:
+            if notif.get("type") == "stale_approval":
+                has_stale_approval = True
             emoji = {
                 "stale_approval": "⏰",
                 "stale_task": "📋",
                 "failed_auto_publish": "❌",
             }.get(notif.get("type", ""), "⚠️")
             lines.append(f"{emoji} {notif['message']}")
+
+        # Point Eyal at where he can actually act on these. [proposal-review 2026-07-06]
+        if has_stale_approval:
+            lines.append("\n→ Run /sync to review & act on these.")
 
         return "\n".join(lines)
 

@@ -2050,24 +2050,39 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             readded = summary.get("readded", 0)
             if not (pulled or pushed or created or readded):
                 await self.send_to_eyal("Sheets and DB are in sync. No changes needed.")
-                return
+            else:
+                lines = [
+                    "<b>Reconcile preview</b> (nothing applied yet):",
+                    f"  • {pulled} of your Sheet edit(s) → DB",
+                    f"  • {pushed} DB update(s) → Sheet",
+                    f"  • {created} new task(s) from Sheet",
+                    f"  • {readded} task(s) re-added to Sheet",
+                ]
+                if settings.RECONCILE_SHADOW_MODE:
+                    lines.append("\n⚠️ Shadow mode is ON — Apply will still write nothing until it's off.")
+                keyboard = [[
+                    InlineKeyboardButton("Apply", callback_data="sync_apply:confirm"),
+                    InlineKeyboardButton("Cancel", callback_data="sync_apply:cancel"),
+                ]]
+                await self.send_to_eyal(
+                    "\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
+                )
 
-            lines = [
-                "<b>Reconcile preview</b> (nothing applied yet):",
-                f"  • {pulled} of your Sheet edit(s) → DB",
-                f"  • {pushed} DB update(s) → Sheet",
-                f"  • {created} new task(s) from Sheet",
-                f"  • {readded} task(s) re-added to Sheet",
-            ]
-            if settings.RECONCILE_SHADOW_MODE:
-                lines.append("\n⚠️ Shadow mode is ON — Apply will still write nothing until it's off.")
-            keyboard = [[
-                InlineKeyboardButton("Apply", callback_data="sync_apply:confirm"),
-                InlineKeyboardButton("Cancel", callback_data="sync_apply:cancel"),
-            ]]
-            await self.send_to_eyal(
-                "\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
-            )
+            # Pending proposals (topic merges / task tweaks) — reviewable right here.
+            # [proposal-review 2026-07-06]
+            try:
+                from processors.proposal_review import list_pending_proposals
+                props = list_pending_proposals()
+                if props:
+                    await self.send_to_eyal(
+                        f"🔀 <b>{len(props)} suggestion(s) to review</b> (topic merges / task tweaks).",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("Review suggestions", callback_data="kreview:start"),
+                        ]]),
+                        parse_mode="HTML",
+                    )
+            except Exception as e:
+                logger.error(f"proposals prompt failed: {e}")
 
         except Exception as e:
             logger.error(f"Sheets sync failed: {e}")
@@ -3981,6 +3996,38 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 logger.error(f"Custom distribution failed for {meeting_id}: {e}")
                 await self.send_to_eyal(f"Error during custom distribution: {e}", parse_mode=None)
 
+        elif action == "kreview":
+            # Proposal review flow (topic merges / task tweaks) from /sync.
+            # meeting_id holds "start" or "done". [proposal-review 2026-07-06]
+            if meeting_id == "done":
+                await query.edit_message_text("Done — run /sync anytime to review the rest.")
+            else:
+                context.user_data["kreview_skipped"] = set()
+                await self._render_next_proposal(query, context)
+
+        elif action == "kdec":
+            # meeting_id holds "{approve|reject|skip}:{proposal_id}".
+            try:
+                dec, pid = meeting_id.split(":", 1)
+            except ValueError:
+                await query.answer("Bad data")
+                return
+            if dec == "skip":
+                context.user_data.setdefault("kreview_skipped", set()).add(pid)
+                await query.answer("Skipped")
+            else:
+                from processors.proposal_review import apply_proposal_decision
+                try:
+                    res = apply_proposal_decision(pid, dec)
+                    if res.get("status") == "gone":
+                        await query.answer("Already handled")
+                    else:
+                        await query.answer("Merged ✓" if dec == "approve" else "Kept separate")
+                except Exception as e:
+                    logger.error(f"proposal decision failed for {pid}: {e}")
+                    await query.answer(f"Failed: {e}")
+            await self._render_next_proposal(query, context)
+
         elif action == "sens_toggle":
             # Cycle sensitivity tier: founders → ceo → team → public → founders
             # T2.5: wrap DB write in try/except + CRITICAL alert so silent
@@ -5270,6 +5317,30 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             InlineKeyboardButton("‹ Back", callback_data=f"dback:{meeting_id}"),
         ])
         return InlineKeyboardMarkup(rows)
+
+    async def _render_next_proposal(self, query, context) -> None:
+        """Show the next pending proposal (topic merge / task tweak) with decision
+        buttons, or 'all caught up'. Skipped ids live in context.user_data for this
+        review pass. [proposal-review 2026-07-06]"""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from processors.proposal_review import list_pending_proposals
+
+        skipped = context.user_data.get("kreview_skipped", set()) if context else set()
+        props = [p for p in list_pending_proposals() if p["proposal_id"] not in skipped]
+        if not props:
+            await query.edit_message_text("✓ All caught up — no more suggestions.")
+            return
+        p = props[0]
+        pid = p["proposal_id"]
+        is_merge = p["content_type"] == "topic_merge"
+        text = f"🔀 <b>Suggestion</b> ({len(props)} left)\n\n{p['label']}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(("✓ Merge" if is_merge else "✓ Apply"), callback_data=f"kdec:approve:{pid}"),
+             InlineKeyboardButton(("✗ Keep separate" if is_merge else "✗ Discard"), callback_data=f"kdec:reject:{pid}")],
+            [InlineKeyboardButton("Skip", callback_data=f"kdec:skip:{pid}"),
+             InlineKeyboardButton("Done", callback_data="kreview:done")],
+        ])
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
     def register_user(self, telegram_user_id: int, team_member_id: str) -> None:
         """
