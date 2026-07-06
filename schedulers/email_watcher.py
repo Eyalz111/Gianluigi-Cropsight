@@ -305,14 +305,28 @@ class EmailWatcher:
 
         ref_prefix = ref_match.group(1)
 
-        # Look up the full meeting_id from pending_approvals table
-        pending = supabase_client.get_pending_approvals(status="pending")
+        # Look up the full meeting_id from pending_approvals by the [ref:] prefix.
+        # approval_id is a text column (a uuid string, or 'prep-...'/'kprop-...'),
+        # so a prefix match works. This replaces a call to a method that never
+        # existed (get_pending_approvals), which crashed EVERY approval-reply email
+        # — latent until new members' mail began passing the inbound filter. A
+        # direct prefix query also avoids the 5-row cap that would miss older
+        # pending approvals. [fix 2026-07-06]
         full_meeting_id = None
-        for row in pending:
-            aid = row.get("approval_id", "")
-            if aid.startswith(ref_prefix):
-                full_meeting_id = aid
-                break
+        try:
+            matches = (
+                supabase_client.client.table("pending_approvals")
+                .select("approval_id")
+                .eq("status", "pending")
+                .ilike("approval_id", f"{ref_prefix}%")
+                .limit(1)
+                .execute()
+                .data
+            )
+            if matches:
+                full_meeting_id = matches[0].get("approval_id")
+        except Exception as e:
+            logger.error(f"pending-approval lookup failed for ref:{ref_prefix}: {e}")
 
         if not full_meeting_id:
             logger.warning(f"No pending approval found for ref:{ref_prefix}")
