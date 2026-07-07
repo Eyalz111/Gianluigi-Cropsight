@@ -2121,6 +2121,47 @@ class GoogleSheetsService:
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
 
+            # --- Protect the system-owned info columns H/I/J (source_meeting,
+            #     created, id) so they can't be hand-edited (Phase 1, 2026-07).
+            #     Task text (C) + Label (B) and the action fields stay editable —
+            #     only the pure-info/identity columns are locked. warningOnly so
+            #     the bot's own writes are never blocked; idempotent (drop any
+            #     prior Gianluigi protection, then re-add one covering H:J). ---
+            _PROTECT_DESC = "Gianluigi: system-owned (source_meeting / created / id)"
+            try:
+                pmeta = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        fields="sheets(properties.sheetId,protectedRanges)",
+                    )
+                )
+                for sheet in pmeta.get("sheets", []):
+                    if sheet.get("properties", {}).get("sheetId") != sid:
+                        continue
+                    for pr in sheet.get("protectedRanges", []):
+                        if pr.get("description") == _PROTECT_DESC:
+                            requests.append({
+                                "deleteProtectedRange": {
+                                    "protectedRangeId": pr["protectedRangeId"]
+                                }
+                            })
+            except Exception:
+                pass
+            requests.append({
+                "addProtectedRange": {
+                    "protectedRange": {
+                        "range": {
+                            "sheetId": sid,
+                            "startRowIndex": 1,  # skip the header row
+                            "startColumnIndex": TASK_COL_INDEX["source_meeting"],  # H
+                            "endColumnIndex": TASK_COL_INDEX["id"] + 1,            # through J
+                        },
+                        "description": _PROTECT_DESC,
+                        "warningOnly": True,
+                    }
+                }
+            })
+
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().batchUpdate(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,

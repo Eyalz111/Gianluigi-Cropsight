@@ -250,8 +250,10 @@ class TestProcessTaskMatchAnnotations:
     @patch("processors.cross_reference.settings")
     @patch("processors.cross_reference.supabase_client")
     def test_auto_apply_enabled_high_confidence_completion(self, mock_sc, mock_settings):
-        """When auto-apply enabled, high-confidence completion → update task to done."""
+        """When auto-apply enabled + field NOT sticky, high-conf completion → done."""
         mock_settings.CONTINUITY_AUTO_APPLY_ENABLED = True
+        mock_sc.get_task.return_value = {
+            "id": "t1", "status": "pending", "manual_status": False, "title": "Done task"}
 
         from processors.cross_reference import _process_task_match_annotations
 
@@ -262,11 +264,14 @@ class TestProcessTaskMatchAnnotations:
         _process_task_match_annotations(annotations, "m1")
 
         mock_sc.update_task.assert_called_once_with("t1", status="done")
+        mock_sc.create_task_update_proposal.assert_not_called()
 
     @patch("processors.cross_reference.settings")
     @patch("processors.cross_reference.supabase_client")
     def test_auto_apply_enabled_high_confidence_status_update(self, mock_sc, mock_settings):
         mock_settings.CONTINUITY_AUTO_APPLY_ENABLED = True
+        mock_sc.get_task.return_value = {
+            "id": "t1", "status": "pending", "manual_status": False, "title": "In progress task"}
 
         from processors.cross_reference import _process_task_match_annotations
 
@@ -277,6 +282,86 @@ class TestProcessTaskMatchAnnotations:
         _process_task_match_annotations(annotations, "m1")
 
         mock_sc.update_task.assert_called_once_with("t1", status="in_progress")
+
+    @patch("processors.cross_reference.settings")
+    @patch("processors.cross_reference.supabase_client")
+    def test_sticky_status_proposes_not_clobbers(self, mock_sc, mock_settings):
+        """Field Eyal set by hand (manual_status) → PROPOSE, never overwrite —
+        even with auto-apply on. This is the Phase 1 propose-don't-clobber win."""
+        mock_settings.CONTINUITY_AUTO_APPLY_ENABLED = True
+        mock_sc.get_task.return_value = {
+            "id": "t1", "status": "in_progress", "manual_status": True, "title": "Eyal's task"}
+
+        from processors.cross_reference import _process_task_match_annotations
+
+        annotations = [
+            {"task_index": 0, "task_id": "t1", "confidence": "high",
+             "evolution": "completion", "title": "Eyal's task"},
+        ]
+        _process_task_match_annotations(annotations, "m1")
+
+        mock_sc.update_task.assert_not_called()
+        mock_sc.create_task_update_proposal.assert_called_once()
+        args = mock_sc.create_task_update_proposal.call_args[0]
+        assert args[0] == "t1" and args[1] == "status" and args[2] == "done"
+
+    @patch("processors.cross_reference.settings")
+    @patch("processors.cross_reference.supabase_client")
+    def test_sticky_proposes_even_when_autoapply_off(self, mock_sc, mock_settings):
+        """A sticky field is proposed regardless of the auto-apply flag (feeds the
+        morning-brief 'Task Proposals' section)."""
+        mock_settings.CONTINUITY_AUTO_APPLY_ENABLED = False
+        mock_sc.get_task.return_value = {
+            "id": "t1", "status": "pending", "manual_status": True, "title": "Eyal's task"}
+
+        from processors.cross_reference import _process_task_match_annotations
+
+        annotations = [
+            {"task_index": 0, "task_id": "t1", "confidence": "high",
+             "evolution": "status_update", "title": "Eyal's task"},
+        ]
+        _process_task_match_annotations(annotations, "m1")
+
+        mock_sc.update_task.assert_not_called()
+        mock_sc.create_task_update_proposal.assert_called_once()
+
+    @patch("processors.cross_reference.settings")
+    @patch("processors.cross_reference.supabase_client")
+    def test_non_sticky_autoapply_off_does_nothing(self, mock_sc, mock_settings):
+        """Non-sticky field + auto-apply off → neither apply nor propose (conservative)."""
+        mock_settings.CONTINUITY_AUTO_APPLY_ENABLED = False
+        mock_sc.get_task.return_value = {
+            "id": "t1", "status": "pending", "manual_status": False, "title": "T"}
+
+        from processors.cross_reference import _process_task_match_annotations
+
+        annotations = [
+            {"task_index": 0, "task_id": "t1", "confidence": "high",
+             "evolution": "completion", "title": "T"},
+        ]
+        _process_task_match_annotations(annotations, "m1")
+
+        mock_sc.update_task.assert_not_called()
+        mock_sc.create_task_update_proposal.assert_not_called()
+
+    @patch("processors.cross_reference.settings")
+    @patch("processors.cross_reference.supabase_client")
+    def test_already_at_target_status_skips(self, mock_sc, mock_settings):
+        """Task already at the inferred status → no update, no proposal."""
+        mock_settings.CONTINUITY_AUTO_APPLY_ENABLED = True
+        mock_sc.get_task.return_value = {
+            "id": "t1", "status": "done", "manual_status": False, "title": "T"}
+
+        from processors.cross_reference import _process_task_match_annotations
+
+        annotations = [
+            {"task_index": 0, "task_id": "t1", "confidence": "high",
+             "evolution": "completion", "title": "T"},
+        ]
+        _process_task_match_annotations(annotations, "m1")
+
+        mock_sc.update_task.assert_not_called()
+        mock_sc.create_task_update_proposal.assert_not_called()
 
     @patch("processors.cross_reference.settings")
     @patch("processors.cross_reference.supabase_client")
@@ -367,6 +452,9 @@ class TestProcessTaskMatchAnnotations:
     @patch("processors.cross_reference.supabase_client")
     def test_multiple_annotations_mixed(self, mock_sc, mock_settings):
         mock_settings.CONTINUITY_AUTO_APPLY_ENABLED = True
+        # non-sticky tasks so auto-apply (not propose) is the path under test
+        mock_sc.get_task.side_effect = lambda tid: {
+            "id": tid, "status": "pending", "manual_status": False, "title": tid}
 
         from processors.cross_reference import _process_task_match_annotations
 

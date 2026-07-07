@@ -159,6 +159,26 @@ vanished" incidents were local test runs hitting live Google APIs, not the recon
 
 ## 5. Phase 1 — EXECUTION CHECKLIST (resume here in a fresh session)
 
+> **STATUS 2026-07-07 — BUILT + TESTED on branch `feat/task-reconcile-editable-phase1`
+> (NOT yet cut over).** Steps 1-3 are implemented with tests green (full suite: 2674
+> passed; the 2 fails are pre-existing/order-flaky, not from this work). Shadow mode is
+> still ON, so nothing is live yet. The remaining work is the **cutover** (§5 Step 4):
+> run the migration in Supabase, run the backfill, deploy, then flip
+> `RECONCILE_SHADOW_MODE=false`. See "Cutover runbook" at the end of this section.
+>
+> Files added/changed this pass:
+> - `scripts/migrate_task_reconcile_editable_content.sql` — snapshot title/label +
+>   tasks.manual_title/manual_label (additive, idempotent).
+> - `scripts/backfill_snapshot_content.py` — seed snapshot title/label from DB (run once).
+> - `services/supabase_client.py` — `upsert_sheet_snapshot(...title,label)`, `get_task()`,
+>   `create_task_update_proposal()`, `_MANUAL_FIELDS` += title/label.
+> - `processors/sheets_sync.py` — content columns reconcile snapshot-style (was one-way).
+> - `services/google_sheets.py` — protect cols H/I/J in `format_task_tracker` (warningOnly).
+> - `guardrails/approval_flow.py` — `apply_edits` updates tasks IN PLACE (UUIDs survive).
+> - `processors/cross_reference.py` — inference proposes on a sticky field, doesn't clobber.
+> - Tests: `test_apply_edits_inplace.py`, `test_task_update_proposal_producer.py`, plus
+>   new cases in `test_reconcile_engine.py` / `test_continuity_extraction.py`.
+
 **Read first:** this doc + memory `project_task_decision_flow_finalize_2026_07`.
 **Current live state (2026-07-07):** rev `gianluigi-00129-m2p`; everything on `main`
 (PRs #61–#64 merged); `RECONCILE_ENABLED=true`, **`RECONCILE_SHADOW_MODE=true`** (my
@@ -198,10 +218,87 @@ Test: inference on a sticky field creates a proposal, not a silent change.
 (`gcloud run services update ... --update-env-vars RECONCILE_SHADOW_MODE=false`); verify a
 `/sync` round-trip preserves a text edit + an action edit.
 
-**Phase 2 (separate):** decision-intelligence design pass (see §4.2).
+### Cutover runbook (exact steps — do these to go live)
+
+1. **Merge the branch** `feat/task-reconcile-editable-phase1` to `main` (PR).
+2. **Migration** — paste `scripts/migrate_task_reconcile_editable_content.sql` into the
+   Supabase SQL editor and run it. Validate the two new columns exist (queries at the
+   bottom of the SQL) and `pytest tests/test_rls_coverage.py` passes.
+3. **Deploy** the code (still shadow — writes nothing):
+   `gcloud run deploy gianluigi --source . --region europe-west1 ...` (standard deploy line).
+4. **Backfill** the snapshots (DB-only, safe): dry-run then apply:
+   `python scripts/backfill_snapshot_content.py` → `... --apply`.
+5. **Flip shadow OFF** — the actual go-live:
+   `gcloud run services update gianluigi --region europe-west1 --update-env-vars RECONCILE_SHADOW_MODE=false`
+   (use `--update-env-vars`, never `--set-env-vars`).
+6. **Verify** a `/sync` round-trip: edit a Task-text cell + an action cell in the Sheet,
+   run `/sync`, confirm both are preserved in the DB (not reverted) and cols H/I/J warn on
+   hand-edit. Watch `audit_log` for `reconcile_applied`.
+
+**Phase 2 (separate):** decision-intelligence design pass — see §6 (grounded in the
+2026-07-07 code research: model decisions on the topic-thread engine).
 
 
 *Prior design context (already settled, do not re-litigate):* DB=SSOT; Sheet=editable
 mirror; Gantt is intentionally **one-way** read-back; `archived`=sanctioned delete;
 the recurring "tasks vanished" incidents were **local test runs hitting live Google APIs**,
 not the reconcile. (See `V2.5_STRATEGY.md`, `KNOWN_ISSUES.md`, project memory.)
+
+---
+
+## 6. Phase 2 — Decisions as living knowledge (research finding, 2026-07-07)
+
+Eyal's ask: decisions shouldn't be a static sheet — the system already turns certain
+topics into persistent "knowledge" that self-updates weekly (tasks/topics/areas). **Align
+the decision rethink to that same engine instead of inventing a new one.** A code deep-dive
+(2026-07-07) confirms this is the right move and that most of the substrate already exists.
+
+**The proven engine to reuse — TOPIC THREADS.** A topic thread is a persistent row whose
+state is:
+- **incrementally self-updated on-event** (per approved meeting) — `update_topic_state`
+  (`processors/topic_threading.py:102`), a cheap Haiku merge of prior state + new meeting,
+  versioned, fire-and-forget; wired in `guardrails/approval_flow.py:1116-1151`.
+- **nightly consolidated** — staleness + fact-dedupe + light reconcile
+  (`processors/knowledge_consolidation.py:run_consolidation`).
+- **weekly deep-re-synthesized from full history** (Sonnet) —
+  `processors/knowledge_synthesis.py:run_weekly_synthesis`.
+- **bi-temporally versioned** (merges *close* the loser, never delete),
+  **parented to an Area** (`topic_threads.area_id`), and **linked in a typed graph**
+  (`knowledge_links`: belongs_to / supersedes / advances / …).
+- **structurally changed only via human-approved proposals** — the weekly clustering pass
+  emits `topic_merge` / `topic_assign` proposals (`processors/topic_clustering.py`) that
+  Eyal approves via `get_proposals`/`decide_proposal` (and now the `/sync` review).
+  (Canonical projects = a naming/alias dictionary that normalizes labels; NOT a living
+  object — reuse only as the vocabulary. Weekly *review* = a presentation/approval session,
+  not the object owner.)
+
+**Decisions already have the hard substrate, none of the behavior.** The `decisions` table
+has `decision_status` (active/superseded/reversed), `parent_decision_id`, `superseded_by`,
+bi-temporal `valid_to`/`superseded_at`, `last_referenced_at`; `get_decision_chain` walks the
+chain; `cross_reference.detect_supersessions` already *detects* supersession and
+`transcript_processor._link_decision_chains` sets the parent pointer. **What's missing is
+the self-synthesis:** `mark_decision_superseded` exists but is **never called** (status flip
+is manual only); there is **no DecisionBrief / brief_json**, no on-approval updater, no
+nightly/weekly re-synthesis, and nothing writes decision→decision `supersedes` links.
+
+**Phase 2 build sketch (a "decision thread" = a topic thread whose parent is
+`parent_decision_id`, status is `decision_status`, and brief is a `DecisionBrief`):**
+1. Add `DecisionBrief`/`brief_json` on `decisions` (mirror `TopicBrief` in
+   `models/schemas.py:255`).
+2. On approval, run a `update_decision_state` alongside the topic loop
+   (`approval_flow.py:1116`) — clone `update_topic_state`.
+3. Auto-flip `decision_status` on detected supersession (wire the orphaned
+   `mark_decision_superseded` into `_link_decision_chains`) + write a `supersedes`
+   knowledge_link.
+4. Extend `run_consolidation` / `run_weekly_synthesis` to re-synthesize decision briefs
+   (de-dupe, re-order by status/recency/relevance, link related decisions).
+5. Surface the synthesized decision view in the **weekly review** for approval — the
+   Decisions sheet becomes a generated *view*, not the workspace (kills the dead-end
+   Sheet↔DB decision divergence from §2.6).
+
+Highest-value files to read when building Phase 2: `processors/topic_threading.py`
+(`update_topic_state`, `_sync_brief_from_state`), `guardrails/approval_flow.py:1116-1151`,
+`processors/knowledge_synthesis.py`, `processors/knowledge_consolidation.py`,
+`services/supabase_client.py` (`get_decision_chain`, the orphaned `mark_decision_superseded`,
+`create_knowledge_link`), and `models/schemas.py:201-300` (`TopicState`/`TopicBrief`/
+`KnowledgeLink` shapes to mirror).
