@@ -448,6 +448,43 @@ class TestProcessResponseRouting:
             assert call_kwargs["sensitivity"] == "founders"
 
     @pytest.mark.asyncio
+    async def test_approve_carries_custom_distribution_through(self):
+        """Regression: the approve path REBUILDS `content`; it must carry the
+        Custom recipient selection (__distribution) through to distribution, else a
+        custom send silently over-shares to the full band. [code-review 2026-07-06]"""
+        summary_content = {
+            "title": "BD Sync", "summary": "notes",
+            "decisions": [], "tasks": [], "follow_ups": [], "open_questions": [],
+            "__distribution": {"recipients": ["paolo"], "override": False},
+        }
+        pending_row = {
+            "approval_id": "cust-approve-1", "content_type": "meeting_summary",
+            "content": summary_content, "status": "pending",
+        }
+        mock_meeting = {
+            "id": "cust-approve-1", "title": "BD Sync", "summary": "notes",
+            "date": "2026-02-25", "sensitivity": "founders", "approval_status": "pending",
+        }
+        with (
+            patch("guardrails.approval_flow.supabase_client") as mock_db,
+            patch("guardrails.approval_flow.comms_spine"),
+            patch("guardrails.approval_flow.update_approval_status", new_callable=AsyncMock),
+            patch("guardrails.approval_flow.cancel_auto_publish"),
+            patch("guardrails.approval_flow.distribute_approved_content", new_callable=AsyncMock) as mock_dist,
+        ):
+            mock_db.get_pending_approval = MagicMock(return_value=pending_row)
+            mock_db.delete_pending_approval = MagicMock(return_value=True)
+            mock_db.get_meeting = MagicMock(return_value=mock_meeting)
+            mock_dist.return_value = {"telegram_sent": True, "email_sent": True}
+
+            from guardrails.approval_flow import process_response
+            await process_response(meeting_id="cust-approve-1", response="approve")
+
+            mock_dist.assert_awaited_once()
+            content_arg = mock_dist.call_args.kwargs["content"]
+            assert content_arg.get("__distribution") == {"recipients": ["paolo"], "override": False}
+
+    @pytest.mark.asyncio
     async def test_approve_with_no_pending_entry_defaults_to_meeting_summary(self):
         """If Supabase has no pending row, should default to meeting_summary flow."""
         mock_meeting = {

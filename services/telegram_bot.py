@@ -3723,22 +3723,24 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 from processors.sheets_sync import reconcile_tasks
                 summary = await reconcile_tasks(dry_run=False)  # v3 engine recomputes fresh
                 if summary.get("error"):
-                    await query.edit_message_text(f"Sync error: {summary['error']}")
+                    await self._safe_edit(query, f"Sync error: {summary['error']}")
                     return
                 if summary.get("shadow"):
-                    await query.edit_message_text(
+                    await self._safe_edit(
+                        query,
                         "Reconcile is in SHADOW mode — nothing written. "
                         "Set RECONCILE_SHADOW_MODE=false to apply."
                     )
                     return
-                await query.edit_message_text(
+                await self._safe_edit(
+                    query,
                     f"Sync applied — {summary.get('pulled', 0)} edit(s)→DB, "
                     f"{summary.get('pushed', 0)} DB→Sheet, "
                     f"{summary.get('created', 0)} created, "
                     f"{summary.get('readded', 0)} re-added."
                 )
             else:
-                await query.edit_message_text("Sync cancelled.")
+                await self._safe_edit(query, "Sync cancelled.")
             return
 
         # ---- Debrief callbacks ----
@@ -4839,11 +4841,20 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 force_action="edit",
             )
 
-            if result.get("action") == "edit_requested":
+            if result.get("action") == "edit_requested" and result.get("resubmitted"):
                 await self.send_message(
                     chat_id,
                     "Edits applied successfully. "
                     "A new approval request has been sent."
+                )
+            elif result.get("action") == "edit_requested":
+                # apply_edits or parsing failed — DO NOT claim success. The summary
+                # is unchanged. [fix 2026-07-06 — was a false 'success' message]
+                await self.send_message(
+                    chat_id,
+                    f"⚠️ I couldn't apply those edits — {result.get('next_step', 'unknown error')}\n\n"
+                    "Your summary is unchanged. Reply again to retry, or use the buttons "
+                    "on the card to Approve/Reject as-is."
                 )
             else:
                 await self.send_message(
@@ -5341,6 +5352,22 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
              InlineKeyboardButton("Done", callback_data="kreview:done")],
         ])
         await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+    async def _safe_edit(self, query, text, **kwargs) -> None:
+        """edit_message_text that swallows Telegram's 'Message is not modified'
+        BadRequest — raised when a button re-edits its message to identical content
+        (e.g. a double-tapped Apply). [fix 2026-07-06]"""
+        from telegram.error import BadRequest
+        try:
+            await query.edit_message_text(text, **kwargs)
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+            else:
+                raise
 
     def register_user(self, telegram_user_id: int, team_member_id: str) -> None:
         """

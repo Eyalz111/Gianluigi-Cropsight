@@ -1285,6 +1285,13 @@ async def process_response(
             "stakeholders": pending_content.get("stakeholders", []),
         }
 
+        # Carry the Custom recipient selection through. This rebuild drops keys it
+        # doesn't list, and without __distribution the hand-picked recipients are
+        # silently ignored — the send falls back to the full band and over-shares
+        # to the people Eyal excluded. [code-review 2026-07-06]
+        if pending_content.get("__distribution"):
+            content["__distribution"] = pending_content["__distribution"]
+
         # Always use pending_approvals as source of truth for structured data.
         # Falls back to DB only if pending_approvals has no structured data at all
         # (shouldn't happen — submit_for_approval always stores full content).
@@ -1452,6 +1459,7 @@ async def process_response(
                 )
                 return {
                     "action": "edit_requested",
+                    "resubmitted": False,  # apply_edits errored — nothing was re-sent
                     "edits": edits,
                     "next_step": f"Edit failed: {updated_content['error']}. Please try again.",
                 }
@@ -1492,12 +1500,14 @@ async def process_response(
 
             return {
                 "action": "edit_requested",
+                "resubmitted": True,  # apply_edits + submit_for_approval succeeded — a new card was sent
                 "edits": edits,
                 "next_step": "Edits applied, resubmitted for approval",
             }
         else:
             return {
                 "action": "edit_requested",
+                "resubmitted": False,  # couldn't parse the edits — nothing was re-sent
                 "edits": [],
                 "next_step": "Could not parse edits, please clarify",
             }
@@ -2081,11 +2091,15 @@ async def distribute_approved_content(
     _custom = content.get("__distribution") if isinstance(content, dict) else None
     if _custom and _custom.get("recipients"):
         from guardrails.distribution import resolve_custom_recipients
-        _emails, cap_level = resolve_custom_recipients(
+        _emails, _custom_cap = resolve_custom_recipients(
             _custom.get("recipients"), override=bool(_custom.get("override"))
         )
+        # Only apply the custom recipients + cap if the selection actually resolved.
+        # An empty resolution must NOT lower cap_level while the default band
+        # recipients stay — that would over-cap the fallback send. [code-review 2026-07-06]
         if _emails:
             distribution_emails = _emails
+            cap_level = _custom_cap
             band = "custom"
             logger.info(
                 f"Custom distribution for {meeting_id}: {len(_emails)} recipient(s), "
@@ -2148,8 +2162,10 @@ async def distribute_approved_content(
         drive_link = results.get("drive_link", "")
         participants = meeting_record.get("participants", []) if meeting_record else []
 
-        if sensitivity in ("ceo", "ceo_only", "restricted", "sensitive"):
-            # CEO: send full summary to Eyal only
+        if band in ("ceo", "custom"):
+            # CEO — or a Custom subset — must NOT broadcast a teaser to the whole
+            # group: custom is a specific recipient set, and the group would leak
+            # the summary to excluded members. Notify Eyal only. [code-review 2026-07-06]
             telegram_result = await comms_spine.send_meeting_summary(
                 title=meeting_title,
                 summary=summary,
