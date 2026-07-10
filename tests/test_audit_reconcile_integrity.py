@@ -199,9 +199,10 @@ class TestReconcileReaddSnapshot:
         assert res["readded"] == 1
         seeded = [s for s in calls["snapshot"] if s[0] == "t2"]
         assert len(seeded) == 1
-        # (task_id, sheet_row, status, deadline, priority, assignee)
-        tid, row, status, deadline, priority, assignee = seeded[0]
+        # (task_id, sheet_row, status, deadline, priority, assignee, title, label)
+        tid, row, status, deadline, priority, assignee, title, label = seeded[0]
         assert status == "in_progress" and priority == "M" and assignee == "Eyal"
+        assert title == "Open one"  # content now carried in the snapshot (Phase 1)
 
 
 # =============================================================================

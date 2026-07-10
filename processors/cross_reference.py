@@ -687,27 +687,49 @@ def _process_task_match_annotations(
         except Exception as e:
             logger.error(f"Error creating task mentions from annotations: {e}")
 
-    # Feature-gated auto-apply: only when explicitly enabled
-    if not settings.CONTINUITY_AUTO_APPLY_ENABLED:
-        return
-
-    # Auto-apply high-confidence changes
+    # High-confidence inferred status changes: PROPOSE, don't clobber.
+    # If Eyal set the status by hand (manual_status sticky), NEVER overwrite it —
+    # emit a task_update_proposal for his one-tap review (consumed by the Telegram
+    # /sync review + Claude.ai decide_proposal, surfaced in the morning brief).
+    # A non-sticky field is auto-applied only when auto-apply is enabled; a sticky
+    # field is proposed regardless (so the morning-brief "Task Proposals" section
+    # is finally fed). [Phase 1 Step 3 / P1, 2026-07]
     for ann in annotations:
         if ann.get("confidence") != "high":
             continue
-
-        task_id = ann["task_id"]
         evolution = ann.get("evolution")
-
+        new_status = (
+            "done" if evolution == "completion"
+            else "in_progress" if evolution == "status_update"
+            else None
+        )
+        if not new_status:
+            continue
+        task_id = ann["task_id"]
+        task = supabase_client.get_task(task_id)
+        if not task:
+            logger.warning(f"Inferred change references unknown task {task_id}")
+            continue
+        if task.get("status") == new_status:
+            continue  # already there — nothing to do
         try:
-            if evolution == "completion":
-                supabase_client.update_task(task_id, status="done")
-                logger.info(f"Auto-applied completion for task {task_id}")
-            elif evolution == "status_update":
-                supabase_client.update_task(task_id, status="in_progress")
-                logger.info(f"Auto-applied status_update for task {task_id}")
+            if task.get("manual_status"):
+                # Eyal owns this field — propose instead of overwriting (Rule 2).
+                supabase_client.create_task_update_proposal(
+                    task_id, "status", new_status,
+                    title=task.get("title", ""),
+                    current=task.get("status"),
+                    source=f"meeting:{meeting_id}",
+                )
+                logger.info(
+                    f"Proposed status '{new_status}' for sticky task {task_id} "
+                    f"(manual_status set) — not clobbering"
+                )
+            elif settings.CONTINUITY_AUTO_APPLY_ENABLED:
+                supabase_client.update_task(task_id, status=new_status)
+                logger.info(f"Auto-applied {evolution} ({new_status}) for task {task_id}")
         except Exception as e:
-            logger.error(f"Auto-apply failed for task {task_id}: {e}")
+            logger.error(f"Inferred status change failed for task {task_id}: {e}")
 
 
 def _parse_json_response(response_text: str) -> dict:

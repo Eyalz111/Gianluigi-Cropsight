@@ -613,7 +613,10 @@ def format_sync_summary(diff: dict) -> str:
 # Reconcile engine (v3 outputs re-architecture)
 # =============================================================================
 # DB is the source of truth; the Sheet is an editable downstream view.
-#   - CONTENT columns (title/label/source/created) are one-way DB->Sheet.
+#   - CONTENT columns (title/label) are reconciled like the action fields as of
+#     Phase 1 (2026-07): a manual edit wins & sticks via the per-task SNAPSHOT;
+#     an untouched cell is refreshed from the DB. (source/created/id stay one-way
+#     DB->Sheet and are protected in the Sheet so they can't be hand-edited.)
 #   - ACTION fields (status/deadline/priority/assignee) are reconciled with
 #     "manual wins & sticks" via a per-task SNAPSHOT (Sheet-now vs snapshot
 #     attributes an edit to Eyal). Identity is the task UUID in column J,
@@ -632,7 +635,8 @@ _ACTION_FIELDS = ("status", "deadline", "priority", "assignee")
 _ACTION_SHEET_KEY = {
     "status": "status", "deadline": "deadline", "priority": "priority", "assignee": "owner",
 }
-# content db-field -> (TASK_COLUMNS key, get_all_tasks dict key)
+# content db-field -> (TASK_COLUMNS key, get_all_tasks dict key). Reconciled
+# snapshot-style (manual-wins-and-sticky) since Phase 1, not one-way DB->Sheet.
 _CONTENT_MAP = {"title": ("task", "task"), "label": ("label", "label")}
 # DB-only tasks in these statuses get re-added to the Sheet (done/archived are not resurrected)
 _READD_STATUSES = ("pending", "in_progress", "overdue")
@@ -686,7 +690,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     db_updates: dict[str, dict] = {}   # task_id -> {field: value}
     manual_marks: list[tuple] = []     # (task_id, field)
     cell_writes: list[dict] = []       # {"range": ..., "values": [[v]]}
-    snapshot_writes: list[tuple] = []  # (task_id, row, status, deadline, priority, assignee)
+    snapshot_writes: list[tuple] = []  # (task_id, row, status, deadline, priority, assignee, title, label)
     archive_moves: list[dict] = []     # sheet-row dicts to move to the Archive tab
 
     def _cell(col_key, row, value):
@@ -745,10 +749,29 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 and st.get("deadline_raw")
                 and str(final["deadline"]) != str(st["deadline_raw"])):
             _cell("deadline", row, str(final["deadline"]))
+        # Content columns (Task text col C, Label col B): reconcile like the
+        # action fields. A manual edit — Sheet-now differs from BOTH the snapshot
+        # AND the DB — is pulled to the DB and marked sticky (Rule 1); an
+        # untouched cell is refreshed from the DB (Rule 4). NEVER pull a blanked
+        # cell (would null a task's text/label) — refresh it from the DB instead.
+        # The extra "!= DB" guard means a missing/stale snapshot can't be mistaken
+        # for an edit (no phantom-pull, audit P1-04). Closes the silent
+        # content-revert trap (Eyal's 2026-07-06 /sync incident).
         for db_key, (col_key, sheet_key) in _CONTENT_MAP.items():
-            if _normalize(st.get(sheet_key)) != _normalize(dt.get(db_key)):
-                _cell(col_key, row, dt.get(db_key))       # content: one-way DB -> Sheet
+            c_sheet, c_snap, c_db = st.get(sheet_key), snap.get(db_key), dt.get(db_key)
+            if (str(c_sheet or "").strip()
+                    and _normalize(c_sheet) != _normalize(c_snap)
+                    and _normalize(c_sheet) != _normalize(c_db)):
+                upd[db_key] = c_sheet                      # Eyal edited (Rule 1)
+                manual_marks.append((sid, db_key))
+                summary["pulled"] += 1
+                final[db_key] = c_sheet
+            elif _normalize(c_db) != _normalize(c_sheet):
+                _cell(col_key, row, c_db)                  # DB advanced -> refresh (Rule 4)
                 summary["pushed"] += 1
+                final[db_key] = c_db
+            else:
+                final[db_key] = c_sheet
         # Urgency is a simple Sheet->DB pull (no snapshot needed — nothing
         # auto-advances it post-extraction, so a Sheet/DB mismatch on a matched
         # task is always Eyal's cell edit). Gated on the K column existing.
@@ -780,7 +803,8 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             summary["archived"] += 1
         else:
             snapshot_writes.append((sid, row, final["status"], final["deadline"],
-                                    final["priority"], final["assignee"]))
+                                    final["priority"], final["assignee"],
+                                    final.get("title"), final.get("label")))
 
     # --- Sheet rows with no UUID -> create in DB + write UUID back ---
     for st in creates:
@@ -842,7 +866,8 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                     summary["created"] -= 1
                     continue
                 snapshot_writes.append((new_id, st["row_number"], st.get("status"),
-                                        st.get("deadline"), st.get("priority"), st.get("assignee")))
+                                        st.get("deadline"), st.get("priority"), st.get("assignee"),
+                                        st.get("task"), st.get("label")))
         except Exception as e:
             logger.warning(f"[reconcile] create from Sheet row failed: {e}")
 
@@ -927,6 +952,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                     supabase_client.upsert_sheet_snapshot(
                         rid, None, rr.get("status"), rr.get("deadline"),
                         rr.get("priority"), rr.get("assignee"),
+                        rr.get("task"), rr.get("label"),
                     )
         except Exception as e:
             logger.warning(f"[reconcile] re-add batch failed: {e}")
@@ -953,10 +979,12 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             logger.error(f"[reconcile] archive move incomplete (see CRITICAL above): {e}")
     # 4. Rewrite snapshots LAST (with a light retry so a transient miss doesn't
     #    leave a stale snapshot that re-attributes the change next cycle, #5).
-    for (tid, row, sstatus, sdeadline, spriority, sassignee) in snapshot_writes:
-        ok = supabase_client.upsert_sheet_snapshot(tid, row, sstatus, sdeadline, spriority, sassignee)
+    for (tid, row, sstatus, sdeadline, spriority, sassignee, stitle, slabel) in snapshot_writes:
+        ok = supabase_client.upsert_sheet_snapshot(
+            tid, row, sstatus, sdeadline, spriority, sassignee, stitle, slabel)
         if not ok:
-            supabase_client.upsert_sheet_snapshot(tid, row, sstatus, sdeadline, spriority, sassignee)
+            supabase_client.upsert_sheet_snapshot(
+                tid, row, sstatus, sdeadline, spriority, sassignee, stitle, slabel)
 
     try:
         supabase_client.log_action("reconcile_applied", details=summary, triggered_by="auto")
