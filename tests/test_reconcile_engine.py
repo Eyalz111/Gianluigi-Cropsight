@@ -107,14 +107,41 @@ class TestReconcile:
         assert upd["deadline"] == "2026-06-01" and upd["deadline_confidence"] == "EXPLICIT"
 
     async def test_rename_matches_by_uuid_no_duplicate(self, monkeypatch):
-        # title differs (Eyal/Gianluigi reworded) but UUID same -> match, content push, no create
+        # Sheet title differs from DB but UUID matches -> match, no duplicate row.
+        # Phase 1: Task text is editable, so a sheet title that differs from BOTH
+        # the snapshot and the DB is Eyal's edit -> PULLED to the DB + marked sticky
+        # (this is the fix for the silent content-revert; it used to overwrite).
         sheet = [_sheet_row(id="t1", task="A renamed", status="pending")]
         db = [{"id": "t1", "title": "A", "status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal"}]
-        snap = {"t1": {"status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal"}}
+        snap = {"t1": {"status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal", "title": "A"}}
         calls, _ = _setup(monkeypatch, sheet, db, snap)
         res = await ss.reconcile_tasks(shadow=False)
-        assert res["matched"] == 1 and res["created"] == 0
-        assert res["pushed"] >= 1  # content (title) refreshed DB->Sheet
+        assert res["matched"] == 1 and res["created"] == 0  # UUID match -> no duplicate
+        assert res["pulled"] >= 1
+        assert calls["update"][0][1].get("title") == "A renamed"  # content pulled to DB
+        assert ("t1", "title", "sheet_edit") in calls["manual"]
+
+    async def test_content_db_advance_refreshes_sheet(self, monkeypatch):
+        # DB title advanced (e.g. inference reworded) while the sheet cell is
+        # untouched (== snapshot) -> refresh the Sheet from the DB, do NOT pull.
+        sheet = [_sheet_row(id="t1", task="Old title", status="pending")]
+        db = [{"id": "t1", "title": "New title", "status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal"}]
+        snap = {"t1": {"status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal", "title": "Old title"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        res = await ss.reconcile_tasks(shadow=False)
+        assert res["pushed"] >= 1
+        assert all("title" not in u for (_, u) in calls["update"])  # no content pull
+
+    async def test_blanked_content_cell_never_nulls_db(self, monkeypatch):
+        # Eyal blanked the Task-text cell -> never null the DB title; refresh the
+        # cell from the DB instead (a task must keep its text).
+        sheet = [_sheet_row(id="t1", task="", status="pending")]
+        db = [{"id": "t1", "title": "Keep me", "status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal"}]
+        snap = {"t1": {"status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal", "title": "Keep me"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        res = await ss.reconcile_tasks(shadow=False)
+        assert all("title" not in u for (_, u) in calls["update"])  # no null pull
+        assert res["pushed"] >= 1  # cell refreshed from DB
 
     async def test_blank_uuid_row_creates(self, monkeypatch):
         # category typed legacy-style is canonicalized on create; the

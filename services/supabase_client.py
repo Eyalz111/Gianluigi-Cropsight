@@ -1196,6 +1196,21 @@ class SupabaseClient:
         )
         return result.data or []
 
+    def get_task(self, task_id: str) -> dict | None:
+        """Fetch a single task by id (all columns, incl. manual_* flags). None if absent."""
+        try:
+            res = (
+                self.client.table("tasks")
+                .select("*")
+                .eq("id", task_id)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except Exception as e:
+            logger.error(f"Error getting task {task_id}: {e}")
+            return None
+
     def update_task(
         self,
         task_id: str,
@@ -2505,6 +2520,52 @@ class SupabaseClient:
         logger.info(f"Created pending approval: {approval_id} ({content_type})")
         return result.data[0]
 
+    def create_task_update_proposal(
+        self,
+        task_id: str,
+        field: str,
+        proposed,
+        title: str = "",
+        current=None,
+        source: str = "inference",
+    ) -> bool:
+        """Propose a change to a manually-set (sticky) task field instead of clobbering it.
+
+        Phase 1 Step 3 (propose-don't-clobber). Emits a 'task_update_proposal'
+        pending_approval consumed by decide_proposal (Claude.ai), the /sync review
+        (Telegram), and surfaced in the morning brief. Idempotent per (task, field):
+        a deterministic approval_id + a pre-check means re-running inference over the
+        same field won't stack duplicate cards. Returns True if a proposal now exists.
+        """
+        approval_id = f"taskprop-{task_id}-{field}"
+        try:
+            existing = (
+                self.client.table("pending_approvals")
+                .select("approval_id")
+                .eq("approval_id", approval_id)
+                .eq("status", "pending")
+                .execute()
+                .data
+            )
+            if existing:
+                return True  # one already open for this task+field — don't stack
+            self.create_pending_approval(
+                approval_id=approval_id,
+                content_type="task_update_proposal",
+                content={
+                    "task_id": task_id,
+                    "field": field,
+                    "proposed": proposed,
+                    "current": current,
+                    "title": title,
+                    "source": source,
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error creating task_update_proposal ({task_id}.{field}): {e}")
+            return False
+
     def create_decision_supersede_proposal(
         self,
         new_id: str,
@@ -2707,6 +2768,22 @@ class SupabaseClient:
         except Exception as e:
             logger.warning(f"get_pending_auto_publishes failed: {e}")
             return []
+
+    def clear_auto_publish_at(self, approval_id: str) -> bool:
+        """Disarm a persisted auto-publish timer (set auto_publish_at = NULL).
+
+        Used to enforce the manual-approval gate: when APPROVAL_MODE is not
+        'auto_review', any leftover auto_publish_at from a previous auto_review
+        window must be cleared so a restart-time reconstruct can never fire it.
+        """
+        try:
+            self.client.table("pending_approvals").update(
+                {"auto_publish_at": None}
+            ).eq("approval_id", approval_id).execute()
+            return True
+        except Exception as e:
+            logger.warning(f"clear_auto_publish_at failed for {approval_id}: {e}")
+            return False
 
     def get_signals_by_status(self, status: str) -> list[dict]:
         """
@@ -4574,7 +4651,7 @@ class SupabaseClient:
     # Reconcile / sheet-sync helpers (v3 outputs re-architecture)
     # =========================================================================
 
-    _MANUAL_FIELDS = ("status", "deadline", "priority", "assignee")
+    _MANUAL_FIELDS = ("status", "deadline", "priority", "assignee", "title", "label")
 
     def get_sheet_snapshots(self, entity_type: str = "task") -> dict:
         """Last-synced action-field snapshot per task, keyed by task_id."""
@@ -4600,8 +4677,15 @@ class SupabaseClient:
         deadline: str | None,
         priority: str | None,
         assignee: str | None,
+        title: str | None = None,
+        label: str | None = None,
     ) -> bool:
-        """Write/refresh the current snapshot row for a task (one per task)."""
+        """Write/refresh the current snapshot row for a task (one per task).
+
+        title/label are the content columns (Phase 1, 2026-07) — snapshotted so a
+        Sheet edit to Task text/Label can be attributed to Eyal (Sheet-now !=
+        snapshot). Older callers that omit them still work (kwargs default None).
+        """
         try:
             from datetime import datetime, timezone
             data = {
@@ -4614,6 +4698,8 @@ class SupabaseClient:
                 "deadline": (deadline or None),
                 "priority": (priority or None),
                 "assignee": (assignee or None),
+                "title": (title or None),
+                "label": (label or None),
                 "snapshot_at": datetime.now(timezone.utc).isoformat(),
             }
             existing = (

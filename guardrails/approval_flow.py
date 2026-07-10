@@ -141,6 +141,20 @@ async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None
     """
     await asyncio.sleep(delay_minutes * 60)
 
+    # HARD SAFETY GATE (I1 — "Gianluigi proposes, Eyal approves"): never
+    # auto-distribute to the team unless auto_review is STILL the active mode when
+    # the timer fires. A flip back to manual (the default) must win over any timer
+    # armed earlier or reconstructed from a stale auto_publish_at row. Without this,
+    # a leftover timer kept publishing summaries with no approval tap.
+    if str(settings.APPROVAL_MODE).lower() != "auto_review":
+        logger.warning(
+            f"Auto-publish ABORTED for {meeting_id}: APPROVAL_MODE="
+            f"'{settings.APPROVAL_MODE}' (not auto_review) — approval stays manual."
+        )
+        supabase_client.clear_auto_publish_at(meeting_id)  # disarm the persisted row
+        _pending_auto_publishes.pop(meeting_id, None)
+        return
+
     # Check if still pending (Eyal may have already acted)
     meeting = supabase_client.get_meeting(meeting_id)
     if not meeting:
@@ -394,6 +408,24 @@ async def reconstruct_auto_publish_timers() -> int:
     Returns:
         Number of timers reconstructed.
     """
+    # I1 SAFETY: only reconstruct auto-publish timers when auto_review is the
+    # active mode. In manual mode (the default), DISARM every persisted
+    # auto_publish_at so a stale timer from a previous auto_review window can never
+    # fire post-flip. This is what makes flipping APPROVAL_MODE=manual actually
+    # stop auto-distribution — otherwise restart re-armed the old timers.
+    if str(settings.APPROVAL_MODE).lower() != "auto_review":
+        rows = supabase_client.get_pending_auto_publishes()
+        for row in (rows or []):
+            supabase_client.clear_auto_publish_at(row["approval_id"])
+        if rows:
+            logger.warning(
+                f"APPROVAL_MODE={settings.APPROVAL_MODE}: disarmed {len(rows)} stale "
+                f"auto-publish timer(s) — nothing auto-distributes without your approval."
+            )
+        else:
+            logger.info("APPROVAL_MODE=manual: no auto-publish timers to reconstruct")
+        return 0
+
     rows = supabase_client.get_pending_auto_publishes()
     if not rows:
         logger.info("No auto-publish timers to reconstruct")
@@ -1744,7 +1776,7 @@ EDITS TO APPLY:
 Return a JSON object with these keys:
 - "summary": the full updated summary text
 - "decisions": updated array of decisions (same format as above, remove items if edit says to delete)
-- "tasks": updated array of tasks (same format as above, remove items if edit says to delete)
+- "tasks": updated array of tasks (same format as above). For every task you KEEP, include its original "index" from CURRENT TASKS UNCHANGED — this preserves the task's identity. Omit "index" (or set it to null) ONLY for a brand-new task that an edit adds. Remove tasks the edits delete.
 - "follow_ups": updated array of follow-up meetings (same format)
 - "open_questions": updated array of open questions (same format)
 
@@ -1814,15 +1846,79 @@ Return ONLY the JSON object, no other text."""
         # Sync edited structured data back to DB tables.
         # This ensures DB, pending_approvals, distribution, and Sheets stay consistent.
         try:
-            # Delete old records and insert edited ones for this meeting
-            # Tasks — include_pending=True because edit happens while children
-            # are still 'pending' (pre-approve).
-            old_tasks = supabase_client.get_tasks(status=None, include_pending=True)
-            old_task_ids = [t["id"] for t in old_tasks if t.get("meeting_id") == meeting_id]
-            for tid in old_task_ids:
-                supabase_client.client.table("tasks").delete().eq("id", tid).execute()
-            if edited_tasks:
-                supabase_client.create_tasks_batch(meeting_id, edited_tasks)
+            # Tasks — UPDATE IN PLACE by the original index so a task's UUID
+            # SURVIVES an edit. The old delete+recreate minted new UUIDs, which
+            # orphaned the already-distributed Sheet rows (they carry the old
+            # UUID) AND re-added the tasks as fresh rows — two rows per task (the
+            # 43-vs-25 count on the 07-06 weekly). Map each returned task to the
+            # SAME all_tasks list the LLM saw (index i+1); update matched ones,
+            # create only genuinely-added ones, delete only genuinely-removed
+            # ones. [Phase 1 Step 2 / P2, 2026-07]
+            old_by_index = {i + 1: t for i, t in enumerate(all_tasks)}
+            title_buckets: dict = {}  # lower(title) -> [originals], indexless fallback
+            for t in all_tasks:
+                title_buckets.setdefault(
+                    (t.get("title") or "").strip().lower(), []
+                ).append(t)
+            claimed_ids: set = set()
+            new_tasks: list[dict] = []
+
+            def _apply_in_place(task_id: str, p: dict) -> None:
+                upd = {
+                    "title": p.get("title", ""),
+                    "assignee": p.get("assignee", ""),
+                    "priority": p.get("priority", "M"),
+                    "category": p.get("category", ""),
+                    "status": p.get("status", "pending"),
+                }
+                dl = p.get("deadline")
+                ser = supabase_client._serialize_datetime(dl) if dl else None
+                if ser is not None:
+                    upd["deadline"] = ser
+                    upd["deadline_confidence"] = "EXPLICIT"
+                # A falsy/blank edit deadline leaves any existing deadline
+                # untouched — never null a real deadline off an omitted field
+                # (the 2026-06-11 data-loss class).
+                supabase_client.update_task(task_id, **upd)
+
+            for t in edited.get("tasks", []):
+                payload = {
+                    "title": t.get("title", ""),
+                    "assignee": t.get("assignee", ""),
+                    "priority": t.get("priority", "M"),
+                    "deadline": t.get("deadline"),
+                    "category": t.get("category", ""),
+                    "status": t.get("status", "pending"),
+                }
+                idx = t.get("index")
+                orig = old_by_index.get(idx) if isinstance(idx, int) else None
+                if orig is None:
+                    # LLM dropped the index — match an unclaimed original by exact
+                    # title so a kept task still updates in place instead of dup'ing.
+                    bucket = title_buckets.get((t.get("title") or "").strip().lower(), [])
+                    orig = next(
+                        (o for o in bucket if o.get("id") and o["id"] not in claimed_ids),
+                        None,
+                    )
+                if orig and orig.get("id") and orig["id"] not in claimed_ids:
+                    try:
+                        _apply_in_place(orig["id"], payload)
+                    except Exception as ue:
+                        # Keep the old row rather than lose the task; just log.
+                        logger.warning(
+                            f"apply_edits: in-place update failed for {orig['id']}: {ue}"
+                        )
+                    claimed_ids.add(orig["id"])  # claimed either way -> never deleted
+                else:
+                    new_tasks.append(payload)  # genuinely new task from an edit
+
+            # Delete only the originals the edit removed (shown to the LLM, absent now).
+            for t in all_tasks:
+                if t.get("id") and t["id"] not in claimed_ids:
+                    supabase_client.client.table("tasks").delete().eq("id", t["id"]).execute()
+
+            if new_tasks:
+                supabase_client.create_tasks_batch(meeting_id, new_tasks)
 
             # Decisions
             supabase_client.client.table("decisions").delete().eq(
