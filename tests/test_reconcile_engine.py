@@ -72,6 +72,43 @@ def _setup(monkeypatch, sheet, db, snap):
 
 
 class TestReconcile:
+    async def test_aborts_on_empty_read_with_snapshots(self, monkeypatch):
+        # 2026-07-10 incident: a transient EMPTY sheet read must NOT drive a mass
+        # re-add. With snapshots present (tasks synced before), an empty read aborts.
+        db = [{"id": "t1", "title": "Open", "status": "in_progress", "deadline": None,
+               "priority": "M", "assignee": "Eyal", "approval_status": "approved"}]
+        snap = {"t1": {"status": "in_progress", "deadline": None, "priority": "M", "assignee": "Eyal"}}
+        calls, fake = _setup(monkeypatch, [], db, snap)  # sheet reads EMPTY
+        res = await ss.reconcile_tasks(shadow=False)
+        assert res.get("error") == "sheet_read_empty"
+        assert calls["readd"] == [] and calls["update"] == []  # nothing written/re-added
+
+    async def test_empty_read_ok_when_no_snapshots(self, monkeypatch):
+        # No snapshots = plausibly a fresh/empty sheet -> genuine first population is
+        # allowed (re-add proceeds, guard doesn't fire).
+        db = [{"id": "t1", "title": "Open", "status": "in_progress", "deadline": None,
+               "priority": "M", "assignee": "Eyal", "approval_status": "approved"}]
+        calls, fake = _setup(monkeypatch, [], db, {})  # empty sheet, NO snapshots
+        res = await ss.reconcile_tasks(shadow=False)
+        assert res.get("error") is None
+        assert res["readded"] == 1  # legitimate first-population re-add
+
+    async def test_readd_capped_on_truncated_read(self, monkeypatch):
+        # A truncated (non-empty) read: 1 row matches but the DB has 40 approved-open
+        # tasks -> re-add would be ~40, over the cap (max(30, matched=1)) -> skipped.
+        sheet = [_sheet_row(id="t0", task="Real", status="pending")]
+        db = [{"id": "t0", "title": "Real", "status": "pending", "deadline": None,
+               "priority": "M", "assignee": "Eyal", "approval_status": "approved"}]
+        for i in range(40):
+            db.append({"id": f"x{i}", "title": f"T{i}", "status": "pending", "deadline": None,
+                       "priority": "M", "assignee": "Eyal", "approval_status": "approved"})
+        snap = {"t0": {"status": "pending", "deadline": None, "priority": "M",
+                       "assignee": "Eyal", "title": "Real"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+        res = await ss.reconcile_tasks(shadow=False)
+        assert res["readded"] == 0        # capped — not appended
+        assert calls["readd"] == []       # add_tasks_batch never called with the flood
+
     async def test_shadow_detects_edit_without_writing(self, monkeypatch):
         sheet = [_sheet_row(id="t1", task="A", status="done")]
         db = [{"id": "t1", "title": "A", "status": "pending", "deadline": None, "priority": "M", "assignee": "Eyal"}]

@@ -676,6 +676,30 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     # re-query for every task that carries a Category edit/create.
     _areas_cache = supabase_client.get_areas()
 
+    # GUARD [2026-07-10 incident]: a transient Google Sheets read can return an
+    # EMPTY sheet WITHOUT raising. Reconcile would then see every DB task as
+    # "missing" and re-add them all — DUPLICATING the whole sheet (the 293-row /
+    # 100-duplicate mess on 2026-07-10). If the sheet reads empty BUT we hold
+    # snapshots (proof tasks were synced to this sheet before), the read is bad —
+    # ABORT before any processing. (No snapshots = plausibly a fresh/empty sheet,
+    # so we don't block genuine first population.)
+    if not sheet_tasks and len(snapshots) > 0:
+        logger.error(
+            f"[reconcile] ABORTED — sheet read returned 0 rows but {len(snapshots)} "
+            f"snapshots exist (tasks were synced before). Refusing to reconcile: a "
+            f"bad/empty read would mass re-add and duplicate the sheet (transient "
+            f"Sheets API read)."
+        )
+        try:
+            supabase_client.log_action(
+                "reconcile_aborted_bad_read",
+                details={"sheet_rows": 0, "db_tasks": len(db_tasks), "snapshots": len(snapshots)},
+                triggered_by="auto",
+            )
+        except Exception:
+            pass
+        return {"error": "sheet_read_empty", "sheet_rows": 0, "snapshots": len(snapshots)}
+
     db_by_id = {t["id"]: t for t in db_tasks if t.get("id")}
     sheet_by_id, creates = {}, []
     for st in sheet_tasks:
@@ -939,6 +963,29 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             if str(st.get("id") or "") not in db_update_failed
         ]
     # 2. Re-add DB-only rows (batched; carries the UUID into col J).
+    # SANITY CAP [2026-07-10 incident]: a truncated (non-empty) sheet read would
+    # make many matched tasks look "missing" and drive an abnormally large re-add.
+    # You never legitimately re-add MORE tasks than the sheet already matched (plus
+    # a small floor for genuine first-population). If the re-add count blows past
+    # that, the read is suspect — SKIP the append (never duplicate the sheet) and
+    # flag it loudly. The safe pulls/pushes on the rows that DID read still apply.
+    _readd_cap = max(30, len(sheet_by_id))
+    if len(readd_rows) > _readd_cap:
+        logger.error(
+            f"[reconcile] SKIPPED re-add of {len(readd_rows)} rows — exceeds the "
+            f"sanity cap ({_readd_cap}) vs {len(sheet_by_id)} matched. Suspected "
+            f"truncated Sheets read; refusing to append (would duplicate the sheet)."
+        )
+        try:
+            supabase_client.log_action(
+                "reconcile_readd_capped",
+                details={"readd": len(readd_rows), "matched": len(sheet_by_id), "cap": _readd_cap},
+                triggered_by="auto",
+            )
+        except Exception:
+            pass
+        readd_rows = []
+        summary["readded"] = 0
     if readd_rows:
         try:
             await sheets_service.add_tasks_batch(readd_rows)
