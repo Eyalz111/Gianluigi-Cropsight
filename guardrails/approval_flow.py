@@ -130,64 +130,26 @@ def _row_to_pending_info(row: dict) -> dict:
 
 async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None:
     """
-    Background task that auto-approves after delay if still pending.
+    REMOVED (2026-07-10): auto-publish to the team was removed entirely.
 
-    Waits for delay_minutes, then checks if the meeting is still pending.
-    If Eyal hasn't acted, auto-approves and notifies him.
-
-    Args:
-        meeting_id: UUID of the meeting.
-        delay_minutes: Minutes to wait before auto-publishing.
+    This function used to auto-approve + distribute a summary after a timeout —
+    "silence = consent", which violated the I1 gate ("Gianluigi proposes, Eyal
+    approves"). It is now a HARD no-op that can NEVER distribute, regardless of
+    any env var. Nothing schedules it anymore (schedule_auto_publish is a stub);
+    this refusal is belt-and-suspenders in case a legacy/stray path invokes it.
+    It also opportunistically disarms the persisted timer row so legacy state
+    self-cleans. See fix/remove-auto-publish.
     """
-    await asyncio.sleep(delay_minutes * 60)
-
-    # HARD SAFETY GATE (I1 — "Gianluigi proposes, Eyal approves"): never
-    # auto-distribute to the team unless auto_review is STILL the active mode when
-    # the timer fires. A flip back to manual (the default) must win over any timer
-    # armed earlier or reconstructed from a stale auto_publish_at row. Without this,
-    # a leftover timer kept publishing summaries with no approval tap.
-    if str(settings.APPROVAL_MODE).lower() != "auto_review":
-        logger.warning(
-            f"Auto-publish ABORTED for {meeting_id}: APPROVAL_MODE="
-            f"'{settings.APPROVAL_MODE}' (not auto_review) — approval stays manual."
-        )
-        supabase_client.clear_auto_publish_at(meeting_id)  # disarm the persisted row
-        _pending_auto_publishes.pop(meeting_id, None)
-        return
-
-    # Check if still pending (Eyal may have already acted)
-    meeting = supabase_client.get_meeting(meeting_id)
-    if not meeting:
-        return
-
-    if meeting.get("approval_status") != "pending":
-        logger.info(
-            f"Auto-publish skipped for {meeting_id}: "
-            f"already {meeting.get('approval_status')}"
-        )
-        return
-
-    logger.info(
-        f"Auto-publishing meeting {meeting_id} after {delay_minutes}m review window"
+    logger.warning(
+        f"Auto-publish is REMOVED — refusing to auto-distribute {meeting_id}. "
+        f"Summaries only leave on Eyal's explicit approval."
     )
-
-    # Trigger approval
-    result = await process_response(
-        meeting_id=meeting_id,
-        response="approve",
-        response_source="auto_review",
-    )
-
-    # Notify Eyal that it was auto-published
-    title = meeting.get("title", "Unknown meeting")
-    await comms_spine.send_to_eyal(
-        f"Auto-published: *{title}*\n\n"
-        f"The review window ({delay_minutes}min) expired without action.\n"
-        f"Use /retract to undo if needed."
-    )
-
-    # Clean up
+    try:
+        supabase_client.clear_auto_publish_at(meeting_id)
+    except Exception:
+        pass
     _pending_auto_publishes.pop(meeting_id, None)
+    return
 
 
 async def _send_approval_reminder(
@@ -258,30 +220,14 @@ def cancel_approval_reminders(meeting_id: str) -> None:
 
 def schedule_auto_publish(meeting_id: str) -> None:
     """
-    Schedule auto-publish if in auto_review mode.
+    REMOVED (2026-07-10): auto-publish to the team was removed entirely.
 
-    Creates a background asyncio task that will auto-approve the meeting
-    after AUTO_REVIEW_WINDOW_MINUTES if Eyal hasn't acted.
-
-    Args:
-        meeting_id: UUID of the meeting to schedule.
+    Nothing is ever distributed without Eyal's explicit approval (the I1 gate).
+    This is now a permanent no-op — no timer is ever armed, regardless of the
+    (now-inert) APPROVAL_MODE env var. Kept as a stub so existing call sites and
+    the settings surface don't break. See fix/remove-auto-publish.
     """
-    if settings.APPROVAL_MODE != "auto_review":
-        return
-
-    delay = settings.AUTO_REVIEW_WINDOW_MINUTES
-
-    # Cancel any existing timer for this meeting
-    existing = _pending_auto_publishes.get(meeting_id)
-    if existing and not existing.done():
-        existing.cancel()
-
-    task = asyncio.create_task(
-        _auto_publish_after_delay(meeting_id, delay),
-        name=f"auto_publish_{meeting_id}"
-    )
-    _pending_auto_publishes[meeting_id] = task
-    logger.info(f"Scheduled auto-publish for {meeting_id} in {delay} minutes")
+    return
 
 
 def cancel_auto_publish(meeting_id: str) -> None:
@@ -398,87 +344,29 @@ async def expire_stale_approvals() -> list[dict]:
 
 async def reconstruct_auto_publish_timers() -> int:
     """
-    Reconstruct auto-publish timers from persistent state on startup.
+    Auto-publish REMOVED (2026-07-10) — this now only DISARMS legacy timers.
 
-    Queries the pending_approvals table for rows with auto_publish_at,
-    and schedules asyncio tasks for each one:
-    - If auto_publish_at is in the past → auto-approve immediately.
-    - If auto_publish_at is in the future → schedule with remaining delay.
+    Auto-publish to the team was removed entirely (nothing distributes without
+    Eyal's approval, the I1 gate). On startup this no longer re-arms anything; it
+    just clears any leftover `auto_publish_at` rows from a previous auto_review
+    era so persisted state self-cleans. Always returns 0 (zero timers armed).
+    Kept (not deleted) so main.py's startup call site stays valid.
 
     Returns:
-        Number of timers reconstructed.
+        0 — no timers are ever reconstructed anymore.
     """
-    # I1 SAFETY: only reconstruct auto-publish timers when auto_review is the
-    # active mode. In manual mode (the default), DISARM every persisted
-    # auto_publish_at so a stale timer from a previous auto_review window can never
-    # fire post-flip. This is what makes flipping APPROVAL_MODE=manual actually
-    # stop auto-distribution — otherwise restart re-armed the old timers.
-    if str(settings.APPROVAL_MODE).lower() != "auto_review":
-        rows = supabase_client.get_pending_auto_publishes()
-        for row in (rows or []):
-            supabase_client.clear_auto_publish_at(row["approval_id"])
-        if rows:
-            logger.warning(
-                f"APPROVAL_MODE={settings.APPROVAL_MODE}: disarmed {len(rows)} stale "
-                f"auto-publish timer(s) — nothing auto-distributes without your approval."
-            )
-        else:
-            logger.info("APPROVAL_MODE=manual: no auto-publish timers to reconstruct")
-        return 0
-
     rows = supabase_client.get_pending_auto_publishes()
-    if not rows:
-        logger.info("No auto-publish timers to reconstruct")
-        return 0
-
-    count = 0
-    now = datetime.now().astimezone()
-
-    for row in rows:
-        approval_id = row["approval_id"]
-        auto_publish_at_str = row["auto_publish_at"]
-
+    for row in (rows or []):
         try:
-            auto_publish_at = datetime.fromisoformat(auto_publish_at_str)
-            # Ensure timezone-aware comparison
-            if auto_publish_at.tzinfo is None:
-                auto_publish_at = auto_publish_at.astimezone()
-
-            remaining_seconds = (auto_publish_at - now).total_seconds()
-
-            if remaining_seconds <= 0:
-                # Expired — auto-approve immediately
-                logger.info(f"Auto-publish timer expired for {approval_id}, approving now")
-                asyncio.create_task(
-                    process_response(
-                        meeting_id=approval_id,
-                        response="approve",
-                        response_source="auto_review",
-                    ),
-                    name=f"auto_publish_expired_{approval_id}",
-                )
-            else:
-                # Future — schedule with remaining delay
-                remaining_minutes = remaining_seconds / 60
-                logger.info(
-                    f"Reconstructing auto-publish timer for {approval_id}: "
-                    f"{remaining_minutes:.1f} minutes remaining"
-                )
-                task = asyncio.create_task(
-                    _auto_publish_after_delay(
-                        approval_id,
-                        delay_minutes=remaining_minutes,
-                    ),
-                    name=f"auto_publish_{approval_id}",
-                )
-                _pending_auto_publishes[approval_id] = task
-
-            count += 1
+            supabase_client.clear_auto_publish_at(row["approval_id"])
         except Exception as e:
-            logger.error(f"Failed to reconstruct timer for {approval_id}: {e}")
-
-    logger.info(f"Reconstructed {count} auto-publish timers")
-    return count
+            logger.warning(f"Failed to disarm legacy auto-publish row {row.get('approval_id')}: {e}")
+    if rows:
+        logger.warning(
+            f"Auto-publish is REMOVED — disarmed {len(rows)} legacy auto-publish "
+            f"timer(s). Nothing auto-distributes; approval is always manual."
+        )
+    return 0
 
 
 async def reconstruct_approval_reminders() -> int:
@@ -584,11 +472,10 @@ async def submit_for_approval(
 
     # Persist approval state to Supabase (survives restarts)
     # Uses atomic upsert to avoid race condition between delete + create
+    # Auto-publish REMOVED (2026-07-10): never arm an auto_publish_at timer —
+    # a summary only leaves on Eyal's explicit approval (the I1 gate). The
+    # (now-inert) APPROVAL_MODE env var no longer has any effect here.
     auto_publish_at = None
-    if settings.APPROVAL_MODE == "auto_review":
-        auto_publish_at = (
-            datetime.now() + timedelta(minutes=settings.AUTO_REVIEW_WINDOW_MINUTES)
-        ).isoformat()
 
     # Calculate expires_at per content type
     expiry_map = {

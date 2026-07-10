@@ -231,8 +231,9 @@ class TestSubmitForApprovalPersistence:
             assert call_kwargs["auto_publish_at"] is None
 
     @pytest.mark.asyncio
-    async def test_submit_auto_review_sets_auto_publish_at(self):
-        """In auto_review mode, submit should set auto_publish_at timestamp."""
+    async def test_submit_never_sets_auto_publish_at_even_in_auto_review(self):
+        """Auto-publish REMOVED (2026-07-10): submit NEVER arms an auto_publish_at
+        timer, even with the inert auto_review env var set."""
         with (
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow.comms_spine") as mock_tg,
@@ -247,7 +248,7 @@ class TestSubmitForApprovalPersistence:
             mock_db.upsert_pending_approval = MagicMock(return_value={
                 "approval_id": "auto-001", "status": "pending"
             })
-            mock_settings.APPROVAL_MODE = "auto_review"
+            mock_settings.APPROVAL_MODE = "auto_review"  # inert now
             mock_settings.AUTO_REVIEW_WINDOW_MINUTES = 60
             mock_settings.TELEGRAM_EYAL_CHAT_ID = "999"
             mock_settings.EYAL_EMAIL = "eyal@test.com"
@@ -263,10 +264,7 @@ class TestSubmitForApprovalPersistence:
             )
 
             call_kwargs = mock_db.upsert_pending_approval.call_args.kwargs
-            assert call_kwargs["auto_publish_at"] is not None
-            # auto_publish_at should be ~60 minutes from now
-            ts = datetime.fromisoformat(call_kwargs["auto_publish_at"])
-            assert ts > datetime.now()
+            assert call_kwargs["auto_publish_at"] is None  # never armed
 
 
 # =============================================================================
@@ -371,81 +369,26 @@ class TestReconstructAutoPublishTimers:
             assert count == 0
 
     @pytest.mark.asyncio
-    async def test_future_timer_schedules_task(self):
-        """Should schedule asyncio task for future auto_publish_at."""
+    async def test_legacy_timers_are_disarmed_not_rearmed(self):
+        """Auto-publish REMOVED (2026-07-10): reconstruct never re-arms; it disarms
+        any leftover auto_publish_at rows and returns 0 (in every mode)."""
         future_time = (datetime.now() + timedelta(minutes=30)).astimezone().isoformat()
+        past_time = (datetime.now() - timedelta(minutes=10)).astimezone().isoformat()
 
         with (
-            patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow._pending_auto_publishes", {}) as pending,
             patch("guardrails.approval_flow.asyncio") as mock_asyncio,
         ):
-            mock_settings.APPROVAL_MODE = "auto_review"
-            mock_db.get_pending_auto_publishes = MagicMock(return_value=[
-                {"approval_id": "future-001", "auto_publish_at": future_time},
-            ])
-            mock_task = MagicMock()
-            mock_asyncio.create_task.return_value = mock_task
-
-            from guardrails.approval_flow import reconstruct_auto_publish_timers
-
-            count = await reconstruct_auto_publish_timers()
-
-            assert count == 1
-            mock_asyncio.create_task.assert_called_once()
-            assert "future-001" in pending
-
-    @pytest.mark.asyncio
-    async def test_expired_timer_auto_approves(self):
-        """Should auto-approve immediately when auto_publish_at is in the past."""
-        past_time = (datetime.now() - timedelta(minutes=10)).astimezone().isoformat()
-
-        with (
-            patch("guardrails.approval_flow.settings") as mock_settings,
-            patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow._pending_auto_publishes", {}),
-            patch("guardrails.approval_flow.asyncio") as mock_asyncio,
-        ):
-            mock_settings.APPROVAL_MODE = "auto_review"
-            mock_db.get_pending_auto_publishes = MagicMock(return_value=[
-                {"approval_id": "expired-001", "auto_publish_at": past_time},
-            ])
-            mock_task = MagicMock()
-            mock_asyncio.create_task.return_value = mock_task
-
-            from guardrails.approval_flow import reconstruct_auto_publish_timers
-
-            count = await reconstruct_auto_publish_timers()
-
-            assert count == 1
-            # Should have created a task (the immediate auto-approve)
-            mock_asyncio.create_task.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_mixed_timers(self):
-        """Should handle both future and expired timers."""
-        future_time = (datetime.now() + timedelta(minutes=30)).astimezone().isoformat()
-        past_time = (datetime.now() - timedelta(minutes=10)).astimezone().isoformat()
-
-        with (
-            patch("guardrails.approval_flow.settings") as mock_settings,
-            patch("guardrails.approval_flow.supabase_client") as mock_db,
-            patch("guardrails.approval_flow._pending_auto_publishes", {}),
-            patch("guardrails.approval_flow.asyncio") as mock_asyncio,
-        ):
-            mock_settings.APPROVAL_MODE = "auto_review"
             mock_db.get_pending_auto_publishes = MagicMock(return_value=[
                 {"approval_id": "future-002", "auto_publish_at": future_time},
                 {"approval_id": "expired-002", "auto_publish_at": past_time},
             ])
-            mock_task = MagicMock()
-            mock_asyncio.create_task.return_value = mock_task
 
             from guardrails.approval_flow import reconstruct_auto_publish_timers
-
             count = await reconstruct_auto_publish_timers()
 
-            assert count == 2
-            # Should have created 2 tasks (one scheduled, one immediate)
-            assert mock_asyncio.create_task.call_count == 2
+            assert count == 0                                     # nothing re-armed
+            assert mock_db.clear_auto_publish_at.call_count == 2  # both disarmed
+            mock_asyncio.create_task.assert_not_called()
+            assert pending == {}

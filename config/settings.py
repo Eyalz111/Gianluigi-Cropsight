@@ -422,11 +422,11 @@ class Settings(BaseSettings):
     # ==========================================================================
     APPROVAL_MODE: str = Field(
         default="manual",
-        description="Approval mode: 'manual' (default) or 'auto_review' for timed auto-publish"
+        description="INERT since 2026-07-10 — auto-publish was REMOVED. Approval is always manual; a summary never leaves without Eyal's explicit approval (I1 gate). Kept only so a stale env var doesn't error. 'auto_review' no longer does anything."
     )
     AUTO_REVIEW_WINDOW_MINUTES: int = Field(
         default=60,
-        description="Minutes to wait before auto-publishing in auto_review mode"
+        description="INERT since 2026-07-10 (auto-publish removed). Unused."
     )
     APPROVAL_REMINDER_HOURS: str = Field(
         default="2,6",
@@ -943,10 +943,13 @@ class Settings(BaseSettings):
         # Eyal approves" (I1) contract is being relaxed: these distribute/apply
         # WITHOUT an explicit per-item human tap. [audit P5-05]
         if str(self.APPROVAL_MODE).lower() == "auto_review":
+            # Auto-publish was REMOVED (2026-07-10) — auto_review is now inert.
+            # Still surface the stale env var so an operator cleans it up, but make
+            # clear it does NOT auto-distribute anymore.
             warnings.append(
-                "APPROVAL_MODE=auto_review — meetings AUTO-DISTRIBUTE to the team on "
-                "the auto-publish timeout with no explicit per-item approval (silence "
-                "= consent). This relaxes the I1 approval gate."
+                "APPROVAL_MODE=auto_review is set but INERT — auto-publish was removed; "
+                "nothing auto-distributes. Approval is always manual. Clear this stale "
+                "env var to avoid confusion."
             )
         if self.INTELLIGENCE_SIGNAL_AUTO_DISTRIBUTE:
             warnings.append(
