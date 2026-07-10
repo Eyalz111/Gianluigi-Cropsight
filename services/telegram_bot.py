@@ -858,14 +858,8 @@ class TelegramBot:
             lines.append(f'<a href="{drive_link}">View Full Draft</a>')
             lines.append("")
 
-        # Show countdown indicator when in auto_review mode
-        from config.settings import settings as _settings
-        if _settings.APPROVAL_MODE == "auto_review":
-            minutes = _settings.AUTO_REVIEW_WINDOW_MINUTES
-            lines.append(
-                f"Auto-publish in {minutes} minutes if no action taken."
-            )
-            lines.append("")
+        # Auto-publish REMOVED (2026-07-10): no countdown — a summary NEVER leaves
+        # without Eyal's explicit approval, so we don't imply a timed auto-send.
 
         lines.append("Approve or reject below.")
 
