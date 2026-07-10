@@ -577,6 +577,58 @@ def _consolidation_rule() -> str:
     )
 
 
+def _decision_extraction_rules() -> str:
+    """The DECISION extraction + decision-vs-action-item disambiguation block.
+
+    Decisions were being confused with action items at extraction (Eyal, 2026-07).
+    A "decision" is a resolved CHOICE/commitment; an "action item" is a doable task
+    with an owner. This block makes the distinction explicit with a test + examples
+    so choices route to decisions and work routes to tasks (and neither is
+    double-counted). Kept as a helper (like _consolidation_rule) so it's a named,
+    testable unit.
+    """
+    return (
+        "DECISION EXTRACTION RULES:\n"
+        "- WHAT A DECISION IS: a CHOICE, CONCLUSION, or COMMITMENT the team reached "
+        "— a settled position on WHAT to do, believe, or pursue (a direction, "
+        "approach, policy, priority, or go/no-go). It answers \"what did we DECIDE?\", "
+        "not \"who will DO what\".\n"
+        "- DECISION vs ACTION ITEM (the #1 confusion — get this right):\n"
+        "  * A DECISION is a resolved CHOICE: \"We'll go with a subscription model\", "
+        "\"We're prioritizing the Moldova pilot over Brazil\", \"We'll use AWS, not "
+        "GCP\", \"We're not raising until Q3\".\n"
+        "  * An ACTION ITEM is a concrete EXECUTION step with an owner: \"Eyal to set "
+        "up the AWS account by Friday\", \"Roye to send the deck to Lavazza\".\n"
+        "  * TEST: if it names WHO does WHAT (a doable task), it is an ACTION ITEM -> "
+        "put it in \"tasks\", NOT \"decisions\". If it is a choice/conclusion/position "
+        "with no single execution step, it is a DECISION.\n"
+        "  * A decision often SPAWNS action items. Do NOT extract the same thing "
+        "twice: capture the CHOICE as one decision, and any concrete follow-on work "
+        "as separate action item(s). Example: \"We decided to outsource design and "
+        "Paolo will find a contractor\" -> decision: \"Outsource design work\"; task: "
+        "\"Paolo to find a design contractor\".\n"
+        "- NOT decisions (never put these in \"decisions\"): routine tasks someone "
+        "agreed to do; \"I'll send X\" / \"let me check Y\" promises; status updates; "
+        "questions still unresolved (those are open_questions); vague intentions with "
+        "no commitment (\"we should probably think about pricing\"). If it is just "
+        "work to be done, it is a task; if it is unresolved, it is an open_question.\n"
+        "- A real decision reflects a CHOICE among alternatives or a clear commitment "
+        "to a course of action. If no genuine choice/commitment was reached, do NOT "
+        "force a decision.\n"
+        "- Every decision MUST include \"rationale\" (why it was decided) and "
+        "\"options_considered\" (alternatives discussed).\n"
+        "- \"confidence\" is a 1-5 scale: 1=tentative/exploratory, 2=leaning toward, "
+        "3=agreed but flexible, 4=firm decision, 5=irreversible commitment. Use 1-2 "
+        "sparingly — a \"decision\" at confidence 1 is usually really an open question "
+        "or a task.\n"
+        "- If rationale or options were not explicitly discussed, infer from context. "
+        "If truly unclear, set rationale to \"Not explicitly discussed\" and "
+        "options_considered to [].\n"
+        "- \"review_date\" defaults to 30 days from the meeting date. For "
+        "urgent/time-sensitive decisions, set earlier."
+    )
+
+
 async def extract_structured_data(
     transcript: str,
     meeting_title: str,
@@ -774,6 +826,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
 }
 
 ACTION ITEM EXTRACTION RULES:
+- An ACTION ITEM is a doable TASK someone will execute (WHO does WHAT) — this is DISTINCT from a DECISION (a choice/conclusion). If something is a settled choice with no single execution step, it belongs in "decisions", not here. See DECISION EXTRACTION RULES for the test.
 - Extract ACTION ITEMS: anything a participant agreed to do, was asked to do, or volunteered to do.
 - Include both formally assigned tasks ("Eyal, can you draft the abstract?") and verbal promises ("I'll send that over").
 - Each action item title should answer: WHO does WHAT by WHEN and WHY.
@@ -805,11 +858,7 @@ ACTION ITEM EXTRACTION RULES:
 LABEL RULES:
 Every decision, task, follow-up meeting, and open question MUST include a "label" field — a 2-3 word topic tag for quick scanning. Use canonical project names when possible: {canonical_names}. If a topic doesn't match any canonical name, create a short descriptive label (2-4 words). Normalize variations: "Moldova PoC", "Gagauzia project", "Moldova wheat" → "Moldova Pilot".
 
-DECISION EXTRACTION RULES:
-- Every decision MUST include "rationale" (why it was decided) and "options_considered" (alternatives discussed).
-- "confidence" is a 1-5 scale: 1=tentative/exploratory, 2=leaning toward, 3=agreed but flexible, 4=firm decision, 5=irreversible commitment.
-- If rationale or options were not explicitly discussed, infer from context. If truly unclear, set rationale to "Not explicitly discussed" and options_considered to [].
-- "review_date" defaults to 30 days from the meeting date. For urgent/time-sensitive decisions, set earlier.
+{decision_rules}
 
 DISCUSSION SUMMARY RULES:
 - Opening paragraph: What was the meeting's purpose and key outcome?
@@ -833,7 +882,7 @@ Meetings may be in Hebrew, English, or mixed. Regardless of language:
 - Keep company/organization names as-is
 - If a Hebrew term has no clear English equivalent, transliterate and add brief explanation
 
-Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names).replace("{consolidation_rule}", consolidation_rule).replace("{urgency_area_json}", urgency_area_json).replace("{urgency_area_rules}", urgency_area_rules).replace("{category_options}", category_options)
+Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names).replace("{consolidation_rule}", consolidation_rule).replace("{decision_rules}", _decision_extraction_rules()).replace("{urgency_area_json}", urgency_area_json).replace("{urgency_area_rules}", urgency_area_rules).replace("{category_options}", category_options)
 
     # Retry with exponential backoff for transient errors (529 overloaded, 500, etc.)
     max_retries = 4
