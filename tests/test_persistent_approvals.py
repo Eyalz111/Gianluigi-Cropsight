@@ -376,10 +376,12 @@ class TestReconstructAutoPublishTimers:
         future_time = (datetime.now() + timedelta(minutes=30)).astimezone().isoformat()
 
         with (
+            patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow._pending_auto_publishes", {}) as pending,
             patch("guardrails.approval_flow.asyncio") as mock_asyncio,
         ):
+            mock_settings.APPROVAL_MODE = "auto_review"
             mock_db.get_pending_auto_publishes = MagicMock(return_value=[
                 {"approval_id": "future-001", "auto_publish_at": future_time},
             ])
@@ -400,10 +402,12 @@ class TestReconstructAutoPublishTimers:
         past_time = (datetime.now() - timedelta(minutes=10)).astimezone().isoformat()
 
         with (
+            patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow._pending_auto_publishes", {}),
             patch("guardrails.approval_flow.asyncio") as mock_asyncio,
         ):
+            mock_settings.APPROVAL_MODE = "auto_review"
             mock_db.get_pending_auto_publishes = MagicMock(return_value=[
                 {"approval_id": "expired-001", "auto_publish_at": past_time},
             ])
@@ -425,10 +429,12 @@ class TestReconstructAutoPublishTimers:
         past_time = (datetime.now() - timedelta(minutes=10)).astimezone().isoformat()
 
         with (
+            patch("guardrails.approval_flow.settings") as mock_settings,
             patch("guardrails.approval_flow.supabase_client") as mock_db,
             patch("guardrails.approval_flow._pending_auto_publishes", {}),
             patch("guardrails.approval_flow.asyncio") as mock_asyncio,
         ):
+            mock_settings.APPROVAL_MODE = "auto_review"
             mock_db.get_pending_auto_publishes = MagicMock(return_value=[
                 {"approval_id": "future-002", "auto_publish_at": future_time},
                 {"approval_id": "expired-002", "auto_publish_at": past_time},
