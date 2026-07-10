@@ -154,11 +154,13 @@ class TestAutoPublishAfterDelay:
         }
 
         with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+             patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.process_response", new_callable=AsyncMock) as mock_process, \
              patch("guardrails.approval_flow.comms_spine") as mock_tg, \
              patch("guardrails.approval_flow._pending_auto_publishes", {"meeting-auto-1": MagicMock()}):
 
+            mock_settings.APPROVAL_MODE = "auto_review"
             mock_db.get_meeting = MagicMock(return_value=mock_meeting)
             mock_process.return_value = {"action": "approved"}
             mock_tg.send_to_eyal = AsyncMock(return_value=True)
@@ -194,10 +196,12 @@ class TestAutoPublishAfterDelay:
         }
 
         with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock), \
+             patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.process_response", new_callable=AsyncMock) as mock_process, \
              patch("guardrails.approval_flow.comms_spine") as mock_tg:
 
+            mock_settings.APPROVAL_MODE = "auto_review"
             mock_db.get_meeting = MagicMock(return_value=mock_meeting)
             mock_tg.send_to_eyal = AsyncMock()
 
@@ -215,9 +219,11 @@ class TestAutoPublishAfterDelay:
     async def test_skips_when_meeting_not_found(self):
         """Should do nothing when the meeting doesn't exist."""
         with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock), \
+             patch("guardrails.approval_flow.settings") as mock_settings, \
              patch("guardrails.approval_flow.supabase_client") as mock_db, \
              patch("guardrails.approval_flow.process_response", new_callable=AsyncMock) as mock_process:
 
+            mock_settings.APPROVAL_MODE = "auto_review"
             mock_db.get_meeting = MagicMock(return_value=None)
 
             from guardrails.approval_flow import _auto_publish_after_delay
@@ -225,6 +231,30 @@ class TestAutoPublishAfterDelay:
             await _auto_publish_after_delay("nonexistent", delay_minutes=30)
 
             mock_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_aborts_when_mode_is_manual(self):
+        """I1 gate: a timer that fires while APPROVAL_MODE=manual must NOT publish —
+        it aborts, disarms the persisted row, and never touches the team."""
+        with patch("guardrails.approval_flow.asyncio.sleep", new_callable=AsyncMock), \
+             patch("guardrails.approval_flow.settings") as mock_settings, \
+             patch("guardrails.approval_flow.supabase_client") as mock_db, \
+             patch("guardrails.approval_flow.process_response", new_callable=AsyncMock) as mock_process, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
+             patch("guardrails.approval_flow._pending_auto_publishes", {"m-manual": MagicMock()}):
+
+            mock_settings.APPROVAL_MODE = "manual"
+            mock_tg.send_to_eyal = AsyncMock()
+
+            from guardrails.approval_flow import _auto_publish_after_delay, _pending_auto_publishes
+
+            await _auto_publish_after_delay("m-manual", delay_minutes=30)
+
+            mock_process.assert_not_awaited()          # nothing distributed
+            mock_tg.send_to_eyal.assert_not_awaited()
+            mock_db.clear_auto_publish_at.assert_called_once_with("m-manual")  # disarmed
+            assert "m-manual" not in _pending_auto_publishes
+            mock_db.get_meeting.assert_not_called()    # aborted before touching the meeting
 
 
 # =============================================================================
@@ -413,3 +443,48 @@ class TestApprovalMessageCountdown:
             mock_send.assert_awaited_once()
             sent_msg = mock_send.call_args.kwargs.get("text", "")
             assert "Auto-publish" not in sent_msg
+
+
+# =============================================================================
+# Test reconstruct_auto_publish_timers mode gate (restart-time safety)
+# =============================================================================
+
+class TestReconstructModeGate:
+    """On restart, reconstruct must DISARM persisted timers when not in auto_review —
+    this is what makes flipping APPROVAL_MODE=manual actually stop auto-distribution."""
+
+    @pytest.mark.asyncio
+    async def test_disarms_persisted_timers_when_manual(self):
+        rows = [
+            {"approval_id": "a1", "auto_publish_at": "2026-07-01T10:00:00"},
+            {"approval_id": "a2", "auto_publish_at": "2026-07-01T11:00:00"},
+        ]
+        with patch("guardrails.approval_flow.settings") as mock_settings, \
+             patch("guardrails.approval_flow.supabase_client") as mock_db, \
+             patch("guardrails.approval_flow.asyncio") as mock_asyncio:
+
+            mock_settings.APPROVAL_MODE = "manual"
+            mock_db.get_pending_auto_publishes = MagicMock(return_value=rows)
+
+            from guardrails.approval_flow import reconstruct_auto_publish_timers
+
+            count = await reconstruct_auto_publish_timers()
+
+            assert count == 0                                   # nothing re-armed
+            assert mock_db.clear_auto_publish_at.call_count == 2  # both disarmed
+            mock_asyncio.create_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_disarm_and_no_rows_when_manual_empty(self):
+        with patch("guardrails.approval_flow.settings") as mock_settings, \
+             patch("guardrails.approval_flow.supabase_client") as mock_db:
+
+            mock_settings.APPROVAL_MODE = "manual"
+            mock_db.get_pending_auto_publishes = MagicMock(return_value=[])
+
+            from guardrails.approval_flow import reconstruct_auto_publish_timers
+
+            count = await reconstruct_auto_publish_timers()
+
+            assert count == 0
+            mock_db.clear_auto_publish_at.assert_not_called()

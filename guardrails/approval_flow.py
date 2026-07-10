@@ -141,6 +141,20 @@ async def _auto_publish_after_delay(meeting_id: str, delay_minutes: int) -> None
     """
     await asyncio.sleep(delay_minutes * 60)
 
+    # HARD SAFETY GATE (I1 — "Gianluigi proposes, Eyal approves"): never
+    # auto-distribute to the team unless auto_review is STILL the active mode when
+    # the timer fires. A flip back to manual (the default) must win over any timer
+    # armed earlier or reconstructed from a stale auto_publish_at row. Without this,
+    # a leftover timer kept publishing summaries with no approval tap.
+    if str(settings.APPROVAL_MODE).lower() != "auto_review":
+        logger.warning(
+            f"Auto-publish ABORTED for {meeting_id}: APPROVAL_MODE="
+            f"'{settings.APPROVAL_MODE}' (not auto_review) — approval stays manual."
+        )
+        supabase_client.clear_auto_publish_at(meeting_id)  # disarm the persisted row
+        _pending_auto_publishes.pop(meeting_id, None)
+        return
+
     # Check if still pending (Eyal may have already acted)
     meeting = supabase_client.get_meeting(meeting_id)
     if not meeting:
@@ -394,6 +408,24 @@ async def reconstruct_auto_publish_timers() -> int:
     Returns:
         Number of timers reconstructed.
     """
+    # I1 SAFETY: only reconstruct auto-publish timers when auto_review is the
+    # active mode. In manual mode (the default), DISARM every persisted
+    # auto_publish_at so a stale timer from a previous auto_review window can never
+    # fire post-flip. This is what makes flipping APPROVAL_MODE=manual actually
+    # stop auto-distribution — otherwise restart re-armed the old timers.
+    if str(settings.APPROVAL_MODE).lower() != "auto_review":
+        rows = supabase_client.get_pending_auto_publishes()
+        for row in (rows or []):
+            supabase_client.clear_auto_publish_at(row["approval_id"])
+        if rows:
+            logger.warning(
+                f"APPROVAL_MODE={settings.APPROVAL_MODE}: disarmed {len(rows)} stale "
+                f"auto-publish timer(s) — nothing auto-distributes without your approval."
+            )
+        else:
+            logger.info("APPROVAL_MODE=manual: no auto-publish timers to reconstruct")
+        return 0
+
     rows = supabase_client.get_pending_auto_publishes()
     if not rows:
         logger.info("No auto-publish timers to reconstruct")

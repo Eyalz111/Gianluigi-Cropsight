@@ -2649,6 +2649,22 @@ class SupabaseClient:
             logger.warning(f"get_pending_auto_publishes failed: {e}")
             return []
 
+    def clear_auto_publish_at(self, approval_id: str) -> bool:
+        """Disarm a persisted auto-publish timer (set auto_publish_at = NULL).
+
+        Used to enforce the manual-approval gate: when APPROVAL_MODE is not
+        'auto_review', any leftover auto_publish_at from a previous auto_review
+        window must be cleared so a restart-time reconstruct can never fire it.
+        """
+        try:
+            self.client.table("pending_approvals").update(
+                {"auto_publish_at": None}
+            ).eq("approval_id", approval_id).execute()
+            return True
+        except Exception as e:
+            logger.warning(f"clear_auto_publish_at failed for {approval_id}: {e}")
+            return False
+
     def get_signals_by_status(self, status: str) -> list[dict]:
         """
         Get all intelligence_signals rows in a given status.
