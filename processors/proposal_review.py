@@ -15,7 +15,9 @@ from services.supabase_client import supabase_client
 logger = logging.getLogger(__name__)
 
 # Proposal content_types Eyal can decide from the Telegram /sync review flow.
-REVIEWABLE_TYPES = ("topic_merge", "topic_assign", "task_update_proposal")
+REVIEWABLE_TYPES = (
+    "topic_merge", "topic_assign", "task_update_proposal", "decision_supersede_proposal",
+)
 
 
 def _label(content_type: str, c: dict) -> str:
@@ -30,6 +32,15 @@ def _label(content_type: str, c: dict) -> str:
         return f"Assign topic <b>\"{c.get('topic_name', '?')}\"</b> to area <b>{c.get('area_name', '?')}</b>?"
     if content_type == "task_update_proposal":
         return f"Update task field <b>{c.get('field', '?')}</b> → <b>{c.get('proposed', '?')}</b>?"
+    if content_type == "decision_supersede_proposal":
+        old = (c.get("old_summary") or "?")[:80]
+        new = (c.get("new_summary") or "?")[:80]
+        return (
+            f"Supersede a decision?\n"
+            f"<b>OLD:</b> \"{old}\"\n"
+            f"<b>NEW:</b> \"{new}\"\n"
+            f"<i>(mark the old one superseded by the new)</i>"
+        )
     return "Review this suggestion?"
 
 
@@ -100,5 +111,16 @@ def apply_proposal_decision(proposal_id: str, decision: str) -> dict:
             triggered_by="eyal",
         )
         return {"status": "ok", "decision": "approved" if approve else "rejected"}
+
+    if content_type == "decision_supersede_proposal":
+        from processors.decision_intelligence import apply_decision_supersede
+        result = apply_decision_supersede(content, approve)
+        supabase_client.delete_pending_approval(proposal_id)
+        supabase_client.log_action(
+            "decision_supersede_approved" if approve else "decision_supersede_rejected",
+            details={"proposal_id": proposal_id, "source": "telegram_sync", **content, "result": result},
+            triggered_by="eyal",
+        )
+        return {"status": "ok", "decision": "approved" if approve else "rejected", "result": result}
 
     return {"status": "unsupported", "content_type": content_type}

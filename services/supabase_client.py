@@ -814,6 +814,21 @@ class SupabaseClient:
         results = (stale_referenced.data or []) + (never_referenced.data or [])
         return results[:20]
 
+    def get_decision(self, decision_id: str) -> dict | None:
+        """Fetch a single decision by id (all columns). None if absent."""
+        try:
+            res = (
+                self.client.table("decisions")
+                .select("*")
+                .eq("id", decision_id)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except Exception as e:
+            logger.error(f"Error getting decision {decision_id}: {e}")
+            return None
+
     def mark_decision_superseded(self, old_id: str, new_id: str) -> None:
         """Mark an old decision as superseded by a new one."""
         self.client.table("decisions").update({
@@ -2489,6 +2504,50 @@ class SupabaseClient:
         result = self.client.table("pending_approvals").insert(data).execute()
         logger.info(f"Created pending approval: {approval_id} ({content_type})")
         return result.data[0]
+
+    def create_decision_supersede_proposal(
+        self,
+        new_id: str,
+        old_id: str,
+        new_summary: str = "",
+        old_summary: str = "",
+        source: str = "inference",
+    ) -> bool:
+        """Propose marking an old decision superseded by a newer one (Phase 2).
+
+        Emits a 'decision_supersede_proposal' pending_approval for Eyal's review —
+        never auto-flips (I1). Consumed by decide_proposal (Claude.ai) and the /sync
+        review (Telegram). Idempotent per (old, new): a deterministic approval_id +
+        a pre-check so re-approving the same meeting won't stack duplicate cards.
+        Returns True if a proposal now exists.
+        """
+        approval_id = f"decprop-{old_id}-{new_id}"
+        try:
+            existing = (
+                self.client.table("pending_approvals")
+                .select("approval_id")
+                .eq("approval_id", approval_id)
+                .eq("status", "pending")
+                .execute()
+                .data
+            )
+            if existing:
+                return True
+            self.create_pending_approval(
+                approval_id=approval_id,
+                content_type="decision_supersede_proposal",
+                content={
+                    "old_decision_id": old_id,
+                    "new_decision_id": new_id,
+                    "old_summary": old_summary,
+                    "new_summary": new_summary,
+                    "source": source,
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error creating decision_supersede_proposal ({old_id}->{new_id}): {e}")
+            return False
 
     def get_pending_approval(self, approval_id: str) -> dict | None:
         """

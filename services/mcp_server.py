@@ -614,9 +614,9 @@ class MCPServer:
             name="get_proposals",
             description=(
                 "[PROPOSALS] List pending proposals awaiting your decision — knowledge "
-                "topic merges/assignments, task-field updates, Gantt row->topic tags. "
-                "Optional type filter: knowledge|task|gantt_tag. Act on one with "
-                "decide_proposal."
+                "topic merges/assignments, task-field updates, decision supersessions, "
+                "Gantt row->topic tags. Optional type filter: knowledge|task|decision|"
+                "gantt_tag. Act on one with decide_proposal."
             ),
         )
         async def get_proposals(type: str | None = None) -> dict:
@@ -629,6 +629,8 @@ class MCPServer:
                     types = ("topic_merge", "topic_assign")
                 elif type == "task":
                     types = ("task_update_proposal",)
+                elif type == "decision":
+                    types = ("decision_supersede_proposal",)
                 elif type == "gantt_tag":
                     types = ("gantt_tag_mapping",)
                 else:
@@ -650,9 +652,10 @@ class MCPServer:
         @mcp.tool(
             name="decide_proposal",
             description=(
-                "[PROPOSALS] Decide a pending proposal (knowledge/task/gantt_tag) by its "
-                "proposal_id from get_proposals. decision='approve' applies it, 'reject' "
-                "discards it. Optional edits overrides the proposed payload (gantt_tag "
+                "[PROPOSALS] Decide a pending proposal (knowledge/task/decision/gantt_tag) "
+                "by its proposal_id from get_proposals. decision='approve' applies it, "
+                "'reject' discards it. A 'decision' proposal marks an old decision superseded "
+                "by a newer one. Optional edits overrides the proposed payload (gantt_tag "
                 "mappings)."
             ),
         )
@@ -715,6 +718,19 @@ class MCPServer:
                                                details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
                     mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
                     return _success({"decision": "rejected"})
+
+                # --- decision supersession (Phase 2) ---
+                if content_type == "decision_supersede_proposal":
+                    from processors.decision_intelligence import apply_decision_supersede
+                    c = pending.get("content") or {}
+                    approve = decision == "approve"
+                    result = apply_decision_supersede(c, approve)
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action(
+                        "decision_supersede_approved" if approve else "decision_supersede_rejected",
+                        details={"proposal_id": proposal_id, **c, "result": result}, triggered_by="eyal")
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": decision})
+                    return _success({"decision": "approved" if approve else "rejected", "result": result})
 
                 # --- gantt row->topic tag mapping ---
                 if content_type == "gantt_tag_mapping":

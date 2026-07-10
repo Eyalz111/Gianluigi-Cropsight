@@ -1150,6 +1150,22 @@ async def process_response(
                 )
                 # never raise — approval flow must complete
 
+            # Phase 2 (decision intelligence): raise supersession PROPOSALS for
+            # Eyal's approval. Any newly-approved decision that superseded an
+            # older active one (parent_decision_id set at extraction) becomes a
+            # one-tap proposal — we PROPOSE the status flip, never auto-flip (I1).
+            # Flag-gated + fire-and-forget so it can't break the approval flow.
+            if getattr(settings, "DECISION_INTELLIGENCE_ENABLED", False):
+                try:
+                    from processors.decision_intelligence import (
+                        propose_supersessions_for_meeting,
+                    )
+                    propose_supersessions_for_meeting(meeting_id)
+                except Exception as e:
+                    logger.warning(
+                        f"[decision_intel] supersession proposal failed for {meeting_id}: {e}"
+                    )
+
         # v2.3 PR 3: log approval observation. Single call covers all
         # content_type branches below — placed here so early-returning
         # branches (prep, digest, gantt, brief, review) are also captured.

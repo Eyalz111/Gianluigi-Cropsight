@@ -643,6 +643,10 @@ class Settings(BaseSettings):
     KNOWLEDGE_READBACK_LATENCY_BUDGET_S: float = Field(
         default=15.0, description="Per-meeting added-latency budget (seconds) for read-back; monitored, not blocking"
     )
+    DECISION_INTELLIGENCE_ENABLED: bool = Field(
+        default=False,
+        description="Phase 2: raise decision-supersession PROPOSALS on meeting approval (Eyal approves; never auto-flip). Off = dormant, no behavior change."
+    )
 
     # ==========================================================================
     # Outputs reconcile (v3) — DB-truth + Sheet-editable via column-ownership sync.
