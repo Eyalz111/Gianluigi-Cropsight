@@ -716,6 +716,45 @@ class GoogleSheetsService:
 
         return tasks
 
+    async def get_all_decisions(self) -> list[dict]:
+        """Get all decisions from the Decisions tab (A:H when the id column is on).
+
+        Returns each row with its row_number + id — the reconcile identity keys
+        (Phase 2). Mirrors get_all_tasks. When DECISION_RECONCILE_ENABLED is off
+        there is no id column, so id comes back "" (reconcile is gated off then).
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            logger.warning("TASK_TRACKER_SHEET_ID not configured")
+            return []
+
+        headers = _decision_headers()
+        num_cols = len(headers)
+        end_col = chr(ord("A") + num_cols - 1)
+        rows = await self._read_sheet_range(
+            sheet_id=settings.TASK_TRACKER_SHEET_ID,
+            range_name=f"Decisions!A:{end_col}",
+        )
+        if not rows or len(rows) < 2:
+            return []
+
+        include_id = _decision_id_enabled()
+        out = []
+        for i, row in enumerate(rows[1:], start=2):
+            while len(row) < num_cols:
+                row.append("")
+            out.append({
+                "row_number": i,
+                "label": row[DECISION_COL_INDEX["label"]],
+                "decision": row[DECISION_COL_INDEX["decision"]],
+                "rationale": row[DECISION_COL_INDEX["rationale"]],
+                "confidence": row[DECISION_COL_INDEX["confidence"]],
+                "source_meeting": row[DECISION_COL_INDEX["source_meeting"]],
+                "date": row[DECISION_COL_INDEX["date"]],
+                "status": row[DECISION_COL_INDEX["status"]],
+                "id": row[7] if include_id else "",
+            })
+        return out
+
     async def archive_completed_tasks(self, titles_to_archive: list[str]) -> int:
         """
         Move completed tasks from active tab to Archive tab.

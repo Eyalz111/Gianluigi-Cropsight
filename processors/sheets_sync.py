@@ -641,6 +641,19 @@ _CONTENT_MAP = {"title": ("task", "task"), "label": ("label", "label")}
 # DB-only tasks in these statuses get re-added to the Sheet (done/archived are not resurrected)
 _READD_STATUSES = ("pending", "in_progress", "overdue")
 
+# Decisions (Phase 2, editable Decisions sheet). Content db-field -> (DECISION_COLUMNS
+# key, get_all_decisions dict key). Reconciled snapshot-style (manual-wins-and-sticky).
+# Status is handled separately (the monotonic-supersede rule), not here.
+_DECISION_CONTENT_MAP = {
+    "description": ("decision", "decision"),
+    "label": ("label", "label"),
+    "rationale": ("rationale", "rationale"),
+    "confidence": ("confidence", "confidence"),
+}
+# A retired decision (superseded/reversed) can never be resurrected to 'active' by
+# a stale Sheet cell — the supersession layer stays authoritative for that direction.
+_DECISION_RETIRED = ("superseded", "reversed")
+
 
 async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> dict:
     """
@@ -1038,6 +1051,227 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     except Exception:
         pass
     logger.info(f"[reconcile] applied: {summary}")
+    return summary
+
+
+async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None) -> dict:
+    """Reconcile the Decisions sheet against the DB (Phase 2 engine).
+
+    Mirrors reconcile_tasks, UUID-keyed on col H:
+    - Pull Eyal's content edits (Sheet-now != snapshot AND != DB) to the DB + mark
+      sticky (Rule 1); refresh untouched cells from the DB (Rule 4); rewrite the
+      per-decision snapshot LAST on success (Rule 3).
+    - Status has the MONOTONIC-SUPERSEDE guard: a stale Sheet 'active' cell can
+      never un-retire a DB superseded/reversed decision (the supersession layer
+      owns that direction). A deliberate forward hand-retire (active -> superseded)
+      still pulls.
+    - DB-only decisions -> re-added to the Sheet (never treated as deletes).
+
+    FIRST CUT: edits/refreshes EXISTING decisions only. Blank-id (hand-authored)
+    rows are counted + LEFT, not created (create needs a source meeting). Gated on
+    DECISION_RECONCILE_ENABLED — a no-op until cutover.
+    """
+    from services.google_sheets import sheets_service, DECISION_COLUMNS
+
+    if not getattr(settings, "DECISION_RECONCILE_ENABLED", False):
+        return {"skipped": "DECISION_RECONCILE_ENABLED off"}
+    if shadow is None:
+        shadow = False  # the enable flag IS the go-live switch; no separate shadow
+    write_allowed = not (dry_run or shadow)
+
+    try:
+        sheet_decisions = await sheets_service.get_all_decisions()
+    except Exception as e:
+        logger.error(f"[decision-reconcile] could not read Sheet: {e}")
+        return {"error": str(e)}
+    db_decisions = supabase_client.list_decisions(
+        limit=2000, include_pending=True, include_superseded=True
+    )
+    snapshots = supabase_client.get_decision_snapshots()
+
+    # GUARD [mirror 2026-07-10 task incident]: a transient empty read would make
+    # every DB decision look "missing" and re-add them all -> duplicate the sheet.
+    if not sheet_decisions and len(snapshots) > 0:
+        logger.error(
+            f"[decision-reconcile] ABORTED — sheet read 0 rows but {len(snapshots)} "
+            f"snapshots exist. Refusing (a bad read would mass re-add + duplicate)."
+        )
+        try:
+            supabase_client.log_action(
+                "decision_reconcile_aborted_bad_read",
+                details={"sheet_rows": 0, "snapshots": len(snapshots)},
+                triggered_by="auto",
+            )
+        except Exception:
+            pass
+        return {"error": "sheet_read_empty", "snapshots": len(snapshots)}
+
+    db_by_id = {d["id"]: d for d in db_decisions if d.get("id")}
+    sheet_by_id, blank_id = {}, 0
+    for sd in sheet_decisions:
+        sid = str(sd.get("id") or "").strip()
+        if sid:
+            sheet_by_id[sid] = sd
+        elif str(sd.get("decision") or "").strip():
+            blank_id += 1  # hand-authored row — first cut leaves it
+
+    summary = {"matched": 0, "pulled": 0, "pushed": 0, "readded": 0,
+               "blank_id": blank_id, "status_guarded": 0,
+               "shadow": shadow, "dry_run": dry_run}
+    db_updates: dict[str, dict] = {}
+    manual_marks: list[tuple] = []
+    cell_writes: list[dict] = []
+    snapshot_writes: list[tuple] = []
+
+    def _cell(col_key, row, value):
+        if row:
+            cell_writes.append({
+                "range": f"Decisions!{DECISION_COLUMNS[col_key]}{row}",
+                "values": [[value if value is not None else ""]],
+            })
+
+    for sid, sd in sheet_by_id.items():
+        dd = db_by_id.get(sid)
+        if not dd:
+            continue  # Sheet id the DB doesn't know — leave it
+        summary["matched"] += 1
+        row = sd.get("row_number")
+        snap = snapshots.get(sid) or {}
+        upd, final = {}, {}
+
+        # --- content fields (description / label / rationale / confidence) ---
+        for db_key, (col_key, sheet_key) in _DECISION_CONTENT_MAP.items():
+            c_sheet, c_snap, c_db = sd.get(sheet_key), snap.get(db_key), dd.get(db_key)
+            if (str(c_sheet or "").strip()
+                    and _normalize(str(c_sheet)) != _normalize(str(c_snap))
+                    and _normalize(str(c_sheet)) != _normalize(str(c_db))):
+                val = c_sheet
+                if db_key == "confidence":
+                    try:
+                        val = int(c_sheet)
+                    except (TypeError, ValueError):
+                        # unparseable confidence — keep DB, don't pull garbage
+                        final[db_key] = c_db
+                        continue
+                upd[db_key] = val                      # Eyal edited (Rule 1)
+                manual_marks.append((sid, db_key))
+                summary["pulled"] += 1
+                final[db_key] = val
+            elif _normalize(str(c_db)) != _normalize(str(c_sheet)):
+                _cell(col_key, row, c_db)              # DB advanced -> refresh (Rule 4)
+                summary["pushed"] += 1
+                final[db_key] = c_db
+            else:
+                final[db_key] = c_sheet
+
+        # --- status (monotonic-supersede rule) ---
+        s_status = _normalize(sd.get("status"))
+        snap_status = _normalize(snap.get("decision_status"))
+        db_status = _normalize(dd.get("decision_status"))
+        if db_status in _DECISION_RETIRED and s_status == "active":
+            # stale/careless cell — NEVER resurrect. Refresh Sheet <- DB.
+            _cell("status", row, dd.get("decision_status"))
+            summary["status_guarded"] += 1
+            final["decision_status"] = dd.get("decision_status")
+        elif s_status and s_status != snap_status and s_status != db_status:
+            upd["decision_status"] = s_status          # forward hand-retire (Rule 1)
+            manual_marks.append((sid, "status"))
+            summary["pulled"] += 1
+            final["decision_status"] = s_status
+        elif db_status != s_status:
+            _cell("status", row, dd.get("decision_status"))  # DB advanced -> refresh
+            summary["pushed"] += 1
+            final["decision_status"] = dd.get("decision_status")
+        else:
+            final["decision_status"] = dd.get("decision_status") or sd.get("status")
+
+        if upd:
+            db_updates[sid] = upd
+        snapshot_writes.append((sid, row, final.get("description"), final.get("label"),
+                                final.get("rationale"), final.get("confidence"),
+                                final.get("decision_status")))
+
+    # --- DB-only approved decisions -> re-add to the Sheet (never delete) ---
+    readd_rows = []
+    for did, dd in db_by_id.items():
+        if did in sheet_by_id:
+            continue
+        if (dd.get("approval_status") or "approved") != "approved":
+            continue
+        summary["readded"] += 1
+        readd_rows.append(dd)
+
+    if shadow or dry_run:
+        logger.info(f"[decision-reconcile][{'shadow' if shadow else 'dry-run'}] {summary}")
+        try:
+            supabase_client.log_action(
+                "decision_shadow_reconcile" if shadow else "decision_reconcile_dryrun",
+                details=summary, triggered_by="auto")
+        except Exception:
+            pass
+        return summary
+
+    # --- APPLY ---
+    for did, upd in db_updates.items():
+        try:
+            supabase_client.update_decision(did, **upd)
+            for (mid, mfield) in manual_marks:
+                if mid == did:
+                    supabase_client.mark_decision_field_manual(did, mfield, "sheet_edit")
+        except Exception as e:
+            logger.warning(f"[decision-reconcile] DB update failed for {did}: {e}")
+
+    # Re-add DB-only rows. SANITY CAP [mirror 2026-07-10]: a truncated read makes
+    # matched decisions look missing; never re-add more than the sheet matched.
+    _readd_cap = max(30, len(sheet_by_id))
+    if len(readd_rows) > _readd_cap:
+        logger.error(
+            f"[decision-reconcile] SKIPPED re-add of {len(readd_rows)} rows — exceeds "
+            f"cap ({_readd_cap}) vs {len(sheet_by_id)} matched (suspected truncated read)."
+        )
+        try:
+            supabase_client.log_action(
+                "decision_reconcile_readd_capped",
+                details={"readd": len(readd_rows), "matched": len(sheet_by_id), "cap": _readd_cap},
+                triggered_by="auto")
+        except Exception:
+            pass
+        readd_rows = []
+        summary["readded"] = 0
+    for dd in readd_rows:
+        try:
+            meeting_info = dd.get("meetings") if isinstance(dd.get("meetings"), dict) else {}
+            src = dd.get("source_meeting") or (meeting_info or {}).get("title", "")
+            await sheets_service.add_decisions_batch_to_sheet(
+                [dd], src, str(dd.get("created_at", ""))[:10])
+            if dd.get("id"):
+                supabase_client.upsert_decision_snapshot(
+                    dd["id"], None, dd.get("description"), dd.get("label"),
+                    dd.get("rationale"), dd.get("confidence"), dd.get("decision_status"))
+        except Exception as e:
+            logger.warning(f"[decision-reconcile] re-add failed for {dd.get('id')}: {e}")
+
+    if cell_writes:
+        try:
+            sheets_service.service.spreadsheets().values().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={"valueInputOption": "RAW", "data": cell_writes},
+            ).execute()
+        except Exception as e:
+            logger.error(f"[decision-reconcile] batched Sheet write failed: {e}")
+            return {**summary, "error": "sheet_write_failed"}  # do NOT rewrite snapshot
+
+    # Rewrite snapshots LAST (one light retry, mirror reconcile_tasks).
+    for (did, row, sdesc, slabel, srat, sconf, sstatus) in snapshot_writes:
+        ok = supabase_client.upsert_decision_snapshot(did, row, sdesc, slabel, srat, sconf, sstatus)
+        if not ok:
+            supabase_client.upsert_decision_snapshot(did, row, sdesc, slabel, srat, sconf, sstatus)
+
+    try:
+        supabase_client.log_action("decision_reconcile_applied", details=summary, triggered_by="auto")
+    except Exception:
+        pass
+    logger.info(f"[decision-reconcile] applied: {summary}")
     return summary
 
 
