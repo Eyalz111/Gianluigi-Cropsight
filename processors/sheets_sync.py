@@ -1172,11 +1172,14 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
         upd, final = {}, {}
 
         # --- content fields (description / label / rationale / confidence) ---
+        # NOTE: use _normalize DIRECTLY (it maps None -> ""); wrapping in str()
+        # first turns None into "None" and makes a null DB field never match a
+        # blank sheet cell -> a permanent push-churn loop (2026-07-11 cutover bug).
         for db_key, (col_key, sheet_key) in _DECISION_CONTENT_MAP.items():
             c_sheet, c_snap, c_db = sd.get(sheet_key), snap.get(db_key), dd.get(db_key)
-            if (str(c_sheet or "").strip()
-                    and _normalize(str(c_sheet)) != _normalize(str(c_snap))
-                    and _normalize(str(c_sheet)) != _normalize(str(c_db))):
+            if (_normalize(c_sheet)
+                    and _normalize(c_sheet) != _normalize(c_snap)
+                    and _normalize(c_sheet) != _normalize(c_db)):
                 val = c_sheet
                 if db_key == "confidence":
                     try:
@@ -1189,7 +1192,7 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
                 manual_marks.append((sid, db_key))
                 summary["pulled"] += 1
                 final[db_key] = val
-            elif _normalize(str(c_db)) != _normalize(str(c_sheet)):
+            elif _normalize(c_db) != _normalize(c_sheet):
                 _cell(col_key, row, c_db)              # DB advanced -> refresh (Rule 4)
                 summary["pushed"] += 1
                 final[db_key] = c_db
