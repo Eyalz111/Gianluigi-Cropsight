@@ -309,6 +309,14 @@ def _decision_headers() -> list[str]:
         headers = headers + ["ID"]
     return headers
 
+
+def _confidence_cell(d: dict) -> str:
+    """Confidence as a sheet string. Missing key -> default 3 (extraction path);
+    an explicit NULL -> blank (NOT the literal 'None' str(None) used to write —
+    which the reconcile then couldn't parse and left on the sheet)."""
+    c = d.get("confidence", 3)
+    return "" if c is None else str(c)
+
 # Legacy constant — kept for backward compatibility during transition
 TASK_TRACKER_COLUMNS = TASK_TRACKER_HEADERS
 
@@ -1138,7 +1146,7 @@ class GoogleSheetsService:
                     d.get("label", ""),
                     d.get("description", ""),
                     d.get("rationale", ""),
-                    str(d.get("confidence", 3)),
+                    _confidence_cell(d),
                     source,
                     str(d.get("created_at", ""))[:10],
                     d.get("decision_status", "Active"),
@@ -1994,7 +2002,7 @@ class GoogleSheetsService:
                     d.get("label", ""),
                     d.get("description", ""),
                     d.get("rationale", ""),
-                    str(d.get("confidence", 3)),
+                    _confidence_cell(d),
                     source_meeting,
                     str(meeting_date)[:10],
                     d.get("decision_status", "Active"),

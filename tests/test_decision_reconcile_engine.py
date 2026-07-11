@@ -117,6 +117,17 @@ class TestContent:
         assert res["pushed"] == 0 and res["pulled"] == 0
         assert _cell_writes(fake) == []
 
+    async def test_junk_confidence_cell_self_heals(self, monkeypatch):
+        # A stale "None" confidence cell (old rebuild artifact) is not pulled as
+        # garbage — it's refreshed from the DB (blank here), then quiesces.
+        db = [_ddec(id="d1", description="X", confidence=None)]
+        snap = {"d1": _snap(db[0])}
+        sheet = [_srow(id="d1", decision="X", confidence="None")]
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+        res = await ss.reconcile_decisions()
+        assert res["pushed"] >= 1 and res["pulled"] == 0
+        assert any(w["values"] == [[""]] for w in _cell_writes(fake))  # D -> blank
+
     async def test_content_refresh_from_db(self, monkeypatch):
         db = [_ddec(id="d1", description="New from DB")]
         snap = {"d1": _snap(_ddec(id="d1", description="Old"))}  # snap == sheet == "Old"
