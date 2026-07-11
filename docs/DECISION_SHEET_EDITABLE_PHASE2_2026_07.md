@@ -68,6 +68,11 @@ flip on only at cutover. (Do NOT reuse `RECONCILE_SHADOW_MODE` — that's task-s
 
 ## Build sequence (3 PRs, all under shadow until cutover)
 
+> **STATUS 2026-07-11:** ✅ **PR A DONE** (commits 5f23d55, b2cedea) · ✅ **PR B DONE**
+> (bc67eb1 engine+reader, 01016b1 apply_edits+wiring). All tests green; all dark
+> behind `DECISION_RECONCILE_ENABLED=false`. **NEXT: PR C** (decision_update_proposal
+> producer + DecisionBrief). Then cutover (§runbook).
+
 ### PR A — substrate + identity (no behavior change)
 1. **Migration** `scripts/migrate_decision_reconcile_editable.sql` (WRITTEN):
    generalizes `sheet_snapshots` (decision_id + description/rationale/confidence/
