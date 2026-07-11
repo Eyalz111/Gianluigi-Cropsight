@@ -2031,18 +2031,25 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         try:
             # v3: route through the reconcile engine (dry-run preview).
-            from processors.sheets_sync import reconcile_tasks
+            from processors.sheets_sync import reconcile_tasks, reconcile_decisions
 
             summary = await reconcile_tasks(dry_run=True)
             if summary.get("error"):
                 await self.send_to_eyal(f"Sync error: {summary['error']}")
                 return
+            # Decisions preview — self-guards on DECISION_RECONCILE_ENABLED (returns
+            # {"skipped": ...} until cutover). Fold its counts into the same preview.
+            dec_summary = await reconcile_decisions(dry_run=True)
+            dec_pulled = dec_summary.get("pulled", 0)
+            dec_pushed = dec_summary.get("pushed", 0)
+            dec_readded = dec_summary.get("readded", 0)
 
             pulled = summary.get("pulled", 0)
             pushed = summary.get("pushed", 0)
             created = summary.get("created", 0)
             readded = summary.get("readded", 0)
-            if not (pulled or pushed or created or readded):
+            if not (pulled or pushed or created or readded
+                    or dec_pulled or dec_pushed or dec_readded):
                 await self.send_to_eyal("Sheets and DB are in sync. No changes needed.")
             else:
                 lines = [
@@ -2052,6 +2059,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     f"  • {created} new task(s) from Sheet",
                     f"  • {readded} task(s) re-added to Sheet",
                 ]
+                if dec_pulled or dec_pushed or dec_readded:
+                    lines += [
+                        f"  • {dec_pulled} decision edit(s) → DB",
+                        f"  • {dec_pushed} decision update(s) → Sheet",
+                        f"  • {dec_readded} decision(s) re-added to Sheet",
+                    ]
                 if settings.RECONCILE_SHADOW_MODE:
                     lines.append("\n⚠️ Shadow mode is ON — Apply will still write nothing until it's off.")
                 keyboard = [[
@@ -3714,7 +3727,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # ---- Sheets sync callbacks (Phase 11 C7) ----
         if action == "sync_apply":
             if meeting_id == "confirm":
-                from processors.sheets_sync import reconcile_tasks
+                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
                 summary = await reconcile_tasks(dry_run=False)  # v3 engine recomputes fresh
                 if summary.get("error"):
                     await self._safe_edit(query, f"Sync error: {summary['error']}")
@@ -3726,13 +3739,21 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                         "Set RECONCILE_SHADOW_MODE=false to apply."
                     )
                     return
-                await self._safe_edit(
-                    query,
+                # Decisions apply — self-guards on DECISION_RECONCILE_ENABLED.
+                dec = await reconcile_decisions(dry_run=False)
+                msg = (
                     f"Sync applied — {summary.get('pulled', 0)} edit(s)→DB, "
                     f"{summary.get('pushed', 0)} DB→Sheet, "
                     f"{summary.get('created', 0)} created, "
                     f"{summary.get('readded', 0)} re-added."
                 )
+                if isinstance(dec, dict) and not dec.get("skipped") and (
+                        dec.get("pulled") or dec.get("pushed") or dec.get("readded")):
+                    msg += (
+                        f"\nDecisions — {dec.get('pulled', 0)} edit(s)→DB, "
+                        f"{dec.get('pushed', 0)} DB→Sheet, {dec.get('readded', 0)} re-added."
+                    )
+                await self._safe_edit(query, msg)
             else:
                 await self._safe_edit(query, "Sync cancelled.")
             return

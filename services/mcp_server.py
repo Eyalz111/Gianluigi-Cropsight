@@ -719,6 +719,19 @@ class MCPServer:
                     mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
                     return _success({"decision": "rejected"})
 
+                # --- decision-field update (Phase 2 PR C, propose-don't-clobber) ---
+                if content_type == "decision_update_proposal":
+                    from processors.decision_intelligence import apply_decision_update
+                    c = pending.get("content") or {}
+                    approve = decision == "approve"
+                    result = apply_decision_update(c, approve)
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action(
+                        "decision_update_approved" if approve else "decision_update_rejected",
+                        details={"proposal_id": proposal_id, **c, "result": result}, triggered_by="eyal")
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": decision})
+                    return _success({"decision": "approved" if approve else "rejected", "result": result})
+
                 # --- decision supersession (Phase 2) ---
                 if content_type == "decision_supersede_proposal":
                     from processors.decision_intelligence import apply_decision_supersede
@@ -2606,9 +2619,12 @@ class MCPServer:
         )
         async def sync_from_sheets(apply: bool = False) -> dict:
             try:
-                from processors.sheets_sync import reconcile_tasks
+                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
 
                 summary = await reconcile_tasks(dry_run=not apply)
+                # Decisions reconcile self-guards on DECISION_RECONCILE_ENABLED
+                # (returns {"skipped": ...} until cutover) — safe to always call.
+                dec_summary = await reconcile_decisions(dry_run=not apply)
                 mcp_auth.log_call("sync_from_sheets", {"apply": apply})
                 if isinstance(summary, dict) and summary.get("error"):
                     return _error(summary["error"])
@@ -2616,6 +2632,7 @@ class MCPServer:
                 return _success({
                     "status": "applied" if applied else "preview",
                     "summary": summary,
+                    "decisions": dec_summary,
                     "note": (
                         "Reconcile is in SHADOW mode — nothing was written. "
                         "Set RECONCILE_SHADOW_MODE=false to apply."

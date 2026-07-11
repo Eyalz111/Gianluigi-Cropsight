@@ -658,6 +658,10 @@ class Settings(BaseSettings):
         default=True,
         description="Reconcile computes + logs but does NOT write Sheet/DB/snapshot. Keep True until cutover (test on a duplicated sheet first)."
     )
+    DECISION_RECONCILE_ENABLED: bool = Field(
+        default=False,
+        description="Phase 2 (editable Decisions sheet): enable the Sheet<->DB decision reconcile AND the sheet id column (col H) + protected ranges. Off = historical one-way A:G layout, no reconcile. Flip ONLY at cutover (after migration + backfill)."
+    )
     RECONCILE_MIDDAY_HOUR: int = Field(default=13, description="IST hour for the midday reconcile")
     RECONCILE_PRENIGHTLY_HOUR: int = Field(
         default=2, description="IST hour for the pre-nightly reconcile (must be < KNOWLEDGE_NIGHTLY_HOUR so the DB is correct before nightly reads tasks)"

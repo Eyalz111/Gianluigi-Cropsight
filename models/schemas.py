@@ -288,6 +288,27 @@ class AreaBrief(BaseModel):
     version: int = 1
 
 
+class DecisionBrief(BaseModel):
+    """Living brief for a decision (stored as decisions.brief_json) — Phase 2 PR C.
+
+    The decision-thread analog of TopicBrief: the current synthesized state of a
+    decision plus its position in the supersession chain. Assembled DETERMINISTICALLY
+    today (no LLM); the later weekly decision-synthesis phase enriches `narrative`.
+    """
+    summary: str = ""                                     # current decision text
+    narrative: str = ""                                   # LLM-enriched later (empty for now)
+    status: str = "active"                                # active | superseded | reversed
+    rationale: str = ""
+    supersedes: list[str] = Field(default_factory=list)   # decision ids this replaced (ancestors)
+    superseded_by: str | None = None                      # decision id that replaced this
+    related: list[str] = Field(default_factory=list)      # linked decision ids (knowledge graph)
+    chain_length: int = 1                                 # size of the supersession chain
+    last_referenced_at: str | None = None
+    sensitivity: Sensitivity = Sensitivity.FOUNDERS
+    last_synthesized_at: str | None = None                # ISO timestamp
+    version: int = 1
+
+
 class KnowledgeLink(BaseModel):
     """A typed relationship in the knowledge_links table (graph-lite)."""
     from_type: str                        # 'topic' | 'area' | 'decision' | 'task' | 'meeting' | 'milestone'

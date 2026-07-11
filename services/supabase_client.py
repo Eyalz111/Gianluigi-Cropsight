@@ -2566,6 +2566,53 @@ class SupabaseClient:
             logger.error(f"Error creating task_update_proposal ({task_id}.{field}): {e}")
             return False
 
+    def create_decision_update_proposal(
+        self,
+        decision_id: str,
+        field: str,
+        proposed,
+        summary: str = "",
+        current=None,
+        source: str = "inference",
+    ) -> bool:
+        """Propose a change to a manually-set (sticky) decision field vs clobbering it.
+
+        Phase 2 PR C (propose-don't-clobber for decisions). Mirrors
+        create_task_update_proposal. `field` is a decision manual-flag name
+        (description/label/rationale/confidence/status). Emits a
+        'decision_update_proposal' consumed by decide_proposal (Claude.ai) + the
+        /sync review (Telegram). Idempotent per (decision, field) via a
+        deterministic approval_id + pre-check. Returns True if a proposal exists.
+        """
+        approval_id = f"decupd-{decision_id}-{field}"
+        try:
+            existing = (
+                self.client.table("pending_approvals")
+                .select("approval_id")
+                .eq("approval_id", approval_id)
+                .eq("status", "pending")
+                .execute()
+                .data
+            )
+            if existing:
+                return True  # one already open for this decision+field — don't stack
+            self.create_pending_approval(
+                approval_id=approval_id,
+                content_type="decision_update_proposal",
+                content={
+                    "decision_id": decision_id,
+                    "field": field,
+                    "proposed": proposed,
+                    "current": current,
+                    "summary": summary,
+                    "source": source,
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error creating decision_update_proposal ({decision_id}.{field}): {e}")
+            return False
+
     def create_decision_supersede_proposal(
         self,
         new_id: str,
@@ -4749,6 +4796,114 @@ class SupabaseClient:
             return True
         except Exception as e:
             logger.error(f"Error clearing manual flag ({task_id}.{field}): {e}")
+            return False
+
+    # =========================================================================
+    # Decision reconcile helpers (Phase 2, 2026-07 — editable Decisions sheet).
+    # Parallel to the task snapshot helpers above; reuse the sheet_snapshots table
+    # via entity_type='decision' (built for this) so the live task path is untouched.
+    # =========================================================================
+
+    _DECISION_MANUAL_FIELDS = ("description", "label", "rationale", "confidence", "status")
+
+    def get_decision_snapshots(self) -> dict:
+        """Last-synced snapshot per decision, keyed by decision_id."""
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", "decision")
+                .execute()
+                .data
+                or []
+            )
+            return {r["decision_id"]: r for r in rows if r.get("decision_id")}
+        except Exception as e:
+            logger.error(f"Error getting decision snapshots: {e}")
+            return {}
+
+    def upsert_decision_snapshot(
+        self,
+        decision_id: str,
+        sheet_row: int | None,
+        description: str | None,
+        label: str | None = None,
+        rationale: str | None = None,
+        confidence: int | None = None,
+        decision_status: str | None = None,
+    ) -> bool:
+        """Write/refresh the current snapshot row for a decision (one per decision).
+
+        The snapshot records the last-synced editable columns so a Sheet edit can be
+        attributed to Eyal (Sheet-now != snapshot) vs an untouched cell. Mirrors
+        upsert_sheet_snapshot for tasks; keyed on decision_id with entity_type='decision'.
+        """
+        try:
+            from datetime import datetime, timezone
+            # confidence is an INTEGER column — coerce "" / bad values to NULL.
+            conf: int | None
+            try:
+                conf = int(confidence) if confidence not in (None, "") else None
+            except (TypeError, ValueError):
+                conf = None
+            data = {
+                "decision_id": decision_id,
+                "entity_type": "decision",
+                "sheet_row": sheet_row,
+                "description": (description or None),
+                "label": (label or None),
+                "rationale": (rationale or None),
+                "confidence": conf,
+                "decision_status": (decision_status or None),
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("decision_id", decision_id)
+                .eq("entity_type", "decision")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "decision_id", decision_id
+                ).eq("entity_type", "decision").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting decision snapshot for '{decision_id}': {e}")
+            return False
+
+    def mark_decision_field_manual(self, decision_id: str, field: str, source: str) -> bool:
+        """Flag a decision field as manually set (sticky). field in _DECISION_MANUAL_FIELDS."""
+        if field not in self._DECISION_MANUAL_FIELDS:
+            logger.warning(f"mark_decision_field_manual: unknown field '{field}'")
+            return False
+        try:
+            from datetime import datetime, timezone
+            self.client.table("decisions").update({
+                f"manual_{field}": True,
+                "manual_set_at": datetime.now(timezone.utc).isoformat(),
+                "manual_set_source": source,
+            }).eq("id", decision_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking decision field manual ({decision_id}.{field}): {e}")
+            return False
+
+    def clear_decision_manual_flag(self, decision_id: str, field: str) -> bool:
+        """Clear a decision sticky flag so inference can write the field again."""
+        if field not in self._DECISION_MANUAL_FIELDS:
+            logger.warning(f"clear_decision_manual_flag: unknown field '{field}'")
+            return False
+        try:
+            self.client.table("decisions").update(
+                {f"manual_{field}": False}
+            ).eq("id", decision_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing decision manual flag ({decision_id}.{field}): {e}")
             return False
 
     # =========================================================================
