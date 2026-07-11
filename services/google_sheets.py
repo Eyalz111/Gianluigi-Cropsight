@@ -290,6 +290,25 @@ DECISION_TRACKER_HEADERS = [
     "Source Meeting", "Date", "Status",
 ]
 
+
+def _decision_id_enabled() -> bool:
+    """Whether the Decisions sheet carries the id column (col H).
+
+    The id is the reconcile identity key — meaningless without the reconcile, so
+    it appears only under DECISION_RECONCILE_ENABLED (Phase 2, editable Decisions
+    sheet). Resolved at RUNTIME (not a module const) so tests + a Cloud Run flag
+    flip both take effect. Off => the historical A:G 7-column layout.
+    """
+    return getattr(settings, "DECISION_RECONCILE_ENABLED", False)
+
+
+def _decision_headers() -> list[str]:
+    """Decisions header row, runtime-resolved (appends 'ID' when id is enabled)."""
+    headers = list(DECISION_TRACKER_HEADERS)
+    if _decision_id_enabled():
+        headers = headers + ["ID"]
+    return headers
+
 # Legacy constant — kept for backward compatibility during transition
 TASK_TRACKER_COLUMNS = TASK_TRACKER_HEADERS
 
@@ -1067,14 +1086,16 @@ class GoogleSheetsService:
             )
 
             # Build rows
-            rows = [DECISION_TRACKER_HEADERS]
+            include_id = _decision_id_enabled()
+            headers = _decision_headers()
+            rows = [headers]
             for d in sorted_decisions:
                 meeting_info = d.get("meetings") or {}
                 source = (
                     d.get("source_meeting", "")
                     or (meeting_info.get("title", "") if isinstance(meeting_info, dict) else "")
                 )
-                rows.append([
+                row = [
                     d.get("label", ""),
                     d.get("description", ""),
                     d.get("rationale", ""),
@@ -1082,10 +1103,13 @@ class GoogleSheetsService:
                     source,
                     str(d.get("created_at", ""))[:10],
                     d.get("decision_status", "Active"),
-                ])
+                ]
+                if include_id:
+                    row.append(d.get("id", ""))   # col H — reconcile identity key
+                rows.append(row)
 
             # Clear and rewrite
-            num_cols = len(DECISION_COLUMNS)
+            num_cols = len(headers)
             end_col = chr(ord("A") + num_cols - 1)
 
             # Route BOTH clear and write through the retry wrapper. The
@@ -1124,6 +1148,14 @@ class GoogleSheetsService:
                 raise
 
             logger.info(f"Rebuilt Decisions sheet: {len(sorted_decisions)} decisions written")
+
+            # Lock the system-owned columns once the sheet carries ids (reconcile
+            # live). Best-effort — never fail the rebuild on a protection hiccup.
+            if include_id:
+                try:
+                    await self.format_decision_tracker(sheet_id)
+                except Exception as fmt_err:
+                    logger.warning(f"Could not protect Decisions sheet: {fmt_err}")
 
             try:
                 from services.supabase_client import supabase_client
@@ -1867,15 +1899,14 @@ class GoogleSheetsService:
             new_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
             logger.info(f"Created Decisions tab (sheetId={new_sheet_id})")
 
-            # Write header row (Phase 9A schema with label, rationale, confidence)
-            headers = [
-                "Label", "Decision", "Rationale", "Confidence",
-                "Source Meeting", "Date", "Status",
-            ]
+            # Write header row (Phase 9A schema with label, rationale, confidence;
+            # + ID at col H under DECISION_RECONCILE_ENABLED — Phase 2).
+            headers = _decision_headers()
+            end_col = chr(ord("A") + len(headers) - 1)
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().update(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    range="Decisions!A1:G1",
+                    range=f"Decisions!A1:{end_col}1",
                     valueInputOption="RAW",
                     body={"values": [headers]},
                 )
@@ -1916,9 +1947,11 @@ class GoogleSheetsService:
             if sheet_id is None:
                 return False
 
+            include_id = _decision_id_enabled()
+            end_col = "H" if include_id else "G"
             rows = []
             for d in decisions:
-                rows.append([
+                row = [
                     d.get("label", ""),
                     d.get("description", ""),
                     d.get("rationale", ""),
@@ -1926,12 +1959,15 @@ class GoogleSheetsService:
                     source_meeting,
                     str(meeting_date)[:10],
                     d.get("decision_status", "Active"),
-                ])
+                ]
+                if include_id:
+                    row.append(d.get("id", ""))   # col H — reconcile identity key
+                rows.append(row)
 
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().append(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
-                    range="Decisions!A:G",
+                    range=f"Decisions!A:{end_col}",
                     valueInputOption="RAW",
                     insertDataOption="INSERT_ROWS",
                     body={"values": rows},
@@ -1943,6 +1979,86 @@ class GoogleSheetsService:
 
         except Exception as e:
             logger.error(f"Error adding decisions to sheet: {e}")
+            return False
+
+    async def format_decision_tracker(self, sheet_id: int | None = None) -> bool:
+        """Protect the system-owned Decisions columns (Phase 2, editable sheet).
+
+        Editable (Eyal-owned): Label(A), Decision(B), Rationale(C), Confidence(D),
+        Status(G). System-owned/locked: Source Meeting(E), Date(F), id(H). Because
+        Status(G) is editable and sits between them, E:F and H are TWO ranges (not
+        one contiguous block like tasks). warningOnly so the bot's own writes are
+        never blocked; idempotent (drop any prior Gianluigi decision protection,
+        then re-add). No-op unless the id column exists (reconcile live).
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+        if not _decision_id_enabled():
+            return True  # A:G layout has no locked identity column yet
+
+        try:
+            sid = sheet_id if sheet_id is not None else await self.ensure_decisions_tab()
+            if sid is None:
+                return False
+
+            _EF_DESC = "Gianluigi: system-owned (source_meeting / date)"
+            _ID_DESC = "Gianluigi: system-owned (id)"
+            requests: list[dict] = []
+
+            # Drop any prior Gianluigi decision protections (idempotent re-apply).
+            try:
+                pmeta = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        fields="sheets(properties.sheetId,protectedRanges)",
+                    )
+                )
+                for sheet in pmeta.get("sheets", []):
+                    if sheet.get("properties", {}).get("sheetId") != sid:
+                        continue
+                    for pr in sheet.get("protectedRanges", []):
+                        if pr.get("description") in (_EF_DESC, _ID_DESC):
+                            requests.append({
+                                "deleteProtectedRange": {
+                                    "protectedRangeId": pr["protectedRangeId"]
+                                }
+                            })
+            except Exception:
+                pass
+
+            src = DECISION_COL_INDEX["source_meeting"]  # E = 4
+            date_i = DECISION_COL_INDEX["date"]          # F = 5
+            id_i = len(DECISION_TRACKER_HEADERS)         # H = 7 (base has no id)
+            for start, end, desc in (
+                (src, date_i + 1, _EF_DESC),   # E:F
+                (id_i, id_i + 1, _ID_DESC),    # H
+            ):
+                requests.append({
+                    "addProtectedRange": {
+                        "protectedRange": {
+                            "range": {
+                                "sheetId": sid,
+                                "startRowIndex": 1,  # skip header
+                                "startColumnIndex": start,
+                                "endColumnIndex": end,
+                            },
+                            "description": desc,
+                            "warningOnly": True,
+                        }
+                    }
+                })
+
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
+            logger.info("Protected system-owned Decisions columns (E:F, H)")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error formatting Decision Tracker: {e}")
             return False
 
     # =========================================================================
