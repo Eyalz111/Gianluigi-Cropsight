@@ -118,9 +118,21 @@ class TestPulseGather:
 # =========================================================================
 
 class TestTeamPackage:
-    def test_team_recipients_excludes_eyal(self):
-        with patch.object(tp, "settings", SimpleNamespace(ROYE_EMAIL="r@x", PAOLO_EMAIL="p@x", YORAM_EMAIL="y@x")):
-            assert tp._team_recipients() == ["r@x", "p@x", "y@x"]
+    def test_team_recipients_excludes_eyal(self, monkeypatch):
+        # Roster-driven since the 2026-07-05 distribution-groups refactor:
+        # _team_recipients() == recipients_for_band("founders", exclude_eyal=True).
+        # Exercise that path (production env + known roster) and assert Eyal is dropped.
+        from config.settings import settings
+        import config.team
+        monkeypatch.setattr(settings, "ENVIRONMENT", "production", raising=False)
+        monkeypatch.setattr(settings, "EYAL_EMAIL", "e@x", raising=False)
+        monkeypatch.setattr(config.team, "TEAM_MEMBERS", {
+            "eyal":  {"email": "e@x", "tier": "ceo",      "status": "active"},
+            "roye":  {"email": "r@x", "tier": "founders", "status": "active"},
+            "paolo": {"email": "p@x", "tier": "founders", "status": "active"},
+            "yoram": {"email": "y@x", "tier": "founders", "status": "active"},
+        }, raising=False)
+        assert tp._team_recipients() == ["r@x", "p@x", "y@x"]
 
     def test_area_team_lines_ceo_degradation(self):
         areas = [
