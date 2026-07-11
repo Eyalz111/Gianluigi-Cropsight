@@ -170,3 +170,37 @@ class TestReaddAndSnapshot:
         res = await ss.reconcile_decisions(dry_run=True)
         assert res["pulled"] == 1                         # computed
         assert calls["update"] == [] and calls["snapshot"] == []  # but not applied
+
+
+class TestCutoverBootstrap:
+    async def test_bootstraps_when_sheet_has_no_ids(self, monkeypatch):
+        # Pre-cutover: sheet has A:G rows (decision text) but NO ids, no snapshots.
+        db = [_ddec(id="d1", description="X"), _ddec(id="d2", description="Y")]
+        sheet = [_srow(id="", decision="X"), _srow(id="", decision="Y")]
+        calls, fake = _setup(monkeypatch, sheet, db, {})   # no snapshots
+        fake.rebuild_decisions_sheet = AsyncMock(return_value=True)
+        res = await ss.reconcile_decisions()
+        assert res.get("bootstrapped") == 2
+        fake.rebuild_decisions_sheet.assert_awaited_once()
+        assert {a[0] for a in calls["snapshot"]} == {"d1", "d2"}  # snapshots seeded
+        assert calls["readd"] == []                        # did NOT duplicate via re-add
+
+    async def test_no_bootstrap_in_steady_state(self, monkeypatch):
+        db = [_ddec(id="d1", description="X")]
+        snap = {"d1": _snap(db[0])}
+        sheet = [_srow(id="d1", decision="X")]
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+        fake.rebuild_decisions_sheet = AsyncMock(return_value=True)
+        res = await ss.reconcile_decisions()
+        assert "bootstrapped" not in res
+        fake.rebuild_decisions_sheet.assert_not_awaited()
+
+    async def test_dry_run_bootstrap_writes_nothing(self, monkeypatch):
+        db = [_ddec(id="d1", description="X")]
+        sheet = [_srow(id="", decision="X")]
+        calls, fake = _setup(monkeypatch, sheet, db, {})
+        fake.rebuild_decisions_sheet = AsyncMock(return_value=True)
+        res = await ss.reconcile_decisions(dry_run=True)
+        assert res.get("bootstrapped") == 1               # reported
+        fake.rebuild_decisions_sheet.assert_not_awaited()  # but not executed
+        assert calls["snapshot"] == []

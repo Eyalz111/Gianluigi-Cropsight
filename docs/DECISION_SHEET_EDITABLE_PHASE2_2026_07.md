@@ -173,10 +173,11 @@ flip on only at cutover. (Do NOT reuse `RECONCILE_SHADOW_MODE` — that's task-s
    `python scripts/backfill_decision_snapshots.py` → `... --apply`.
 5. **Flip on**: `gcloud run services update gianluigi --region europe-west1
    --update-env-vars DECISION_RECONCILE_ENABLED=true` (use `--update-env-vars`).
-6. **Populate col-H ids on the Sheet from PROD** (not a local script): trigger one
-   `rebuild_decisions_sheet` in prod (e.g. an MCP/Telegram admin path or the first
-   reconcile), which rewrites the Decisions tab A:H with ids from DB and applies the
-   protected ranges. Only after this does the sheet carry the identity keys.
+6. **Trigger the first reconcile** (MCP `sync_from_sheets(apply=true)` or Telegram
+   `/sync` → Apply). It **self-bootstraps**: detecting the pre-cutover A:G sheet (rows
+   with no id, no snapshots), it does ONE `rebuild_decisions_sheet` to write the col-H
+   ids from the DB + seed snapshots, then returns. (No manual rebuild needed — the
+   engine handles it. The separate backfill in step 4 is now belt-and-suspenders.)
 7. **Verify** a `/sync` round-trip: edit a Decision-text cell + a Status cell, run
    `/sync`, confirm both preserved (not reverted); confirm a hand "active" on a
    DB-superseded decision does NOT resurrect it; cols E/F/H warn on hand-edit. Watch

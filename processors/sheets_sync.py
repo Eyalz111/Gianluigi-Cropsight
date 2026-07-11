@@ -1118,6 +1118,38 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
     summary = {"matched": 0, "pulled": 0, "pushed": 0, "readded": 0,
                "blank_id": blank_id, "status_guarded": 0,
                "shadow": shadow, "dry_run": dry_run}
+
+    # CUTOVER BOOTSTRAP: pre-cutover state — the sheet still holds the historical
+    # A:G rows (decision text present) but NONE carry an id, and no snapshots exist
+    # yet (the flag was just flipped). Re-adding would DUPLICATE every decision.
+    # Instead do ONE full rebuild to write the col-H ids from the DB + seed
+    # snapshots, then return — the next reconcile keys on the ids normally. This
+    # replaces the fragile "manually trigger a prod rebuild" cutover step.
+    if blank_id > 0 and not sheet_by_id and not snapshots:
+        approved = [d for d in db_decisions
+                    if (d.get("approval_status") or "approved") == "approved"]
+        summary["bootstrapped"] = len(approved)
+        if dry_run or shadow:
+            logger.info(f"[decision-reconcile][{'shadow' if shadow else 'dry-run'}] would bootstrap {summary}")
+            return summary
+        try:
+            await sheets_service.rebuild_decisions_sheet(approved)
+            for d in approved:
+                if d.get("id"):
+                    supabase_client.upsert_decision_snapshot(
+                        d["id"], None, d.get("description"), d.get("label"),
+                        d.get("rationale"), d.get("confidence"), d.get("decision_status"))
+        except Exception as e:
+            logger.error(f"[decision-reconcile] bootstrap rebuild failed: {e}")
+            return {**summary, "error": "bootstrap_failed"}
+        try:
+            supabase_client.log_action("decision_reconcile_bootstrapped",
+                                       details=summary, triggered_by="auto")
+        except Exception:
+            pass
+        logger.info(f"[decision-reconcile] bootstrapped col-H ids + snapshots: {summary}")
+        return summary
+
     db_updates: dict[str, dict] = {}
     manual_marks: list[tuple] = []
     cell_writes: list[dict] = []
