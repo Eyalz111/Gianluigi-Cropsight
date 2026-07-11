@@ -1185,7 +1185,11 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
                     try:
                         val = int(c_sheet)
                     except (TypeError, ValueError):
-                        # unparseable confidence — keep DB, don't pull garbage
+                        # Junk confidence cell (e.g. a stale "None" the old rebuild
+                        # wrote) — don't pull garbage; refresh it from the DB so the
+                        # cell self-heals to a number or blank.
+                        _cell(col_key, row, c_db)
+                        summary["pushed"] += 1
                         final[db_key] = c_db
                         continue
                 upd[db_key] = val                      # Eyal edited (Rule 1)
