@@ -105,6 +105,18 @@ class TestContent:
         assert ("d1", "description", "sheet_edit") in calls["manual"]
         assert _cell_writes(fake) == []                   # a pull writes no cell
 
+    async def test_null_db_field_blank_cell_no_churn(self, monkeypatch):
+        # A DB field that is None + a blank sheet cell must NOT push. The
+        # 2026-07-11 cutover bug wrapped values in str() before _normalize, so
+        # str(None)="None" never matched the blank cell "" -> permanent push churn.
+        db = [_ddec(id="d1", description="X", rationale=None, label=None)]
+        snap = {"d1": _snap(db[0])}                        # snapshot also None
+        sheet = [_srow(id="d1", decision="X", rationale="", label="")]
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+        res = await ss.reconcile_decisions()
+        assert res["pushed"] == 0 and res["pulled"] == 0
+        assert _cell_writes(fake) == []
+
     async def test_content_refresh_from_db(self, monkeypatch):
         db = [_ddec(id="d1", description="New from DB")]
         snap = {"d1": _snap(_ddec(id="d1", description="Old"))}  # snap == sheet == "Old"
