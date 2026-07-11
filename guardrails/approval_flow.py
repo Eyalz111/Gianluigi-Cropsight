@@ -1662,7 +1662,7 @@ EDITS TO APPLY:
 
 Return a JSON object with these keys:
 - "summary": the full updated summary text
-- "decisions": updated array of decisions (same format as above, remove items if edit says to delete)
+- "decisions": updated array of decisions (same format as above). For every decision you KEEP, include its original "index" from CURRENT DECISIONS UNCHANGED — this preserves the decision's identity (its Sheet id + supersession chain). Omit "index" (or set it to null) ONLY for a brand-new decision an edit adds. Remove decisions the edits delete.
 - "tasks": updated array of tasks (same format as above). For every task you KEEP, include its original "index" from CURRENT TASKS UNCHANGED — this preserves the task's identity. Omit "index" (or set it to null) ONLY for a brand-new task that an edit adds. Remove tasks the edits delete.
 - "follow_ups": updated array of follow-up meetings (same format)
 - "open_questions": updated array of open questions (same format)
@@ -1807,12 +1807,49 @@ Return ONLY the JSON object, no other text."""
             if new_tasks:
                 supabase_client.create_tasks_batch(meeting_id, new_tasks)
 
-            # Decisions
-            supabase_client.client.table("decisions").delete().eq(
-                "meeting_id", meeting_id
-            ).execute()
-            if edited_decisions:
-                supabase_client.create_decisions_batch(meeting_id, edited_decisions)
+            # Decisions — UPDATE IN PLACE by the original index so a decision's
+            # UUID (its Sheet col-H identity) + supersession chain SURVIVE an edit.
+            # The old delete+recreate minted new UUIDs, which orphaned the Sheet
+            # rows the reconcile keys on and dropped decision_status/parent links.
+            # Mirror the task in-place fix. [Phase 2 PR B, 2026-07]
+            old_dec_by_index = {i + 1: d for i, d in enumerate(decisions)}
+            dec_desc_buckets: dict = {}
+            for d in decisions:
+                dec_desc_buckets.setdefault(
+                    (d.get("description") or "").strip().lower(), []
+                ).append(d)
+            claimed_dec_ids: set = set()
+            new_decisions: list[dict] = []
+            for d in edited.get("decisions", []):
+                desc = d.get("description", "")
+                idx = d.get("index")
+                orig = old_dec_by_index.get(idx) if isinstance(idx, int) else None
+                if orig is None:
+                    # LLM dropped the index — match an unclaimed original by exact
+                    # description so a kept decision updates in place, not dup'd.
+                    bucket = dec_desc_buckets.get((desc or "").strip().lower(), [])
+                    orig = next(
+                        (o for o in bucket if o.get("id") and o["id"] not in claimed_dec_ids),
+                        None,
+                    )
+                if orig and orig.get("id") and orig["id"] not in claimed_dec_ids:
+                    try:
+                        supabase_client.update_decision(orig["id"], description=desc)
+                    except Exception as ue:
+                        logger.warning(
+                            f"apply_edits: in-place decision update failed for {orig['id']}: {ue}"
+                        )
+                    claimed_dec_ids.add(orig["id"])  # claimed either way -> never deleted
+                else:
+                    new_decisions.append({"description": desc})  # genuinely new
+            # Delete only the decisions the edit removed (shown to the LLM, absent now).
+            for d in decisions:
+                if d.get("id") and d["id"] not in claimed_dec_ids:
+                    supabase_client.client.table("decisions").delete().eq(
+                        "id", d["id"]
+                    ).execute()
+            if new_decisions:
+                supabase_client.create_decisions_batch(meeting_id, new_decisions)
 
             # Follow-ups
             supabase_client.client.table("follow_up_meetings").delete().eq(

@@ -2606,9 +2606,12 @@ class MCPServer:
         )
         async def sync_from_sheets(apply: bool = False) -> dict:
             try:
-                from processors.sheets_sync import reconcile_tasks
+                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
 
                 summary = await reconcile_tasks(dry_run=not apply)
+                # Decisions reconcile self-guards on DECISION_RECONCILE_ENABLED
+                # (returns {"skipped": ...} until cutover) — safe to always call.
+                dec_summary = await reconcile_decisions(dry_run=not apply)
                 mcp_auth.log_call("sync_from_sheets", {"apply": apply})
                 if isinstance(summary, dict) and summary.get("error"):
                     return _error(summary["error"])
@@ -2616,6 +2619,7 @@ class MCPServer:
                 return _success({
                     "status": "applied" if applied else "preview",
                     "summary": summary,
+                    "decisions": dec_summary,
                     "note": (
                         "Reconcile is in SHADOW mode — nothing was written. "
                         "Set RECONCILE_SHADOW_MODE=false to apply."

@@ -125,11 +125,16 @@ class ReconcileScheduler:
                     "reconcile", details={"slot": slot, "kind": "gantt"}
                 )
             else:
-                from processors.sheets_sync import reconcile_tasks
+                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
                 summary = await reconcile_tasks()
+                # Decisions reconcile self-guards on DECISION_RECONCILE_ENABLED
+                # (returns {"skipped": ...} until cutover) — safe to always call.
+                dec_summary = await reconcile_decisions()
                 supabase_client.upsert_scheduler_heartbeat(
                     "reconcile",
-                    details={"slot": slot, **(summary if isinstance(summary, dict) else {})},
+                    details={"slot": slot,
+                             **(summary if isinstance(summary, dict) else {}),
+                             "decisions": dec_summary if isinstance(dec_summary, dict) else None},
                 )
         except Exception as e:
             logger.error(f"Reconcile failed ({slot}): {e}")
