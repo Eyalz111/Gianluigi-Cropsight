@@ -2566,6 +2566,53 @@ class SupabaseClient:
             logger.error(f"Error creating task_update_proposal ({task_id}.{field}): {e}")
             return False
 
+    def create_decision_update_proposal(
+        self,
+        decision_id: str,
+        field: str,
+        proposed,
+        summary: str = "",
+        current=None,
+        source: str = "inference",
+    ) -> bool:
+        """Propose a change to a manually-set (sticky) decision field vs clobbering it.
+
+        Phase 2 PR C (propose-don't-clobber for decisions). Mirrors
+        create_task_update_proposal. `field` is a decision manual-flag name
+        (description/label/rationale/confidence/status). Emits a
+        'decision_update_proposal' consumed by decide_proposal (Claude.ai) + the
+        /sync review (Telegram). Idempotent per (decision, field) via a
+        deterministic approval_id + pre-check. Returns True if a proposal exists.
+        """
+        approval_id = f"decupd-{decision_id}-{field}"
+        try:
+            existing = (
+                self.client.table("pending_approvals")
+                .select("approval_id")
+                .eq("approval_id", approval_id)
+                .eq("status", "pending")
+                .execute()
+                .data
+            )
+            if existing:
+                return True  # one already open for this decision+field — don't stack
+            self.create_pending_approval(
+                approval_id=approval_id,
+                content_type="decision_update_proposal",
+                content={
+                    "decision_id": decision_id,
+                    "field": field,
+                    "proposed": proposed,
+                    "current": current,
+                    "summary": summary,
+                    "source": source,
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error creating decision_update_proposal ({decision_id}.{field}): {e}")
+            return False
+
     def create_decision_supersede_proposal(
         self,
         new_id: str,

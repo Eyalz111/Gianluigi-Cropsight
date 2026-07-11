@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Proposal content_types Eyal can decide from the Telegram /sync review flow.
 REVIEWABLE_TYPES = (
     "topic_merge", "topic_assign", "task_update_proposal", "decision_supersede_proposal",
+    "decision_update_proposal",
 )
 
 
@@ -32,6 +33,12 @@ def _label(content_type: str, c: dict) -> str:
         return f"Assign topic <b>\"{c.get('topic_name', '?')}\"</b> to area <b>{c.get('area_name', '?')}</b>?"
     if content_type == "task_update_proposal":
         return f"Update task field <b>{c.get('field', '?')}</b> → <b>{c.get('proposed', '?')}</b>?"
+    if content_type == "decision_update_proposal":
+        summ = (c.get("summary") or "?")[:80]
+        return (
+            f"Update decision field <b>{c.get('field', '?')}</b> → "
+            f"<b>{c.get('proposed', '?')}</b>?\n<i>\"{summ}\"</i>"
+        )
     if content_type == "decision_supersede_proposal":
         old = (c.get("old_summary") or "?")[:80]
         new = (c.get("new_summary") or "?")[:80]
@@ -111,6 +118,17 @@ def apply_proposal_decision(proposal_id: str, decision: str) -> dict:
             triggered_by="eyal",
         )
         return {"status": "ok", "decision": "approved" if approve else "rejected"}
+
+    if content_type == "decision_update_proposal":
+        from processors.decision_intelligence import apply_decision_update
+        result = apply_decision_update(content, approve)
+        supabase_client.delete_pending_approval(proposal_id)
+        supabase_client.log_action(
+            "decision_update_approved" if approve else "decision_update_rejected",
+            details={"proposal_id": proposal_id, "source": "telegram_sync", **content, "result": result},
+            triggered_by="eyal",
+        )
+        return {"status": "ok", "decision": "approved" if approve else "rejected", "result": result}
 
     if content_type == "decision_supersede_proposal":
         from processors.decision_intelligence import apply_decision_supersede

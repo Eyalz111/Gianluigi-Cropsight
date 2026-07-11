@@ -92,3 +92,78 @@ def apply_decision_supersede(content: dict, approve: bool) -> dict:
         link_type="supersedes", created_by="eyal",
     )
     return {"status": "applied", "old_id": old_id, "new_id": new_id}
+
+
+# =============================================================================
+# Propose-don't-clobber for decisions (Phase 2 PR C). Mirrors the task
+# task_update_proposal flow: a sticky (manually-set) decision field is never
+# overwritten by inference — a decision_update_proposal is raised for Eyal.
+# =============================================================================
+
+# Editable decision fields (manual_<field> flags). Mirrors
+# supabase_client._DECISION_MANUAL_FIELDS but kept local so validation doesn't
+# depend on the (test-patched) client instance.
+_DECISION_FIELDS = ("description", "label", "rationale", "confidence", "status")
+# Decision sticky-field name (manual_<field>) -> DB column. Only 'status' differs.
+_DECISION_FIELD_COLUMN = {"status": "decision_status"}
+
+
+def _decision_column(field: str) -> str:
+    return _DECISION_FIELD_COLUMN.get(field, field)
+
+
+def apply_decision_update(content: dict, approve: bool) -> dict:
+    """Apply or reject a decision_update_proposal.
+
+    On approve: write the proposed value + mark the field sticky (Eyal blessed
+    it). Shared by decide_proposal (Claude.ai) + the /sync review (Telegram), so
+    both surfaces behave identically. Guarded + idempotent.
+
+    Returns {"status": "applied"|"rejected"|"gone"|"invalid", ...}.
+    """
+    decision_id = content.get("decision_id")
+    field = content.get("field")
+    proposed = content.get("proposed")
+
+    if not approve:
+        return {"status": "rejected"}
+    if not (decision_id and field):
+        return {"status": "invalid"}
+    if field not in _DECISION_FIELDS:
+        return {"status": "invalid", "reason": f"unknown field {field}"}
+    if not supabase_client.get_decision(decision_id):
+        return {"status": "gone"}
+
+    supabase_client.update_decision(decision_id, **{_decision_column(field): proposed})
+    supabase_client.mark_decision_field_manual(decision_id, field, "eyal")
+    return {"status": "applied", "decision_id": decision_id, "field": field, "value": proposed}
+
+
+def propose_or_update_decision_field(
+    decision_id: str, field: str, value, *, source: str = "inference", summary: str = ""
+) -> str:
+    """The rail any FUTURE inference path must call to change a decision field.
+
+    If Eyal set the field by hand (manual_<field> sticky) -> raise a
+    decision_update_proposal for his one-tap review (propose, don't clobber).
+    Otherwise write it directly. Returns "proposed" | "updated" | "noop".
+
+    NOTE (2026-07-11): no current path auto-overwrites decision CONTENT — this is
+    the guard a future dedup/continuity updater calls instead of update_decision,
+    so a system change can never silently stomp a decision Eyal edited.
+    """
+    if field not in _DECISION_FIELDS:
+        logger.warning(f"propose_or_update_decision_field: unknown field '{field}'")
+        return "noop"
+    d = supabase_client.get_decision(decision_id)
+    if not d:
+        return "noop"
+    column = _decision_column(field)
+    if d.get(f"manual_{field}"):
+        supabase_client.create_decision_update_proposal(
+            decision_id=decision_id, field=field, proposed=value,
+            summary=summary or d.get("description", ""), current=d.get(column), source=source,
+        )
+        return "proposed"
+    supabase_client.update_decision(decision_id, **{column: value})
+    return "updated"
