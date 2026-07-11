@@ -167,3 +167,78 @@ def propose_or_update_decision_field(
         return "proposed"
     supabase_client.update_decision(decision_id, **{column: value})
     return "updated"
+
+
+# =============================================================================
+# DecisionBrief (Phase 2 PR C, groundwork). A decision's living-state object
+# (decisions.brief_json), assembled DETERMINISTICALLY from the decision + its
+# supersession chain — NO LLM. The later weekly decision-synthesis phase enriches
+# the `narrative`. This just keeps the object current on every approval.
+# =============================================================================
+
+_VALID_SENSITIVITY = {"public", "team", "founders", "ceo"}
+
+
+def build_decision_brief(decision_id: str) -> dict | None:
+    """Assemble + persist a DecisionBrief (brief_json) for one decision.
+
+    Deterministic snapshot of the decision + its chain position. Fire-and-forget:
+    returns the brief dict on success, None on any failure (never raises).
+    """
+    from datetime import datetime, timezone
+    from models.schemas import DecisionBrief
+    try:
+        d = supabase_client.get_decision(decision_id)
+        if not d:
+            return None
+        try:
+            chain = supabase_client.get_decision_chain(decision_id) or []
+        except Exception:
+            chain = []
+        # Ancestors this decision replaced = chain entries before it (oldest first).
+        supersedes: list[str] = []
+        for c in chain:
+            cid = c.get("id")
+            if cid == decision_id:
+                break
+            if cid:
+                supersedes.append(cid)
+
+        sens = (d.get("sensitivity") or "founders").lower()
+        if sens not in _VALID_SENSITIVITY:
+            sens = "founders"
+
+        brief = DecisionBrief(
+            summary=d.get("description", "") or "",
+            status=d.get("decision_status", "active") or "active",
+            rationale=d.get("rationale", "") or "",
+            supersedes=supersedes,
+            superseded_by=d.get("superseded_by"),
+            chain_length=max(1, len(chain)),
+            last_referenced_at=d.get("last_referenced_at"),
+            sensitivity=sens,
+            last_synthesized_at=datetime.now(timezone.utc).isoformat(),
+        )
+        payload = brief.model_dump(mode="json")
+        supabase_client.update_decision(decision_id, brief_json=payload)
+        return payload
+    except Exception as e:
+        logger.warning(f"[decision_intel] build_decision_brief({decision_id}) failed: {e}")
+        return None
+
+
+def refresh_decision_briefs_for_meeting(meeting_id: str) -> int:
+    """Rebuild the brief for each approved decision this meeting touched, plus any
+    parent it just superseded (whose status/superseded_by changed). Deterministic,
+    cheap; returns the count refreshed. Runs post-approval, fire-and-forget.
+    """
+    refreshed = 0
+    seen: set = set()
+    decisions = supabase_client.list_decisions(meeting_id=meeting_id, include_pending=False)
+    for d in decisions:
+        for did in (d.get("id"), d.get("parent_decision_id")):
+            if did and did not in seen:
+                seen.add(did)
+                if build_decision_brief(did):
+                    refreshed += 1
+    return refreshed

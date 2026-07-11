@@ -1078,8 +1078,13 @@ async def process_response(
                 try:
                     from processors.decision_intelligence import (
                         propose_supersessions_for_meeting,
+                        refresh_decision_briefs_for_meeting,
                     )
                     propose_supersessions_for_meeting(meeting_id)
+                    # Keep each decision's living-state object (brief_json) current.
+                    # Deterministic (no LLM), fire-and-forget — groundwork for the
+                    # later weekly decision-synthesis phase. [Phase 2 PR C]
+                    refresh_decision_briefs_for_meeting(meeting_id)
                 except Exception as e:
                     logger.warning(
                         f"[decision_intel] supersession proposal failed for {meeting_id}: {e}"
