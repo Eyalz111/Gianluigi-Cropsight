@@ -101,6 +101,45 @@ flip on only at cutover. (Do NOT reuse `RECONCILE_SHADOW_MODE` — that's task-s
 10. Tests: sheet text edit pulled + sticky; untouched cell refreshed from DB; a stale
     "active" cell does NOT un-supersede; edit-after-distribution makes no dup rows.
 
+#### PR B implementation notes (turnkey — from the 2026-07-11 reconcile_tasks study)
+- **Sheet reader:** `reconcile_tasks` uses `sheets_service.get_all_tasks()` which returns
+  each row with `row_number` + `id`. Decisions have no equivalent — `_read_decisions_from_sheets`
+  (`sheets_sync.py:319`) reads `Decisions!A:G` WITHOUT row numbers/id. **Build a
+  `get_all_decisions()`** (or extend the reader) that reads `Decisions!A:H` and returns
+  `{label, decision, rationale, confidence, source_meeting, date, status, id, row_number}`.
+- **reconcile_decisions skeleton** (mirror `reconcile_tasks:645-1041` closely):
+  1. `if shadow is None: shadow = not DECISION_RECONCILE_ENABLED` (NOTE: the flag is the
+     *enable*, so gate the whole function on it AND treat off as shadow). read sheet+db+snaps.
+  2. **Empty-read GUARD** (copy `:686-701`): `if not sheet_decisions and len(snaps)>0: abort`
+     → log `decision_reconcile_aborted_bad_read`, return.
+  3. Match by id (col H). `db = list_decisions(limit=2000, include_pending=True,
+     include_superseded=True)`; `snaps = get_decision_snapshots()`.
+  4. Per matched decision, 3-way per CONTENT field (description, label, rationale,
+     confidence) exactly like `_CONTENT_MAP` (`:784-798`): pull if `sheet!=snap AND
+     sheet!=db` (+ `mark_decision_field_manual`), elif `db!=sheet` refresh cell, else keep.
+     NEVER pull a blanked description (would null the decision text).
+  5. **Status (the monotonic rule):** normalize case (sheet "Active" vs db "active").
+     - `RETIRED = {"superseded","reversed"}`. If `db_status in RETIRED` and
+       `sheet_status == "active"` → **refresh cell ← db, NEVER pull** (can't resurrect).
+     - else standard 3-way (a hand `active→superseded` is a legit forward pull + sticky).
+  6. **Creates (blank-id rows): FIRST CUT = LEAVE + log a count, do NOT create.**
+     `create_decisions_batch` needs a `meeting_id` and can't set approval/decision_status,
+     and a hand-authored decision has no source meeting — so authoring-from-sheet is a
+     follow-up, not first cut. (Edit/refresh of existing decisions is the whole value.)
+  7. **Re-add DB-only decisions** to the sheet (mirror `:898-922` + the readd sanity cap
+     `:972`): a DB decision not on the sheet → append. Seed its snapshot from written
+     values (avoid phantom-pull, `:996-1003`).
+  8. Snapshot writes LAST via `upsert_decision_snapshot` (mirror `:1029-1034`), with the
+     one-retry. Batched cell writes via `values().batchUpdate` (`:1007`).
+- **apply_edits in place:** `approval_flow.py:1810-1815` delete+recreates decisions with
+  `edited_decisions=[{"description":...}]` (`:1702`). Mirror the task `_apply_in_place`
+  (`:1753-1808`): match edited-decision to existing by index/id, `update_decision(id, ...)`
+  in place (keeps UUID + chain fields), delete only genuinely-removed. This preserves the
+  col-H ids the reconcile keys on.
+- **Wiring:** add `reconcile_decisions()` calls next to each `reconcile_tasks()`:
+  scheduler `:128-129`, MCP `sync_from_sheets` `:2607-2611`, Telegram `/sync` `:2034,:3717`.
+  Guard each on `DECISION_RECONCILE_ENABLED` so it's a no-op until cutover.
+
 ### PR C — propose-don't-clobber + DecisionBrief groundwork
 11. **`decision_update_proposal`** producer: when inference/cross-reference wants to
     change a decision field Eyal set (read `manual_*`), emit a proposal instead of
