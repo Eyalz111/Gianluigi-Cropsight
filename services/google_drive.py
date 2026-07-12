@@ -682,6 +682,63 @@ class GoogleDriveService:
             logger.error(f"Error uploading file {filename}: {e}")
             return {}
 
+    async def docx_to_pdf_bytes(self, docx_bytes: bytes) -> bytes:
+        """Convert a .docx to PDF bytes via Google Drive — formatting preserved,
+        NO rendering dependency/system binary. Uploads a temp Google Doc (Drive
+        converts docx->Doc), exports it as PDF, then deletes the temp Doc.
+        Returns b'' on any failure (caller falls back to the .docx)."""
+        if not docx_bytes:
+            return b""
+        doc_id = None
+        try:
+            media = MediaIoBaseUpload(
+                io.BytesIO(docx_bytes),
+                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                resumable=True,
+            )
+            body = {"name": "__pdftmp__", "mimeType": "application/vnd.google-apps.document"}
+            folder = settings.MEETING_SUMMARIES_FOLDER_ID or settings.CROPSIGHT_OPS_FOLDER_ID
+            if folder:
+                body["parents"] = [folder]
+            doc = self._execute_with_retry(
+                lambda: self.service.files().create(body=body, media_body=media, fields="id")
+            )
+            doc_id = doc.get("id")
+            if not doc_id:
+                return b""
+            data = self._execute_with_retry(
+                lambda: self.service.files().export_media(fileId=doc_id, mimeType="application/pdf")
+            )
+            return data if isinstance(data, (bytes, bytearray)) else b""
+        except Exception as e:
+            logger.error(f"docx->PDF conversion failed: {e}")
+            return b""
+        finally:
+            if doc_id:
+                try:
+                    self._execute_with_retry(lambda: self.service.files().delete(fileId=doc_id))
+                except Exception:
+                    pass
+
+    async def save_meeting_summary_pdf(self, docx_bytes: bytes, filename: str) -> dict:
+        """Convert a summary .docx to PDF and save it to the Meeting Summaries
+        folder. Returns {id, webViewLink, pdf_bytes} (pdf_bytes reused for the email).
+        Empty dict if not configured or the conversion failed."""
+        if not settings.MEETING_SUMMARIES_FOLDER_ID:
+            logger.warning("MEETING_SUMMARIES_FOLDER_ID not configured — skipping summary PDF")
+            return {}
+        pdf_bytes = await self.docx_to_pdf_bytes(docx_bytes)
+        if not pdf_bytes:
+            return {}
+        name = filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
+        result = await self._upload_bytes_file(
+            data=pdf_bytes, filename=name,
+            folder_id=settings.MEETING_SUMMARIES_FOLDER_ID, mime_type="application/pdf",
+        )
+        result["pdf_bytes"] = pdf_bytes
+        logger.info(f"Saved meeting summary PDF to Drive: {result.get('id')}")
+        return result
+
     async def save_meeting_summary_docx(
         self,
         data: bytes,

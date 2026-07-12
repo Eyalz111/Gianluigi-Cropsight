@@ -31,6 +31,7 @@ import re
 from typing import Any
 
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -606,30 +607,33 @@ class TelegramBot:
             # Split long messages (Telegram limit is 4096 chars).
             # Send overflow parts first, buttons only on the last part.
             # Tier 3.4: _bot_send_message wraps the network call in @retry.
-            if len(text) > 4000:
-                parts = _split_message(text, max_len=4000)
-                # Send all parts except the last without buttons
-                for part in parts[:-1]:
+            async def _do_send(pm):
+                if len(text) > 4000:
+                    parts = _split_message(text, max_len=4000)
+                    for part in parts[:-1]:
+                        await self._bot_send_message(chat_id=chat_id, text=part, parse_mode=pm)
                     await self._bot_send_message(
-                        chat_id=chat_id,
-                        text=part,
-                        parse_mode=parse_mode,
+                        chat_id=chat_id, text=parts[-1], parse_mode=pm, reply_markup=reply_markup,
                     )
-                # Send the last part with buttons
-                await self._bot_send_message(
-                    chat_id=chat_id,
-                    text=parts[-1],
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                )
-            else:
-                await self._bot_send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                )
-            return True
+                else:
+                    await self._bot_send_message(
+                        chat_id=chat_id, text=text, parse_mode=pm, reply_markup=reply_markup,
+                    )
+
+            try:
+                await _do_send(parse_mode)
+                return True
+            except BadRequest as e:
+                # Malformed Markdown/HTML must NEVER make a message silently vanish
+                # (2026-07-12 incident: an approval-flow message failed to send with
+                # "can't parse entities" and the bot went dark). Resend as plain text.
+                if parse_mode and "parse entities" in str(e).lower():
+                    logger.warning(
+                        f"Telegram parse error ({parse_mode}) to {chat_id}; retrying as plain text: {e}"
+                    )
+                    await _do_send(None)
+                    return True
+                raise
         except Exception as e:
             logger.error(f"Error sending message to {chat_id}: {e}")
             return False
@@ -879,29 +883,39 @@ class TelegramBot:
             except Exception:
                 pass  # Message may already be deleted or too old
 
-        # Send and track message IDs for multi-part cleanup
-        sent_message_ids = []
-        try:
+        # Send and track message IDs for multi-part cleanup.
+        async def _send_card(pm):
+            ids = []
             chat_id = self.eyal_chat_id
             if len(message) > 4000:
                 parts = _split_message(message, max_len=4000)
                 for part in parts[:-1]:
-                    msg = await self.app.bot.send_message(
-                        chat_id=chat_id, text=part, parse_mode="HTML",
-                    )
-                    sent_message_ids.append(msg.message_id)
-                msg = await self.app.bot.send_message(
-                    chat_id=chat_id, text=parts[-1], parse_mode="HTML",
-                    reply_markup=reply_markup,
+                    m = await self.app.bot.send_message(chat_id=chat_id, text=part, parse_mode=pm)
+                    ids.append(m.message_id)
+                m = await self.app.bot.send_message(
+                    chat_id=chat_id, text=parts[-1], parse_mode=pm, reply_markup=reply_markup,
                 )
-                sent_message_ids.append(msg.message_id)
+                ids.append(m.message_id)
             else:
-                msg = await self.app.bot.send_message(
-                    chat_id=chat_id, text=message, parse_mode="HTML",
-                    reply_markup=reply_markup,
+                m = await self.app.bot.send_message(
+                    chat_id=chat_id, text=message, parse_mode=pm, reply_markup=reply_markup,
                 )
-                sent_message_ids.append(msg.message_id)
+                ids.append(m.message_id)
+            return ids
 
+        try:
+            try:
+                sent_message_ids = await _send_card("HTML")
+            except BadRequest as e:
+                # The APPROVAL CARD is the one message that must never fail to
+                # send — a malformed-HTML parse error left Eyal with no card +
+                # no buttons (2026-07-12 incident). Resend as plain text so he
+                # always gets the card and its Approve/Edit/Reject buttons.
+                if "parse entities" in str(e).lower():
+                    logger.warning(f"Approval card HTML parse error; resending as plain text: {e}")
+                    sent_message_ids = await _send_card(None)
+                else:
+                    raise
             self._approval_message_ids[meeting_id] = sent_message_ids
             return True
         except Exception as e:
@@ -3004,11 +3018,25 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     latest = pending[0]
                     mid = latest.get("approval_id") or latest.get("id")
                     action = "approve" if "approve" in lower_msg else "reject"
-                    await self.send_message(
-                        update.effective_chat.id,
-                        "On it." if action == "approve"
-                        else "Got it — rejecting.",
-                    )
+                    if action == "reject":
+                        # Route a text "reject" through the SAME confirmation gate as
+                        # the button (2026-07-12 incident — reject must confirm).
+                        counts = self._meeting_child_counts(mid)
+                        await self.send_message(
+                            update.effective_chat.id,
+                            "⚠️ Reject this meeting summary?\n\n"
+                            f"This permanently deletes {counts.get('tasks', 0)} tasks, "
+                            f"{counts.get('decisions', 0)} decisions, "
+                            f"{counts.get('open_questions', 0)} open questions, and "
+                            f"{counts.get('follow_up_meetings', 0)} follow-ups — it cannot be undone.",
+                            parse_mode=None,
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("✅ Yes, reject & delete", callback_data=f"reject_confirm:{mid}"),
+                                InlineKeyboardButton("Cancel", callback_data=f"reject_cancel:{mid}"),
+                            ]]),
+                        )
+                        return
+                    await self.send_message(update.effective_chat.id, "On it.")
                     try:
                         result = await process_response(
                             meeting_id=mid,
@@ -3040,6 +3068,36 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                         await self.send_to_eyal(
                             f"Error processing approval: {e}", parse_mode=None
                         )
+                    return
+
+            # A pending meeting summary + free text that looks like edits =
+            # probably changes Eyal typed BEFORE tapping "Request Changes"
+            # (2026-07-12 incident — the edit went to the agent and was lost).
+            # Offer to apply it as a change request instead of losing it.
+            if self._looks_like_edit(message_text):
+                try:
+                    from services.supabase_client import supabase_client
+                    pend = supabase_client.get_pending_approvals_by_status("pending") or []
+                    summ = next((p for p in pend if p.get("content_type") == "meeting_summary"), None)
+                except Exception:
+                    summ = None
+                if summ:
+                    mid = summ.get("approval_id") or summ.get("id")
+                    try:
+                        mt = supabase_client.get_meeting(mid)
+                        title = (mt or {}).get("title") or "the pending summary"
+                    except Exception:
+                        title = "the pending summary"
+                    context.user_data["freetext_edit"] = {"meeting_id": mid, "text": message_text}
+                    await self.send_message(
+                        update.effective_chat.id,
+                        f"📝 That looks like changes for the pending summary “{title}”. "
+                        f"Apply them as a change request?",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✅ Apply as changes", callback_data=f"ftedit_yes:{mid}"),
+                            InlineKeyboardButton("No, just chatting", callback_data=f"ftedit_no:{mid}"),
+                        ]]),
+                    )
                     return
 
         # --- Inbound guardrails ---
@@ -3812,13 +3870,31 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 )
 
         elif action == "reject":
+            # CONFIRMATION GATE (2026-07-12 incident: a single tap deleted 190
+            # tasks + 100 decisions with no warning). Show exactly what will be
+            # deleted and require a SECOND tap. Nothing is deleted here.
+            counts = self._meeting_child_counts(meeting_id)
+            n_t, n_d = counts.get("tasks", 0), counts.get("decisions", 0)
+            n_q, n_f = counts.get("open_questions", 0), counts.get("follow_up_meetings", 0)
+            await query.edit_message_text(
+                "⚠️ <b>Reject this meeting summary?</b>\n\n"
+                f"This permanently deletes <b>{n_t} tasks</b>, <b>{n_d} decisions</b>, "
+                f"<b>{n_q} open questions</b>, and <b>{n_f} follow-ups</b> — it cannot be undone.\n\n"
+                "If you meant to make changes, tap Cancel and use “Request Changes” instead.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Yes, reject & delete", callback_data=f"reject_confirm:{meeting_id}"),
+                    InlineKeyboardButton("Cancel", callback_data=f"reject_cancel:{meeting_id}"),
+                ]]),
+            )
+
+        elif action == "reject_confirm":
+            # The ACTUAL reject (only reachable after the confirmation gate above).
             # Delete orphan multi-part messages (all except the button message)
             await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
 
             # Delegate to process_response so both paths (Telegram + email) go
-            # through the same cascading-reject logic. This is critical because
-            # the old inline path only flipped approval_status and left tasks/
-            # decisions/embeddings as orphans in the DB.
+            # through the same cascading-reject logic.
             await query.edit_message_text("Got it — rejecting.")
             try:
                 from guardrails.approval_flow import process_response
@@ -3846,6 +3922,37 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 await query.edit_message_text(f"Reject failed: {e}")
 
             conversation_memory.clear(str(self.eyal_chat_id))
+
+        elif action == "reject_cancel":
+            # Back out of the reject gate — restore the Approve / Request Changes /
+            # Reject buttons so Eyal can pick the action he meant.
+            try:
+                from services.supabase_client import supabase_client
+                m = supabase_client.get_meeting(meeting_id)
+                sens = (m or {}).get("sensitivity", "founders")
+            except Exception:
+                sens = "founders"
+            await query.edit_message_text(
+                "Reject cancelled — nothing was deleted. Choose an action:",
+                reply_markup=self._build_approval_keyboard(meeting_id, sens),
+            )
+
+        elif action == "ftedit_yes":
+            # Apply the free text Eyal sent before tapping "Request Changes"
+            # (stashed by the _handle_message offer) through the normal edit flow.
+            stash = context.user_data.pop("freetext_edit", None)
+            if not stash or stash.get("meeting_id") != meeting_id or not stash.get("text"):
+                await query.edit_message_text(
+                    "That change request expired — tap “Request Changes” on the summary and resend it."
+                )
+            else:
+                await query.edit_message_text("Applying your changes…")
+                context.user_data["pending_edit_meeting_id"] = meeting_id
+                await self._route_edit_instruction(update, context, meeting_id, stash["text"])
+
+        elif action == "ftedit_no":
+            context.user_data.pop("freetext_edit", None)
+            await query.edit_message_text("Okay — not applied. Go ahead and ask.")
 
         elif action == "edit":
             await query.edit_message_text(
@@ -5268,6 +5375,41 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
     @staticmethod
     def _sensitivity_for_band(band: str) -> str:
         return {"ceo": "ceo", "founders": "founders", "company": "team"}.get(band, "founders")
+
+    def _meeting_child_counts(self, meeting_id: str) -> dict:
+        """Cheap child-row counts for a meeting — the reject-confirmation preview.
+        Mirrors scripts/resend_approval_card.py:_counts. Never raises."""
+        from services.supabase_client import supabase_client
+        out = {}
+        for tbl, fk in [("tasks", "meeting_id"), ("decisions", "meeting_id"),
+                        ("open_questions", "meeting_id"), ("follow_up_meetings", "source_meeting_id")]:
+            try:
+                out[tbl] = (
+                    supabase_client.client.table(tbl).select("id", count="exact")
+                    .eq(fk, meeting_id).execute().count or 0
+                )
+            except Exception:
+                out[tbl] = 0
+        return out
+
+    @staticmethod
+    def _looks_like_edit(text: str) -> bool:
+        """Cheap heuristic: does this free text read like edit instructions (vs a
+        question/chat)? Used only to decide whether to OFFER a change request when a
+        summary is pending — never auto-applies, so a false positive is one tap to
+        dismiss. Deterministic (no LLM)."""
+        t = (text or "").strip().lower()
+        if len(t) < 4 or t.endswith("?"):
+            return False
+        first = t.split()[0]
+        if first in {"what", "how", "why", "who", "when", "where", "is", "are",
+                     "does", "do", "did", "can", "could", "should", "would", "will"}:
+            return False
+        cues = ("change", "update", "remove", "delete", "add ", "fix", "replace",
+                "rename", "correct", "reword", "move ", "assign", "deadline", "task",
+                "decision", "owner", "priorit", "instead", "typo", "edit", "adjust",
+                "should be", "should say", "set ", "make it", "swap")
+        return any(c in t for c in cues)
 
     def _build_approval_keyboard(self, meeting_id: str, sensitivity: str):
         """Approve/Edit/Reject + the CEO/Founders/Company band row + Custom…"""
