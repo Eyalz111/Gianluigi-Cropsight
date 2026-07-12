@@ -1360,15 +1360,32 @@ async def process_response(
         elif meeting_id.startswith("digest-"):
             resubmit_content_type = "weekly_digest"
 
-        # Parse edit instructions
-        edits = await parse_edit_instructions_with_claude(response, meeting)
+        # Never strand the meeting in 'editing' — on ANY edit failure revert to
+        # pending so the card can be re-shown and Eyal can retry. (2026-07-12
+        # incident: a crash mid-edit left the summary stuck in 'editing' and
+        # invisible.) On success, submit_for_approval restores 'pending' itself.
+        async def _unstick():
+            if not is_non_meeting:
+                try:
+                    await update_approval_status(meeting_id, ApprovalStatus.PENDING)
+                except Exception as re:
+                    logger.error(f"Failed to revert {meeting_id} to pending: {re}")
 
-        if edits:
+        try:
+            edits = await parse_edit_instructions_with_claude(response, meeting)
+
+            if not edits:
+                await _unstick()
+                return {
+                    "action": "edit_requested",
+                    "resubmitted": False,  # couldn't parse the edits — nothing re-sent
+                    "edits": [],
+                    "next_step": "Could not parse those edits — the summary is back to pending. Please clarify.",
+                }
+
             if resubmit_content_type == "meeting_prep":
                 # Meeting prep edits: apply to the summary text, carry over prep fields
                 updated_content = await apply_edits(meeting_id, edits)
-
-                # Carry over all prep-specific fields
                 if pending_info and pending_info.get("content"):
                     for key in ("title", "start_time", "sensitivity", "meeting_type",
                                 "focus_instructions", "sections", "attendees"):
@@ -1381,11 +1398,9 @@ async def process_response(
                     for key in ("decisions", "tasks", "follow_ups", "open_questions"):
                         if key in pending_info["content"]:
                             current_structured[key] = pending_info["content"][key]
-
                 updated_content = await apply_edits(
                     meeting_id, edits, structured_data=current_structured
                 )
-
                 if pending_info and pending_info.get("content"):
                     for key in ("executive_summary", "discussion_summary",
                                 "stakeholders", "cross_reference"):
@@ -1394,14 +1409,13 @@ async def process_response(
 
             # Validate apply_edits() succeeded — don't resubmit error dicts
             if "error" in updated_content:
-                logger.error(
-                    f"apply_edits failed for {meeting_id}: {updated_content['error']}"
-                )
+                logger.error(f"apply_edits failed for {meeting_id}: {updated_content['error']}")
+                await _unstick()
                 return {
                     "action": "edit_requested",
                     "resubmitted": False,  # apply_edits errored — nothing was re-sent
                     "edits": edits,
-                    "next_step": f"Edit failed: {updated_content['error']}. Please try again.",
+                    "next_step": f"Edit failed: {updated_content['error']}. The summary is back to pending — try again.",
                 }
 
             # Track edit version for audit trail
@@ -1409,12 +1423,9 @@ async def process_response(
             if pending_info and pending_info.get("content"):
                 prev_version = pending_info["content"].get("edit_version", 0)
             updated_content["edit_version"] = prev_version + 1
-            logger.info(
-                f"Edit applied to {meeting_id}, version {prev_version + 1}"
-            )
+            logger.info(f"Edit applied to {meeting_id}, version {prev_version + 1}")
 
-            # v2.3 PR 3: log edit observation. edit_distance_pct is computed
-            # inside log_approval_observation from the before/after content.
+            # v2.3 PR 3: log edit observation.
             try:
                 supabase_client.log_approval_observation(
                     content_type=resubmit_content_type,
@@ -1431,25 +1442,26 @@ async def process_response(
             except Exception as e:
                 logger.warning(f"[observation] edit log failed (non-fatal): {e}")
 
-            # Resubmit for approval with edited content
+            # Resubmit for approval with edited content (restores 'pending').
             await submit_for_approval(
                 content_type=resubmit_content_type,
                 content=updated_content,
                 meeting_id=meeting_id,
             )
-
             return {
                 "action": "edit_requested",
                 "resubmitted": True,  # apply_edits + submit_for_approval succeeded — a new card was sent
                 "edits": edits,
                 "next_step": "Edits applied, resubmitted for approval",
             }
-        else:
+        except Exception as edit_err:
+            logger.error(f"Edit flow crashed for {meeting_id}: {edit_err}")
+            await _unstick()
             return {
                 "action": "edit_requested",
-                "resubmitted": False,  # couldn't parse the edits — nothing was re-sent
+                "resubmitted": False,
                 "edits": [],
-                "next_step": "Could not parse edits, please clarify",
+                "next_step": f"Edit failed ({edit_err}). The summary is back to pending — try again.",
             }
 
 
