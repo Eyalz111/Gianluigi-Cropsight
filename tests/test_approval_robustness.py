@@ -5,6 +5,7 @@ free-text-looks-like-edit heuristic (edits sent before "Request Changes" aren't
 lost), the reject-confirmation child counts, and the edit-flow revert-to-pending
 (never strand a meeting in 'editing').
 """
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -127,3 +128,123 @@ class TestEditRevertsToPending:
                                         response_source="telegram", force_action="edit")
         assert res["resubmitted"] is False
         assert status_calls[-1] == ApprovalStatus.PENDING   # never stranded in 'editing'
+
+
+def _approve_env(monkeypatch, *, status, pending_info, db_tasks):
+    """Wire process_response's approve arm with mocked internals; return (af, sc, captured_dist)."""
+    import guardrails.approval_flow as af
+    sc = MagicMock()
+    sc.get_pending_approval.return_value = {"approval_id": "m1"} if pending_info is not None else None
+    sc.get_meeting.return_value = {
+        "id": "m1", "approval_status": status, "title": "M",
+        "sensitivity": "team", "summary": "S", "date": "2026-07-12",
+    }
+    sc.get_tasks.return_value = db_tasks
+    sc.list_decisions.return_value = []
+    sc.list_follow_up_meetings.return_value = []
+    sc.get_open_questions.return_value = []
+    monkeypatch.setattr(af, "supabase_client", sc)
+    monkeypatch.setattr(af, "_row_to_pending_info", lambda row: pending_info)
+    monkeypatch.setattr(af, "cancel_auto_publish", lambda *a, **k: None)
+    monkeypatch.setattr(af, "cancel_approval_reminders", lambda *a, **k: None)
+    monkeypatch.setattr(af, "update_approval_status", AsyncMock())
+    monkeypatch.setattr(af, "_promote_children_to_approved", lambda *a, **k: None)
+    captured = {}
+
+    async def fake_dist(meeting_id, content, sensitivity):
+        captured["content"] = content
+        captured["sensitivity"] = sensitivity
+        return {"email_sent": True}
+
+    monkeypatch.setattr(af, "distribute_approved_content", fake_dist)
+    return af, sc, captured
+
+
+class TestIdempotentDistribution:
+    """#1 — a meeting distributes at most once; a second approve never re-sends."""
+
+    async def test_second_approve_on_approved_meeting_is_noop(self, monkeypatch):
+        af, sc, captured = _approve_env(
+            monkeypatch, status="approved", pending_info=None, db_tasks=[],
+        )
+        res = await af.process_response("m1", "approve", force_action="approve")
+        assert res["action"] == "already_approved"
+        assert "content" not in captured                 # distribution never ran
+        sc.delete_pending_approval.assert_not_called()   # didn't even consume the row
+
+    async def test_first_approve_on_pending_meeting_distributes(self, monkeypatch):
+        af, sc, captured = _approve_env(
+            monkeypatch, status="pending", pending_info={"type": "meeting_summary", "content": {}},
+            db_tasks=[{"meeting_id": "m1", "title": "T", "assignee": "Paolo", "priority": "H"}],
+        )
+        res = await af.process_response("m1", "approve", force_action="approve")
+        assert res["action"] == "approved"
+        assert captured["content"]["tasks"]              # distribution ran
+
+
+class TestDistributeFromDB:
+    """#3 — structured lists come from the DB, never the lossy edited pending copy."""
+
+    async def test_uses_db_owners_not_blank_pending(self, monkeypatch):
+        # pending copy has a BLANK owner (renders 'team'); DB has the real owner.
+        lossy = {"type": "meeting_summary",
+                 "content": {"title": "M", "summary": "S", "tasks": [{"title": "T", "assignee": ""}]}}
+        af, sc, captured = _approve_env(
+            monkeypatch, status="pending", pending_info=lossy,
+            db_tasks=[{"meeting_id": "m1", "title": "T", "assignee": "Paolo Vailetti", "priority": "H"}],
+        )
+        res = await af.process_response("m1", "approve", force_action="approve")
+        assert res["action"] == "approved"
+        # distribution got the DB task (real owner), NOT the blank pending one
+        assert captured["content"]["tasks"][0]["assignee"] == "Paolo Vailetti"
+        assert all(t.get("assignee") for t in captured["content"]["tasks"])
+
+
+class TestApplyEditsDedup:
+    """#4 — a task/decision the edit LLM emits twice must not create a duplicate row."""
+
+    async def test_duplicate_llm_task_dropped(self, monkeypatch):
+        import guardrails.approval_flow as af
+        llm = json.dumps({
+            "summary": "s",
+            "tasks": [
+                {"title": "Same task", "assignee": "A", "priority": "H", "index": 1},
+                {"title": "Same task", "assignee": "A", "priority": "H"},  # dup, no index
+            ],
+            "decisions": [], "follow_ups": [], "open_questions": [],
+        })
+        monkeypatch.setattr(af, "call_llm", lambda **k: (llm, {}))
+        sc = MagicMock()
+        sc._serialize_datetime.return_value = None
+        monkeypatch.setattr(af, "supabase_client", sc)
+        structured = {"tasks": [{"id": "t1", "title": "Same task", "assignee": "A"}],
+                      "decisions": [], "follow_ups": [], "open_questions": []}
+        await af.apply_edits("m1", [{"type": "noop"}], structured_data=structured)
+        # dup collapsed -> original updated in place once, NO new row created
+        sc.create_tasks_batch.assert_not_called()
+        assert sc.update_task.call_count == 1
+
+
+class TestCardMessageIdPersistence:
+    """#5/#6 — approval-card message-ids round-trip through pending_approvals content."""
+
+    def test_set_then_get_roundtrip(self, monkeypatch):
+        from services import supabase_client as scmod
+        sc = scmod.supabase_client
+        written = {}
+        monkeypatch.setattr(sc, "get_pending_approval", lambda aid: {"content": {"title": "M"}})
+        monkeypatch.setattr(sc, "update_pending_approval",
+                            lambda aid, content=None, **k: written.update({"content": content}))
+        sc.set_card_message_ids("m1", [101, 102])
+        assert written["content"]["_card_message_ids"] == [101, 102]
+        assert written["content"]["title"] == "M"        # merged, didn't clobber content
+
+        monkeypatch.setattr(sc, "get_pending_approval",
+                            lambda aid: {"content": {"_card_message_ids": [101, 102]}})
+        assert sc.get_card_message_ids("m1") == [101, 102]
+
+    def test_missing_row_returns_empty(self, monkeypatch):
+        from services import supabase_client as scmod
+        sc = scmod.supabase_client
+        monkeypatch.setattr(sc, "get_pending_approval", lambda aid: None)
+        assert sc.get_card_message_ids("nope") == []       # never raises

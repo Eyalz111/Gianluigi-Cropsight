@@ -2706,6 +2706,41 @@ class SupabaseClient:
         )
         return result.data[0] if result.data else {}
 
+    def get_card_message_ids(self, approval_id: str) -> list[int]:
+        """Telegram approval-card message-ids persisted for this approval.
+
+        [robustness #5/#6, 2026-07-12] Stored inside the pending_approvals
+        content JSON (no migration) so the "delete prior cards before sending a
+        new one" cleanup survives a Cloud Run restart (which drops the bot's
+        in-memory map) AND covers out-of-band resends. Best-effort — returns []
+        on any miss so a read failure can never block a card send.
+        """
+        try:
+            row = self.get_pending_approval(approval_id)
+            if not row:
+                return []
+            ids = (row.get("content") or {}).get("_card_message_ids") or []
+            return [int(x) for x in ids]
+        except Exception as e:
+            logger.warning(f"get_card_message_ids failed for {approval_id}: {e}")
+            return []
+
+    def set_card_message_ids(self, approval_id: str, message_ids: list[int]) -> None:
+        """Replace the persisted approval-card message-ids for this approval.
+
+        Merges into the existing content JSON (never clobbers the meeting
+        content). Best-effort — a failure here must never break the card send.
+        """
+        try:
+            row = self.get_pending_approval(approval_id)
+            if not row:
+                return
+            content = dict(row.get("content") or {})
+            content["_card_message_ids"] = [int(x) for x in message_ids]
+            self.update_pending_approval(approval_id, content=content)
+        except Exception as e:
+            logger.warning(f"set_card_message_ids failed for {approval_id}: {e}")
+
     def delete_pending_approval(self, approval_id: str) -> bool:
         """
         Delete a pending approval record.

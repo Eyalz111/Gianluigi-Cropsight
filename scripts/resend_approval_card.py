@@ -75,10 +75,24 @@ async def main() -> int:
     chat_id = settings.EYAL_TELEGRAM_ID or settings.TELEGRAM_EYAL_CHAT_ID
     bot = Bot(settings.TELEGRAM_BOT_TOKEN)
     async with bot:
+        # [robustness #6] Collapse to ONE live card: delete any prior (persisted)
+        # cards for this meeting first, so an out-of-band resend never leaves the
+        # orphan/dead cards behind (the 2026-07-12 incident). Best-effort.
+        for old_id in sb.get_card_message_ids(mid):
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=old_id)
+            except Exception:
+                pass
         msg = await bot.send_message(
             chat_id=chat_id, text=text, parse_mode="HTML",
             reply_markup=_keyboard(mid, m.get("sensitivity", "founders")),
         )
+    # Register the new card so the running service's cleanup (and the next
+    # resend) supersede it instead of orphaning it.
+    try:
+        sb.set_card_message_ids(mid, [msg.message_id])
+    except Exception:
+        pass
     print(f"ok — sent message {msg.message_id} to {chat_id}")
     return 0
 

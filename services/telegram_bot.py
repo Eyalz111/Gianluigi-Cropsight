@@ -873,8 +873,18 @@ class TelegramBot:
         # [distribution-groups 2026-07-05] Replaces the single 4-way sensitivity toggle.
         reply_markup = self._build_approval_keyboard(meeting_id, sensitivity)
 
-        # Delete old approval messages for this meeting (cleanup on resubmit after edit)
-        old_msg_ids = self._approval_message_ids.pop(meeting_id, [])
+        # Delete old approval messages for this meeting so only ONE live card
+        # ever exists. [robustness #5/#6, 2026-07-12] In-memory ids cover the
+        # common resubmit-after-edit case; the PERSISTED ids (pending_approvals
+        # content) additionally cover a Cloud Run restart that dropped the map
+        # and any card sent out-of-band — the two orphan sources behind today's
+        # dead/duplicate cards.
+        from services.supabase_client import supabase_client as _sb_cards
+        old_msg_ids = set(self._approval_message_ids.pop(meeting_id, []))
+        try:
+            old_msg_ids |= set(_sb_cards.get_card_message_ids(meeting_id))
+        except Exception:
+            pass
         for msg_id in old_msg_ids:
             try:
                 await self.app.bot.delete_message(
@@ -917,6 +927,10 @@ class TelegramBot:
                 else:
                     raise
             self._approval_message_ids[meeting_id] = sent_message_ids
+            try:
+                _sb_cards.set_card_message_ids(meeting_id, sent_message_ids)
+            except Exception:
+                pass  # persistence is best-effort; never fail the card send
             return True
         except Exception as e:
             logger.error(f"Error sending approval request: {e}")
@@ -3829,6 +3843,41 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             distribute_approved_content,
             process_response,
         )
+
+        # ---- Stale-card guard (2026-07-12) --------------------------------
+        # Approval cards can outlive the pending state: an out-of-band resend,
+        # a Cloud Run restart that drops the in-memory _approval_message_ids
+        # map, or a leftover duplicate all leave live-looking buttons on a
+        # meeting that's already approved/rejected. Tapping them re-ran the
+        # action — worst case "Approve" re-distributed the summary to the whole
+        # team. For the lifecycle actions, verify the meeting is still pending;
+        # if not, close the stale card with a toast instead of re-processing.
+        if action in ("approve", "edit", "reject", "reject_confirm"):
+            _m = supabase_client.get_meeting(meeting_id)
+            _status = (_m or {}).get("approval_status")
+            if _status != "pending":
+                _label = {
+                    "approved": "already approved & sent",
+                    "rejected": "already rejected",
+                    "editing": "being edited right now — hang on a moment",
+                }.get(_status, "already handled" if _m else "no longer available")
+                try:
+                    await query.answer(f"This summary was {_label}.", show_alert=True)
+                except Exception:
+                    pass
+                # Close the card for terminal states; leave it be while 'editing'
+                # (that's transient — a fresh pending card follows when it lands).
+                if _status != "editing":
+                    try:
+                        _title = (_m or {}).get("title") or "This summary"
+                        await query.edit_message_text(
+                            f"✅ <b>{_title}</b> — {_label}.\n"
+                            f"<i>(This card is closed — no action needed.)</i>",
+                            parse_mode="HTML", reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+                return
 
         if action == "approve":
             # Delete orphan multi-part messages (all except the button message)

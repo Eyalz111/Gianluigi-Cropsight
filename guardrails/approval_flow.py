@@ -995,6 +995,25 @@ async def process_response(
     cancel_approval_reminders(meeting_id)
 
     if action == "approve":
+        # IDEMPOTENCY GUARD (2026-07-12 double-distribution incident) --------
+        # A meeting summary distributes AT MOST ONCE. A second approve — a
+        # duplicate/stale card tap, a Telegram+email race, a retry — must NOT
+        # re-send. The first pass flips approval_status to 'approved' early
+        # (below) and deletes the pending row, so a re-entry with the meeting
+        # already 'approved' means distribution already happened. Refuse it.
+        # [robustness #1 — defense-in-depth below the Telegram stale-card guard]
+        if not is_non_meeting and (meeting.get("approval_status") or "") == "approved":
+            logger.warning(
+                f"process_response(approve) re-entered for already-approved "
+                f"meeting {meeting_id} — skipping re-distribution (idempotent)."
+            )
+            return {
+                "action": "already_approved",
+                "edits": None,
+                "next_step": "Already approved and distributed — nothing was re-sent.",
+                "distribution": {},
+            }
+
         # Delete from persistent store (already fetched above, now remove it)
         supabase_client.delete_pending_approval(meeting_id)
 
@@ -1232,39 +1251,33 @@ async def process_response(
         if pending_content.get("__distribution"):
             content["__distribution"] = pending_content["__distribution"]
 
-        # Always use pending_approvals as source of truth for structured data.
-        # Falls back to DB only if pending_approvals has no structured data at all
-        # (shouldn't happen — submit_for_approval always stores full content).
-        if any(key in pending_content for key in ("tasks", "decisions", "follow_ups", "open_questions")):
-            content["decisions"] = pending_content.get("decisions", [])
-            content["tasks"] = pending_content.get("tasks", [])
-            content["follow_ups"] = pending_content.get("follow_ups", [])
-            content["open_questions"] = pending_content.get("open_questions", [])
-            logger.info("Using content from pending_approvals for distribution")
-        else:
-            # Safety fallback — should not normally be reached
-            logger.warning(
-                f"pending_approvals for {meeting_id} has no structured data — "
-                f"falling back to DB tables. This may indicate a bug in submit_for_approval."
-            )
-            # Tier 3.1: this is the approve branch fallback — children for
-            # this meeting are still 'pending' at this point (promote happens
-            # above us in the caller). Must include pending to see anything.
-            decisions = supabase_client.list_decisions(
-                meeting_id=meeting_id, include_pending=True
-            )
-            tasks = supabase_client.get_tasks(status=None, include_pending=True)
-            tasks = [t for t in tasks if t.get("meeting_id") == meeting_id]
-            follow_ups = supabase_client.list_follow_up_meetings(
-                source_meeting_id=meeting_id, include_pending=True
-            )
-            open_questions = supabase_client.get_open_questions(
-                meeting_id=meeting_id, include_pending=True
-            )
-            content["decisions"] = decisions
-            content["tasks"] = tasks
-            content["follow_ups"] = follow_ups
-            content["open_questions"] = open_questions
+        # STRUCTURED LISTS ALWAYS FROM THE DB — source of truth. [robustness #3,
+        # 2026-07-12 wrong-first-email incident]
+        # The post-edit pending_approvals copy is an LLM-regenerated DISPLAY
+        # snapshot that can blank task owners/priorities — they then render as
+        # "team"/"M". The DB rows carry the correct values the edit wrote in
+        # place, which is exactly why the DB-fallback email came out right while
+        # the pending-content email was wrong. So NEVER source the structured
+        # lists from pending_content; read them from the DB every time. The
+        # narrative text (summary/executive/discussion) still comes from
+        # pending_content-or-meeting above — that's Eyal's edited prose, not a
+        # lossy field. Children were promoted to 'approved' just above (or are
+        # still 'pending' on a straight approve) — include_pending sees both.
+        db_tasks = supabase_client.get_tasks(status=None, include_pending=True)
+        content["tasks"] = [t for t in db_tasks if t.get("meeting_id") == meeting_id]
+        content["decisions"] = supabase_client.list_decisions(
+            meeting_id=meeting_id, include_pending=True
+        )
+        content["follow_ups"] = supabase_client.list_follow_up_meetings(
+            source_meeting_id=meeting_id, include_pending=True
+        )
+        content["open_questions"] = supabase_client.get_open_questions(
+            meeting_id=meeting_id, include_pending=True
+        )
+        logger.info(
+            f"Distribution sourced structured data from DB for {meeting_id}: "
+            f"{len(content['tasks'])} tasks, {len(content['decisions'])} decisions."
+        )
 
         # v0.3: Carry cross-reference data through to distribution
         if pending_info and pending_info.get("content", {}).get("cross_reference"):
@@ -1687,10 +1700,16 @@ Return a JSON object with these keys:
 Return ONLY the JSON object, no other text."""
 
     try:
+        # 16000 (not 8192): the edited JSON re-emits the ENTIRE summary +
+        # every decision/task/follow-up/question, so a large meeting (e.g. 30
+        # tasks / 14 decisions) overruns 8192 and truncates mid-string, which
+        # then fails json.loads ("Unterminated string ..."). 16000 is the safe
+        # ceiling for a non-streaming Sonnet 4.6 call (no beta header needed;
+        # higher risks the SDK's ~10-min idle-timeout guard).
         response_text, _ = call_llm(
             prompt=prompt,
             model=settings.model_background,
-            max_tokens=8192,
+            max_tokens=16000,
             call_site="edit_application",
             meeting_id=meeting_id,
         )
@@ -1785,7 +1804,26 @@ Return ONLY the JSON object, no other text."""
                 # (the 2026-06-11 data-loss class).
                 supabase_client.update_task(task_id, **upd)
 
-            for t in edited.get("tasks", []):
+            # [robustness #4, 2026-07-12 duplicate-rows incident] The edit LLM
+            # sometimes emits the SAME task twice — once matching an original
+            # (updates in place), once as a reworded variant that fails the
+            # index/title match and gets CREATED as a fresh row -> a duplicate
+            # (the 16 dup rows this incident). Drop exact normalized-title
+            # repeats from the LLM's own output before applying. Additive and
+            # safe: only collapses byte-identical (case/space-normalized) titles
+            # the model returned more than once — never merges distinct tasks.
+            _seen_task_titles: set = set()
+            _edited_tasks: list = []
+            for _t in edited.get("tasks", []):
+                _k = (_t.get("title") or "").strip().lower()
+                if _k and _k in _seen_task_titles:
+                    logger.info(f"apply_edits: dropped duplicate edited task '{_k[:40]}'")
+                    continue
+                if _k:
+                    _seen_task_titles.add(_k)
+                _edited_tasks.append(_t)
+
+            for t in _edited_tasks:
                 payload = {
                     "title": t.get("title", ""),
                     "assignee": t.get("assignee", ""),
@@ -1837,7 +1875,18 @@ Return ONLY the JSON object, no other text."""
                 ).append(d)
             claimed_dec_ids: set = set()
             new_decisions: list[dict] = []
-            for d in edited.get("decisions", []):
+            # [robustness #4] Same LLM-duplicate guard as tasks above.
+            _seen_dec_desc: set = set()
+            _edited_decisions: list = []
+            for _d in edited.get("decisions", []):
+                _k = (_d.get("description") or "").strip().lower()
+                if _k and _k in _seen_dec_desc:
+                    logger.info("apply_edits: dropped duplicate edited decision")
+                    continue
+                if _k:
+                    _seen_dec_desc.add(_k)
+                _edited_decisions.append(_d)
+            for d in _edited_decisions:
                 desc = d.get("description", "")
                 idx = d.get("index")
                 orig = old_dec_by_index.get(idx) if isinstance(idx, int) else None
