@@ -2570,6 +2570,15 @@ class MCPServer:
                 summary = compute_cost_summary(records)
                 summary["period_days"] = days
 
+                # Non-LLM external cost sources (dark-safe; only present when configured).
+                try:
+                    from services.drive_storage_cost import get_drive_storage_cost
+                    _st = get_drive_storage_cost()
+                    if _st.get("available"):
+                        summary["external_costs"] = {"drive_storage": _st}
+                except Exception as _e:
+                    logger.warning(f"drive storage cost skipped in get_cost_summary: {_e}")
+
                 mcp_auth.log_call("get_cost_summary", {"days": days})
                 return _success(summary, source="token_usage")
 

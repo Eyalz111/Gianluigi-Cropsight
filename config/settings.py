@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     MEETING_PREP_FOLDER_ID: str = Field(default="", description="Meeting Prep folder ID")
     WEEKLY_DIGESTS_FOLDER_ID: str = Field(default="", description="Weekly Digests folder ID")
     DOCUMENTS_FOLDER_ID: str = Field(default="", description="Documents folder ID for team uploads")
+    DATA_PACKAGE_FOLDER_ID: str = Field(default="", description="Drive folder ID of CropSight-Data-Package; lets the cost report read its _metrics.json footprint. Optional.")
 
     # ==========================================================================
     # Google Sheets IDs
@@ -883,6 +884,10 @@ class Settings(BaseSettings):
     )
     CLOUD_RUN_SERVICE_NAME: str = Field(
         default="gianluigi", description="Cloud Run service name targeted by rollout env-var updates."
+    )
+    WORKSPACE_STORAGE_USD_PER_GB_MONTH: float = Field(
+        default=0.0,
+        description="Rate ($/GB/month) for Google Drive/Workspace storage in the weekly cost report + get_cost_summary. 0 = disabled (dark-safe). E.g. Google One 2TB ≈ 0.005; pooled Workspace ≈ 0.",
     )
 
     @property
