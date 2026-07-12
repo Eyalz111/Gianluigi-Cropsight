@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Proposal content_types Eyal can decide from the Telegram /sync review flow.
 REVIEWABLE_TYPES = (
     "topic_merge", "topic_assign", "task_update_proposal", "decision_supersede_proposal",
-    "decision_update_proposal",
+    "decision_update_proposal", "decision_merge", "decision_relate",
 )
 
 
@@ -38,6 +38,18 @@ def _label(content_type: str, c: dict) -> str:
         return (
             f"Update decision field <b>{c.get('field', '?')}</b> → "
             f"<b>{c.get('proposed', '?')}</b>?\n<i>\"{summ}\"</i>"
+        )
+    if content_type == "decision_merge":
+        return (
+            f"Merge duplicate decisions?\n"
+            f"<b>KEEP:</b> \"{(c.get('winner_summary') or '?')[:80]}\"\n"
+            f"<b>DROP:</b> \"{(c.get('loser_summary') or '?')[:80]}\"\n"
+            f"<i>(same decision recorded twice — retires the older)</i>"
+        )
+    if content_type == "decision_relate":
+        return (
+            f"Link related decisions?\n"
+            f"\"{(c.get('a_summary') or '?')[:80]}\"  ↔  \"{(c.get('b_summary') or '?')[:80]}\""
         )
     if content_type == "decision_supersede_proposal":
         old = (c.get("old_summary") or "?")[:80]
@@ -136,6 +148,17 @@ def apply_proposal_decision(proposal_id: str, decision: str) -> dict:
         supabase_client.delete_pending_approval(proposal_id)
         supabase_client.log_action(
             "decision_supersede_approved" if approve else "decision_supersede_rejected",
+            details={"proposal_id": proposal_id, "source": "telegram_sync", **content, "result": result},
+            triggered_by="eyal",
+        )
+        return {"status": "ok", "decision": "approved" if approve else "rejected", "result": result}
+
+    if content_type in ("decision_merge", "decision_relate"):
+        from processors.decision_clustering import apply_decision_cluster_proposal
+        result = apply_decision_cluster_proposal(content, approve)
+        supabase_client.delete_pending_approval(proposal_id)
+        supabase_client.log_action(
+            f"{content_type}_approved" if approve else f"{content_type}_rejected",
             details={"proposal_id": proposal_id, "source": "telegram_sync", **content, "result": result},
             triggered_by="eyal",
         )

@@ -630,7 +630,8 @@ class MCPServer:
                 elif type == "task":
                     types = ("task_update_proposal",)
                 elif type == "decision":
-                    types = ("decision_supersede_proposal",)
+                    types = ("decision_supersede_proposal", "decision_update_proposal",
+                             "decision_merge", "decision_relate")
                 elif type == "gantt_tag":
                     types = ("gantt_tag_mapping",)
                 else:
@@ -741,6 +742,19 @@ class MCPServer:
                     supabase_client.delete_pending_approval(proposal_id)
                     supabase_client.log_action(
                         "decision_supersede_approved" if approve else "decision_supersede_rejected",
+                        details={"proposal_id": proposal_id, **c, "result": result}, triggered_by="eyal")
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": decision})
+                    return _success({"decision": "approved" if approve else "rejected", "result": result})
+
+                # --- cross-decision merge / relate (synthesis phase) ---
+                if content_type in ("decision_merge", "decision_relate"):
+                    from processors.decision_clustering import apply_decision_cluster_proposal
+                    c = pending.get("content") or {}
+                    approve = decision == "approve"
+                    result = apply_decision_cluster_proposal(c, approve)
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action(
+                        f"{content_type}_approved" if approve else f"{content_type}_rejected",
                         details={"proposal_id": proposal_id, **c, "result": result}, triggered_by="eyal")
                     mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": decision})
                     return _success({"decision": "approved" if approve else "rejected", "result": result})
@@ -1931,6 +1945,54 @@ class MCPServer:
             except Exception as e:
                 logger.error(f"get_decision_chain error: {e}")
                 mcp_auth.log_call("get_decision_chain", success=False, error=str(e))
+                return _error(str(e))
+
+        # ============================================================
+        # 20c. get_decision_synthesis (read) — decision synthesis phase
+        # ============================================================
+        @mcp.tool(
+            name="get_decision_synthesis",
+            description=(
+                "[DECISIONS] The living synthesized view of a decision: the LLM "
+                "narrative (what was decided, why, how it evolved, status today), "
+                "its supersession chain, and related decisions from the knowledge "
+                "graph. The decision analog of get_topic_thread."
+            ),
+        )
+        async def get_decision_synthesis(decision_id: str) -> dict:
+            try:
+                from services.supabase_client import supabase_client as _sc
+
+                d = _sc.get_decision(decision_id)
+                if not d:
+                    return _error("decision not found")
+                brief = d.get("brief_json") or {}
+                chain = _sc.get_decision_chain(decision_id) or []
+                related = _sc.get_related_decisions(decision_id, ("relates_to", "supersedes")) or []
+                mcp_auth.log_call("get_decision_synthesis", {"decision_id": decision_id})
+                return _success({
+                    "id": decision_id,
+                    "summary": brief.get("summary") or d.get("description"),
+                    "narrative": brief.get("narrative", ""),
+                    "status": brief.get("status") or d.get("decision_status"),
+                    "supersedes": brief.get("supersedes", []),
+                    "superseded_by": brief.get("superseded_by") or d.get("superseded_by"),
+                    "related": [
+                        {"id": r.get("id"), "description": r.get("description"),
+                         "status": r.get("decision_status")}
+                        for r in related
+                    ],
+                    "chain": [
+                        {"id": c.get("id"), "description": c.get("description"),
+                         "status": c.get("decision_status")}
+                        for c in chain
+                    ],
+                    "last_synthesized_at": brief.get("last_synthesized_at"),
+                    "sensitivity": brief.get("sensitivity"),
+                })
+            except Exception as e:
+                logger.error(f"get_decision_synthesis error: {e}")
+                mcp_auth.log_call("get_decision_synthesis", success=False, error=str(e))
                 return _error(str(e))
 
         # ============================================================
