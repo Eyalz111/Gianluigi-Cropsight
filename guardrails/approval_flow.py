@@ -2183,7 +2183,10 @@ async def distribute_approved_content(
     team_discussion = content.get("discussion_summary", "")
     team_exec = exec_summary
     team_docx_bytes = _docx_bytes_for_email
-    if cap_level < 4:
+    # Content-level tier capping is flag-gated (Eyal 2026-07-12). Off => the full
+    # summary goes to whoever is on the distribution list; the recipient bands
+    # (who gets the email) still apply. Capability preserved for re-enabling.
+    if getattr(settings, "DISTRIBUTION_TIER_CAPPING_ENABLED", True) and cap_level < 4:
         filtered_decisions = filter_by_sensitivity(content.get("decisions", []), cap_level)
         filtered_tasks = filter_by_sensitivity(content.get("tasks", []), cap_level)
         filtered_questions = filter_by_sensitivity(content.get("open_questions", []), cap_level)
