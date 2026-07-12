@@ -651,6 +651,10 @@ class Settings(BaseSettings):
         default=False,
         description="Weekly decision synthesis: LLM-enrich decision brief_json.narrative for recently-active decisions + raise cross-decision merge/relate PROPOSALS (Eyal approves). Rides the Sunday knowledge-weekly scheduler; only runs when KNOWLEDGE_WEEKLY_ENABLED is also true. Off = dormant."
     )
+    DISTRIBUTION_TIER_CAPPING_ENABLED: bool = Field(
+        default=True,
+        description="When True, a meeting summary distributed to a band below its sensitivity has above-band decisions/tasks/questions stripped + the narrative/attachment rebuilt (CEO-safe). Set False to send the FULL summary to whoever is on the distribution list (recipient bands still control WHO gets it). Capability is preserved either way — this only toggles the content-level filtering. [Eyal 2026-07-12]"
+    )
 
     # ==========================================================================
     # Outputs reconcile (v3) — DB-truth + Sheet-editable via column-ownership sync.

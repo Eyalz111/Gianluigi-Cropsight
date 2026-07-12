@@ -160,6 +160,51 @@ class TestDistributeApprovedContentTierFilter:
         # Founders content still goes out
         assert "Move the demo to next week" in kw["summary_content"]
 
+    @pytest.mark.asyncio
+    async def test_capping_disabled_sends_full_content(self):
+        # DISTRIBUTION_TIER_CAPPING_ENABLED=False -> no content-level filtering;
+        # the full summary (incl. CEO items) goes to whoever is on the list.
+        with patch("guardrails.approval_flow.supabase_client") as mock_db, \
+             patch("guardrails.approval_flow.drive_service") as mock_drive, \
+             patch("guardrails.approval_flow.sheets_service") as mock_sheets, \
+             patch("guardrails.approval_flow.gmail_service") as mock_gmail, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
+             patch("guardrails.approval_flow.get_distribution_list", return_value=["roye@cropsight.com"]), \
+             patch("guardrails.approval_flow.settings") as mock_settings, \
+             patch("services.word_generator.generate_summary_docx", return_value=b"docx"):
+            mock_settings.ENVIRONMENT = "production"
+            mock_settings.DISTRIBUTION_TIER_CAPPING_ENABLED = False   # OFF
+            mock_db.get_meeting = MagicMock(return_value={"participants": [], "duration_minutes": 30, "summary": "x"})
+            mock_db.get_tasks = MagicMock(return_value=[])
+            mock_db.log_action = MagicMock(return_value={"id": "l"})
+            mock_drive.save_meeting_summary = AsyncMock(return_value={"id": "d", "webViewLink": "http://drive/x"})
+            mock_drive.save_meeting_summary_pdf = AsyncMock(return_value={})
+            mock_drive.docx_to_pdf_bytes = AsyncMock(return_value=b"")
+            mock_drive.save_meeting_summary_docx = AsyncMock(return_value={"id": "d2", "webViewLink": "http://drive/y"})
+            mock_sheets.add_task = AsyncMock(return_value=True)
+            mock_gmail.send_meeting_summary = AsyncMock(return_value=True)
+            mock_tg.send_to_group = AsyncMock(return_value=True)
+            mock_tg.send_to_eyal = AsyncMock(return_value=True)
+            mock_tg.send_meeting_summary = AsyncMock(return_value=True)
+
+            content = {
+                "title": "BD Sync", "date": "2026-06-12",
+                "summary": f"Pipeline talk. {_SECRET} at $50M.",
+                "executive_summary": f"{_SECRET} exec",
+                "discussion_summary": f"Long discussion. {_SECRET}.",
+                "decisions": [{"description": f"{_SECRET} decision", "sensitivity": "ceo"}],
+                "tasks": [{"title": f"{_SECRET} task", "assignee": "Eyal", "sensitivity": "ceo"}],
+                "open_questions": [{"question": f"{_SECRET} question", "sensitivity": "ceo"}],
+                "follow_ups": [], "stakeholders": [],
+            }
+            from guardrails.approval_flow import distribute_approved_content
+            await distribute_approved_content("m-1", content, sensitivity="founders")
+
+        kw = mock_gmail.send_meeting_summary.call_args.kwargs
+        # Capping OFF -> CEO content is NOT stripped; the full summary + tasks go out.
+        assert _SECRET in kw["summary_content"]
+        assert any(_SECRET in (t.get("title", "")) for t in kw.get("tasks", []))
+
 
 # =============================================================================
 # P2-03 — weekly-review team digest (Drive doc)
