@@ -147,10 +147,13 @@ class TestServerBuild:
         # get_proposals / decide_proposal; Gantt write ops folded into gantt_ops)
         expected_tools.append("clear_manual_flag")
 
+        # Decision synthesis phase: the living synthesized decision view.
+        expected_tools.append("get_decision_synthesis")
+
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
 
-        assert len(tool_names) == 45
+        assert len(tool_names) == 46
 
     @pytest.mark.asyncio
     async def test_all_tools_have_descriptions(self):

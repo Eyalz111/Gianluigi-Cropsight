@@ -4653,6 +4653,34 @@ class SupabaseClient:
             logger.error(f"Error getting knowledge links: {e}")
             return []
 
+    def get_related_decisions(self, decision_id: str, link_types: tuple = ("relates_to",)) -> list[dict]:
+        """Decisions linked to this one in the knowledge graph — the decision->decision READER.
+
+        Reads knowledge_links in BOTH directions (this decision as from- and to-side)
+        for the given link_types, resolves the other endpoint to a decision row.
+        The first-ever consumer of decision->decision links (relates_to / supersedes).
+        Powers DecisionBrief.related and the get_decision_synthesis MCP view.
+        """
+        out: list[dict] = []
+        seen: set = set()
+        try:
+            for lt in link_types:
+                for lk in self.get_knowledge_links(from_type="decision", from_id=decision_id, link_type=lt):
+                    other = lk.get("to_id")
+                    if lk.get("to_type") == "decision" and other and other != decision_id:
+                        seen.add(other)
+                for lk in self.get_knowledge_links(to_type="decision", to_id=decision_id, link_type=lt):
+                    other = lk.get("from_id")
+                    if lk.get("from_type") == "decision" and other and other != decision_id:
+                        seen.add(other)
+            for other in seen:
+                d = self.get_decision(other)
+                if d:
+                    out.append(d)
+        except Exception as e:
+            logger.error(f"Error getting related decisions for '{decision_id}': {e}")
+        return out
+
     def supersede_knowledge_link(self, link_id: str) -> bool:
         """Mark a link as no longer valid (bi-temporal close, never deleted)."""
         try:

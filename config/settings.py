@@ -647,6 +647,10 @@ class Settings(BaseSettings):
         default=False,
         description="Phase 2: raise decision-supersession PROPOSALS on meeting approval (Eyal approves; never auto-flip). Off = dormant, no behavior change."
     )
+    DECISION_SYNTHESIS_ENABLED: bool = Field(
+        default=False,
+        description="Weekly decision synthesis: LLM-enrich decision brief_json.narrative for recently-active decisions + raise cross-decision merge/relate PROPOSALS (Eyal approves). Rides the Sunday knowledge-weekly scheduler; only runs when KNOWLEDGE_WEEKLY_ENABLED is also true. Off = dormant."
+    )
 
     # ==========================================================================
     # Outputs reconcile (v3) — DB-truth + Sheet-editable via column-ownership sync.

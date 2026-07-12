@@ -108,12 +108,24 @@ class KnowledgeWeeklyScheduler:
             except Exception as e:
                 logger.warning(f"Topic clustering proposals skipped (non-fatal): {e}")
 
+            # Decision synthesis (narratives + cross-decision proposals). Rides this
+            # same Sunday run, flag-gated + non-fatal, mirrors the topic pattern.
+            if getattr(settings, "DECISION_SYNTHESIS_ENABLED", False):
+                try:
+                    from processors.decision_synthesis import run_decision_synthesis
+                    from processors.decision_clustering import propose_decision_consolidation
+                    summary["decision_synthesis"] = await run_decision_synthesis()
+                    summary["decision_proposals"] = await propose_decision_consolidation()
+                except Exception as e:
+                    logger.warning(f"Decision synthesis skipped (non-fatal): {e}")
+
             # Heartbeat to scheduler_heartbeats (what the health checks read),
             # not audit_log. [audit P4-01]
             from services.supabase_client import supabase_client
             supabase_client.upsert_scheduler_heartbeat(
                 "knowledge_weekly",
-                details={k: summary.get(k) for k in ("resynthesized_topics", "proposals")},
+                details={k: summary.get(k) for k in
+                         ("resynthesized_topics", "proposals", "decision_synthesis", "decision_proposals")},
             )
         except Exception as e:
             logger.error(f"Knowledge weekly synthesis failed: {e}")
