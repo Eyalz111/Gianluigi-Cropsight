@@ -1992,7 +1992,8 @@ async def distribute_approved_content(
     except Exception as e:
         logger.error(f"Error saving to Drive: {e}")
 
-    # 1b. Generate and save Word document
+    # 1b. Generate the Word doc (the PDF source) and archive a PDF to Drive.
+    #     PDF replaces the .docx as the archived/attached format (Eyal, 2026-07-12).
     try:
         from services.word_generator import generate_summary_docx
         docx_bytes = generate_summary_docx(
@@ -2008,16 +2009,27 @@ async def distribute_approved_content(
             discussion_summary=content.get("discussion_summary", "") or content.get("summary", ""),
             stakeholders_mentioned=content.get("stakeholders", []),
         )
-        docx_result = await drive_service.save_meeting_summary_docx(
-            data=docx_bytes,
-            filename=f"{meeting_date} - {meeting_title}.docx",
-        )
-        results["docx_link"] = docx_result.get("webViewLink", "")
-        # Store bytes separately (not in results dict — bytes aren't JSON serializable)
+        # Store bytes separately (not in results dict — bytes aren't JSON serializable).
+        # Tier-filtered + converted to PDF at the email step below.
         _docx_bytes_for_email = docx_bytes
-        logger.info(f"Saved .docx to Drive: {docx_result.get('id')}")
+
+        pdf_result = await drive_service.save_meeting_summary_pdf(
+            docx_bytes=docx_bytes,
+            filename=f"{meeting_date} - {meeting_title}.pdf",
+        )
+        if pdf_result.get("id"):
+            results["pdf_link"] = pdf_result.get("webViewLink", "")
+            logger.info(f"Saved summary PDF to Drive: {pdf_result.get('id')}")
+        else:
+            # PDF conversion unavailable — archive the .docx so nothing is lost.
+            docx_result = await drive_service.save_meeting_summary_docx(
+                data=docx_bytes,
+                filename=f"{meeting_date} - {meeting_title}.docx",
+            )
+            results["docx_link"] = docx_result.get("webViewLink", "")
+            logger.warning("Summary PDF unavailable — archived .docx to Drive instead")
     except Exception as e:
-        logger.error(f"Error saving Word document: {e}")
+        logger.error(f"Error generating summary doc/PDF: {e}")
 
     # 2. Add tasks to Google Sheets Task Tracker
     try:
@@ -2249,6 +2261,16 @@ async def distribute_approved_content(
     # 7. Send email
     try:
         if distribution_emails:
+            # Convert the tier-safe .docx -> PDF for the attachment (PDF replaces
+            # Word, 2026-07-12). Built from team_docx_bytes so the tier-capping is
+            # preserved. ISOLATED: a conversion failure must never skip the email —
+            # it just falls back to the .docx attachment.
+            team_pdf_bytes = None
+            if team_docx_bytes:
+                try:
+                    team_pdf_bytes = await drive_service.docx_to_pdf_bytes(team_docx_bytes)
+                except Exception as _pe:
+                    logger.warning(f"Email PDF conversion failed, attaching .docx instead: {_pe}")
             email_result = await gmail_service.send_meeting_summary(
                 recipients=distribution_emails,
                 meeting_title=meeting_title,
@@ -2257,8 +2279,9 @@ async def distribute_approved_content(
                 meeting_date=meeting_date,
                 executive_summary=team_exec,
                 tasks=team_content.get("tasks", []),
-                docx_bytes=team_docx_bytes,  # [audit P2-02] CEO-safe attachment
+                docx_bytes=team_docx_bytes,  # [audit P2-02] CEO-safe .docx (fallback)
                 discussion_summary=team_discussion,
+                pdf_bytes=team_pdf_bytes,  # PDF replaces the Word attachment
             )
             results["email_sent"] = email_result
             results["emails_to"] = distribution_emails
