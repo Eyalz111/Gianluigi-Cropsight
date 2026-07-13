@@ -103,7 +103,10 @@ def _read_package_gb(drive) -> float | None:
         done = False
         while not done:
             _, done = dl.next_chunk()
-        data = json.loads(buf.getvalue().decode("utf-8"))
+        # utf-8-sig, not utf-8: the sync writes _metrics.json with a BOM, and a
+        # plain utf-8 decode leaves the BOM in place so json.loads raises and the
+        # package line silently stays empty (2026-07-13). utf-8-sig strips it.
+        data = json.loads(buf.getvalue().decode("utf-8-sig"))
         return float(data["total_gb"]) if data.get("total_gb") is not None else None
     except Exception as e:
         logger.debug(f"package _metrics.json read skipped: {e}")
