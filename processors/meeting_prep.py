@@ -923,6 +923,54 @@ def _html_escape(text: str) -> str:
     )
 
 
+_HL_LABEL_KEYS = ("description", "title", "task", "label", "name", "text",
+                  "question", "summary", "commitment")
+
+
+def _extract_section_highlights(section: dict, limit: int = 2) -> list[str]:
+    """Pull a few real one-liners from a section's gathered data so the prep
+    card shows ACTUAL content (decisions/tasks/Gantt status), not just counts —
+    and stays useful even if the Haiku narrative/agenda calls fail during an
+    Anthropic outage (which otherwise collapses the card to "N items" + a
+    generic "Review X" agenda). Defensive: handles list-of-dicts and
+    dict-of-lists shapes; never raises. [2026-07-13]"""
+    out: list[str] = []
+
+    def _one(item) -> str | None:
+        if isinstance(item, str):
+            return item.strip() or None
+        if not isinstance(item, dict):
+            return None
+        base = next((str(item[k]).strip() for k in _HL_LABEL_KEYS
+                     if item.get(k) and str(item[k]).strip()), None)
+        if not base:
+            return None
+        who = item.get("assignee") or item.get("owner") or item.get("led_by")
+        st = item.get("status")
+        extra = " · ".join(x for x in (who, st) if x)
+        return base[:100] + (f" ({extra})" if extra else "")
+
+    def _walk(v):
+        if len(out) >= limit:
+            return
+        if isinstance(v, list):
+            for it in v:
+                if len(out) >= limit:
+                    return
+                s = _one(it)
+                if s and s not in out:
+                    out.append(s)
+        elif isinstance(v, dict):
+            for vv in v.values():
+                _walk(vv)
+
+    try:
+        _walk(section.get("data"))
+    except Exception:
+        pass
+    return out[:limit]
+
+
 def format_outline_for_telegram(outline: dict, confidence: str = "auto") -> str:
     """
     Format a prep outline as a Telegram briefing card (HTML).
@@ -1007,6 +1055,21 @@ def format_outline_for_telegram(outline: dict, confidence: str = "auto") -> str:
     if unavailable:
         lines.append(f"Unavailable: {', '.join(s['name'].lower() for s in unavailable)}")
     lines.append("")
+
+    # Real-content highlights — a couple of concrete items per section (actual
+    # decisions/tasks/Gantt status), so the card is connected to the DB rather
+    # than a wall of counts. Deterministic → survives an LLM outage that would
+    # otherwise collapse the card to counts + a generic "Review X" agenda.
+    highlight_lines: list[str] = []
+    for s in ok_sections[:4]:
+        hl = _extract_section_highlights(s, limit=2)
+        if hl:
+            highlight_lines.append(f"<b>{_html_escape(s['name'])}:</b>")
+            for h in hl:
+                highlight_lines.append(f"  • {_html_escape(h)}")
+    if highlight_lines:
+        lines.extend(highlight_lines)
+        lines.append("")
 
     # Suggested focus — the most useful part
     if agenda:

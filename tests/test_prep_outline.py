@@ -185,6 +185,61 @@ class TestFormatOutlineForTelegram:
         assert "I think this is" in text
         assert "Founders Technical Review" in text
 
+    def test_renders_real_content_highlights(self):
+        """2026-07-13: the card must show ACTUAL decisions/tasks/Gantt items from
+        sections[].data, not just counts — so it isn't 'disconnected from the DB'
+        and stays useful when the LLM narrative/agenda fall back to counts."""
+        from processors.meeting_prep import format_outline_for_telegram
+        outline = {
+            "event": _make_event(),
+            "template_name": "Monthly Strategic",
+            "sections": [
+                {"name": "Recent Decisions", "status": "ok", "item_count": 2,
+                 "data": [
+                     {"description": "Adopt black-box validation for universities", "status": "active"},
+                     {"description": "Ship MVP to Oltrepo Pavese as design partner"},
+                 ]},
+                {"name": "Gantt Status: Product & Technology", "status": "ok", "item_count": 1,
+                 "data": {"section": "P&T",
+                          "weeks": {"W7": [{"task": "Satellite integration", "owner": "Roye", "status": "in_progress"}]}}},
+            ],
+            "suggested_agenda": ["Review Recent Decisions"],   # LLM-fallback-style
+        }
+        text = format_outline_for_telegram(outline, confidence="auto")
+        assert "black-box validation" in text                 # real decision text, not a count
+        assert "Oltrepo Pavese" in text
+        assert "Satellite integration" in text                # pulled from the gantt dict-of-lists
+
+    def test_no_data_degrades_without_raising(self):
+        from processors.meeting_prep import format_outline_for_telegram
+        outline = {
+            "event": _make_event(), "template_name": "General",
+            "sections": [{"name": "Tasks", "status": "ok", "item_count": 0}],
+            "suggested_agenda": [],
+        }
+        assert "Prep:" in format_outline_for_telegram(outline, confidence="auto")
+
+
+class TestExtractHighlights:
+    def test_list_of_dicts_with_owner_status(self):
+        from processors.meeting_prep import _extract_section_highlights
+        s = {"data": [{"description": "D1", "assignee": "Paolo", "status": "open"},
+                      {"description": "D2"}]}
+        hl = _extract_section_highlights(s, limit=2)
+        assert hl[0].startswith("D1") and "Paolo" in hl[0] and "open" in hl[0]
+        assert "D2" in hl[1]
+
+    def test_dict_of_lists_gantt_shape(self):
+        from processors.meeting_prep import _extract_section_highlights
+        s = {"data": {"weeks": {"W7": [{"task": "Satellite"}]}}}
+        assert any("Satellite" in h for h in _extract_section_highlights(s))
+
+    def test_never_raises_on_junk(self):
+        from processors.meeting_prep import _extract_section_highlights
+        assert _extract_section_highlights({"data": None}) == []
+        assert _extract_section_highlights({}) == []
+        assert _extract_section_highlights({"data": 42}) == []
+
     def test_unavailable_sections_shown(self):
         """Unavailable sections should show in outline."""
         from processors.meeting_prep import format_outline_for_telegram
