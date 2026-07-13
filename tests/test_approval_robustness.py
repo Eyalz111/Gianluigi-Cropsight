@@ -248,3 +248,40 @@ class TestCardMessageIdPersistence:
         sc = scmod.supabase_client
         monkeypatch.setattr(sc, "get_pending_approval", lambda aid: None)
         assert sc.get_card_message_ids("nope") == []       # never raises
+
+
+class TestNonMeetingRejectNoUuidError:
+    """2026-07-13 regression: rejecting a prep/digest (prefixed id, not a UUID)
+    threw 22P02 because the stale-card guard ran get_meeting() on the prep id.
+    Non-meeting ids must skip every UUID-keyed query and discard directly."""
+
+    async def test_prep_reject_never_calls_get_meeting(self, monkeypatch):
+        from services.telegram_bot import TelegramBot
+        import guardrails.approval_flow as af
+        import services.telegram_bot as tb
+
+        bot = TelegramBot.__new__(TelegramBot)
+        bot.eyal_chat_id = "123"
+        bot._approval_message_ids = {}          # empty -> _cleanup_approval_parts is a no-op
+        bot._app = MagicMock()                  # 'app' is a property backed by _app
+
+        sc = MagicMock()
+        monkeypatch.setattr("services.supabase_client.supabase_client", sc)
+        pr = AsyncMock(return_value={"next_step": "Content discarded"})
+        monkeypatch.setattr(af, "process_response", pr)
+        monkeypatch.setattr(tb, "conversation_memory", MagicMock())
+
+        q = MagicMock()
+        q.data = "reject:prep-b8qifkej29plnbgn9a9dt9fl1g_20260713T170000Z"
+        q.from_user.id = "123"
+        q.message.message_id = 999
+        q.answer = AsyncMock()
+        q.edit_message_text = AsyncMock()
+        update = SimpleNamespace(callback_query=q)
+        ctx = SimpleNamespace(user_data={})
+
+        await bot._handle_callback_query(update, ctx)
+
+        sc.get_meeting.assert_not_called()   # the bug — would 400 on a prep- id
+        pr.assert_awaited_once()
+        assert pr.await_args.kwargs.get("force_action") == "reject"

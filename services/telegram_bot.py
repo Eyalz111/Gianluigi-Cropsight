@@ -3852,7 +3852,15 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # action — worst case "Approve" re-distributed the summary to the whole
         # team. For the lifecycle actions, verify the meeting is still pending;
         # if not, close the stale card with a toast instead of re-processing.
-        if action in ("approve", "edit", "reject", "reject_confirm"):
+        # Non-meeting content (prep-, digest-, outline-, gantt-, brief-, review-)
+        # uses PREFIXED ids, not meeting UUIDs — DB queries keyed on the meetings/
+        # tasks UUID columns 400 on them ("invalid input syntax for type uuid").
+        # The lifecycle guard here + the reject-confirmation gate below are
+        # meeting-only. [regression fix 2026-07-13: prep reject threw 22P02]
+        _non_meeting_id = meeting_id.startswith(
+            ("digest-", "prep-", "outline-", "gantt-", "brief-", "review-")
+        )
+        if action in ("approve", "edit", "reject", "reject_confirm") and not _non_meeting_id:
             _m = supabase_client.get_meeting(meeting_id)
             _status = (_m or {}).get("approval_status")
             if _status != "pending":
@@ -3919,6 +3927,23 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 )
 
         elif action == "reject":
+            if _non_meeting_id:
+                # Non-meeting content (prep/digest/outline/…) has no task/decision
+                # children — skip the deletion gate and discard it directly.
+                await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
+                await query.edit_message_text("Got it — rejecting.")
+                try:
+                    result = await process_response(
+                        meeting_id=meeting_id, response="reject",
+                        response_source="telegram", force_action="reject",
+                    )
+                    await query.edit_message_text(result.get("next_step") or "Rejected.")
+                    logger.info(f"{meeting_id} rejected by Eyal (non-meeting)")
+                except Exception as e:
+                    logger.error(f"Reject failed for {meeting_id}: {e}")
+                    await query.edit_message_text(f"Reject failed: {e}")
+                conversation_memory.clear(str(self.eyal_chat_id))
+                return
             # CONFIRMATION GATE (2026-07-12 incident: a single tap deleted 190
             # tasks + 100 decisions with no warning). Show exactly what will be
             # deleted and require a SECOND tap. Nothing is deleted here.
