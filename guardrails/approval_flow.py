@@ -875,6 +875,18 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
     # any Drive write permission.
     counts: dict = {}
     try:
+        # Capture decision ids BEFORE the cascade so we can retire their
+        # semantic-index embeddings — delete_meeting_cascade drops the meeting's
+        # transcript embeddings (source_id=meeting_id) but decision embeddings
+        # key on the decision id. [semantic-index Phase 2]
+        _rejected_decision_ids: list[str] = []
+        try:
+            _rejected_decision_ids = [
+                d["id"] for d in supabase_client.list_decisions(
+                    meeting_id=meeting_id, include_pending=True) if d.get("id")
+            ]
+        except Exception:
+            pass
         counts = supabase_client.delete_meeting_cascade(meeting_id, keep_tombstone=True)
         supabase_client.log_action(
             action="meeting_rejected_tombstoned",
@@ -882,6 +894,12 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
             triggered_by="eyal",
         )
         logger.info(f"Tombstoned rejected meeting {meeting_id}: {counts}")
+        try:
+            from processors.semantic_index import deindex as _si_deindex
+            for _did in _rejected_decision_ids:
+                _si_deindex("decision", _did)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Cascade+tombstone failed for rejected meeting {meeting_id}: {e}")
         try:
@@ -1108,6 +1126,15 @@ async def process_response(
                     logger.warning(
                         f"[decision_intel] supersession proposal failed for {meeting_id}: {e}"
                     )
+
+            # Semantic index (own flag): embed the newly-approved decisions so
+            # they become semantically searchable (find_relevant_decisions,
+            # search_memory). Best-effort — never breaks approval. [Phase 2]
+            try:
+                from processors.semantic_index import index_decisions_for_meeting
+                await index_decisions_for_meeting(meeting_id)
+            except Exception as e:
+                logger.warning(f"[semantic_index] approval index failed for {meeting_id}: {e}")
 
         # v2.3 PR 3: log approval observation. Single call covers all
         # content_type branches below — placed here so early-returning
@@ -1914,6 +1941,10 @@ Return ONLY the JSON object, no other text."""
                     supabase_client.client.table("decisions").delete().eq(
                         "id", d["id"]
                     ).execute()
+                    # Retire the removed decision from the semantic index —
+                    # re-approval re-indexes the KEPT decisions but never these.
+                    from processors.semantic_index import deindex as _si_deindex
+                    _si_deindex("decision", d["id"])
             if new_decisions:
                 supabase_client.create_decisions_batch(meeting_id, new_decisions)
 

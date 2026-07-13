@@ -460,6 +460,9 @@ async def synthesize_all_topics(
             logger.info(f"[synthesis][dry-run] topic '{t.get('topic_name')}' -> {brief.get('current_status')}")
         else:
             supabase_client.update_topic_brief(t["id"], brief)
+            # Re-embed the refreshed narrative into the semantic index. [Phase 2]
+            from processors.semantic_index import schedule_reindex_topic
+            schedule_reindex_topic(t["id"])
         done += 1
     skipped = len(topics) - len(pending)
     result = {"topics_total": len(topics), "synthesized": done, "skipped": skipped, "failed": failed}
@@ -559,6 +562,8 @@ async def run_weekly_synthesis(days: int = 7) -> dict:
         brief = await synthesize_topic_brief(t, use_rag=True)
         if brief:
             supabase_client.update_topic_brief(t["id"], brief)
+            from processors.semantic_index import schedule_reindex_topic
+            schedule_reindex_topic(t["id"])
             resynth += 1
 
     areas_result = await synthesize_all_areas(force=True)

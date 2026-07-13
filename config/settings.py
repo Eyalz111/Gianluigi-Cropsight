@@ -656,6 +656,10 @@ class Settings(BaseSettings):
         default=True,
         description="When True, a meeting summary distributed to a band below its sensitivity has above-band decisions/tasks/questions stripped + the narrative/attachment rebuilt (CEO-safe). Set False to send the FULL summary to whoever is on the distribution list (recipient bands still control WHO gets it). Capability is preserved either way — this only toggles the content-level filtering. [Eyal 2026-07-12]"
     )
+    SEMANTIC_INDEX_ENABLED: bool = Field(
+        default=False,
+        description="Embed approved decisions + active topic narratives into the shared `embeddings` table (source_type='decision'/'topic') so the curated brain is semantically searchable — not just raw meeting transcripts. Powers find_relevant_decisions, the make-prep topic section, and search_memory. Off = dormant (no indexing hooks fire). Requires migrate_semantic_index.sql (RPC returns sensitivity) + a one-time backfill. [Eyal 2026-07-13]"
+    )
 
     # ==========================================================================
     # Outputs reconcile (v3) — DB-truth + Sheet-editable via column-ownership sync.

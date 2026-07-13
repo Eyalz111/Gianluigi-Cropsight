@@ -197,6 +197,9 @@ def apply_topic_proposal(content: dict) -> dict:
         supabase_client.client.table("topic_threads").update(
             {"status": "closed", "valid_to": now, "superseded_at": now}
         ).eq("id", loser).execute()
+        # Retire the closed loser from the semantic index. [Phase 2]
+        from processors.semantic_index import deindex as _si_deindex
+        _si_deindex("topic", loser)
         return {"merged": loser, "into": winner}
 
     if ptype == "topic_assign":

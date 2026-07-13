@@ -226,6 +226,10 @@ async def find_relevant_decisions(
             limit=limit,
             source_type="decision",
         )
+        # Tier-filter the semantic hits — the RPC now returns each row's
+        # sensitivity (migrate_semantic_index.sql), so a below-tier decision
+        # never leaks through this (previously unfiltered) branch. [Phase 3]
+        similar = filter_by_sensitivity(similar, max_sensitivity_level)
 
         for item in similar:
             decision_id = item.get("source_id") or item.get("id", "")
@@ -1353,6 +1357,51 @@ def calculate_timeline_mode(hours_until: float) -> str:
         return "skip"
 
 
+async def find_relevant_topics(topic: str, limit: int = 5,
+                               max_sensitivity_level: int = 3) -> list[dict]:
+    """Semantic-match active topic threads to a meeting title, tier-filtered.
+
+    Returns [{topic_id, topic_name, narrative}]. Empty when the semantic index
+    holds no topics (SEMANTIC_INDEX_ENABLED off / not backfilled) — the caller
+    just renders nothing. Best-effort. [semantic-index Phase 3]
+    """
+    try:
+        query_embedding = await embedding_service.embed_text(topic)
+        hits = supabase_client.search_embeddings(
+            query_embedding=query_embedding, limit=limit, source_type="topic",
+        )
+        hits = filter_by_sensitivity(hits, max_sensitivity_level)
+        out, seen = [], set()
+        for h in hits:
+            tid = h.get("source_id") or h.get("id")
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            meta = h.get("metadata") or {}
+            out.append({
+                "topic_id": tid,
+                "topic_name": meta.get("topic_name") or "",
+                "narrative": meta.get("narrative") or h.get("chunk_text", ""),
+            })
+        return out
+    except Exception as e:
+        logger.warning(f"Semantic topic search failed: {e}")
+        return []
+
+
+def _format_topics_section(topics: list[dict]) -> str:
+    """Render a 'Where Key Topics Stand' Markdown block. Empty -> empty string."""
+    if not topics:
+        return ""
+    lines = ["## Where Key Topics Stand", ""]
+    for t in topics:
+        name = t.get("topic_name") or "Topic"
+        narrative = (t.get("narrative") or "").strip()
+        lines.append(f"**{name}** — {narrative}" if narrative else f"**{name}**")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 async def generate_meeting_prep_from_outline(approval_id: str) -> dict:
     """
     Generate a full prep document from a stored outline.
@@ -1398,6 +1447,22 @@ async def generate_meeting_prep_from_outline(approval_id: str) -> dict:
     from guardrails.sensitivity_classifier import classify_sensitivity
 
     sensitivity = classify_sensitivity({"title": title})
+
+    # Semantic "Where Key Topics Stand" — full make-prep doc only (not the
+    # lightweight outline card). Topics matched to the meeting title, tier-safe.
+    # No-op until the semantic index is populated. [semantic-index Phase 3]
+    try:
+        _topics = await find_relevant_topics(title, limit=5, max_sensitivity_level=3)
+        _topic_block = _format_topics_section(_topics)
+        if _topic_block:
+            _footer = "\n---\n"
+            if _footer in prep_document:
+                prep_document = prep_document.replace(_footer, f"\n{_topic_block}\n{_footer}", 1)
+            else:
+                prep_document = f"{prep_document}\n\n{_topic_block}"
+    except Exception as e:
+        logger.warning(f"[prep] topic section injection failed: {e}")
+
     prep_approval_id = f"prep-{event.get('id', approval_id.replace('outline-', ''))}"
 
     await submit_for_approval(

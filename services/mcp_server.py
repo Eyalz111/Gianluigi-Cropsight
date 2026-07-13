@@ -430,6 +430,15 @@ class MCPServer:
                         if r.get("source_type") in source_types
                     ]
 
+                # Tier-safety: curated decisions/topics now sit in the embedding
+                # pool and carry their sensitivity (match_embeddings returns it).
+                # search_memory is Eyal/CEO-facing so filtering to CEO is a no-op
+                # today — a safeguard that protects any future lower-tier caller.
+                # [semantic-index Phase 3]
+                if "embeddings" in results:
+                    from models.schemas import filter_by_sensitivity
+                    results["embeddings"] = filter_by_sensitivity(results["embeddings"], 4)
+
                 # Sanitize — never return raw transcript text
                 if "embeddings" in results:
                     results["embeddings"] = _sanitize_records(results["embeddings"])

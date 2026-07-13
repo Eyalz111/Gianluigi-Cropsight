@@ -159,6 +159,9 @@ def apply_decision_merge(content: dict) -> dict:
     supabase_client.create_knowledge_link(
         "decision", winner, "decision", loser, "supersedes", created_by="eyal"
     )
+    # Retire the merged-away duplicate from the semantic index. [Phase 2]
+    from processors.semantic_index import deindex as _si_deindex
+    _si_deindex("decision", loser)
     return {"status": "applied", "merged": loser, "into": winner}
 
 
