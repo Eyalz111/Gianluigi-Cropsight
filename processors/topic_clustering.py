@@ -142,6 +142,33 @@ async def propose_topic_consolidation(max_proposals: int = _DEFAULT_MAX) -> dict
     return {"created": len(proposals), "proposals": proposals}
 
 
+def _resolve_active_winner(topic_id: str, _seen: set | None = None) -> str:
+    """Follow 'supersedes' links to the ultimate active winner.
+
+    In a CHAINED merge (443fbdde <- be1e35e9 <- 17261901), if the intermediate
+    winner has itself already been superseded, re-pointing mentions onto it
+    strands them on a closed topic instead of the final winner (the 2026-07-13
+    bug: one May mention stranded on a closed intermediate). A link
+    (X supersedes topic_id) means X is a newer winner over topic_id — walk up
+    until nobody supersedes the head. Cycle-guarded.
+    """
+    _seen = _seen or set()
+    if topic_id in _seen:
+        return topic_id
+    _seen.add(topic_id)
+    try:
+        links = supabase_client.get_knowledge_links(
+            to_type="topic", to_id=topic_id, link_type="supersedes"
+        ) or []
+    except Exception:
+        return topic_id
+    for link in links:
+        nxt = link.get("from_id")
+        if nxt and nxt != topic_id and nxt not in _seen:
+            return _resolve_active_winner(nxt, _seen)
+    return topic_id
+
+
 def apply_topic_proposal(content: dict) -> dict:
     """
     Apply an approved consolidation proposal (structural move). Bi-temporal:
@@ -152,7 +179,12 @@ def apply_topic_proposal(content: dict) -> dict:
         winner, loser = content.get("winner_id"), content.get("loser_id")
         if not winner or not loser or winner == loser:
             return {"error": "invalid merge (same or missing topic)"}
-        # Re-point the losing topic's mentions to the winner.
+        # Resolve to the ultimate active winner so a chained merge never
+        # re-points mentions onto a closed intermediate. [2026-07-13 fix]
+        winner = _resolve_active_winner(winner)
+        if winner == loser:
+            return {"error": "merge collapses to self after chain resolution"}
+        # Re-point the losing topic's mentions to the (resolved) winner.
         supabase_client.client.table("topic_thread_mentions").update(
             {"topic_id": winner}
         ).eq("topic_id", loser).execute()

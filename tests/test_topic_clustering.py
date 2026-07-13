@@ -109,6 +109,31 @@ class TestApply:
         res = tc.apply_topic_proposal({"proposal_type": "topic_merge", "winner_id": "x", "loser_id": "x"})
         assert "error" in res
 
+    def test_chained_merge_resolves_to_ultimate_winner(self, monkeypatch):
+        # 2026-07-13 fix: winner "b" was itself superseded by "a" in a prior
+        # merge — mentions must re-point to "a", never onto the closed "b".
+        updates = []
+        monkeypatch.setattr(tc.supabase_client, "_client",
+                            SimpleNamespace(table=lambda name: _UpdateChain(name, updates)))
+        monkeypatch.setattr(tc.supabase_client, "create_knowledge_link", lambda *a, **k: None)
+        monkeypatch.setattr(tc.supabase_client, "get_knowledge_links",
+                            lambda to_type=None, to_id=None, link_type=None, **k:
+                            [{"from_id": "a"}] if to_id == "b" else [])
+        res = tc.apply_topic_proposal({"proposal_type": "topic_merge", "winner_id": "b", "loser_id": "c"})
+        assert res == {"merged": "c", "into": "a"}                        # resolved past closed "b"
+        assert ("topic_thread_mentions", {"topic_id": "a"}) in updates    # mentions -> ultimate winner
+        assert ("topic_thread_mentions", {"topic_id": "b"}) not in updates
+
+    def test_simple_merge_winner_unchanged(self, monkeypatch):
+        updates = []
+        monkeypatch.setattr(tc.supabase_client, "_client",
+                            SimpleNamespace(table=lambda name: _UpdateChain(name, updates)))
+        monkeypatch.setattr(tc.supabase_client, "create_knowledge_link", lambda *a, **k: None)
+        monkeypatch.setattr(tc.supabase_client, "get_knowledge_links", lambda **k: [])
+        res = tc.apply_topic_proposal({"proposal_type": "topic_merge", "winner_id": "w", "loser_id": "l"})
+        assert res == {"merged": "l", "into": "w"}
+        assert ("topic_thread_mentions", {"topic_id": "w"}) in updates
+
     def test_assign_sets_area(self, monkeypatch):
         set_calls = []
         monkeypatch.setattr(tc.supabase_client, "set_topic_area", lambda tid, aid: set_calls.append((tid, aid)))
