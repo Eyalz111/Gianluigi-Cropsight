@@ -201,13 +201,14 @@ class DocumentWatcher:
             # Binary files (PDF, DOCX) or text files
             file_bytes = await drive_service.download_file_bytes(file_id)
             if not file_bytes:
-                drive_service.mark_document_processed(file_id)
-                return {
-                    "file_id": file_id,
-                    "file_name": file_name,
-                    "status": "error",
-                    "error": "Failed to download file",
-                }
+                # Empty bytes for a binary file means the download FAILED after
+                # retries (a real PDF/DOCX is never empty). Raise so _poll_once
+                # applies its 3-strike + alert instead of permanently quarantining
+                # the document on a single transient blip (audit SS-02). Do NOT
+                # mark_document_processed here.
+                raise RuntimeError(
+                    f"Drive download returned no bytes for '{file_name}' ({file_id})"
+                )
             content = extract_text_by_mime_type(file_bytes, mime_type, file_name)
 
         if not content or not content.strip():

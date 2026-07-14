@@ -176,24 +176,22 @@ class GmailService:
     # Sending Emails
     # =========================================================================
 
-    @retry(max_attempts=3, backoff=2.0, base_delay=1.0)
     async def _execute_send(self, send_body: dict) -> None:
         """
-        Network-call wrapper for Gmail's messages().send() — extracted
-        so the @retry decorator can catch transient BrokenPipeError,
-        ConnectionError, TimeoutError, and other OSError subclasses
-        from the underlying socket. BrokenPipeError is a subclass of
-        OSError, which core.retry's default TRANSIENT_EXCEPTIONS tuple
-        catches, so the existing decorator covers the observed pain
-        directly. 3 attempts with exponential backoff (1s, 2s).
+        Network-call wrapper for Gmail's messages().send().
 
-        Tier 3.4: added after a BrokenPipe was observed during test 4
-        on 2026-04-09 that silently dropped an approval email.
+        Routes through _execute_with_retry (which NULLS self._service between
+        attempts) so a Cloud Run idle-wake broken pipe rebuilds the transport and
+        actually retries — the old @retry decorator retried against the same dead
+        socket, so all 3 attempts failed identically and the email silently dropped
+        (audit SS-01 / June PR-B). 3 attempts, exponential backoff.
+
+        Tier 3.4: added after a BrokenPipe silently dropped an approval email
+        (2026-04-09).
         """
-        self.service.users().messages().send(
-            userId="me",
-            body=send_body,
-        ).execute()
+        self._execute_with_retry(
+            lambda: self.service.users().messages().send(userId="me", body=send_body)
+        )
 
     async def send_email(
         self,

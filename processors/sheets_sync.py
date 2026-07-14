@@ -1040,6 +1040,17 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     # 4. Rewrite snapshots LAST (with a light retry so a transient miss doesn't
     #    leave a stale snapshot that re-attributes the change next cycle, #5).
     for (tid, row, sstatus, sdeadline, spriority, sassignee, stitle, slabel) in snapshot_writes:
+        if tid in db_update_failed:
+            # The DB write for this row failed — do NOT advance its snapshot to the
+            # edited value. If we did, next cycle would see sheet==snapshot, treat
+            # the (stale) DB as authoritative, and overwrite Eyal's edit back out of
+            # the sheet. Leaving the snapshot stale re-detects the edit and retries
+            # the pull next cycle instead of silently reverting it (audit AD-01).
+            logger.warning(
+                f"[reconcile] NOT advancing snapshot for {tid} — its DB update "
+                "failed; edit will be retried next cycle."
+            )
+            continue
         ok = supabase_client.upsert_sheet_snapshot(
             tid, row, sstatus, sdeadline, spriority, sassignee, stitle, slabel)
         if not ok:
@@ -1251,6 +1262,7 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
         return summary
 
     # --- APPLY ---
+    decision_update_failed: set[str] = set()
     for did, upd in db_updates.items():
         try:
             supabase_client.update_decision(did, **upd)
@@ -1263,6 +1275,7 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
             from processors.semantic_index import schedule_reindex_decision
             schedule_reindex_decision(did)
         except Exception as e:
+            decision_update_failed.add(did)
             logger.warning(f"[decision-reconcile] DB update failed for {did}: {e}")
 
     # Re-add DB-only rows. SANITY CAP [mirror 2026-07-10]: a truncated read makes
@@ -1307,6 +1320,14 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
 
     # Rewrite snapshots LAST (one light retry, mirror reconcile_tasks).
     for (did, row, sdesc, slabel, srat, sconf, sstatus) in snapshot_writes:
+        if did in decision_update_failed:
+            # DB write failed — leave the snapshot stale so the edit is re-detected
+            # and retried next cycle, not silently reverted (audit AD-01).
+            logger.warning(
+                f"[decision-reconcile] NOT advancing snapshot for {did} — DB update "
+                "failed; edit will be retried next cycle."
+            )
+            continue
         ok = supabase_client.upsert_decision_snapshot(did, row, sdesc, slabel, srat, sconf, sstatus)
         if not ok:
             supabase_client.upsert_decision_snapshot(did, row, sdesc, slabel, srat, sconf, sstatus)

@@ -60,8 +60,13 @@ class KnowledgeWeeklyScheduler:
                     await asyncio.sleep(3600)
                     continue
 
-                await self._run()
-                self._last_generated_week = week_key
+                # Only mark the week done if the run actually succeeded, else
+                # retry within the window — a swallowed failure must not silently
+                # skip topic + decision synthesis for the week (audit SC-01).
+                if await self._run():
+                    self._last_generated_week = week_key
+                else:
+                    await asyncio.sleep(300)
 
             except asyncio.CancelledError:
                 break
@@ -93,7 +98,8 @@ class KnowledgeWeeklyScheduler:
         )
         await asyncio.sleep(sleep_seconds)
 
-    async def _run(self) -> None:
+    async def _run(self) -> bool:
+        """Run weekly synthesis. Returns True on success, False on failure (audit SC-01)."""
         logger.info("Knowledge weekly synthesis triggering")
         try:
             from processors.knowledge_synthesis import run_weekly_synthesis
@@ -127,6 +133,7 @@ class KnowledgeWeeklyScheduler:
                 details={k: summary.get(k) for k in
                          ("resynthesized_topics", "proposals", "decision_synthesis", "decision_proposals")},
             )
+            return True
         except Exception as e:
             logger.error(f"Knowledge weekly synthesis failed: {e}")
             try:
@@ -141,6 +148,7 @@ class KnowledgeWeeklyScheduler:
                 await check_and_alert("knowledge_weekly", e)
             except Exception:
                 pass
+            return False
 
 
 # Singleton instance

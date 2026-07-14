@@ -2613,12 +2613,17 @@ async def distribute_approved_prep(
                         f"Meeting prep document for '{title}' ({start_time}) "
                         f"is ready: {drive_link}"
                     )
-                    await gmail_service.send_email(
+                    sent = await gmail_service.send_email(
                         to=attendee_emails,
                         subject=f"Meeting Prep: {title}",
                         body=email_body,
                     )
-                    results["email_sent"] = True
+                    results["email_sent"] = bool(sent)
+                    if not sent:
+                        logger.error(
+                            f"Prep email to {attendee_emails} did NOT send "
+                            "(send_email returned False) — audit SS-01"
+                        )
             except Exception as e:
                 logger.warning(f"Failed to send prep email: {e}")
 
@@ -3204,13 +3209,18 @@ async def distribute_approved_review(
             if digest_link:
                 body += f"\nFull digest: {digest_link}"
 
-            await gmail_service.send_email(
+            sent = await gmail_service.send_email(
                 to=review_emails,
                 subject=subject,
                 body=body,
             )
-            results["email_sent"] = True
+            results["email_sent"] = bool(sent)
             results["emails_to"] = review_emails
+            if not sent:
+                logger.error(
+                    f"Weekly-review email to {review_emails} did NOT send "
+                    "(send_email returned False) — audit SS-01"
+                )
     except Exception as e:
         logger.error(f"Review email failed: {e}")
 

@@ -787,10 +787,23 @@ class MCPServer:
                     from processors.gantt_tagging import apply_row_tags
 
                     mapping = edits if edits is not None else content.get("candidates", [])
+                    expected = sum(1 for m in mapping if m.get("topic_id") and m.get("row"))
                     result = await apply_row_tags(sheet_name, mapping)
-                    supabase_client.delete_pending_approval(proposal_id)
-                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, **result})
-                    return _success({"sheet": sheet_name, **result})
+                    applied = result.get("applied", 0)
+                    if applied >= expected:
+                        # Every tag written — safe to retire the proposal.
+                        supabase_client.delete_pending_approval(proposal_id)
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, **result})
+                        return _success({"sheet": sheet_name, **result})
+                    # Partial write (some tags failed — likely a transient Sheets
+                    # error). KEEP the proposal pending so it can be retried, and
+                    # surface the partial state rather than reporting success (audit RG-01).
+                    logger.error(
+                        f"gantt_tag_mapping partial apply: {applied}/{expected} on "
+                        f"{sheet_name}; keeping proposal {proposal_id} for retry"
+                    )
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "partial": True, **result})
+                    return _success({"sheet": sheet_name, "partial": True, "expected": expected, **result})
 
                 return _error(
                     f"decide_proposal does not handle content_type {content_type!r}; "
