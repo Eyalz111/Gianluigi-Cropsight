@@ -1257,6 +1257,11 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
             for (mid, mfield) in manual_marks:
                 if mid == did:
                     supabase_client.mark_decision_field_manual(did, mfield, "sheet_edit")
+            # Keep the semantic index in sync with sheet edits pulled to the DB —
+            # the reconcile path was the one decision-edit path not yet hooked.
+            # [semantic-index dual-side gap closed, 2026-07-14]
+            from processors.semantic_index import schedule_reindex_decision
+            schedule_reindex_decision(did)
         except Exception as e:
             logger.warning(f"[decision-reconcile] DB update failed for {did}: {e}")
 
