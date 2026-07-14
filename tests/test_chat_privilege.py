@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.tools import tools_for, WRITE_TOOL_NAMES, SENSITIVE_READ_TOOL_NAMES
+from core.tools import (
+    tools_for,
+    WRITE_TOOL_NAMES,
+    SENSITIVE_READ_TOOL_NAMES,
+    RESTRICTED_READ_TOOL_NAMES,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -24,17 +29,20 @@ class TestToolsFor:
         assert "search_memory" in names
         assert "list_decisions" in names
 
-    def test_group_loses_writes_and_sensitive_reads(self):
+    def test_team_level_is_operational_reads_only(self):
         names = {t["name"] for t in tools_for(False, 2)}
-        assert not (names & WRITE_TOOL_NAMES), "group must have no write tools"
-        assert not (names & SENSITIVE_READ_TOOL_NAMES), "group must have no sensitive reads"
-        # ...but keeps operational reads useful to an office manager
+        assert not (names & WRITE_TOOL_NAMES), "no write tools"
+        assert not (names & SENSITIVE_READ_TOOL_NAMES), "no sensitive reads at TEAM"
         assert {"get_tasks", "get_gantt_status", "get_open_questions"} <= names
 
-    def test_founders_readonly_keeps_sensitive_reads_but_no_writes(self):
+    def test_founders_group_can_query_but_not_write_or_touch_raw_email(self):
+        # The office-manager group runs at FOUNDERS: it can query decisions/memory
+        # (output tier-filtered elsewhere), stays read-only, and never gets raw
+        # Gmail / email-intel tools.
         names = {t["name"] for t in tools_for(False, 3)}
-        assert not (names & WRITE_TOOL_NAMES)
-        assert "list_decisions" in names  # FOUNDERS may still read decisions
+        assert not (names & WRITE_TOOL_NAMES), "read-only"
+        assert {"list_decisions", "search_memory", "get_tasks"} <= names, "can query"
+        assert not (names & RESTRICTED_READ_TOOL_NAMES), "no raw gmail/email"
 
 
 # --------------------------------------------------------------------------- #
@@ -95,8 +103,8 @@ class TestRespondGating:
         agent = ConversationAgent(tool_executor=executor)
         responses = [_tool_use("get_tasks", {}), _end("here you go")]
         with patch("core.conversation_agent.call_llm_with_tools", side_effect=responses):
-            out = await agent.respond("my tasks", "roye", allow_writes=False, max_sensitivity_level=2)
-        executor.assert_awaited_once_with("get_tasks", {})
+            out = await agent.respond("my tasks", "roye", allow_writes=False, max_sensitivity_level=3)
+        executor.assert_awaited_once_with("get_tasks", {}, 3)   # level threaded through
         assert out["response"] == "here you go"
 
 
@@ -121,15 +129,41 @@ class TestChatPrivilege:
         is_eyal, allow_writes, lvl = self._bot()._chat_privilege(_update(8190904141, 8190904141))
         assert is_eyal and allow_writes and lvl == 4
 
-    def test_eyal_in_group_is_readonly_team_capped(self):
-        # Audience-based: the group caps clearance and blocks writes even for Eyal.
+    def test_eyal_in_group_is_readonly_founders_capped(self):
+        # Audience-based: the group caps clearance (FOUNDERS) and blocks writes
+        # even for Eyal — CEO content must not land in the shared chat.
         is_eyal, allow_writes, lvl = self._bot()._chat_privilege(_update(8190904141, -5187389631))
-        assert is_eyal and not allow_writes and lvl == 2
+        assert is_eyal and not allow_writes and lvl == 3
 
-    def test_other_member_in_group_is_readonly(self):
+    def test_other_member_in_group_is_readonly_founders(self):
         is_eyal, allow_writes, lvl = self._bot()._chat_privilege(_update(999, -5187389631))
-        assert not is_eyal and not allow_writes and lvl == 2
+        assert not is_eyal and not allow_writes and lvl == 3
 
-    def test_other_member_dm_is_readonly(self):
+    def test_other_member_dm_is_readonly_founders(self):
         is_eyal, allow_writes, lvl = self._bot()._chat_privilege(_update(999, 999))
-        assert not is_eyal and not allow_writes and lvl == 2
+        assert not is_eyal and not allow_writes and lvl == 3
+
+
+class TestApplyTierFilter:
+    def _agent(self):
+        from core.agent import GianluigiAgent
+        return GianluigiAgent()
+
+    def test_founders_caller_drops_ceo_decisions(self):
+        result = {"decisions": [
+            {"description": "team one", "sensitivity": "team"},
+            {"description": "ceo one", "sensitivity": "ceo"},
+        ], "count": 2}
+        out = self._agent()._apply_tier_filter("list_decisions", result, 3)
+        assert out["count"] == 1
+        assert out["decisions"][0]["sensitivity"] == "team"
+
+    def test_ceo_caller_sees_everything(self):
+        result = {"decisions": [{"description": "x", "sensitivity": "ceo"}], "count": 1}
+        out = self._agent()._apply_tier_filter("list_decisions", result, 4)
+        assert out["count"] == 1
+
+    def test_meeting_summary_above_level_is_gated(self):
+        result = {"title": "Board", "summary": "secret", "sensitivity": "ceo"}
+        out = self._agent()._apply_tier_filter("get_meeting_summary", result, 3)
+        assert "error" in out and "summary" not in out

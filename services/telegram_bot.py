@@ -2900,15 +2900,15 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         Audience-based access control (audit 2026-07 AC-01 / TS-01 / TS-02):
         writes execute ONLY in Eyal's private DM; the Telegram group — where the
         office manager interacts — and any non-Eyal sender are read-only and capped
-        at TEAM clearance (level 2), so no FOUNDERS/CEO content is ever rendered into
-        a shared chat, even when Eyal himself is the one asking there.
+        at FOUNDERS clearance (level 3). The group can query decisions/meetings/tasks
+        but never CEO-only content, and never write — even when Eyal asks there.
         """
         user = update.effective_user
         chat = update.effective_chat
         is_eyal = bool(user) and str(user.id) == str(self.eyal_chat_id)
         is_dm = bool(chat) and int(chat.id) > 0
         eyal_dm = is_eyal and is_dm
-        return is_eyal, eyal_dm, (4 if eyal_dm else 2)
+        return is_eyal, eyal_dm, (4 if eyal_dm else 3)
 
     async def _route_inbound_text(
         self,

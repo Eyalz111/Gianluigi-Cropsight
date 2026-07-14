@@ -160,7 +160,9 @@ class ConversationAgent:
                                     "this is a read-only context."
                                 )
                             else:
-                                result = await self.tool_executor(tool_name, tool_input)
+                                result = await self.tool_executor(
+                                    tool_name, tool_input, max_sensitivity_level
+                                )
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": tool_id,
