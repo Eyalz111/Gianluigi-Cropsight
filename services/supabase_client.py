@@ -1898,7 +1898,10 @@ class SupabaseClient:
             {
                 "search_query": query_text,
                 "match_count": limit,
-                "filter_source_type": source_type,
+                # RPC param is `source_filter` — the old `filter_source_type`
+                # silently 404'd the RPC (PGRST202), so search_memory's fulltext
+                # half never ran and hybrid search was vector-only. [2026-07-14]
+                "source_filter": source_type,
             },
         ).execute()
         return result.data

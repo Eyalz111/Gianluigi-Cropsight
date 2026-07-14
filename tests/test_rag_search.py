@@ -418,7 +418,7 @@ class TestSearchFulltext:
             {
                 "search_query": "satellite data",
                 "match_count": 10,
-                "filter_source_type": "meeting",
+                "source_filter": "meeting",   # RPC's real param name (2026-07-14 fix)
             },
         )
         assert len(results) == 1
@@ -445,7 +445,7 @@ class TestSearchFulltext:
             {
                 "search_query": "test query",
                 "match_count": 20,
-                "filter_source_type": None,
+                "source_filter": None,   # RPC's real param name (2026-07-14 fix)
             },
         )
 
