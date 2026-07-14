@@ -384,8 +384,38 @@ class Settings(BaseSettings):
             "when False). Default False = require a valid token. This is a safety "
             "valve: if a legit client (e.g. the Claude.ai connector) can't send the "
             "token and gets locked out, flip this to True via env var (no redeploy) "
-            "to instantly restore access while you fix the client auth."
+            "to instantly restore access while you fix the client auth. Ignored when "
+            "MCP_OAUTH_ENABLED (the SDK's RequireAuthMiddleware enforces auth then)."
         ),
+    )
+    MCP_OAUTH_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Enable the built-in OAuth 2.1 authorization server on /mcp so Claude.ai "
+            "connects via OAuth (DCR + PKCE) instead of authless — the proper close of "
+            "June P3-01. When True: the legacy MCPAuthMiddleware token/authless gate is "
+            "bypassed and the SDK's RequireAuthMiddleware enforces auth; /authorize, "
+            "/token, /register, /.well-known/* and the PIN-gated /login page are served. "
+            "Requires the mcp_oauth table (scripts/migrate_mcp_oauth.sql) + MCP_OAUTH_PIN."
+        ),
+    )
+    MCP_OAUTH_PIN: str = Field(
+        default="",
+        description=(
+            "The single owner PIN/password that gates the OAuth /login consent page. "
+            "Only someone who knows it can complete a connection; Claude.ai never sees "
+            "it. Set in .env / Cloud Run and keep secret. Empty = login fails closed."
+        ),
+    )
+    MCP_PUBLIC_URL: str = Field(
+        default="https://gianluigi-378037201341.europe-west1.run.app",
+        description=(
+            "Public HTTPS base URL of this server — the OAuth issuer_url + resource "
+            "identifier. Must exactly match what Claude.ai connects to (no trailing /)."
+        ),
+    )
+    MCP_OAUTH_SCOPE: str = Field(
+        default="user", description="OAuth scope name for the MCP connection."
     )
 
     # ==========================================================================
