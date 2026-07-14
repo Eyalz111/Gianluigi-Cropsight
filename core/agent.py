@@ -224,7 +224,9 @@ class GianluigiAgent:
         self,
         user_message: str,
         user_id: str,
-        conversation_history: list | None = None
+        conversation_history: list | None = None,
+        allow_writes: bool = True,
+        max_sensitivity_level: int = 4,
     ) -> dict:
         """
         Process a user message and return the agent's response.
@@ -259,6 +261,21 @@ class GianluigiAgent:
         if query_type != "general":
             extra_context = await self._get_query_context(query_type, user_message)
             logger.info(f"Query classified as '{query_type}', pre-fetched context")
+
+        # Write-capable intents (debrief, information injection) are Eyal-only.
+        # A non-privileged caller — the Telegram group where the office manager
+        # interacts — may read but never inject/change items (audit AC-01).
+        if not allow_writes and intent in ("debrief", "information_injection"):
+            logger.info(f"Read-only caller {user_id}: blocked write intent '{intent}'")
+            return {
+                "action": "read_only",
+                "response": (
+                    "Only Eyal can add or change items. I can still look things up — "
+                    "ask me about open tasks, the Gantt, or open questions."
+                ),
+                "actions": [],
+                "sources": [],
+            }
 
         # Step 3: Dispatch based on intent
         if intent == "debrief":
@@ -309,6 +326,8 @@ class GianluigiAgent:
             conversation_history=conversation_history,
             intent=intent,
             extra_context=extra_context,
+            allow_writes=allow_writes,
+            max_sensitivity_level=max_sensitivity_level,
         )
 
         # Log the interaction

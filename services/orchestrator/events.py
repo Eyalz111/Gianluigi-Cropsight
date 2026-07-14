@@ -55,3 +55,8 @@ class InboundEvent:
     message_id: str | None = None
     raw_transcript: str | None = None
     conversation_history: list | None = None
+    # Caller privilege, set by the channel adapter (audit AC-01 / TS-02, 2026-07).
+    # Default = full (Eyal/CEO) for backward compatibility; the Telegram adapter
+    # sets restrictive values for the group / non-Eyal senders.
+    allow_writes: bool = True
+    max_sensitivity_level: int = 4

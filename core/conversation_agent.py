@@ -58,6 +58,8 @@ class ConversationAgent:
         conversation_history: list | None = None,
         intent: str | None = None,
         extra_context: str = "",
+        allow_writes: bool = True,
+        max_sensitivity_level: int = 4,
     ) -> dict:
         """
         Process a user message and return a response.
@@ -100,6 +102,14 @@ class ConversationAgent:
             "content": full_message,
         })
 
+        # Restrict the toolset to what this caller may use. Eyal's DM gets
+        # everything; the Telegram group (read-only, TEAM-capped) loses write and
+        # sensitive-read tools entirely — Claude never even sees them. Belt-and-
+        # braces: allowed_names guards execution below (audit AC-01 / TS-02).
+        from core.tools import tools_for
+        tools = tools_for(allow_writes, max_sensitivity_level)
+        allowed_names = {t["name"] for t in tools}
+
         # Track actions taken
         actions_taken = []
         sources_cited = []
@@ -116,7 +126,7 @@ class ConversationAgent:
                 model=self.model,
                 max_tokens=4096,
                 system=self.system_prompt_cached,
-                tools=self.tools,
+                tools=tools,
                 call_site="conversation_agent",
             )
 
@@ -137,7 +147,20 @@ class ConversationAgent:
                         logger.info(f"Executing tool: {tool_name}")
 
                         try:
-                            result = await self.tool_executor(tool_name, tool_input)
+                            if tool_name not in allowed_names:
+                                # Defense in depth: a restricted caller's Claude
+                                # shouldn't see this tool, but never execute it if
+                                # the model hallucinates the name (audit AC-01).
+                                logger.warning(
+                                    f"Blocked disallowed tool '{tool_name}' for "
+                                    f"restricted caller {user_id}"
+                                )
+                                result = (
+                                    f"The '{tool_name}' tool is not available here — "
+                                    "this is a read-only context."
+                                )
+                            else:
+                                result = await self.tool_executor(tool_name, tool_input)
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": tool_id,

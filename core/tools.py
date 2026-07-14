@@ -750,3 +750,54 @@ TOOL_DEFINITIONS = [
     # v1.0 Phase 4 — Email Intelligence tools
     TOOL_GET_EMAIL_INTELLIGENCE,
 ]
+
+
+# =============================================================================
+# Caller privilege tiers — which tools a given caller may use.
+# (Audit 2026-07 AC-01 / TS-02: the Telegram group where the office manager
+# interacts must be read-only and must not reach sensitive content.)
+# =============================================================================
+
+# Tools that WRITE or trigger an action/distribution. Only Eyal (in his DM) may
+# use these; the group / any non-Eyal caller never gets them.
+WRITE_TOOL_NAMES = frozenset({
+    "create_task",
+    "update_task",
+    "ingest_transcript",
+    "ingest_document",
+    "get_meeting_prep",
+    "generate_weekly_digest",
+    "update_stakeholder_tracker",
+    "propose_gantt_update",
+    "rollback_gantt_update",
+})
+
+# Reads that surface sensitive content (raw transcripts, decisions, email, Gmail,
+# cross-meeting entity history). Hidden from any caller below FOUNDERS clearance.
+SENSITIVE_READ_TOOL_NAMES = frozenset({
+    "search_meetings",
+    "get_meeting_summary",
+    "search_memory",
+    "list_decisions",
+    "get_email_intelligence",
+    "search_gmail",
+    "get_entity_timeline",
+    "get_commitments",
+})
+
+
+def tools_for(allow_writes: bool, max_sensitivity_level: int) -> list:
+    """Return the subset of tools a caller is permitted to use.
+
+    Eyal in his DM gets everything (allow_writes=True, level 4=CEO). The Telegram
+    group (allow_writes=False, level 2=TEAM) loses every write tool and every
+    sensitive-read tool — it can still see tasks, Gantt, cadence and open questions,
+    but cannot write or pull decisions/meeting-memory/email. Belt-and-braces with
+    per-item sensitivity filtering at the render sites.
+    """
+    tools = TOOL_DEFINITIONS
+    if not allow_writes:
+        tools = [t for t in tools if t["name"] not in WRITE_TOOL_NAMES]
+    if max_sensitivity_level < 3:  # below FOUNDERS
+        tools = [t for t in tools if t["name"] not in SENSITIVE_READ_TOOL_NAMES]
+    return tools

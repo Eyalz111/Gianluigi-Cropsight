@@ -483,11 +483,14 @@ class TestCheckInbox:
                     member_name="Eyal Zror",
                 )
 
-            # Should have called the agent with conversation history
+            # Should have called the agent with conversation history + privilege
+            # (member "eyal" -> writes + full clearance; audit AC-01 email sibling)
             mock_agent.process_message.assert_called_once_with(
                 user_message="What is our Q1 budget?",
                 user_id="eyal",
                 conversation_history=[],
+                allow_writes=True,
+                max_sensitivity_level=4,
             )
 
             # Should have sent reply email
@@ -537,6 +540,8 @@ class TestCheckInbox:
                 user_message="What is our runway?",
                 user_id="eyal",
                 conversation_history=[],
+                allow_writes=True,
+                max_sensitivity_level=4,
             )
 
     @pytest.mark.asyncio

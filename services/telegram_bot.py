@@ -1591,6 +1591,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         query = " ".join(args)
 
+        # Caller privilege — the group is read-only + TEAM-capped (audit TS-01).
+        _, allow_writes, max_sens = self._chat_privilege(update)
+
         await self.send_message(
             update.effective_chat.id,
             "Let me look into that...",
@@ -1599,6 +1602,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         from services.supabase_client import supabase_client
         from services.embeddings import embedding_service
+        from models.schemas import filter_by_sensitivity
 
         try:
             # Embed the query for semantic search
@@ -1608,6 +1612,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 limit=10,
                 source_type=source_filter,
             )
+            # Drop any hit above the chat's clearance before rendering.
+            results = filter_by_sensitivity(results, max_sens)
 
             if not results:
                 await self.send_message(
@@ -1659,6 +1665,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             result = await gianluigi_agent.process_message(
                 user_message=f"Search our meeting history for: {query}",
                 user_id=user_id,
+                allow_writes=allow_writes,
+                max_sensitivity_level=max_sens,
             )
             await self.send_message(
                 update.effective_chat.id,
@@ -1676,8 +1684,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         Lists recent decisions.
         """
         from services.supabase_client import supabase_client
+        from models.schemas import filter_by_sensitivity
 
-        decisions = supabase_client.list_decisions()[:10]
+        # Tier-filter to the chat's clearance — the group only sees TEAM/PUBLIC
+        # decisions, never CEO/FOUNDERS content (audit TS-01).
+        _, _, max_sens = self._chat_privilege(update)
+        decisions = filter_by_sensitivity(supabase_client.list_decisions(), max_sens)[:10]
 
         if not decisions:
             await self.send_message(update.effective_chat.id, "No decisions recorded yet.")
@@ -1702,8 +1714,15 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         Lists open questions.
         """
         from services.supabase_client import supabase_client
+        from models.schemas import filter_by_sensitivity
 
-        questions = supabase_client.list_open_questions(status="open")[:10]
+        # Tier-filter to the chat's clearance (audit TS-01). Items without an
+        # explicit sensitivity default to FOUNDERS, so the group sees only
+        # genuinely team/public open questions.
+        _, _, max_sens = self._chat_privilege(update)
+        questions = filter_by_sensitivity(
+            supabase_client.list_open_questions(status="open"), max_sens
+        )[:10]
 
         if not questions:
             await self.send_message(update.effective_chat.id, "No open questions at the moment.")
@@ -2875,6 +2894,22 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
     # Message Handlers
     # =========================================================================
 
+    def _chat_privilege(self, update: Update) -> tuple[bool, bool, int]:
+        """Return (is_eyal, allow_writes, max_sensitivity_level) for this sender/chat.
+
+        Audience-based access control (audit 2026-07 AC-01 / TS-01 / TS-02):
+        writes execute ONLY in Eyal's private DM; the Telegram group — where the
+        office manager interacts — and any non-Eyal sender are read-only and capped
+        at TEAM clearance (level 2), so no FOUNDERS/CEO content is ever rendered into
+        a shared chat, even when Eyal himself is the one asking there.
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+        is_eyal = bool(user) and str(user.id) == str(self.eyal_chat_id)
+        is_dm = bool(chat) and int(chat.id) > 0
+        eyal_dm = is_eyal and is_dm
+        return is_eyal, eyal_dm, (4 if eyal_dm else 2)
+
     async def _route_inbound_text(
         self,
         message_text: str,
@@ -2882,6 +2917,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         history: list,
         chat_id: str | int,
         message_id: str | None,
+        allow_writes: bool = True,
+        max_sensitivity_level: int = 4,
     ) -> dict:
         """Dispatch an inbound text message to the brain (flag-gated seam).
 
@@ -2889,7 +2926,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         inbound entry shared with voice — which normalizes the event, calls the brain,
         and returns the agent result dict. Otherwise call the agent directly. Either
         way the caller renders the same dict, so this is behavior-preserving while the
-        flag is off.
+        flag is off. allow_writes / max_sensitivity_level carry the caller's privilege
+        (audit AC-01) through both routes.
         """
         if settings.ORCHESTRATION_SPINE_ENABLED:
             from services.orchestrator.spine import comms_spine
@@ -2904,6 +2942,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     text=message_text,
                     message_id=message_id,
                     conversation_history=history,
+                    allow_writes=allow_writes,
+                    max_sensitivity_level=max_sensitivity_level,
                 )
             )
         from core.agent import gianluigi_agent
@@ -2912,6 +2952,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             user_message=message_text,
             user_id=user_id,
             conversation_history=history,
+            allow_writes=allow_writes,
+            max_sensitivity_level=max_sensitivity_level,
         )
 
     async def _handle_message(
@@ -3152,6 +3194,10 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # Get conversation history for context
         history = conversation_memory.get_history(chat_id_str)
 
+        # Caller privilege: writes only in Eyal's DM; the group is read-only +
+        # TEAM-capped (audit AC-01 / TS-02).
+        _, allow_writes, max_sens = self._chat_privilege(update)
+
         try:
             result = await self._route_inbound_text(
                 message_text=message_text,
@@ -3159,6 +3205,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 history=history,
                 chat_id=update.effective_chat.id,
                 message_id=str(update.message.message_id) if update.message else None,
+                allow_writes=allow_writes,
+                max_sensitivity_level=max_sens,
             )
 
             # Handle quick injection confirmation

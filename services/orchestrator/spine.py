@@ -140,6 +140,8 @@ class CommsSpine:
             user_message=event.text,
             user_id=event.sender_id,
             conversation_history=event.conversation_history,
+            allow_writes=event.allow_writes,
+            max_sensitivity_level=event.max_sensitivity_level,
         )
 
     async def _transcribe(self, event: InboundEvent) -> str | None:

@@ -103,7 +103,8 @@ async def test_handle_inbound_text_dispatches_to_brain():
         result = await comms_spine.handle_inbound(event)
     assert result == fake
     agent.process_message.assert_awaited_once_with(
-        user_message="what's overdue?", user_id="eyal", conversation_history=history
+        user_message="what's overdue?", user_id="eyal", conversation_history=history,
+        allow_writes=True, max_sensitivity_level=4
     )
 
 
@@ -248,5 +249,6 @@ async def test_route_inbound_text_uses_agent_when_flag_off():
 
     assert result == fake
     agent.process_message.assert_awaited_once_with(
-        user_message="what's overdue?", user_id="eyal", conversation_history=history
+        user_message="what's overdue?", user_id="eyal", conversation_history=history,
+        allow_writes=True, max_sensitivity_level=4
     )

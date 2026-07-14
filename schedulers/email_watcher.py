@@ -490,6 +490,10 @@ class EmailWatcher:
         # Get team member ID
         member_id = member_name.lower().split()[0]  # "Eyal Zror" -> "eyal"
 
+        # Only Eyal gets write-capable + full-clearance answers by email; any other
+        # team member is read-only and TEAM-capped (audit AC-01, email sibling).
+        is_eyal = member_id == "eyal"
+
         # Get conversation history keyed by sender email
         history = conversation_memory.get_history(sender_email)
 
@@ -498,6 +502,8 @@ class EmailWatcher:
                 user_message=question,
                 user_id=member_id,
                 conversation_history=history,
+                allow_writes=is_eyal,
+                max_sensitivity_level=4 if is_eyal else 2,
             )
 
             response_text = result.get("response", "I couldn't process your request.")
