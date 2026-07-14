@@ -647,7 +647,7 @@ class Settings(BaseSettings):
         default=4, description="IST hour for weekly knowledge synthesis"
     )
     KNOWLEDGE_CLUSTER_ENABLED: bool = Field(
-        default=False, description="Enable semantic topic/area clustering -> proposals (Eyal approves)"
+        default=False, description="RESERVED (not yet wired in code): semantic topic/area clustering -> proposals. [audit SC-04]"
     )
     KNOWLEDGE_READBACK_COST_CEILING_USD: float = Field(
         default=0.05, description="Per-meeting added-cost budget for read-back; warn at 1x, trip per-meeting fallback at 2x"
@@ -714,13 +714,13 @@ class Settings(BaseSettings):
         default=False, description="Enable the copy+add-rows engine (+1 Planning/+2 Execution per area). Cutover to live also requires confirm=True. Copy-first, never auto."
     )
     GANTT_LINKAGE_ENABLED: bool = Field(
-        default=False, description="Enable per-lane->topics linkage proposals (knowledge_links 'gantt_covers'); proposal-only, DB-only"
+        default=False, description="RESERVED (not yet wired in code): per-lane->topics linkage proposals ('gantt_covers'). [audit SC-04]"
     )
     GANTT_NUDGE_ENABLED: bool = Field(
         default=False, description="Surface the weekly 'Gantt updates' nudges (brief<->board divergence) in the weekly review"
     )
     GANTT_ALERT_ENABLED: bool = Field(
-        default=False, description="Enable the rare high-bar Telegram pop for critical+blocked+board-active Gantt divergences (cooldown 1/topic/week)"
+        default=False, description="RESERVED (not yet wired in code): high-bar Telegram pop for critical Gantt divergences. [audit SC-04]"
     )
 
     # ==========================================================================

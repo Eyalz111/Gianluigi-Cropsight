@@ -204,6 +204,13 @@ async def run_consolidation(apply: bool | None = None) -> dict:
                         ).eq("id", t["id"]).execute()
                     except Exception:
                         pass
+                # Keep the semantic index in step with the consolidated narrative:
+                # a staled topic is deindexed, an active one reindexed (audit TS-03).
+                from processors.semantic_index import schedule_reindex_topic, deindex as _si_deindex
+                if brief.get("current_status") == "stale":
+                    _si_deindex("topic", t["id"])
+                else:
+                    schedule_reindex_topic(t["id"])
                 updated += 1
 
     summary = {

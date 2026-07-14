@@ -402,9 +402,14 @@ class TelegramBot:
         from services.supabase_client import supabase_client
         sessions = []
 
-        review = supabase_client.get_active_weekly_review_session()
-        if review:
-            sessions.append(("weekly_review", review.get("created_at", "")))
+        # Guard each lookup independently so a transient DB error on one doesn't
+        # abort reconstruction of the other (audit SS-05).
+        try:
+            review = supabase_client.get_active_weekly_review_session()
+            if review:
+                sessions.append(("weekly_review", review.get("created_at", "")))
+        except Exception:
+            pass
 
         try:
             debrief = supabase_client.get_active_debrief_session()
@@ -3112,6 +3117,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                                 status_lines.append("  - Notification sent")
                             if dist.get("email_sent"):
                                 status_lines.append("  - Email sent")
+                            if len(status_lines) == 1:
+                                # No channel succeeded — don't imply success (audit AD-03).
+                                status_lines = [
+                                    "⚠️ Distribution FAILED on all channels — nothing went out. "
+                                    "It's approved in the DB; please retry or check the logs."
+                                ]
                             await self.send_to_eyal(
                                 "\n".join(status_lines), parse_mode=None
                             )
@@ -3746,7 +3757,24 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # still passes (from_user is him). The review/debrief sub-handlers keep
         # their own checks as defense-in-depth. Guarded only when eyal_chat_id is
         # configured, so a missing config can't brick every button. [audit P3-14]
-        if self.eyal_chat_id and str(query.from_user.id) != str(self.eyal_chat_id):
+        # Fail CLOSED if we cannot verify the approver: an unconfigured
+        # eyal_chat_id must NOT let anyone action a CEO control (audit AC-02).
+        # If it's unset the bot is already misconfigured (it can't DM Eyal), so
+        # blocking the callback is the safe outcome.
+        if not self.eyal_chat_id:
+            logger.error(
+                f"Rejecting callback {action!r}: TELEGRAM_EYAL_CHAT_ID is not "
+                "configured — cannot verify the approver."
+            )
+            try:
+                await query.answer(
+                    "Cannot verify approver (misconfigured) — action blocked.",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
+            return
+        if str(query.from_user.id) != str(self.eyal_chat_id):
             logger.warning(
                 f"Ignoring callback {action!r} from non-Eyal user {query.from_user.id}"
             )
@@ -3963,6 +3991,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 if dist.get("email_sent"):
                     status_lines.append("  - Email sent to team")
 
+                if len(status_lines) == 1:
+                    # No channel succeeded — don't imply success (audit AD-03).
+                    status_lines = [
+                        "⚠️ Distribution FAILED on all channels — nothing went out. "
+                        "It's approved in the DB; please retry or check the logs."
+                    ]
                 await self.send_to_eyal("\n".join(status_lines), parse_mode=None)
 
             except Exception as e:

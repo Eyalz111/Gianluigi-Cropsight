@@ -84,6 +84,13 @@ def apply_decision_supersede(content: dict, approve: bool) -> dict:
     if (old.get("decision_status") or "active") != "active":
         return {"status": "already_superseded"}
 
+    # Resolve the winner to the live active decision — don't point the old one at a
+    # winner that was itself superseded since the proposal was raised (audit KP-03).
+    from processors.decision_clustering import _resolve_active_winner
+    new_id = _resolve_active_winner(new_id)
+    if new_id == old_id:
+        return {"status": "invalid", "reason": "winner resolves to old decision"}
+
     supabase_client.mark_decision_superseded(old_id, new_id)
     # Record the chain edge in the knowledge graph (mirrors topic-merge 'supersedes').
     supabase_client.create_knowledge_link(

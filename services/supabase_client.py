@@ -387,9 +387,14 @@ class SupabaseClient:
                     ("tasks", "meeting_id"),
                 ]:
                     try:
-                        self.client.table(table).delete().eq(fk_col, meeting_id).execute()
+                        _res = self.client.table(table).delete().eq(fk_col, meeting_id).execute()
+                        # Report the ACTUAL number deleted, not the pre-count (audit AD-02).
+                        if table in counts:
+                            counts[table] = len(_res.data) if _res.data else 0
                     except Exception as e:
-                        logger.debug(f"Skipping {table} cleanup: {e}")
+                        # A failed child delete is a real integrity concern — surface
+                        # it at WARNING, don't swallow at debug as if it succeeded.
+                        logger.warning(f"[cascade] {table} delete FAILED for {meeting_id}: {e}")
 
                 # pending_approvals is keyed by approval_id, not FK'd to meetings.id.
                 try:

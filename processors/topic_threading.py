@@ -562,6 +562,11 @@ def rename_thread(topic_id: str, new_name: str) -> dict:
 
     logger.info(f"Renamed topic thread {topic_id} to '{new_name}'")
 
+    # topic_name is part of the embedded text, so a rename must reindex or the
+    # semantic index keeps surfacing the old name (audit TS-04).
+    from processors.semantic_index import schedule_reindex_topic
+    schedule_reindex_topic(topic_id)
+
     result = supabase_client.client.table("topic_threads").select("*").eq("id", topic_id).execute()
     return result.data[0] if result.data else {}
 
