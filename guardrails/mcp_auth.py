@@ -155,12 +155,22 @@ class MCPAuthMiddleware:
                 await self._send_json_error(send, 401, {"error": "Invalid token"})
                 return
             rate_key = f"token:{token}"
-        else:
-            # No token — authless mode (Claude.ai connector)
-            # Use client IP for rate limiting
+        elif settings.MCP_ALLOW_AUTHLESS:
+            # No token, but authless explicitly allowed (safety valve / legacy
+            # Claude.ai connector). Rate-limit by client IP. Closes June audit
+            # P3-01 when MCP_ALLOW_AUTHLESS is False (the default).
             client_host = scope.get("client", ("unknown", 0))[0]
             rate_key = f"ip:{client_host}"
-            logger.debug(f"MCP authless access from {client_host} to {path}")
+            logger.warning(f"MCP AUTHLESS access allowed from {client_host} to {path}")
+        else:
+            # No token and authless disabled — reject. This is the secure default:
+            # every /mcp request must carry a valid Bearer token.
+            client_host = scope.get("client", ("unknown", 0))[0]
+            logger.warning(f"MCP auth: rejected tokenless request from {client_host} to {path}")
+            await self._send_json_error(
+                send, 401, {"error": "Authentication required"}
+            )
+            return
 
         if not mcp_auth.check_rate_limit(rate_key):
             logger.warning(f"MCP auth: rate limit exceeded for {path}")

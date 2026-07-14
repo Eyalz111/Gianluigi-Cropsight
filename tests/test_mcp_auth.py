@@ -251,11 +251,39 @@ class TestAuthMiddleware:
         assert response.status_code == 429
         assert "Rate limit" in response.json()["error"]
 
+    @patch("guardrails.mcp_auth.settings")
     @patch("guardrails.mcp_auth.mcp_auth")
-    def test_mcp_rate_limited_authless(self, mock_auth):
-        """Authless connections are still rate-limited by IP."""
+    def test_mcp_rate_limited_authless(self, mock_auth, mock_settings):
+        """When authless is explicitly allowed, connections are still rate-limited by IP."""
+        mock_settings.MCP_ALLOW_AUTHLESS = True
         mock_auth.check_rate_limit.return_value = False
         app = self._make_test_app()
         client = TestClient(app)
         response = client.get("/mcp")
         assert response.status_code == 429
+
+    @patch("guardrails.mcp_auth.settings")
+    @patch("guardrails.mcp_auth.mcp_auth")
+    def test_mcp_tokenless_rejected_by_default(self, mock_auth, mock_settings):
+        """Secure default (June P3-01 closed): no token + authless disabled => 401,
+        rejected BEFORE the rate-limit check."""
+        mock_settings.MCP_ALLOW_AUTHLESS = False
+        app = self._make_test_app()
+        client = TestClient(app)
+        response = client.get("/mcp")
+        assert response.status_code == 401
+        assert "Authentication required" in response.json()["error"]
+        mock_auth.check_rate_limit.assert_not_called()
+
+    @patch("guardrails.mcp_auth.settings")
+    @patch("guardrails.mcp_auth.mcp_auth")
+    def test_mcp_authless_allowed_when_flag_set(self, mock_auth, mock_settings):
+        """Safety valve: MCP_ALLOW_AUTHLESS=True restores the old authless pass-through
+        (instant env-var escape hatch if a legit client gets locked out)."""
+        mock_settings.MCP_ALLOW_AUTHLESS = True
+        mock_auth.check_rate_limit.return_value = True
+        app = self._make_test_app()
+        client = TestClient(app)
+        response = client.get("/mcp")
+        assert response.status_code == 200
+        mock_auth.validate_token.assert_not_called()

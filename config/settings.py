@@ -376,6 +376,17 @@ class Settings(BaseSettings):
     MCP_RATE_LIMIT_PER_HOUR: int = Field(
         default=100, description="Max MCP tool calls per hour per token"
     )
+    MCP_ALLOW_AUTHLESS: bool = Field(
+        default=False,
+        description=(
+            "If True, /mcp requests with NO Bearer token are allowed through "
+            "(the old 'authless for Claude.ai' behavior — closes June audit P3-01 "
+            "when False). Default False = require a valid token. This is a safety "
+            "valve: if a legit client (e.g. the Claude.ai connector) can't send the "
+            "token and gets locked out, flip this to True via env var (no redeploy) "
+            "to instantly restore access while you fix the client auth."
+        ),
+    )
 
     # ==========================================================================
     # v1.0 — Weekly Review
