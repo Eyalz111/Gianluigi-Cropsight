@@ -120,6 +120,28 @@ class EmailWatcher:
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', sender)
                 sender_email = email_match.group(0) if email_match else sender
 
+                # CRITICAL — never re-ingest our OWN outbound approval-request.
+                # The bot sends '[APPROVAL NEEDED] … [ref:xxxx]' emails from Eyal's
+                # own Gmail, so each request lands right back in Eyal's inbox looking
+                # like it's "from Eyal". Its body says "Reply APPROVE …", so routing
+                # it as an approval reply made the watcher read the bot's own request
+                # as Eyal's approval and auto-approve + distribute with NO human in
+                # the loop. Skip these outright — before the team-email / reply
+                # routing below. [2026-07-16 self-approval incident]
+                if self._is_own_approval_request(subject):
+                    logger.warning(
+                        f"Skipping bot's own outbound approval-request email "
+                        f"(not an approval): {subject}"
+                    )
+                    supabase_client.log_action(
+                        action="approval_request_email_ignored",
+                        details={"subject": subject, "sender": sender_email},
+                        triggered_by="system",
+                    )
+                    await gmail_service.mark_as_read(msg_id)
+                    self._processed_ids.add(msg_id)
+                    continue
+
                 # Only process emails from team members
                 if not is_team_email(sender_email):
                     logger.debug(f"Skipping non-team email from {sender_email}")
@@ -200,12 +222,27 @@ class EmailWatcher:
                         pass
 
     def _is_approval_reply(self, subject: str) -> bool:
-        """Check if the email is a reply to an approval request."""
-        subject_lower = subject.lower()
-        return (
-            "[approval needed]" in subject_lower
-            or "re: [approval needed]" in subject_lower
-        )
+        """True only for a genuine human REPLY to an approval request.
+
+        A real reply's subject starts with 'Re:' (every mail client adds it).
+        The BARE '[APPROVAL NEEDED] …' subject is our OWN outbound request, not
+        a reply — and because the bot sends it from Eyal's own Gmail it bounces
+        back into his inbox as if "from Eyal". The old check matched that bare
+        subject too, so the watcher treated the bot's own request as Eyal's
+        approval and auto-approved the meeting. Requiring 'Re:' separates a real
+        reply from the request. Outbound requests are also dropped earlier via
+        _is_own_approval_request(). [2026-07-16 self-approval incident]
+        """
+        s = subject.strip().lower()
+        return s.startswith("re:") and "[approval needed]" in s
+
+    def _is_own_approval_request(self, subject: str) -> bool:
+        """True for the bot's OWN outbound '[APPROVAL NEEDED] …' request email
+        (i.e. NOT a reply). These must never be routed as a reply, a question,
+        or intelligence — they are the bot's own mail echoing back into the
+        inbox. [2026-07-16 self-approval incident]"""
+        s = subject.strip().lower()
+        return "[approval needed]" in s and not s.startswith("re:")
 
     async def _extract_and_log(
         self,

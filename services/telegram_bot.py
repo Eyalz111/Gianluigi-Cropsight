@@ -3953,14 +3953,35 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 # (that's transient — a fresh pending card follows when it lands).
                 if _status != "editing":
                     try:
-                        _title = (_m or {}).get("title") or "This summary"
+                        # Escape the title — meeting titles routinely contain <, >,
+                        # and & (e.g. "CropSight <> Shemer...", "Weekly R&D Status").
+                        # Interpolated raw into a parse_mode=HTML message they make
+                        # Telegram 400 "can't parse entities", which the bare except
+                        # below swallowed — so the stale card never closed and the
+                        # buttons stayed live, re-firing this toast on every tap.
+                        # That was the "Request Changes is stuck" report. [2026-07-16]
+                        _title = _escape_html((_m or {}).get("title") or "This summary")
                         await query.edit_message_text(
                             f"✅ <b>{_title}</b> — {_label}.\n"
                             f"<i>(This card is closed — no action needed.)</i>",
                             parse_mode="HTML", reply_markup=None,
                         )
-                    except Exception:
-                        pass
+                    except Exception as _close_err:
+                        # Last resort: strip formatting so a still-odd title can't
+                        # keep the card alive. Plain text can't fail entity parsing.
+                        logger.warning(
+                            f"Stale-card HTML close failed ({_close_err}); "
+                            f"retrying as plain text for {meeting_id}"
+                        )
+                        try:
+                            _plain = (_m or {}).get("title") or "This summary"
+                            await query.edit_message_text(
+                                f"{_plain} — {_label}. "
+                                "(This card is closed — no action needed.)",
+                                reply_markup=None,
+                            )
+                        except Exception:
+                            pass
                 return
 
         if action == "approve":

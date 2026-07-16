@@ -490,6 +490,21 @@ class Settings(BaseSettings):
             "the prep/gantt approval emails without a code change."
         ),
     )
+    APPROVAL_EMAIL_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Send the '[APPROVAL NEEDED]' EMAIL to Eyal for meeting_summary, "
+            "weekly_digest and morning_brief approvals. Default False = approvals "
+            "are TELEGRAM-ONLY. Disabled 2026-07-16 after the self-approval "
+            "incident: the bot sends this email FROM Eyal's own Gmail, so it "
+            "bounced back into his inbox and the email watcher read it as Eyal's "
+            "approval and auto-approved a meeting. The watcher now ignores its own "
+            "requests, but keeping the email OFF removes the whole class. Flip "
+            "True only if the watcher's own-request guard is trusted AND Eyal "
+            "wants email approvals back. Does NOT affect team distribution emails "
+            "sent AFTER Eyal approves."
+        ),
+    )
 
     # ==========================================================================
     # Weekly Digest Scheduling (post-Phase 4)

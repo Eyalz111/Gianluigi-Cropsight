@@ -576,11 +576,16 @@ async def submit_for_approval(
             summary_preview=preview,
             meeting_id=meeting_id,
         )
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title=f"Weekly Digest — Week of {week_of}",
-            summary_preview=digest_doc[:1000],
-            meeting_id=meeting_id,
-        )
+        # Telegram-only unless re-enabled — same self-approval risk as the
+        # meeting_summary email. [APPROVAL_EMAIL_ENABLED, 2026-07-16]
+        if settings.APPROVAL_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title=f"Weekly Digest — Week of {week_of}",
+                summary_preview=digest_doc[:1000],
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     elif content_type == "gantt_update":
         # Gantt update proposal — render human-readable diff for approval
@@ -640,11 +645,16 @@ async def submit_for_approval(
             summary_preview=preview,
             meeting_id=meeting_id,
         )
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title="Morning Brief",
-            summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""),
-            meeting_id=meeting_id,
-        )
+        # Telegram-only unless re-enabled — same self-approval risk as the
+        # meeting_summary email. [APPROVAL_EMAIL_ENABLED, 2026-07-16]
+        if settings.APPROVAL_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title="Morning Brief",
+                summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""),
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     elif content_type == "weekly_review":
         # Weekly review — handled by its own session flow.
@@ -691,16 +701,23 @@ async def submit_for_approval(
             sensitivity=meeting_sensitivity,
         )
 
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title=meeting_title,
-            summary_preview=discussion_summary or summary[:600],
-            executive_summary=executive_summary,
-            decisions=decisions,
-            tasks=tasks,
-            follow_ups=follow_ups,
-            open_questions=open_questions,
-            meeting_id=meeting_id,
-        )
+        # Meeting-summary approval is TELEGRAM-ONLY unless re-enabled. The email
+        # is sent from Eyal's own Gmail and bounced back into his inbox where the
+        # watcher read it as his approval and auto-approved (2026-07-16 incident).
+        # [APPROVAL_EMAIL_ENABLED]
+        if settings.APPROVAL_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title=meeting_title,
+                summary_preview=discussion_summary or summary[:600],
+                executive_summary=executive_summary,
+                decisions=decisions,
+                tasks=tasks,
+                follow_ups=follow_ups,
+                open_questions=open_questions,
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     # Inject approval context into conversation memory so the agent knows
     # what summary it just sent (enables follow-up questions and edits)
