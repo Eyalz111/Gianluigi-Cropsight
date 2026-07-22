@@ -2702,17 +2702,21 @@ class GoogleSheetsService:
 
         try:
             # Same bare-range hazard as get_all_tasks(): qualify with the tab.
+            # Width comes from the live layout, not a hardcoded A1:J1 — that
+            # range predates the col-J UUID / col-K Urgency / col-L Last Update
+            # appends and would have truncated the header row. [2026-07-22]
             tab_name = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+            last_col = max(TASK_COLUMNS.values())
             rows = await self._read_sheet_range(
                 sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                range_name=f"'{tab_name}'!A1:J1"
+                range_name=f"'{tab_name}'!A1:{last_col}1"
             )
 
             if not rows:
                 # Add headers
                 await self._write_sheet_range(
                     sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                    range_name=f"'{tab_name}'!A1:J1",
+                    range_name=f"'{tab_name}'!A1:{last_col}1",
                     values=[TASK_TRACKER_HEADERS]
                 )
                 logger.info("Created Task Tracker headers")
