@@ -1112,11 +1112,20 @@ class SupabaseClient:
         include_pending: bool = False,
         include_superseded: bool = False,
         include_archived: bool = False,
+        meeting_id: str | None = None,
     ) -> list[dict]:
         """
         Get tasks with optional filtering.
 
         Args:
+            meeting_id: Filter to one meeting's tasks, SERVER-SIDE. Always use
+                this instead of fetching everything and filtering the result in
+                Python — `limit` applies before a client-side filter would run,
+                so the meeting's rows can fall outside the returned window
+                entirely and silently yield []. That is exactly what blanked a
+                distributed summary on 2026-07-17: ordering is by deadline ASC,
+                NULL deadlines sort last, so a fresh extraction's tasks were
+                never inside the first 100 of 396 rows.
             assignee: Filter by assignee name.
             status: Filter by status ('pending', 'in_progress', 'done', 'overdue',
                 'archived'). Passing 'archived' explicitly returns archived tasks
@@ -1140,6 +1149,9 @@ class SupabaseClient:
             List of task records.
         """
         query = self.client.table("tasks").select("*, meetings(title, date)")
+
+        if meeting_id:
+            query = query.eq("meeting_id", meeting_id)
 
         # Tier 3.1 narrow: filter to approved by default so every read path
         # that doesn't explicitly opt into pending gets the right behavior.
@@ -3651,10 +3663,9 @@ class SupabaseClient:
                     if meeting:
                         # Get related decisions and tasks for this meeting
                         decisions = self.list_decisions(meeting_id=source_id, limit=5)
-                        tasks = self.get_tasks(status=None)
-                        meeting_tasks = [
-                            t for t in tasks if t.get("meeting_id") == source_id
-                        ][:5]
+                        meeting_tasks = self.get_tasks(
+                            status=None, meeting_id=source_id, limit=5
+                        )
                         meeting_cache[source_id] = {
                             "meeting": meeting,
                             "decisions": decisions,

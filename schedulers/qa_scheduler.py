@@ -111,10 +111,13 @@ def _check_extraction_quality(issues: list[str]) -> dict:
                 # output — without this, a meeting whose tasks were later all
                 # archived (e.g. the 2026-06 cleanup) trips a daily false
                 # "Empty extraction" alert.
-                all_tasks = supabase_client.get_tasks(
-                    status=None, include_pending=True, include_archived=True
+                tasks = supabase_client.get_tasks(
+                    status=None,
+                    include_pending=True,
+                    include_archived=True,
+                    meeting_id=mid,
+                    limit=500,
                 )
-                tasks = [t for t in all_tasks if t.get("meeting_id") == mid]
                 total_items = len(decisions) + len(tasks)
 
                 if total_items == 0:
