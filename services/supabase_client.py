@@ -4787,10 +4787,18 @@ class SupabaseClient:
         hit = _match(raw)
         if hit:
             return hit
-        # Multi-owner cell: canonicalize the PRIMARY owner only. The other
-        # names belong in the task title (Eyal, 2026-07-22).
-        if "," in raw or " and " in raw.lower():
-            primary = raw.replace(" and ", ",").split(",")[0]
+        # Multi-owner cell: canonicalize the PRIMARY (first-named) owner only.
+        # The other names belong in the task title (Eyal, 2026-07-22).
+        #
+        # "or" and "/" are included deliberately. They read as UNDECIDED
+        # ownership rather than co-ownership, but Eyal's call (2026-07-22) is
+        # that the first-named person owns it — same rule, no special case.
+        lowered = raw.lower()
+        if "," in raw or "/" in raw or " and " in lowered or " or " in lowered:
+            primary = raw
+            for sep in (" and ", " or ", "/"):
+                primary = primary.replace(sep, ",").replace(sep.upper(), ",")
+            primary = primary.split(",")[0]
             hit = _match(primary)
             if hit:
                 return hit
