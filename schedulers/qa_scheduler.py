@@ -66,6 +66,7 @@ def run_qa_check() -> dict:
     report["checks"]["duplicate_tasks"] = _check_duplicate_tasks(report["issues"])
     report["checks"]["topic_state_staleness"] = _check_topic_state_staleness(report["issues"])
     report["checks"]["category_taxonomy"] = _check_category_taxonomy(report["issues"])
+    report["checks"]["assignee_taxonomy"] = _check_assignee_taxonomy(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -536,6 +537,42 @@ def _check_category_taxonomy(issues: list[str]) -> dict:
             )
     except Exception as e:
         logger.warning(f"Category taxonomy check failed: {e}")
+    return result
+
+
+def _check_assignee_taxonomy(issues: list[str]) -> dict:
+    """
+    Assignee hygiene guard — the compensating control for resolve_assignee,
+    which deliberately keeps unknown names as-is (never destroy what a human
+    typed). Category had this check; assignee never did, which is how the same
+    person accumulated under two spellings ("Eyal Zror" x31 vs "Eyal" x9) until
+    every assignee filter was quietly wrong. [2026-07-22]
+
+    Flags: names that are neither a roster member nor a known group bucket.
+    Blank assignees are NOT flagged here — get_tasks_without_assignee already
+    covers those and they are a legitimate "not yet decided" state.
+    """
+    result: dict = {"off_roster": 0, "values": []}
+    try:
+        roster = supabase_client.list_team_members() or []
+        known = {(m.get("name") or "").strip().lower() for m in roster}
+        known |= supabase_client._NON_PERSON_ASSIGNEES
+        known.discard("")
+        tasks = supabase_client.get_tasks(status=None, limit=1000, include_pending=True)
+        bad: dict[str, int] = {}
+        for t in tasks:
+            who = (t.get("assignee") or "").strip()
+            if who and who.lower() not in known:
+                bad[who] = bad.get(who, 0) + 1
+        if bad:
+            result["off_roster"] = sum(bad.values())
+            result["values"] = sorted(bad, key=bad.get, reverse=True)[:8]
+            issues.append(
+                f"Off-roster task assignees ({result['off_roster']} tasks): "
+                + ", ".join(f"'{v}' x{bad[v]}" for v in result["values"])
+            )
+    except Exception as e:
+        logger.warning(f"Assignee taxonomy check failed: {e}")
     return result
 
 

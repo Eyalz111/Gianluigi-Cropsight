@@ -51,7 +51,10 @@ class TestLoadTeamMembers:
 class TestFlagOffParity:
     def test_hardcoded_has_the_four(self):
         names = [m["name"] for m in team._HARDCODED_TEAM_MEMBERS.values()]
-        assert names == ["Eyal Zror", "Roye Tadmor", "Paolo Vailetti", "Prof. Yoram Weiss"]
+        # Honorific dropped 2026-07-22: the canonical assignee form is
+        # first + last name, and "Prof. Yoram Weiss" was the one roster entry
+        # that broke it — neither "Yoram" nor "Yoram Weiss" matched it.
+        assert names == ["Eyal Zror", "Roye Tadmor", "Paolo Vailetti", "Yoram Weiss"]
 
     def test_team_emails_derive_in_order(self):
         # CROPSIGHT_TEAM_EMAILS derives from the roster, preserving order.

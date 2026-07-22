@@ -726,7 +726,11 @@ class GianluigiAgent:
         """Create a new task."""
         task = supabase_client.create_task(
             title=input.get("title", ""),
-            assignee=input.get("assignee", "team"),
+            # Default to UNASSIGNED, not the literal "team": the extraction
+            # prompt explicitly forbids "team"/"everyone"/"TBD", and an
+            # unassigned task is surfaced by get_tasks_without_assignee for
+            # gap-fill, whereas a bogus "team" owner just hides it. [2026-07-22]
+            assignee=input.get("assignee") or "",
             deadline=input.get("deadline"),
             priority=input.get("priority", "M"),
             status="pending",
@@ -739,19 +743,17 @@ class GianluigiAgent:
         """Get tasks filtered by assignee/status/category."""
         assignee = input.get("assignee")
 
-        # Resolve short names (e.g., "eyal") to full names ("Eyal Zror")
-        # The LLM may pass just a first name or member_id
+        # Resolve short names (e.g., "eyal") to the canonical full name.
+        #
+        # This used to resolve "roye" -> "Roye Tadmor" and then hand it to
+        # get_tasks, which filters with `ilike` and NO wildcards — so it matched
+        # only rows literally stored as "Roye Tadmor" and MISSED every row stored
+        # as "Roye". On live data that was 9 of 40 Eyal rows and 4 of 15 Paolo
+        # rows returned. resolve_assignee canonicalizes on write, and the
+        # backfill normalizes history, so one lookup is now correct for both.
+        # [2026-07-22]
         if assignee:
-            from config.team import TEAM_MEMBERS
-            member = get_team_member(assignee)
-            if member:
-                assignee = member["name"]
-            else:
-                # Check if it matches any full name (case-insensitive)
-                for m in TEAM_MEMBERS.values():
-                    if m["name"].lower() == assignee.lower():
-                        assignee = m["name"]
-                        break
+            assignee = supabase_client.resolve_assignee(assignee)
 
         tasks = supabase_client.get_tasks(
             assignee=assignee,

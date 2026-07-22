@@ -994,6 +994,7 @@ class SupabaseClient:
         Returns:
             Created task record.
         """
+        assignee = self.resolve_assignee(assignee)
         data = {
             "title": title,
             "assignee": assignee,
@@ -1049,6 +1050,8 @@ class SupabaseClient:
         # Canonicalize categories at this choke point (one areas fetch per batch)
         # so every batch-creation path stores the Gantt-area taxonomy.
         _areas = self.get_areas()
+        # Same for assignees — one roster fetch per batch (2026-07-22).
+        _roster = self.list_team_members()
 
         def _row(t: dict) -> dict:
             raw_deadline = t.get("deadline")
@@ -1069,7 +1072,7 @@ class SupabaseClient:
             return {
                 "meeting_id": meeting_id,
                 "title": t.get("title"),
-                "assignee": t.get("assignee", ""),
+                "assignee": self.resolve_assignee(t.get("assignee", ""), roster=_roster),
                 "priority": t.get("priority", "M"),
                 "deadline": ser_deadline,
                 "transcript_timestamp": t.get("transcript_timestamp"),
@@ -1269,8 +1272,16 @@ class SupabaseClient:
                 updates["deadline"] = serialized
         # Category carries the Gantt-area taxonomy — canonicalize at this
         # choke point so every update path stores one taxonomy.
-        if updates.get("category"):
+        #
+        # Membership, NOT truthiness: the old `if updates.get("category")` let
+        # category="" skip canonicalization AND still be written, so an edit
+        # whose LLM output omitted the field silently BLANKED a task's area —
+        # and the QA check couldn't flag it, because it skips empty values.
+        # resolve_category("") correctly returns 'General'. [2026-07-22]
+        if "category" in updates:
             updates["category"] = self.resolve_category(updates["category"])
+        if "assignee" in updates:
+            updates["assignee"] = self.resolve_assignee(updates["assignee"])
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         result = (
@@ -2825,12 +2836,20 @@ class SupabaseClient:
         logger.info(f"Upserted pending approval: {approval_id} ({content_type})")
         return result.data[0] if result.data else {}
 
-    def get_pending_approvals_by_status(self, status: str = "pending") -> list[dict]:
+    def get_pending_approvals_by_status(
+        self, status: str = "pending", limit: int = 200
+    ) -> list[dict]:
         """
         Get all pending approvals with a given status, newest first.
 
-        Used to find the most recent pending approval when Eyal types
-        'approve' or 'reject' as free text instead of using buttons.
+        Originally written to find the most recent pending approval when Eyal
+        types 'approve'/'reject' as free text, and hard-capped at 5. It now also
+        backs MCP `get_proposals` and topic_clustering's dedupe set, where a
+        cap of 5 is actively wrong: get_proposals filters by TYPE *after* this
+        truncation, so `type="task"` could return [] while task proposals
+        existed, and the clustering dedupe would re-propose merges already
+        pending. Default raised to 200; the free-text caller only reads [0].
+        [2026-07-22]
 
         Returns:
             List of pending approval records.
@@ -2840,7 +2859,7 @@ class SupabaseClient:
             .select("*")
             .eq("status", status)
             .order("created_at", desc=True)
-            .limit(5)
+            .limit(limit)
             .execute()
         )
         return result.data
@@ -4564,6 +4583,96 @@ class SupabaseClient:
         except Exception as e:
             logger.warning(f"resolve_category lookup failed (keeping label): {e}")
         return self.LEGACY_CATEGORY_MAP.get(label.lower(), label)
+
+    # Honorifics stripped before name matching, so a roster entry like
+    # "Prof. Yoram Weiss" still matches "Yoram" and "Yoram Weiss".
+    _HONORIFICS = {"prof", "dr", "mr", "mrs", "ms", "adv", "eng"}
+
+    # Group/placeholder assignees that are NOT a person and must never be
+    # coerced into one. They stay verbatim; the QA pass surfaces them.
+    _NON_PERSON_ASSIGNEES = {
+        "team", "cropsight team", "cropsight technical team", "technical team",
+        "everyone", "all", "tbd", "n/a", "-", "unassigned",
+    }
+
+    def resolve_assignee(
+        self, name: str | None, roster: list[dict] | None = None
+    ) -> str:
+        """Canonicalize a task/decision assignee against the live team roster.
+
+        Mirrors resolve_category. Live data carried the SAME person under two
+        spellings — "Eyal Zror"(31) and "Eyal"(9), and likewise for Paolo, Roye
+        and Yoram — which silently broke every assignee filter: get_tasks
+        filters with `ilike` and no wildcards, so "Eyal" matched 9 of 40 rows.
+        Canonical form is FIRST + LAST (Eyal's call, 2026-07-22).
+
+        Resolution order:
+          1. blank                          -> "" (a genuinely unassigned task)
+          2. group/placeholder              -> returned verbatim, never guessed
+          3. exact match on a roster name   -> that name
+          4. first-name-only match          -> the roster's full name
+          5. multi-owner ("Paolo, Eyal")    -> the FIRST name, canonicalized
+                                               (never split: splitting changes
+                                                task counts and history)
+          6. anything else                  -> RETURNED AS-IS (never destroy
+                                               what a human typed; the QA pass
+                                               flags off-roster assignees)
+        """
+        raw = (name or "").strip()
+        if not raw:
+            return ""
+        if raw.lower() in self._NON_PERSON_ASSIGNEES:
+            return raw
+        try:
+            rows = roster if roster is not None else self.list_team_members()
+            names = [(m.get("name") or "").strip() for m in (rows or [])]
+            names = [n for n in names if n]
+        except Exception as e:
+            logger.warning(f"resolve_assignee roster lookup failed (keeping name): {e}")
+            return raw
+
+        # Roster names can carry an honorific ("Prof. Yoram Weiss"), so compare
+        # against the honorific-stripped form too — otherwise neither "Yoram"
+        # nor "Yoram Weiss" matches it and both silently stay off-roster.
+        _honorifics = self._HONORIFICS
+
+        def _strip_title(n: str) -> str:
+            parts = n.split()
+            while parts and parts[0].lower().rstrip(".") in _honorifics:
+                parts = parts[1:]
+            return " ".join(parts)
+
+        def _match(candidate: str) -> str | None:
+            c = _strip_title(candidate.strip()).lower()
+            if not c:
+                return None
+            bare = {full: _strip_title(full).lower() for full in names}
+            for full, b in bare.items():             # exact full name
+                if b == c or full.lower() == c:
+                    return full
+            for full, b in bare.items():             # first name alone
+                if b.split() and b.split()[0] == c:
+                    return full
+            # Last name alone — only when it is unambiguous across the roster.
+            surname_hits = [
+                full for full, b in bare.items()
+                if len(b.split()) > 1 and b.split()[-1] == c
+            ]
+            if len(surname_hits) == 1:
+                return surname_hits[0]
+            return None
+
+        hit = _match(raw)
+        if hit:
+            return hit
+        # Multi-owner cell: canonicalize the PRIMARY owner only. The other
+        # names belong in the task title (Eyal, 2026-07-22).
+        if "," in raw or " and " in raw.lower():
+            primary = raw.replace(" and ", ",").split(",")[0]
+            hit = _match(primary)
+            if hit:
+                return hit
+        return raw
 
     def add_area(
         self,

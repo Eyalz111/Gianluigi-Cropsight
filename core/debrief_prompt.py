@@ -28,7 +28,7 @@ DEDUPLICATION:
 Check the "ITEMS CAPTURED SO FAR" in the context. Do NOT re-extract items that are already captured. Only extract genuinely NEW information from this message. If the user is clarifying or adding detail to a previously captured item, do NOT create a new item — the clarification is captured in the raw messages and will be available for review.
 
 ASSIGNEE NAMES:
-Use first names only: Eyal, Roye, Paolo, Yoram. Do NOT use full names like "Eyal Zror".
+Use FULL names, exactly as written here: Eyal Zror, Roye Tadmor, Paolo Vailetti, Yoram Weiss, Nechama Tik. Do NOT use a first name alone — the same person stored under two spellings silently breaks every assignee filter. For someone not on this list, use their full name as spoken. If a task has two owners, put the PRIMARY owner in assignee and name the other in the title. Never use "team", "everyone", or "TBD".
 
 SENSITIVITY:
 Auto-flag items mentioning investors, fundraising, legal, equity, or compensation as sensitive: true.
