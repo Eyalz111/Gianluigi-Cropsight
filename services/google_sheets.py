@@ -328,6 +328,12 @@ DECISION_COLUMNS = {
 
 DECISION_COL_INDEX = {k: ord(v) - ord("A") for k, v in DECISION_COLUMNS.items()}
 
+# The decision id lives at col H but is deliberately NOT in DECISION_COLUMNS —
+# that map drives editable-cell writes, and the id is system-owned. Readers use
+# row[7] directly. Named here so writers stop reaching for a key that isn't
+# there: DECISION_COLUMNS['id'] raised KeyError. [2026-07-22]
+DECISION_ID_COLUMN = "H"
+
 # Header labels for sheet display (order matches column mapping).
 # _BASE is the always-present A:J layout; flag-gated columns are appended.
 TASK_TRACKER_HEADERS_BASE = [
@@ -341,9 +347,17 @@ if getattr(settings, "TASK_SHEET_LAST_UPDATE_ENABLED", False):
     TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Last Update"]
 
 DECISION_TRACKER_HEADERS = [
-    "Label", "Decision", "Rationale", "Confidence",
+    "Project", "Decision", "Rationale", "Confidence",
     "Source Meeting", "Date", "Status",
 ]
+
+# Archive = the Tasks layout + when it left + WHAT IT WAS + WHY.
+#
+# Prior Status exists because auto-archival flips `done` -> `archived`, which
+# erases the difference between work that was FINISHED and work that was
+# abandoned. Without it, Archive cannot answer "what did we ship last quarter",
+# which is the only reason to keep it rather than delete rows.
+ARCHIVE_HEADERS = TASK_TRACKER_HEADERS + ["Archived", "Prior Status", "Reason"]
 
 # ---------------------------------------------------------------------------
 # Meetings tab (2026-07) — follow_up_meetings, Nechama's queue.
@@ -922,14 +936,14 @@ class GoogleSheetsService:
                 t for t in all_tasks
                 if t.get("task", "").lower() in titles_lower and t.get("status", "").lower() == "done"
             ]
-            return await self.archive_task_rows(rows_to_archive)
+            return await self.archive_task_rows(rows_to_archive, reason="auto-30d")
 
         except Exception as e:
             logger.error(f"Error archiving tasks: {e}")
             return 0
 
     def _ensure_archive_tab(self) -> None:
-        """Create the Archive tab (header = Tasks layout + Archived) if missing."""
+        """Create the Archive tab (Tasks layout + Archived/Prior Status/Reason)."""
         meta = self._execute_with_retry(
             lambda: self.service.spreadsheets().get(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
@@ -948,7 +962,7 @@ class GoogleSheetsService:
                 body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
             )
         )
-        archive_headers = TASK_TRACKER_HEADERS + ["Archived"]
+        archive_headers = ARCHIVE_HEADERS
         self._execute_with_retry(
             lambda: self.service.spreadsheets().values().update(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
@@ -958,13 +972,22 @@ class GoogleSheetsService:
             )
         )
 
-    async def archive_task_rows(self, sheet_rows: list[dict]) -> int:
+    async def archive_task_rows(
+        self, sheet_rows: list[dict], reason: str = "manual"
+    ) -> int:
         """
         Move Tasks-tab rows (dicts from get_all_tasks, row_number included) to
         the Archive tab and delete them from the active tab.
 
-        The archive row mirrors the Tasks layout (including the col-J UUID so
-        an archived task stays identifiable) plus an Archived date column.
+        The archive row mirrors the Tasks layout (including the col-J UUID so an
+        archived task stays identifiable), plus Archived date, PRIOR STATUS and
+        REASON.
+
+        Prior Status matters because auto-archival flips `done` -> `archived`,
+        which would otherwise erase the distinction between work that was
+        FINISHED and work that was abandoned. Archive is meant to answer "what
+        did we ship last quarter, by area" — that is impossible if every row
+        just says `archived`. [2026-07-22]
 
         Returns the number of rows moved.
         """
@@ -1012,10 +1035,15 @@ class GoogleSheetsService:
             if "last_update" in TASK_COLUMNS:
                 _row.append(t.get("last_update") or "")
             _row.append(datetime.now().strftime("%Y-%m-%d"))  # Archived date
+            # Prior Status: what the task was BEFORE the archive flip. Taken
+            # from the sheet row, which still holds the pre-archive value.
+            _prior = (t.get("prior_status") or t.get("status") or "").strip()
+            _row.append("done" if _prior == "archived" else _prior)
+            _row.append(reason)
             archive_rows.append(_row)
 
         if archive_rows:
-            num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
+            num_archive_cols = len(ARCHIVE_HEADERS)
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().append(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,

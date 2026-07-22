@@ -67,7 +67,8 @@ def _setup(monkeypatch, sheet, db, snap):
     monkeypatch.setattr(sc, "create_task", lambda **k: calls["create"].append(k) or {"id": "new-uuid"})
     monkeypatch.setattr(sc, "log_action", lambda *a, **k: None)
     fake.add_tasks_batch.side_effect = lambda rows: calls["readd"].extend(rows) or True
-    fake.archive_task_rows.side_effect = lambda rows: calls["archive"].extend(rows) or len(rows)
+    fake.archive_task_rows.side_effect = (
+        lambda rows, reason="manual": calls["archive"].extend(rows) or len(rows))
     return calls, fake
 
 
@@ -279,6 +280,11 @@ class TestReconcile:
         assert ("t1", {"status": "archived"}) in calls["update"]
         fake.archive_task_rows.assert_awaited_once()
         assert calls["archive"][0]["id"] == "t1"
+        # prior_status must come from the DB: the sheet cell already reads
+        # 'archived' (that IS the removal signal), so the pre-archive value only
+        # survives in the DB. Without it Archive cannot tell finished work from
+        # abandoned work. [2026-07-22]
+        assert calls["archive"][0]["prior_status"] == "pending"
         assert calls["snapshot"] == []  # archived rows get no snapshot
 
     async def test_shadow_archived_counts_but_never_moves(self, monkeypatch):

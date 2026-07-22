@@ -5258,6 +5258,47 @@ class SupabaseClient:
         "title", "label", "led_by", "proposed_date", "participants", "status",
     )
 
+    def create_manual_decision(
+        self,
+        description: str,
+        label: str = "",
+        rationale: str = "",
+        confidence=None,
+        decision_status: str = "active",
+    ) -> dict | None:
+        """Create a decision typed straight into the Sheet (no source meeting).
+
+        `meeting_id` is nullable, so a hand-authored decision is legitimate.
+        approval_status is 'approved' immediately — a human typing it IS the
+        approval, the same reasoning debrief items use. Before this, blank-id
+        rows on the Decisions tab were counted and left, so they accumulated
+        forever while the tab was advertised as editable. [2026-07-22]
+        """
+        if not (description or "").strip():
+            return None
+        try:
+            conf = None
+            try:
+                conf = int(confidence) if confidence not in (None, "") else None
+            except (TypeError, ValueError):
+                conf = None
+            data = {
+                "description": description.strip(),
+                "label": self.resolve_label(label),
+                "rationale": (rationale or "").strip() or None,
+                "confidence": conf,
+                "decision_status": (decision_status or "active").strip().lower(),
+                "approval_status": "approved",
+            }
+            result = self.client.table("decisions").insert(data).execute()
+            if result.data:
+                logger.info(f"Created manual decision: {description[:60]}")
+                return result.data[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error creating manual decision: {e}")
+            return None
+
     def get_meeting_snapshots(self) -> dict:
         """Last-synced snapshot per follow-up meeting, keyed by meeting id."""
         try:

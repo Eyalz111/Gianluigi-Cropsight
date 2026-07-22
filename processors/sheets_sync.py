@@ -866,7 +866,14 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         # 'archived' (typed by Eyal or already set in the DB) -> move the row to
         # the Archive tab; no snapshot (the row is leaving the working view).
         if _normalize(final.get("status")) == "archived":
-            archive_moves.append({**st, "status": "archived"})
+            # prior_status must come from the DB, not the sheet row: `st` is
+            # about to be stamped 'archived', and the sheet cell already says
+            # 'archived' (that IS the removal signal), so the pre-archive value
+            # only survives in the DB. Without it Archive can't tell finished
+            # work from abandoned work. [2026-07-22]
+            archive_moves.append({
+                **st, "status": "archived", "prior_status": dt.get("status"),
+            })
             summary["archived"] += 1
         else:
             snapshot_writes.append((sid, row, final["status"], final["deadline"],
@@ -1060,7 +1067,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     #      cell writes — deleting rows shifts the row numbers cell_writes used.
     if archive_moves:
         try:
-            await sheets_service.archive_task_rows(archive_moves)
+            await sheets_service.archive_task_rows(archive_moves, reason="manual")
         except Exception as e:
             # archive_task_rows fires its own CRITICAL with the exact rows/UUIDs
             # when the append-then-delete move only half-completes; it self-heals
@@ -1415,7 +1422,9 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
     rows are counted + LEFT, not created (create needs a source meeting). Gated on
     DECISION_RECONCILE_ENABLED — a no-op until cutover.
     """
-    from services.google_sheets import sheets_service, DECISION_COLUMNS
+    from services.google_sheets import (
+        sheets_service, DECISION_COLUMNS, DECISION_ID_COLUMN,
+    )
 
     if not getattr(settings, "DECISION_RECONCILE_ENABLED", False):
         return {"skipped": "DECISION_RECONCILE_ENABLED off"}
@@ -1452,12 +1461,14 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
 
     db_by_id = {d["id"]: d for d in db_decisions if d.get("id")}
     sheet_by_id, blank_id = {}, 0
+    blank_rows: list[dict] = []
     for sd in sheet_decisions:
         sid = str(sd.get("id") or "").strip()
         if sid:
             sheet_by_id[sid] = sd
         elif str(sd.get("decision") or "").strip():
-            blank_id += 1  # hand-authored row — first cut leaves it
+            blank_id += 1
+            blank_rows.append(sd)
 
     summary = {"matched": 0, "pulled": 0, "pushed": 0, "readded": 0,
                "blank_id": blank_id, "status_guarded": 0, "manual_held": 0,
@@ -1603,6 +1614,56 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
         return summary
 
     # --- APPLY ---
+    # Hand-added decision rows: create them, instead of counting them forever.
+    #
+    # The first cut deliberately left blank-id rows alone because "a decision
+    # needs a source meeting". That was defensible when the tab was read-mostly,
+    # but the tab is advertised as editable, so those rows just accumulated —
+    # `blank_id` sat at 10 with nothing ever consuming it. source_meeting_id is
+    # nullable, so a decision typed straight into the Sheet is legitimate; it is
+    # approved on arrival for the same reason debrief items are (a human typing
+    # it IS the approval). The UUID is written back synchronously and the create
+    # rolled back if that fails, so a row can never be created twice.
+    # [2026-07-22]
+    for sd in blank_rows:
+        row_no = sd.get("row_number")
+        if not row_no:
+            continue
+        try:
+            created = supabase_client.create_manual_decision(
+                description=sd.get("decision") or "",
+                label=sd.get("label") or "",
+                rationale=sd.get("rationale") or "",
+                confidence=sd.get("confidence"),
+                decision_status=(sd.get("status") or "active").strip().lower(),
+            )
+            if not created:
+                continue
+            new_id = created["id"]
+            try:
+                await sheets_service._update_cell(
+                    sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                    range_name=f"Decisions!{DECISION_ID_COLUMN}{row_no}",
+                    value=new_id,
+                )
+            except Exception as we:
+                logger.error(
+                    f"[decision-reconcile] UUID writeback failed for new row "
+                    f"{row_no} — rolling back the DB create: {we}"
+                )
+                supabase_client.client.table("decisions").delete().eq(
+                    "id", new_id).execute()
+                continue
+            summary["created"] = summary.get("created", 0) + 1
+            summary["blank_id"] -= 1
+            supabase_client.upsert_decision_snapshot(
+                new_id, row_no, created.get("description"), created.get("label"),
+                created.get("rationale"), created.get("confidence"),
+                created.get("decision_status"),
+            )
+        except Exception as e:
+            logger.error(f"[decision-reconcile] create failed for row {row_no}: {e}")
+
     decision_update_failed: set[str] = set()
     for did, upd in db_updates.items():
         try:
