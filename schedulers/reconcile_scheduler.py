@@ -139,12 +139,22 @@ class ReconcileScheduler:
                 # (they return {"skipped": ...} until cutover) — safe to always call.
                 dec_summary = await reconcile_decisions()
                 meet_summary = await reconcile_meetings()
+                # Generated views LAST — they read the state the reconcile just
+                # settled, so running them first would render stale counts.
+                views = None
+                if getattr(settings, "WORKSPACE_VIEWS_ENABLED", False):
+                    try:
+                        from processors.workspace_views import refresh_workspace_views
+                        views = await refresh_workspace_views()
+                    except Exception as ve:
+                        logger.warning(f"Workspace views refresh failed (non-fatal): {ve}")
                 supabase_client.upsert_scheduler_heartbeat(
                     "reconcile",
                     details={"slot": slot,
                              **(summary if isinstance(summary, dict) else {}),
                              "decisions": dec_summary if isinstance(dec_summary, dict) else None,
-                             "meetings": meet_summary if isinstance(meet_summary, dict) else None},
+                             "meetings": meet_summary if isinstance(meet_summary, dict) else None,
+                             "views": views},
                 )
             return True
         except Exception as e:

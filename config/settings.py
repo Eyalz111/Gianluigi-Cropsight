@@ -769,6 +769,14 @@ class Settings(BaseSettings):
             "until the first diff has been eyeballed."
         ),
     )
+    WORKSPACE_VIEWS_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Generate the read-only 'Open Questions' and 'Areas' tabs on the "
+            "reconcile cycle. Both are rebuilt from the DB every run, so any "
+            "hand edit is overwritten — they are protected in-sheet to say so."
+        ),
+    )
     RECONCILE_MIDDAY_HOUR: int = Field(default=13, description="IST hour for the midday reconcile")
     RECONCILE_PRENIGHTLY_HOUR: int = Field(
         default=2, description="IST hour for the pre-nightly reconcile (must be < KNOWLEDGE_NIGHTLY_HOUR so the DB is correct before nightly reads tasks)"

@@ -379,6 +379,23 @@ MEETING_TRACKER_HEADERS = [
 MEETING_STATUSES = ("not_scheduled", "scheduled", "held", "dropped")
 MEETING_STATUS_ORDER = {"not_scheduled": 0, "scheduled": 1, "held": 2, "dropped": 3}
 
+# ---------------------------------------------------------------------------
+# Read-only reference tabs (2026-07).
+#
+# Generated from the DB, never edited. They exist so the workspace answers
+# "what's outstanding, and where does it sit?" without anyone querying anything.
+# ---------------------------------------------------------------------------
+QUESTIONS_TAB_NAME = "Open Questions"
+QUESTIONS_HEADERS = [
+    "Question", "Raised By", "Project", "Age (days)", "Source Meeting", "Status", "ID",
+]
+
+AREAS_TAB_NAME = "Areas"
+AREAS_HEADERS = [
+    "Area", "Open Tasks", "Overdue", "Open Questions", "Meetings to Schedule",
+    "Last Activity", "Current Focus",
+]
+
 
 def _fmt_day(value) -> str:
     """Render a DB timestamp as YYYY-MM-DD for a sheet cell.
@@ -2414,6 +2431,192 @@ class GoogleSheetsService:
         except Exception as e:
             logger.error(f"Error rebuilding Meetings sheet: {e}")
             return False
+
+    # =========================================================================
+    # Read-only reference tabs — Open Questions + Areas.
+    # =========================================================================
+
+    async def _ensure_tab(self, tab_name: str, headers: list[str]) -> int | None:
+        """Create `tab_name` with a header row if missing; return its sheetId.
+
+        Always appended LAST. A tab at index 0 is what silently broke every
+        sheet read in April 2026, because bare A1 ranges resolve against
+        whichever sheet sits first.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return None
+        try:
+            meta = self._execute_with_retry(
+                lambda: self.service.spreadsheets().get(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    fields="sheets.properties",
+                )
+            )
+            sheets = meta.get("sheets", [])
+            for sheet in sheets:
+                props = sheet.get("properties", {})
+                if props.get("title") == tab_name:
+                    return props["sheetId"]
+            resp = self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": [{"addSheet": {"properties": {
+                        "title": tab_name, "index": len(sheets),
+                    }}}]},
+                )
+            )
+            sid = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+            end_col = chr(ord("A") + len(headers) - 1)
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().update(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{tab_name}'!A1:{end_col}1",
+                    valueInputOption="RAW",
+                    body={"values": [headers]},
+                )
+            )
+            logger.info(f"Created {tab_name} tab (sheetId={sid})")
+            return sid
+        except Exception as e:
+            logger.error(f"Error ensuring {tab_name} tab: {e}")
+            return None
+
+    async def _rebuild_readonly_tab(
+        self, tab_name: str, headers: list[str], rows: list[list],
+        force_empty: bool = False,
+    ) -> bool:
+        """Clear + rewrite a generated tab, then lock it.
+
+        `force_empty` guard is mandatory here for the same reason as
+        rebuild_tasks_sheet: a transient Supabase read returning [] must never
+        clear a populated tab. That is precisely how the Tasks sheet was wiped
+        in April 2026.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+        if not rows and not force_empty:
+            logger.error(
+                f"_rebuild_readonly_tab({tab_name}) called with 0 rows and "
+                f"force_empty=False — refusing to clear a populated tab."
+            )
+            return False
+        try:
+            sid = await self._ensure_tab(tab_name, headers)
+            if sid is None:
+                return False
+            end_col = chr(ord("A") + len(headers) - 1)
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().clear(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{tab_name}'!A2:{end_col}",
+                    body={},
+                )
+            )
+            if rows:
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().values().update(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=f"'{tab_name}'!A2:{end_col}{len(rows) + 1}",
+                        valueInputOption="RAW",
+                        body={"values": rows},
+                    )
+                )
+            await self._format_readonly_tab(sid, tab_name, len(headers))
+            logger.info(f"Rebuilt {tab_name}: {len(rows)} row(s)")
+            return True
+        except Exception as e:
+            logger.error(f"Error rebuilding {tab_name}: {e}")
+            return False
+
+    async def _format_readonly_tab(self, sid: int, tab_name: str, n_cols: int) -> bool:
+        """Header styling, widths, banding, and a whole-tab protected range."""
+        try:
+            desc = f"Gianluigi: {tab_name} is generated — edits are overwritten"
+            requests: list[dict] = [
+                {"updateSheetProperties": {
+                    "properties": {"sheetId": sid,
+                                   "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount"}},
+                {"repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                              "startColumnIndex": 0, "endColumnIndex": n_cols},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": COLORS["header_bg"],
+                        "textFormat": {"bold": True,
+                                       "foregroundColor": COLORS["header_text"]}}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+                _border_request(sid, n_cols),
+            ]
+            requests.append(_text_wrap_request(sid, 0))
+            try:
+                pmeta = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        fields="sheets(properties.sheetId,protectedRanges)",
+                    )
+                )
+                for sheet in pmeta.get("sheets", []):
+                    if sheet.get("properties", {}).get("sheetId") != sid:
+                        continue
+                    for pr in sheet.get("protectedRanges", []):
+                        if pr.get("description") == desc:
+                            requests.append({"deleteProtectedRange": {
+                                "protectedRangeId": pr["protectedRangeId"]}})
+            except Exception:
+                pass
+            # Whole tab, not just some columns — every cell here is generated,
+            # and an edit would be silently discarded on the next rebuild.
+            requests.append({"addProtectedRange": {"protectedRange": {
+                "range": {"sheetId": sid},
+                "description": desc,
+                "warningOnly": True,
+            }}})
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Could not format {tab_name}: {e}")
+            return False
+
+    async def rebuild_questions_tab(self, questions: list[dict]) -> bool:
+        """Open Questions — open only, newest first, grouped by Project.
+
+        The FILTER is the feature. There are 100+ open questions going back to
+        May; dumping all of them produces a tab nobody opens. Aging (60d ->
+        stale) happens in processors/question_lifecycle; this renders whatever
+        is still `open`.
+        """
+        rows = [[
+            (q.get("question") or "")[:500],
+            q.get("raised_by") or "",
+            q.get("label") or "",
+            q.get("age_days", ""),
+            q.get("source_meeting") or "",
+            q.get("status") or "open",
+            q.get("id") or "",
+        ] for q in questions]
+        return await self._rebuild_readonly_tab(
+            QUESTIONS_TAB_NAME, QUESTIONS_HEADERS, rows, force_empty=True
+        )
+
+    async def rebuild_areas_tab(self, areas: list[dict]) -> bool:
+        """Areas — the index into every other tab, one row per Gantt area."""
+        rows = [[
+            a.get("name") or "",
+            a.get("open_tasks", 0),
+            a.get("overdue", 0),
+            a.get("open_questions", 0),
+            a.get("meetings_to_schedule", 0),
+            a.get("last_activity") or "",
+            (a.get("current_focus") or "")[:400],
+        ] for a in areas]
+        return await self._rebuild_readonly_tab(
+            AREAS_TAB_NAME, AREAS_HEADERS, rows
+        )
 
     async def add_decisions_batch_to_sheet(
         self,
