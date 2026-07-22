@@ -688,9 +688,32 @@ async def submit_for_approval(
         meeting_record = supabase_client.get_meeting(meeting_id)
         meeting_sensitivity = meeting_record.get("sensitivity", "founders") if meeting_record else "founders"
 
+        # Flag suspected within-meeting DUPLICATE action items — two tasks that
+        # are the same underlying action worded differently (e.g. "send the
+        # Scope-of-Work doc to Ido" + "send the deployment task-list doc to Ido").
+        # The strict text-dedup can't catch these; an LLM can. Detect-and-FLAG
+        # only (never auto-merge — a wrong merge would silently drop a real task);
+        # Eyal resolves with an edit. Non-fatal. [within-meeting dup flag, 2026-07-22]
+        _summary_preview = discussion_summary or summary[:600]
+        try:
+            from processors.duplicate_task_detector import (
+                detect_duplicate_task_pairs,
+                format_duplicate_flag,
+            )
+            _dup_pairs = await detect_duplicate_task_pairs(tasks, meeting_id=meeting_id)
+            _dup_flag = format_duplicate_flag(_dup_pairs, tasks)
+            if _dup_flag:
+                _summary_preview = f"{_dup_flag}\n\n{_summary_preview}"
+                logger.info(
+                    f"Flagged {len(_dup_pairs)} possible duplicate task pair(s) on "
+                    f"the approval card for {meeting_id}"
+                )
+        except Exception as _dup_err:
+            logger.warning(f"Duplicate-task flag skipped (non-fatal): {_dup_err}")
+
         telegram_sent = await comms_spine.send_approval_request(
             meeting_title=meeting_title,
-            summary_preview=discussion_summary or summary[:600],
+            summary_preview=_summary_preview,
             meeting_id=meeting_id,
             decisions=decisions,
             tasks=tasks,

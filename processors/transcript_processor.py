@@ -591,7 +591,12 @@ def _consolidation_rule() -> str:
         return (
             "- CONSOLIDATION: Merge ONLY sub-tasks that serve the exact same "
             "deliverable. Otherwise capture every distinct commitment — never drop "
-            "or over-merge items to hit a target count. Completeness over brevity."
+            "or over-merge items to hit a target count. Completeness over brevity. "
+            "One exception in the other direction: do NOT split a SINGLE action "
+            "into near-duplicate tasks — if one person is doing one thing that "
+            "happens to involve a few parts (e.g. sending someone the set of "
+            "pre-meeting documents), capture it as ONE action item that names the "
+            "parts, not one task per part."
         )
     return (
         "- CONSOLIDATION: Combine related sub-tasks into one higher-level action "
