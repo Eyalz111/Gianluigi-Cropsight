@@ -752,6 +752,23 @@ class Settings(BaseSettings):
         default=False,
         description="Phase 2 (editable Decisions sheet): enable the Sheet<->DB decision reconcile AND the sheet id column (col H) + protected ranges. Off = historical one-way A:G layout, no reconcile. Flip ONLY at cutover (after migration + backfill)."
     )
+    MEETING_RECONCILE_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Enable the Sheet<->DB reconcile for the Meetings tab "
+            "(follow_up_meetings). Off = the tab is not synced at all. Flip ONLY "
+            "after migrate_meeting_reconcile.sql + the snapshot backfill, and "
+            "run in shadow first — an un-backfilled snapshot makes every "
+            "untouched cell look like a human edit (phantom-pull)."
+        ),
+    )
+    MEETING_RECONCILE_SHADOW_MODE: bool = Field(
+        default=True,
+        description=(
+            "Meetings reconcile computes + logs but writes nothing. Keep True "
+            "until the first diff has been eyeballed."
+        ),
+    )
     RECONCILE_MIDDAY_HOUR: int = Field(default=13, description="IST hour for the midday reconcile")
     RECONCILE_PRENIGHTLY_HOUR: int = Field(
         default=2, description="IST hour for the pre-nightly reconcile (must be < KNOWLEDGE_NIGHTLY_HOUR so the DB is correct before nightly reads tasks)"

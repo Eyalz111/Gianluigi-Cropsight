@@ -1108,6 +1108,296 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     return summary
 
 
+_MEETING_CONTENT_MAP = {
+    "title": "title",
+    "label": "label",
+    "led_by": "led_by",
+    "participants": "participants",
+}
+
+
+def _meeting_participants_to_list(text: str) -> list[str]:
+    return [p.strip() for p in (text or "").split(",") if p.strip()]
+
+
+async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) -> dict:
+    """Reconcile the Meetings tab against follow_up_meetings.
+
+    Fourth reconcile entity, UUID-keyed on col J. Same three rules as tasks:
+      - Rule 1: Sheet-now != snapshot -> Eyal/Nechama edited -> pull + mark sticky
+      - Rule 2: a manually-set field is never reverted by a DB-side change
+      - Rule 4: otherwise refresh the cell from the DB
+      - snapshot rewritten LAST, and skipped when the DB write failed
+
+    Two deliberate differences:
+      - Blank-id rows ARE created (unlike decisions, which need a source
+        meeting): source_meeting_id is nullable, so a meeting typed straight
+        into the Sheet is legitimate. The UUID is written back SYNCHRONOUSLY and
+        the create rolled back if that writeback fails — the same guard the task
+        create path uses, and the reason the old "Schedule: X" rows duplicated
+        forever (they never got a UUID at all).
+      - Status is MONOTONIC: a stale cell can never move a meeting backwards
+        (held -> scheduled), because the meeting already happened.
+    """
+    from services.google_sheets import (
+        sheets_service, MEETING_COLUMNS, MEETING_TAB_NAME,
+        MEETING_STATUSES, MEETING_STATUS_ORDER,
+    )
+
+    if not getattr(settings, "MEETING_RECONCILE_ENABLED", False):
+        return {"skipped": "MEETING_RECONCILE_ENABLED off"}
+    if shadow is None:
+        shadow = getattr(settings, "MEETING_RECONCILE_SHADOW_MODE", True)
+    write_allowed = not (dry_run or shadow)
+
+    try:
+        sheet_rows = await sheets_service.get_all_meetings()
+    except Exception as e:
+        logger.error(f"[meeting-reconcile] could not read Sheet: {e}")
+        return {"error": str(e)}
+
+    db_rows = supabase_client.list_follow_up_meetings(limit=2000, include_pending=True)
+    snapshots = supabase_client.get_meeting_snapshots()
+
+    # Same bad-read guard as tasks/decisions: an empty read WITH snapshots means
+    # the read failed, not that the tab is empty. Re-adding everything would
+    # duplicate the tab (the 2026-07-10 incident class).
+    if not sheet_rows and len(snapshots) > 0:
+        logger.error(
+            f"[meeting-reconcile] ABORTED — sheet read returned 0 rows but "
+            f"{len(snapshots)} snapshots exist."
+        )
+        return {"error": "sheet_read_empty", "snapshots": len(snapshots)}
+
+    db_by_id = {m["id"]: m for m in db_rows if m.get("id")}
+    sheet_by_id, creates = {}, []
+    for sm in sheet_rows:
+        sid = str(sm.get("id") or "").strip()
+        if sid:
+            sheet_by_id[sid] = sm
+        elif str(sm.get("title") or "").strip():
+            creates.append(sm)
+
+    summary = {"matched": 0, "pulled": 0, "pushed": 0, "created": 0, "readded": 0,
+               "manual_held": 0, "status_guarded": 0, "bad_dates": 0,
+               "shadow": shadow, "dry_run": dry_run}
+    manual_held: list[tuple] = []
+    cell_writes: list[dict] = []
+    snapshot_writes: list[tuple] = []
+    db_updates: dict[str, dict] = {}
+    manual_marks: list[tuple] = []
+
+    def _cell(col_key, row, value):
+        if row:
+            cell_writes.append({
+                "range": f"'{MEETING_TAB_NAME}'!{MEETING_COLUMNS[col_key]}{row}",
+                "values": [[value if value is not None else ""]],
+            })
+
+    for mid, sm in sheet_by_id.items():
+        dm = db_by_id.get(mid)
+        if not dm:
+            continue
+        summary["matched"] += 1
+        row = sm.get("row_number")
+        snap = snapshots.get(mid) or {}
+        upd, final = {}, {}
+
+        for field, sheet_key in _MEETING_CONTENT_MAP.items():
+            s_val = sm.get(sheet_key)
+            snap_val = snap.get(field)
+            d_val = dm.get(field)
+            if field == "participants":
+                # Stored as TEXT[] in the DB, rendered comma-separated in the cell.
+                d_val = ", ".join(d_val) if isinstance(d_val, list) else (d_val or "")
+            if (str(s_val or "").strip()
+                    and _normalize(s_val) != _normalize(snap_val)
+                    and _normalize(s_val) != _normalize(d_val)):
+                upd[field] = (_meeting_participants_to_list(s_val)
+                              if field == "participants" else s_val)
+                manual_marks.append((mid, field))
+                summary["pulled"] += 1
+                final[field] = s_val
+            elif _normalize(d_val) != _normalize(s_val):
+                if dm.get(f"manual_{field}"):
+                    summary["manual_held"] += 1
+                    manual_held.append((mid, field, d_val, s_val))
+                    final[field] = s_val
+                else:
+                    _cell(sheet_key, row, d_val)
+                    summary["pushed"] += 1
+                    final[field] = d_val
+            else:
+                final[field] = s_val
+
+        # --- proposed date (unparseable cells are never pulled) ---
+        raw_date = sm.get("proposed_date_raw")
+        s_date = sm.get("proposed_date")
+        if raw_date and parse_human_date(raw_date) is None:
+            logger.warning(
+                f"[meeting-reconcile] unparseable date {raw_date!r} (row {row}) — ignored"
+            )
+            summary["bad_dates"] += 1
+            final["proposed_date"] = dm.get("proposed_date")
+        else:
+            d_date = str(dm.get("proposed_date") or "")[:10]
+            snap_date = str(snap.get("proposed_date") or "")[:10]
+            if _normalize(s_date) != _normalize(snap_date):
+                upd["proposed_date"] = s_date or None
+                manual_marks.append((mid, "proposed_date"))
+                summary["pulled"] += 1
+                final["proposed_date"] = s_date
+            elif _normalize(d_date) != _normalize(s_date):
+                if dm.get("manual_proposed_date"):
+                    summary["manual_held"] += 1
+                    manual_held.append((mid, "proposed_date", d_date, s_date))
+                    final["proposed_date"] = s_date
+                else:
+                    _cell("proposed_date", row, d_date)
+                    summary["pushed"] += 1
+                    final["proposed_date"] = d_date
+            else:
+                final["proposed_date"] = s_date
+
+        # --- status: MONOTONIC. A meeting that was held cannot become merely
+        #     scheduled again because a stale cell says so. Forward moves pull. ---
+        s_status = (sm.get("status") or "").strip().lower()
+        d_status = (dm.get("status") or "not_scheduled").strip().lower()
+        snap_status = (snap.get("status") or "").strip().lower()
+        if s_status and s_status not in MEETING_STATUSES:
+            logger.warning(f"[meeting-reconcile] unknown status {s_status!r} (row {row})")
+            s_status = ""
+        if s_status and s_status != snap_status and s_status != d_status:
+            if MEETING_STATUS_ORDER.get(s_status, 0) >= MEETING_STATUS_ORDER.get(d_status, 0):
+                upd["status"] = s_status
+                manual_marks.append((mid, "status"))
+                summary["pulled"] += 1
+                final["status"] = s_status
+            else:
+                summary["status_guarded"] += 1
+                _cell("status", row, d_status)
+                final["status"] = d_status
+        elif d_status != s_status:
+            _cell("status", row, d_status)
+            summary["pushed"] += 1
+            final["status"] = d_status
+        else:
+            final["status"] = s_status
+
+        if upd:
+            db_updates[mid] = upd
+        snapshot_writes.append((
+            mid, row, final.get("title"), final.get("label"), final.get("led_by"),
+            final.get("proposed_date"), final.get("participants"), final.get("status"),
+        ))
+
+    # --- hand-added rows (no UUID) -> create in DB + write the UUID back ---
+    if write_allowed:
+        for sm in creates:
+            try:
+                created = supabase_client.create_follow_up_meeting_manual(
+                    title=sm.get("title") or "",
+                    led_by=sm.get("led_by") or "",
+                    proposed_date=(sm.get("proposed_date") or None),
+                    participants=_meeting_participants_to_list(sm.get("participants")),
+                    label=sm.get("label") or "",
+                    status=(sm.get("status") or "not_scheduled").strip().lower(),
+                )
+                if not created:
+                    continue
+                new_id = created["id"]
+                row = sm.get("row_number")
+                try:
+                    # SYNCHRONOUS writeback, then roll back on failure — a row
+                    # left without its UUID is re-created on every subsequent
+                    # run, which is precisely how "Schedule: X" rows multiplied.
+                    await sheets_service._update_cell(
+                        sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                        range_name=f"'{MEETING_TAB_NAME}'!{MEETING_COLUMNS['id']}{row}",
+                        value=new_id,
+                    )
+                except Exception as we:
+                    logger.error(
+                        f"[meeting-reconcile] UUID writeback failed for new row {row} "
+                        f"— rolling back the DB create: {we}"
+                    )
+                    supabase_client.client.table("follow_up_meetings").delete().eq(
+                        "id", new_id).execute()
+                    continue
+                summary["created"] += 1
+                supabase_client.upsert_meeting_snapshot(
+                    new_id, row, created.get("title"), created.get("label"),
+                    created.get("led_by"), str(created.get("proposed_date") or "")[:10],
+                    ", ".join(created.get("participants") or []), created.get("status"),
+                )
+            except Exception as e:
+                logger.error(f"[meeting-reconcile] create failed for row {sm.get('row_number')}: {e}")
+
+    # --- DB-only meetings -> re-add to the Sheet (never treated as deletes) ---
+    missing = [m for m in db_rows
+               if m.get("id") and m["id"] not in sheet_by_id
+               and (m.get("status") or "not_scheduled") != "dropped"]
+    _readd_cap = max(30, len(sheet_by_id))
+    if len(missing) > _readd_cap:
+        logger.error(
+            f"[meeting-reconcile] re-add of {len(missing)} rows exceeds cap "
+            f"{_readd_cap} — skipping (bad-read safety)."
+        )
+        missing = []
+    if missing and write_allowed:
+        await sheets_service.add_meetings_batch_to_sheet(missing)
+        summary["readded"] = len(missing)
+
+    if not write_allowed:
+        logger.info(f"[meeting-reconcile][{'shadow' if shadow else 'dry-run'}] {summary}")
+        return summary
+
+    # --- apply DB updates ---
+    failed: set[str] = set()
+    for mid, upd in db_updates.items():
+        try:
+            supabase_client.update_follow_up_meeting(mid, **upd)
+        except Exception as e:
+            failed.add(mid)
+            logger.error(f"[meeting-reconcile] DB update failed for {mid}: {e}")
+    for mid, field in manual_marks:
+        if mid not in failed:
+            supabase_client.mark_meeting_field_manual(mid, field, "sheet_edit")
+
+    if cell_writes:
+        try:
+            sheets_service.service.spreadsheets().values().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                body={"valueInputOption": "RAW", "data": cell_writes},
+            ).execute()
+        except Exception as e:
+            logger.error(f"[meeting-reconcile] batched Sheet write failed: {e}")
+            return {**summary, "error": "sheet_write_failed"}  # do NOT advance snapshots
+
+    for (mid, row, title, label, led_by, pdate, parts, status) in snapshot_writes:
+        if mid in failed:
+            logger.warning(
+                f"[meeting-reconcile] NOT advancing snapshot for {mid} — its DB "
+                "update failed; the edit retries next cycle."
+            )
+            continue
+        supabase_client.upsert_meeting_snapshot(
+            mid, row, title, label, led_by, pdate, parts, status)
+
+    if manual_held:
+        summary["manual_held_fields"] = [
+            {"meeting_id": m, "field": f, "db": str(d or ""), "sheet": str(s or "")}
+            for (m, f, d, s) in manual_held[:20]
+        ]
+    try:
+        supabase_client.log_action("meeting_reconcile_applied", details=summary,
+                                   triggered_by="auto")
+    except Exception:
+        pass
+    logger.info(f"[meeting-reconcile] applied: {summary}")
+    return summary
+
+
 async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None) -> dict:
     """Reconcile the Decisions sheet against the DB (Phase 2 engine).
 

@@ -2462,19 +2462,41 @@ async def distribute_approved_content(
     except Exception as e:
         logger.error(f"Error adding decisions to Sheets: {e}")
 
-    # 3. Add follow-up meetings to Task Tracker as action items
+    # 3. Add follow-up meetings to the Meetings tab
+    #
+    # These used to be smuggled into the TASKS tab as "Schedule: X" rows with 9
+    # columns and NO col-J UUID, so every reconcile classified them as
+    # hand-added and created a DUPLICATE `tasks` row — on every run, forever.
+    # They now go to their own tab, carrying their real UUID, which is both the
+    # fix and the thing that makes them workable as a queue. [2026-07-22]
+    #
+    # The DB rows are re-read here rather than using the extracted dicts:
+    # `follow_ups` from content has no id, and the id is the whole point.
     try:
         if follow_ups:
-            fu_result = await sheets_service.add_follow_ups_as_tasks(
-                follow_ups=follow_ups,
-                source_meeting=meeting_title,
-                created_date=meeting_date,
+            fu_rows = supabase_client.list_follow_up_meetings(
+                source_meeting_id=meeting_id, limit=200, include_pending=True
             )
+            if fu_rows:
+                fu_result = await sheets_service.add_meetings_batch_to_sheet(
+                    meetings=fu_rows, source_meeting=meeting_title,
+                )
+                # Seed snapshots so the first reconcile sees snap == sheet == db
+                # and doesn't mistake an untouched cell for a human edit.
+                for m in fu_rows:
+                    supabase_client.upsert_meeting_snapshot(
+                        m["id"], None, m.get("title"), m.get("label"),
+                        m.get("led_by"), str(m.get("proposed_date") or "")[:10],
+                        ", ".join(m.get("participants") or []),
+                        m.get("status") or "not_scheduled",
+                    )
+            else:
+                fu_result = False
             results["follow_ups_added"] = fu_result
             results["follow_ups_count"] = len(follow_ups)
-            logger.info(f"Added {len(follow_ups)} follow-up meetings to tracker")
+            logger.info(f"Added {len(follow_ups)} follow-up meeting(s) to the Meetings tab")
     except Exception as e:
-        logger.error(f"Error adding follow-ups to Sheets: {e}")
+        logger.error(f"Error adding follow-ups to the Meetings tab: {e}")
 
     # 4. Add new stakeholders to Stakeholder Tracker
     try:

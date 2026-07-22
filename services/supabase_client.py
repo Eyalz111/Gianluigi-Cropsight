@@ -5247,6 +5247,164 @@ class SupabaseClient:
             return False
 
     # =========================================================================
+    # Meeting reconcile helpers (2026-07 — editable Meetings tab).
+    # Fourth use of the entity_type recipe; reuses sheet_snapshots via
+    # entity_type='meeting'. follow_up_meetings had NO Sheet identity at all
+    # before this — its only surface was a "Schedule: X" row smuggled into the
+    # Tasks tab with no UUID, which reconcile then duplicated on every run.
+    # =========================================================================
+
+    _MEETING_MANUAL_FIELDS = (
+        "title", "label", "led_by", "proposed_date", "participants", "status",
+    )
+
+    def get_meeting_snapshots(self) -> dict:
+        """Last-synced snapshot per follow-up meeting, keyed by meeting id."""
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", "meeting")
+                .execute()
+                .data
+                or []
+            )
+            return {r["follow_up_meeting_id"]: r for r in rows
+                    if r.get("follow_up_meeting_id")}
+        except Exception as e:
+            logger.error(f"Error getting meeting snapshots: {e}")
+            return {}
+
+    def upsert_meeting_snapshot(
+        self,
+        meeting_id: str,
+        sheet_row: int | None,
+        title: str | None,
+        label: str | None = None,
+        led_by: str | None = None,
+        proposed_date: str | None = None,
+        participants: str | None = None,
+        status: str | None = None,
+    ) -> bool:
+        """Write/refresh the snapshot row for one follow-up meeting."""
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "follow_up_meeting_id": meeting_id,
+                "entity_type": "meeting",
+                "sheet_row": sheet_row,
+                "title": (title or None),
+                "label": (label or None),
+                "led_by": (led_by or None),
+                "proposed_date": (proposed_date or None),
+                "participants": (participants or None),
+                "status": (status or None),
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("follow_up_meeting_id", meeting_id)
+                .eq("entity_type", "meeting")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "follow_up_meeting_id", meeting_id
+                ).eq("entity_type", "meeting").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting meeting snapshot ({meeting_id}): {e}")
+            return False
+
+    def mark_meeting_field_manual(
+        self, meeting_id: str, field: str, source: str = "sheet_edit"
+    ) -> bool:
+        """Mark a follow-up meeting field as human-owned (sticky)."""
+        if field not in self._MEETING_MANUAL_FIELDS:
+            logger.warning(f"mark_meeting_field_manual: unknown field '{field}'")
+            return False
+        try:
+            from datetime import datetime, timezone
+            self.client.table("follow_up_meetings").update({
+                f"manual_{field}": True,
+                "manual_set_at": datetime.now(timezone.utc).isoformat(),
+                "manual_set_source": source,
+            }).eq("id", meeting_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking meeting field manual ({meeting_id}.{field}): {e}")
+            return False
+
+    def clear_meeting_manual_flag(self, meeting_id: str, field: str) -> bool:
+        """Clear a meeting sticky flag so inference can write the field again."""
+        if field not in self._MEETING_MANUAL_FIELDS:
+            logger.warning(f"clear_meeting_manual_flag: unknown field '{field}'")
+            return False
+        try:
+            self.client.table("follow_up_meetings").update(
+                {f"manual_{field}": False}
+            ).eq("id", meeting_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing meeting manual flag ({meeting_id}.{field}): {e}")
+            return False
+
+    def update_follow_up_meeting(self, meeting_id: str, **updates) -> dict:
+        """Update a follow-up meeting; canonicalizes label and bumps updated_at."""
+        from datetime import datetime, timezone
+
+        if "label" in updates:
+            updates["label"] = self.resolve_label(updates["label"])
+        if "led_by" in updates:
+            updates["led_by"] = self.resolve_assignee(updates["led_by"])
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        result = (
+            self.client.table("follow_up_meetings")
+            .update(updates).eq("id", meeting_id).execute()
+        )
+        if not result.data:
+            raise ValueError(f"Follow-up meeting {meeting_id} not found or not updated")
+        return result.data[0]
+
+    def create_follow_up_meeting_manual(
+        self,
+        title: str,
+        led_by: str = "",
+        proposed_date: str | None = None,
+        participants: list[str] | None = None,
+        label: str = "",
+        status: str = "not_scheduled",
+    ) -> dict | None:
+        """Create a hand-added follow-up meeting (no source meeting).
+
+        `source_meeting_id` is nullable, so a meeting Eyal or Nechama types
+        straight into the Sheet simply has no source. approval_status is
+        'approved' immediately — a human typing it IS the approval, the same
+        reasoning debrief items use.
+        """
+        try:
+            data = {
+                "title": title,
+                "led_by": self.resolve_assignee(led_by),
+                "proposed_date": proposed_date,
+                "participants": participants or [],
+                "label": self.resolve_label(label),
+                "status": status or "not_scheduled",
+                "approval_status": "approved",
+            }
+            result = self.client.table("follow_up_meetings").insert(data).execute()
+            if result.data:
+                logger.info(f"Created manual follow-up meeting: {title}")
+                return result.data[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error creating manual follow-up meeting '{title}': {e}")
+            return None
+
+    # =========================================================================
     # Gantt reconcile helpers (v3 chunk 2 — curated knowledge-view)
     # =========================================================================
 
