@@ -82,6 +82,11 @@ COLORS = {
     "banding_odd": _hex_color("#FFFFFF"),          # White
     "border_gray": _hex_color("#E0E0E0"),         # Light Gray
 
+    # Staleness (Last Update column) — deliberately distinct from the status
+    # palette: a stale row is a prompt to look, not a status of its own.
+    "stale_warn": _hex_color("#FFE0B2"),          # Light Orange — 30d+
+    "stale_alert": _hex_color("#FFCDD2"),         # Light Red — 60d+
+
     # Header
     "header_bg": _hex_color("#1A237E"),           # Dark Blue
     "header_text": _hex_color("#FFFFFF"),         # White
@@ -144,6 +149,41 @@ def _column_width_request(sheet_id: int, col_index: int, width_px: int) -> dict:
             },
             "properties": {"pixelSize": width_px},
             "fields": "pixelSize",
+        }
+    }
+
+
+def _staleness_format_rule(
+    sheet_id: int, col_index: int, days: int, color: dict, rule_index: int = 0
+) -> dict:
+    """Highlight a date cell older than `days` — the staleness signal.
+
+    A CUSTOM_FORMULA rule rather than TEXT_CONTAINS: the cell holds a date, and
+    what matters is how OLD it is, which no substring can express. Blank cells
+    are excluded so a task with no recorded update isn't painted as stale.
+    """
+    col_letter = chr(ord("A") + col_index)
+    return {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{
+                    "sheetId": sheet_id,
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
+                    "startRowIndex": 1,
+                }],
+                "booleanRule": {
+                    "condition": {
+                        "type": "CUSTOM_FORMULA",
+                        "values": [{
+                            "userEnteredValue":
+                                f"=AND(${col_letter}2<>\"\", TODAY()-DATEVALUE(${col_letter}2)>={days})"
+                        }],
+                    },
+                    "format": {"backgroundColor": color},
+                },
+            },
+            "index": rule_index,
         }
     }
 
@@ -261,6 +301,17 @@ TASK_COLUMNS = {
 if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
     TASK_COLUMNS["urgency"] = "K"
 
+# Last Update = L, appended AFTER urgency by the same never-relocate rule.
+#
+# Why it exists: deadlines are legitimately optional here (75% of open tasks
+# have none), so a due-date view is nearly empty and reads as a defect list when
+# it isn't one. STALENESS is the pressure signal that always applies — but
+# `updated_at` was not in the sheet at all (col I is *Created*), so it could not
+# be computed or sorted on. Sorting by this column IS the weekly agenda.
+# System-owned: written by reconcile, protected alongside H:J. [2026-07-22]
+if getattr(settings, "TASK_SHEET_LAST_UPDATE_ENABLED", False):
+    TASK_COLUMNS["last_update"] = "L"
+
 # Column indices (0-based) for formatting operations
 TASK_COL_INDEX = {k: ord(v) - ord("A") for k, v in TASK_COLUMNS.items()}
 
@@ -277,18 +328,35 @@ DECISION_COLUMNS = {
 
 DECISION_COL_INDEX = {k: ord(v) - ord("A") for k, v in DECISION_COLUMNS.items()}
 
-# Header labels for sheet display (order matches column mapping)
-TASK_TRACKER_HEADERS = [
-    "Priority", "Label", "Task", "Owner", "Deadline",
-    "Status", "Category", "Source Meeting", "Created", "ID",
+# Header labels for sheet display (order matches column mapping).
+# _BASE is the always-present A:J layout; flag-gated columns are appended.
+TASK_TRACKER_HEADERS_BASE = [
+    "Priority", "Project", "Task", "Owner", "Deadline",
+    "Status", "Area", "Source Meeting", "Created", "ID",
 ]
+TASK_TRACKER_HEADERS = list(TASK_TRACKER_HEADERS_BASE)
 if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
     TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Urgency"]
+if getattr(settings, "TASK_SHEET_LAST_UPDATE_ENABLED", False):
+    TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Last Update"]
 
 DECISION_TRACKER_HEADERS = [
     "Label", "Decision", "Rationale", "Confidence",
     "Source Meeting", "Date", "Status",
 ]
+
+
+def _fmt_day(value) -> str:
+    """Render a DB timestamp as YYYY-MM-DD for a sheet cell.
+
+    The Last Update column is read by humans and sorted on, so it carries the
+    day only — a full ISO timestamp sorts identically but is unreadable in a
+    narrow column. Unparseable/missing values become "" rather than "None".
+    """
+    if not value:
+        return ""
+    text = str(value)
+    return text[:10] if len(text) >= 10 else text
 
 
 def _decision_id_enabled() -> bool:
@@ -542,6 +610,8 @@ class GoogleSheetsService:
         ]
         if "urgency" in TASK_COLUMNS:
             values.append(urgency or "M")
+        if "last_update" in TASK_COLUMNS:
+            values.append(created_date)   # new row: last update == created
 
         return await self._append_row(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
@@ -720,6 +790,8 @@ class GoogleSheetsService:
             }
             if "urgency" in TASK_COL_INDEX:
                 _task["urgency"] = row[TASK_COL_INDEX["urgency"]]
+            if "last_update" in TASK_COL_INDEX:
+                _task["last_update"] = row[TASK_COL_INDEX["last_update"]]
             tasks.append(_task)
 
         return tasks
@@ -871,6 +943,8 @@ class GoogleSheetsService:
             ]
             if "urgency" in TASK_COLUMNS:
                 _row.append(t.get("urgency") or "")
+            if "last_update" in TASK_COLUMNS:
+                _row.append(t.get("last_update") or "")
             _row.append(datetime.now().strftime("%Y-%m-%d"))  # Archived date
             archive_rows.append(_row)
 
@@ -1085,6 +1159,8 @@ class GoogleSheetsService:
                 ]
                 if "urgency" in TASK_COLUMNS:
                     _row.append(t.get("urgency") or "M")
+                if "last_update" in TASK_COLUMNS:
+                    _row.append(_fmt_day(t.get("updated_at")))
                 rows.append(_row)
 
             # Clear the tab and write fresh data
@@ -1499,6 +1575,8 @@ class GoogleSheetsService:
             ]
             if "urgency" in TASK_COLUMNS:
                 _row.append(task.get("urgency") or "M")
+            if "last_update" in TASK_COLUMNS:
+                _row.append(_fmt_day(task.get("updated_at")))
             values.append(_row)
 
         return await self._append_rows(
@@ -2301,10 +2379,22 @@ class GoogleSheetsService:
                 }
             })
 
-            # --- Fixed column widths (Phase 10 layout) ---
-            # A=Priority(50), B=Label(120), C=Task(350), D=Owner(90),
-            # E=Deadline(90), F=Status(90), G=Category(120), H=Source(150), I=Created(80)
-            col_widths = [50, 120, 350, 90, 90, 90, 120, 150, 80]
+            # --- Fixed column widths ---
+            # A=Priority(50), B=Project(120), C=Task(350), D=Owner(120),
+            # E=Deadline(90), F=Status(90), G=Area(150), H=Source(150),
+            # I=Created(80), J=ID(70), K=Urgency(70), L=Last Update(95)
+            #
+            # This list used to stop at I — 9 widths for a 10/11-column layout —
+            # so the identity and urgency columns rendered at whatever width
+            # they happened to have. Owner widened to 120 now that assignees are
+            # full names (was 90, which truncated "Paolo Vailetti"). [2026-07-22]
+            col_widths = [50, 120, 350, 120, 90, 90, 150, 150, 80]
+            if "id" in TASK_COL_INDEX:
+                col_widths.append(70)
+            if "urgency" in TASK_COL_INDEX:
+                col_widths.append(70)
+            if "last_update" in TASK_COL_INDEX:
+                col_widths.append(95)
             for i, w in enumerate(col_widths):
                 requests.append(_column_width_request(sid, i, w))
 
@@ -2353,6 +2443,19 @@ class GoogleSheetsService:
                 )
                 rule_idx += 1
 
+            # --- Staleness on Last Update (L) ---
+            # Red BEFORE amber: rules are evaluated in order and the first match
+            # wins, so the 60-day rule must be registered first or everything
+            # over 30 days would paint amber and the 60-day rule never fire.
+            if "last_update" in TASK_COL_INDEX:
+                for days, color in ((60, COLORS["stale_alert"]), (30, COLORS["stale_warn"])):
+                    requests.append(
+                        _staleness_format_rule(
+                            sid, TASK_COL_INDEX["last_update"], days, color, rule_idx
+                        )
+                    )
+                    rule_idx += 1
+
             # --- NO data validation dropdowns (removed — they cause errors) ---
 
             # --- Remove existing banding then add fresh (idempotent) ---
@@ -2382,6 +2485,7 @@ class GoogleSheetsService:
             #     the bot's own writes are never blocked; idempotent (drop any
             #     prior Gianluigi protection, then re-add one covering H:J). ---
             _PROTECT_DESC = "Gianluigi: system-owned (source_meeting / created / id)"
+            _LAST_UPDATE_PROTECT_DESC = "Gianluigi: system-owned (last update)"
             try:
                 pmeta = self._execute_with_retry(
                     lambda: self.service.spreadsheets().get(
@@ -2393,7 +2497,7 @@ class GoogleSheetsService:
                     if sheet.get("properties", {}).get("sheetId") != sid:
                         continue
                     for pr in sheet.get("protectedRanges", []):
-                        if pr.get("description") == _PROTECT_DESC:
+                        if pr.get("description") in (_PROTECT_DESC, _LAST_UPDATE_PROTECT_DESC):
                             requests.append({
                                 "deleteProtectedRange": {
                                     "protectedRangeId": pr["protectedRangeId"]
@@ -2415,6 +2519,24 @@ class GoogleSheetsService:
                     }
                 }
             })
+            # Last Update (L) is system-owned too, but NOT contiguous with H:J —
+            # Urgency (K) sits between them and stays editable — so it needs its
+            # own range. Same delete-then-re-add idempotence via its description.
+            if "last_update" in TASK_COL_INDEX:
+                requests.append({
+                    "addProtectedRange": {
+                        "protectedRange": {
+                            "range": {
+                                "sheetId": sid,
+                                "startRowIndex": 1,
+                                "startColumnIndex": TASK_COL_INDEX["last_update"],
+                                "endColumnIndex": TASK_COL_INDEX["last_update"] + 1,
+                            },
+                            "description": _LAST_UPDATE_PROTECT_DESC,
+                            "warningOnly": True,
+                        }
+                    }
+                })
 
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().batchUpdate(

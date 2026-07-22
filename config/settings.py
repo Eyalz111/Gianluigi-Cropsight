@@ -165,6 +165,18 @@ class Settings(BaseSettings):
             "churn.)"
         ),
     )
+    TASK_SHEET_LAST_UPDATE_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Add 'Last Update' (col L) to the Tasks sheet — the DB updated_at, "
+            "APPENDED after Urgency by the same never-relocate rule. Deadlines "
+            "are optional here (75% of open tasks have none), so a due-date view "
+            "is nearly empty; STALENESS is the pressure signal that always "
+            "applies, and it could not be computed in-sheet because updated_at "
+            "was absent (col I is Created). Sorting by this column is the weekly "
+            "review agenda. System-owned — protected alongside H:J."
+        ),
+    )
 
     # ==========================================================================
     # Calendar Configuration

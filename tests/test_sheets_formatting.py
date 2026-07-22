@@ -239,9 +239,17 @@ class TestFormatTaskTracker:
             auto_resize = [r for r in requests if "autoResizeDimensions" in r]
             assert len(auto_resize) == 0, "Should NOT have autoResizeDimensions"
 
-            # Should have 9 column width requests (A-I)
+            # One width per COLUMN IN THE LAYOUT. This used to assert exactly 9
+            # (A-I), which pinned a bug rather than a behaviour: the layout has
+            # been 10-11 columns since the col-J UUID and col-K Urgency were
+            # added, so J/K/L rendered at whatever width they happened to have.
+            # [2026-07-22]
+            from services.google_sheets import TASK_COLUMNS
+
             dim_reqs = [r for r in requests if "updateDimensionProperties" in r]
-            assert len(dim_reqs) == 9, "Expected 9 column width requests"
+            assert len(dim_reqs) == len(TASK_COLUMNS), (
+                f"Expected one width per column ({len(TASK_COLUMNS)}), got {len(dim_reqs)}"
+            )
 
             # Phase 10: Priority column (A=0) is 50px, Task column (C=2) is 350px
             col_a = [

@@ -851,6 +851,16 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         elif dt.get("category"):
             _cell("category", row, dt.get("category"))
             summary["pushed"] += 1
+        # Last Update (col L): one-way DB -> Sheet, system-owned. It mirrors
+        # `updated_at`, which is what makes staleness sortable in-sheet — the
+        # pressure signal that replaces deadlines for the 75% of tasks that
+        # legitimately have none. Never pulled: a human editing this cell is
+        # editing a system field, not stating a fact. [2026-07-22]
+        if getattr(settings, "TASK_SHEET_LAST_UPDATE_ENABLED", False):
+            from services.google_sheets import _fmt_day
+            want = _fmt_day(dt.get("updated_at"))
+            if want and want != (st.get("last_update") or "").strip():
+                _cell("last_update", row, want)
         if upd:
             db_updates[sid] = upd
         # 'archived' (typed by Eyal or already set in the DB) -> move the row to
