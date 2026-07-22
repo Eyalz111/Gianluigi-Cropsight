@@ -249,16 +249,19 @@ async def start_services() -> None:
     elif not settings.TRANSCRIPT_WATCHER_ENABLED:
         logger.info("  Transcript watcher disabled (TRANSCRIPT_WATCHER_ENABLED=false)")
 
-        # Start document watcher (polls Documents folder for team uploads)
-        if settings.DOCUMENTS_FOLDER_ID:
+        # Start document watcher (polls Documents folder for team uploads) — needs
+        # Google Drive, same gate as the transcript watcher above (audit SC-06).
+        if settings.DOCUMENTS_FOLDER_ID and init_status.get("google_drive"):
             logger.info("  Starting document watcher...")
             doc_watcher_task = asyncio.create_task(
                 document_watcher.start(),
                 name="document_watcher"
             )
             tasks.append(doc_watcher_task)
-        else:
+        elif not settings.DOCUMENTS_FOLDER_ID:
             logger.warning("  Document watcher disabled (DOCUMENTS_FOLDER_ID not set)")
+        else:
+            logger.warning("  Document watcher disabled (Google Drive not available)")
     else:
         logger.warning("  Transcript watcher disabled (Google Drive not available)")
         logger.warning("  Document watcher disabled (Google Drive not available)")

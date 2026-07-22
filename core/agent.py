@@ -224,7 +224,9 @@ class GianluigiAgent:
         self,
         user_message: str,
         user_id: str,
-        conversation_history: list | None = None
+        conversation_history: list | None = None,
+        allow_writes: bool = True,
+        max_sensitivity_level: int = 4,
     ) -> dict:
         """
         Process a user message and return the agent's response.
@@ -259,6 +261,21 @@ class GianluigiAgent:
         if query_type != "general":
             extra_context = await self._get_query_context(query_type, user_message)
             logger.info(f"Query classified as '{query_type}', pre-fetched context")
+
+        # Write-capable intents (debrief, information injection) are Eyal-only.
+        # A non-privileged caller — the Telegram group where the office manager
+        # interacts — may read but never inject/change items (audit AC-01).
+        if not allow_writes and intent in ("debrief", "information_injection"):
+            logger.info(f"Read-only caller {user_id}: blocked write intent '{intent}'")
+            return {
+                "action": "read_only",
+                "response": (
+                    "Only Eyal can add or change items. I can still look things up — "
+                    "ask me about open tasks, the Gantt, or open questions."
+                ),
+                "actions": [],
+                "sources": [],
+            }
 
         # Step 3: Dispatch based on intent
         if intent == "debrief":
@@ -309,6 +326,8 @@ class GianluigiAgent:
             conversation_history=conversation_history,
             intent=intent,
             extra_context=extra_context,
+            allow_writes=allow_writes,
+            max_sensitivity_level=max_sensitivity_level,
         )
 
         # Log the interaction
@@ -467,7 +486,48 @@ class GianluigiAgent:
             "approval_status": "pending",
         }
 
-    async def _execute_tool_call(self, tool_name: str, tool_input: dict) -> Any:
+    async def _execute_tool_call(
+        self, tool_name: str, tool_input: dict, max_sensitivity_level: int = 4
+    ) -> Any:
+        """Execute a tool call and tier-filter its result to the caller's clearance.
+
+        Dispatches to the implementation, then (for a non-CEO caller such as the
+        founders-tier Telegram group) drops any result item above the caller's
+        sensitivity level so CEO-only content never reaches a shared chat
+        (audit TS-02, 2026-07).
+        """
+        result = await self._dispatch_tool_call(tool_name, tool_input)
+        return self._apply_tier_filter(tool_name, result, max_sensitivity_level)
+
+    def _apply_tier_filter(self, tool_name: str, result: Any, max_level: int) -> Any:
+        """Drop result items above ``max_level`` for the sensitivity-tagged read tools.
+
+        CEO callers (level 4) see everything unchanged. The output shapes handled
+        here are the ones exposed to the founders-tier group; raw un-taggable tools
+        (Gmail, email intel) are withheld upstream by ``tools_for``.
+        """
+        if max_level >= 4 or not isinstance(result, dict):
+            return result
+        from models.schemas import filter_by_sensitivity
+
+        if tool_name == "search_memory":
+            for key in ("embeddings", "decisions", "tasks"):
+                if isinstance(result.get(key), list):
+                    result[key] = filter_by_sensitivity(result[key], max_level)
+        elif tool_name == "list_decisions":
+            if isinstance(result.get("decisions"), list):
+                result["decisions"] = filter_by_sensitivity(result["decisions"], max_level)
+                result["count"] = len(result["decisions"])
+        elif tool_name == "search_meetings":
+            if isinstance(result.get("results"), list):
+                result["results"] = filter_by_sensitivity(result["results"], max_level)
+        elif tool_name == "get_meeting_summary":
+            # Gate the whole summary by the source meeting's own sensitivity.
+            if filter_by_sensitivity([result], max_level) == []:
+                return {"error": "That meeting is above your access level."}
+        return result
+
+    async def _dispatch_tool_call(self, tool_name: str, tool_input: dict) -> Any:
         """
         Execute a tool call and return the result.
 
@@ -650,6 +710,8 @@ class GianluigiAgent:
             "date": meeting.get("date"),
             "summary": meeting.get("summary"),
             "participants": meeting.get("participants"),
+            # Carried so _apply_tier_filter can gate the whole summary by tier.
+            "sensitivity": meeting.get("sensitivity"),
         }
 
         # Add Drive link so the user can navigate directly

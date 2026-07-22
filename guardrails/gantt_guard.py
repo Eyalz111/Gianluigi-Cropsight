@@ -69,7 +69,7 @@ def _load_schema_metadata() -> dict:
 
 
 def resolve_row_number(
-    sheet_name: str, section: str, subsection: str
+    sheet_name: str, section: str, subsection: str, schema_rows: list[dict] | None = None
 ) -> tuple[int | None, str | None, str | None]:
     """
     Resolve a section/subsection to a row number using the gantt_schema table.
@@ -81,12 +81,15 @@ def resolve_row_number(
         sheet_name: Tab name (e.g., "2026-2027").
         section: Section name (e.g., "Product & Technology").
         subsection: Subsection name (e.g., "Execution").
+        schema_rows: Pre-loaded schema (pass the caller's single load to avoid a
+            per-cell re-fetch that could transiently fail; audit SS-03).
 
     Returns:
         Tuple of (row_number, matched_section, matched_subsection).
         row_number is None if no match found.
     """
-    schema_rows = _load_schema()
+    if schema_rows is None:
+        schema_rows = _load_schema()
     if not schema_rows:
         return None, None, None
 
@@ -120,9 +123,17 @@ def resolve_row_number(
     return None, None, None
 
 
-def is_protected(sheet_name: str, row_number: int) -> bool:
-    """Check if a row is protected (formula rows, section headers)."""
-    schema_rows = _load_schema()
+def is_protected(
+    sheet_name: str, row_number: int, schema_rows: list[dict] | None = None
+) -> bool:
+    """Check if a row is protected (formula rows, section headers).
+
+    Pass ``schema_rows`` (the caller's single verified load) so a transient
+    per-cell re-fetch can't silently fail-open and let a write onto a protected
+    row pass validation (audit SS-03).
+    """
+    if schema_rows is None:
+        schema_rows = _load_schema()
     for row in schema_rows:
         if (
             row.get("sheet_name", "").lower() == sheet_name.lower()
@@ -324,9 +335,10 @@ def validate_proposal(
                 f"{prefix}: week W{week} is out of range (max W{max_week})"
             )
 
-        # Resolve section/subsection
+        # Resolve section/subsection — reuse the single schema load above so a
+        # transient per-cell re-fetch can't fail-open (audit SS-03).
         row_num, matched_section, matched_subsection = resolve_row_number(
-            sheet_name, change["section"], change["subsection"]
+            sheet_name, change["section"], change["subsection"], schema_rows=schema_rows
         )
         if row_num is None:
             errors.append(
@@ -336,7 +348,7 @@ def validate_proposal(
             continue
 
         # Protected row check
-        if is_protected(sheet_name, row_num):
+        if is_protected(sheet_name, row_num, schema_rows=schema_rows):
             errors.append(
                 f"{prefix}: row {row_num} ({matched_section} > {matched_subsection}) "
                 f"is protected and cannot be modified"

@@ -86,9 +86,12 @@ class IntelligenceSignalScheduler:
                     await asyncio.sleep(3600)
                     continue
 
-                # Generate signal
-                await self._run_generation()
-                self._last_generated_week = week_key
+                # Generate signal — only mark the week done if it actually
+                # succeeded, else retry within the window (audit SC-01).
+                if await self._run_generation():
+                    self._last_generated_week = week_key
+                else:
+                    await asyncio.sleep(300)  # 5 min, then retry this window
 
             except asyncio.CancelledError:
                 break
@@ -131,8 +134,13 @@ class IntelligenceSignalScheduler:
         )
         await asyncio.sleep(sleep_seconds)
 
-    async def _run_generation(self) -> None:
-        """Execute the intelligence signal generation pipeline."""
+    async def _run_generation(self) -> bool:
+        """Execute the intelligence signal generation pipeline.
+
+        Returns True on success, False on failure — the caller must only set the
+        fire-once guard on success, else one failed run silently darkens the whole
+        week (audit SC-01).
+        """
         logger.info("Intelligence signal scheduler triggering generation")
         try:
             from processors.intelligence_signal_agent import (
@@ -156,6 +164,7 @@ class IntelligenceSignalScheduler:
                 "intelligence_signal",
                 details={"signal_id": signal_id, "run_status": status},
             )
+            return True
 
         except Exception as e:
             logger.error(f"Intelligence signal generation failed: {e}")
@@ -173,6 +182,7 @@ class IntelligenceSignalScheduler:
                 await check_and_alert("intelligence_signal", e)
             except Exception:
                 pass
+            return False
 
 
 # Singleton instance

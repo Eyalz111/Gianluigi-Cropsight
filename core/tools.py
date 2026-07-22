@@ -750,3 +750,65 @@ TOOL_DEFINITIONS = [
     # v1.0 Phase 4 — Email Intelligence tools
     TOOL_GET_EMAIL_INTELLIGENCE,
 ]
+
+
+# =============================================================================
+# Caller privilege tiers — which tools a given caller may use.
+# (Audit 2026-07 AC-01 / TS-02: the Telegram group where the office manager
+# interacts must be read-only and must not reach sensitive content.)
+# =============================================================================
+
+# Tools that WRITE or trigger an action/distribution. Only Eyal (in his DM) may
+# use these; the group / any non-Eyal caller never gets them.
+WRITE_TOOL_NAMES = frozenset({
+    "create_task",
+    "update_task",
+    "ingest_transcript",
+    "ingest_document",
+    "get_meeting_prep",
+    "generate_weekly_digest",
+    "update_stakeholder_tracker",
+    "propose_gantt_update",
+    "rollback_gantt_update",
+})
+
+# Reads that surface sensitive-but-tier-TAGGED content (transcripts, decisions,
+# memory, cross-meeting entity history). Available at/above FOUNDERS, where their
+# OUTPUT is tier-filtered per item (see GianluigiAgent._apply_tier_filter).
+SENSITIVE_READ_TOOL_NAMES = frozenset({
+    "search_meetings",
+    "get_meeting_summary",
+    "search_memory",
+    "list_decisions",
+    "get_entity_timeline",
+    "get_commitments",
+})
+
+# Raw external reads that are NOT reliably sensitivity-tagged (raw Gmail, extracted
+# email items). These can't be tier-filtered safely, so they are never exposed below
+# CEO clearance — not even to the founders-tier group.
+RESTRICTED_READ_TOOL_NAMES = frozenset({
+    "search_gmail",
+    "get_email_intelligence",
+})
+
+
+def tools_for(allow_writes: bool, max_sensitivity_level: int) -> list:
+    """Return the subset of tools a caller is permitted to use.
+
+    - Eyal's DM (allow_writes=True, level 4=CEO): everything.
+    - The Telegram group (allow_writes=False, level 3=FOUNDERS): read-only, and it
+      can query decisions/meetings/memory — but their OUTPUT is tier-filtered so
+      CEO-only items are dropped, and raw un-taggable external tools (Gmail, email
+      intel) are withheld entirely.
+    - A TEAM-level (level 2) read-only caller loses the sensitive reads too, keeping
+      only operational tools (tasks, Gantt, cadence, open questions).
+    """
+    tools = TOOL_DEFINITIONS
+    if not allow_writes:
+        tools = [t for t in tools if t["name"] not in WRITE_TOOL_NAMES]
+    if max_sensitivity_level < 4:  # below CEO — never the raw-external tools
+        tools = [t for t in tools if t["name"] not in RESTRICTED_READ_TOOL_NAMES]
+    if max_sensitivity_level < 3:  # below FOUNDERS — no sensitive reads at all
+        tools = [t for t in tools if t["name"] not in SENSITIVE_READ_TOOL_NAMES]
+    return tools

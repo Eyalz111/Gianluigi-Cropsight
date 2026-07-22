@@ -26,7 +26,7 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from config.settings import settings
 from guardrails.mcp_auth import MCPAuthMiddleware, mcp_auth
@@ -115,11 +115,44 @@ class MCPServer:
         self._mcp: FastMCP | None = None
         self._server: uvicorn.Server | None = None
         self._ready: bool = False
+        self._oauth_provider = None  # set in _build_mcp when MCP_OAUTH_ENABLED
+
+    def _oauth_kwargs(self) -> dict:
+        """FastMCP auth kwargs when the built-in OAuth server is enabled (audit P3-01).
+
+        Makes this server a self-contained OAuth Authorization Server: the SDK mounts
+        /authorize, /token, /register, /.well-known/* and wraps /mcp in
+        RequireAuthMiddleware. Claude.ai connects via DCR + PKCE.
+        """
+        if not settings.MCP_OAUTH_ENABLED:
+            return {}
+        from mcp.server.auth.settings import (
+            AuthSettings, ClientRegistrationOptions, RevocationOptions,
+        )
+        from services.mcp_oauth import GianluigiOAuthProvider
+
+        public = settings.MCP_PUBLIC_URL.rstrip("/")
+        self._oauth_provider = GianluigiOAuthProvider(public)
+        return {
+            "auth_server_provider": self._oauth_provider,
+            "auth": AuthSettings(
+                issuer_url=public,
+                resource_server_url=f"{public}/mcp",
+                required_scopes=[settings.MCP_OAUTH_SCOPE],
+                client_registration_options=ClientRegistrationOptions(
+                    enabled=True,                       # Claude.ai uses DCR (RFC 7591)
+                    valid_scopes=[settings.MCP_OAUTH_SCOPE],
+                    default_scopes=[settings.MCP_OAUTH_SCOPE],
+                ),
+                revocation_options=RevocationOptions(enabled=True),
+            ),
+        }
 
     def _build_mcp(self) -> FastMCP:
         """Build the FastMCP instance with all tools and custom routes."""
         mcp = FastMCP(
             "gianluigi",
+            **self._oauth_kwargs(),
             instructions=(
                 "You are connected to Gianluigi, CropSight's AI operations assistant. "
                 "IMPORTANT RULES:\n"
@@ -153,8 +186,42 @@ class MCPServer:
         )
 
         self._register_health_routes(mcp)
+        if settings.MCP_OAUTH_ENABLED:
+            self._register_oauth_routes(mcp)
         self._register_tools(mcp)
         return mcp
+
+    def _register_oauth_routes(self, mcp: FastMCP) -> None:
+        """PIN-gated /login consent page for the built-in OAuth server.
+
+        These are custom (unauthenticated) routes — only /mcp is behind
+        RequireAuthMiddleware, so the login handshake is reachable.
+        """
+        from services.mcp_oauth import login_page_html
+
+        provider = self._oauth_provider
+
+        @mcp.custom_route("/login", methods=["GET"])
+        async def handle_login(request: Request) -> Response:
+            state = request.query_params.get("state", "")
+            return HTMLResponse(login_page_html(settings.MCP_PUBLIC_URL, state))
+
+        @mcp.custom_route("/login/callback", methods=["POST"])
+        async def handle_login_callback(request: Request) -> Response:
+            from starlette.exceptions import HTTPException as _HTTPException
+
+            form = await request.form()
+            pin = str(form.get("pin", ""))
+            state = str(form.get("state", ""))
+            try:
+                redirect_url = provider.complete_login(pin, state)
+            except _HTTPException as e:
+                # Re-render the form with the error, keeping the state.
+                return HTMLResponse(
+                    login_page_html(settings.MCP_PUBLIC_URL, state, error=e.detail),
+                    status_code=e.status_code,
+                )
+            return RedirectResponse(url=redirect_url, status_code=302)
 
     # ------------------------------------------------------------------
     # Health / Ready / Report routes (replaces aiohttp health_server)
@@ -429,6 +496,15 @@ class MCPServer:
                         r for r in results["embeddings"]
                         if r.get("source_type") in source_types
                     ]
+
+                # Tier-safety: curated decisions/topics now sit in the embedding
+                # pool and carry their sensitivity (match_embeddings returns it).
+                # search_memory is Eyal/CEO-facing so filtering to CEO is a no-op
+                # today — a safeguard that protects any future lower-tier caller.
+                # [semantic-index Phase 3]
+                if "embeddings" in results:
+                    from models.schemas import filter_by_sensitivity
+                    results["embeddings"] = filter_by_sensitivity(results["embeddings"], 4)
 
                 # Sanitize — never return raw transcript text
                 if "embeddings" in results:
@@ -778,10 +854,23 @@ class MCPServer:
                     from processors.gantt_tagging import apply_row_tags
 
                     mapping = edits if edits is not None else content.get("candidates", [])
+                    expected = sum(1 for m in mapping if m.get("topic_id") and m.get("row"))
                     result = await apply_row_tags(sheet_name, mapping)
-                    supabase_client.delete_pending_approval(proposal_id)
-                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, **result})
-                    return _success({"sheet": sheet_name, **result})
+                    applied = result.get("applied", 0)
+                    if applied >= expected:
+                        # Every tag written — safe to retire the proposal.
+                        supabase_client.delete_pending_approval(proposal_id)
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, **result})
+                        return _success({"sheet": sheet_name, **result})
+                    # Partial write (some tags failed — likely a transient Sheets
+                    # error). KEEP the proposal pending so it can be retried, and
+                    # surface the partial state rather than reporting success (audit RG-01).
+                    logger.error(
+                        f"gantt_tag_mapping partial apply: {applied}/{expected} on "
+                        f"{sheet_name}; keeping proposal {proposal_id} for retry"
+                    )
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "partial": True, **result})
+                    return _success({"sheet": sheet_name, "partial": True, "expected": expected, **result})
 
                 return _error(
                     f"decide_proposal does not handle content_type {content_type!r}; "
@@ -2570,6 +2659,15 @@ class MCPServer:
                 summary = compute_cost_summary(records)
                 summary["period_days"] = days
 
+                # Non-LLM external cost sources (dark-safe; only present when configured).
+                try:
+                    from services.drive_storage_cost import get_drive_storage_cost
+                    _st = get_drive_storage_cost()
+                    if _st.get("available"):
+                        summary["external_costs"] = {"drive_storage": _st}
+                except Exception as _e:
+                    logger.warning(f"drive storage cost skipped in get_cost_summary: {_e}")
+
                 mcp_auth.log_call("get_cost_summary", {"days": days})
                 return _success(summary, source="token_usage")
 
@@ -3103,9 +3201,15 @@ class MCPServer:
         """Start the MCP server with SSE transport on the configured port."""
         self._mcp = self._build_mcp()
 
-        # Get the Starlette SSE app and add auth middleware
+        # Get the Starlette app. When the built-in OAuth server is on, the SDK's
+        # RequireAuthMiddleware already enforces auth on /mcp and mounts the OAuth
+        # endpoints — the legacy token/authless gate would BLOCK the OAuth handshake
+        # (/authorize, /token, /login), so skip it (audit P3-01 / OAuth).
         app = self._mcp.streamable_http_app()
-        app.add_middleware(MCPAuthMiddleware)
+        if not settings.MCP_OAUTH_ENABLED:
+            app.add_middleware(MCPAuthMiddleware)
+        else:
+            logger.info("MCP OAuth enabled — RequireAuthMiddleware guards /mcp (legacy gate off)")
 
         port = settings.PORT
         config = uvicorn.Config(

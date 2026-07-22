@@ -54,11 +54,12 @@ async def read_row_tags(sheet_name: str) -> dict[int, str]:
     """Map row_number -> topic_id from the tag column (blank cells skipped)."""
     col = tag_column()
     try:
-        resp = (
-            sheets_service.service.spreadsheets()
+        # Route through _execute_with_retry so an idle-wake broken pipe rebuilds
+        # the transport instead of failing the read (audit RG-01 / June P3-07).
+        resp = sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets()
             .values()
             .get(spreadsheetId=settings.GANTT_SHEET_ID, range=f"'{sheet_name}'!{col}1:{col}")
-            .execute()
         )
         out: dict[int, str] = {}
         for i, row in enumerate(resp.get("values", []), start=1):
@@ -83,12 +84,16 @@ async def write_row_tag(sheet_name: str, row: int, topic_id: str) -> bool:
     """Write a topic id into the tag column for one row."""
     col = tag_column()
     try:
-        sheets_service.service.spreadsheets().values().update(
-            spreadsheetId=settings.GANTT_SHEET_ID,
-            range=f"'{sheet_name}'!{col}{row}",
-            valueInputOption="RAW",
-            body={"values": [[topic_id]]},
-        ).execute()
+        # Retry-wrapped so a stale idle-wake socket rebuilds rather than silently
+        # dropping the tag write (audit RG-01 / June P3-07).
+        sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets().values().update(
+                spreadsheetId=settings.GANTT_SHEET_ID,
+                range=f"'{sheet_name}'!{col}{row}",
+                valueInputOption="RAW",
+                body={"values": [[topic_id]]},
+            )
+        )
         return True
     except Exception as e:
         logger.error(f"write_row_tag({sheet_name},{row}) failed: {e}")
@@ -106,23 +111,25 @@ async def format_tag_column(sheet_name: str) -> bool:
             return False
         col_idx0 = _col_to_index(tag_column()) - 1  # 0-based for the API
         white = {"red": 1, "green": 1, "blue": 1}
-        sheets_service.service.spreadsheets().batchUpdate(
-            spreadsheetId=settings.GANTT_SHEET_ID,
-            body={"requests": [{
-                "repeatCell": {
-                    "range": {
-                        "sheetId": sid,
-                        "startColumnIndex": col_idx0,
-                        "endColumnIndex": col_idx0 + 1,
-                    },
-                    "cell": {"userEnteredFormat": {
-                        "backgroundColor": white,
-                        "textFormat": {"foregroundColor": white},
-                    }},
-                    "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor",
-                }
-            }]},
-        ).execute()
+        sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.GANTT_SHEET_ID,
+                body={"requests": [{
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sid,
+                            "startColumnIndex": col_idx0,
+                            "endColumnIndex": col_idx0 + 1,
+                        },
+                        "cell": {"userEnteredFormat": {
+                            "backgroundColor": white,
+                            "textFormat": {"foregroundColor": white},
+                        }},
+                        "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor",
+                    }
+                }]},
+            )
+        )
         return True
     except Exception as e:
         logger.error(f"format_tag_column({sheet_name}) failed: {e}")

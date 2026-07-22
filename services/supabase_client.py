@@ -387,9 +387,14 @@ class SupabaseClient:
                     ("tasks", "meeting_id"),
                 ]:
                     try:
-                        self.client.table(table).delete().eq(fk_col, meeting_id).execute()
+                        _res = self.client.table(table).delete().eq(fk_col, meeting_id).execute()
+                        # Report the ACTUAL number deleted, not the pre-count (audit AD-02).
+                        if table in counts:
+                            counts[table] = len(_res.data) if _res.data else 0
                     except Exception as e:
-                        logger.debug(f"Skipping {table} cleanup: {e}")
+                        # A failed child delete is a real integrity concern — surface
+                        # it at WARNING, don't swallow at debug as if it succeeded.
+                        logger.warning(f"[cascade] {table} delete FAILED for {meeting_id}: {e}")
 
                 # pending_approvals is keyed by approval_id, not FK'd to meetings.id.
                 try:
@@ -1898,7 +1903,10 @@ class SupabaseClient:
             {
                 "search_query": query_text,
                 "match_count": limit,
-                "filter_source_type": source_type,
+                # RPC param is `source_filter` — the old `filter_source_type`
+                # silently 404'd the RPC (PGRST202), so search_memory's fulltext
+                # half never ran and hybrid search was vector-only. [2026-07-14]
+                "source_filter": source_type,
             },
         ).execute()
         return result.data
@@ -2705,6 +2713,41 @@ class SupabaseClient:
             .execute()
         )
         return result.data[0] if result.data else {}
+
+    def get_card_message_ids(self, approval_id: str) -> list[int]:
+        """Telegram approval-card message-ids persisted for this approval.
+
+        [robustness #5/#6, 2026-07-12] Stored inside the pending_approvals
+        content JSON (no migration) so the "delete prior cards before sending a
+        new one" cleanup survives a Cloud Run restart (which drops the bot's
+        in-memory map) AND covers out-of-band resends. Best-effort — returns []
+        on any miss so a read failure can never block a card send.
+        """
+        try:
+            row = self.get_pending_approval(approval_id)
+            if not row:
+                return []
+            ids = (row.get("content") or {}).get("_card_message_ids") or []
+            return [int(x) for x in ids]
+        except Exception as e:
+            logger.warning(f"get_card_message_ids failed for {approval_id}: {e}")
+            return []
+
+    def set_card_message_ids(self, approval_id: str, message_ids: list[int]) -> None:
+        """Replace the persisted approval-card message-ids for this approval.
+
+        Merges into the existing content JSON (never clobbers the meeting
+        content). Best-effort — a failure here must never break the card send.
+        """
+        try:
+            row = self.get_pending_approval(approval_id)
+            if not row:
+                return
+            content = dict(row.get("content") or {})
+            content["_card_message_ids"] = [int(x) for x in message_ids]
+            self.update_pending_approval(approval_id, content=content)
+        except Exception as e:
+            logger.warning(f"set_card_message_ids failed for {approval_id}: {e}")
 
     def delete_pending_approval(self, approval_id: str) -> bool:
         """

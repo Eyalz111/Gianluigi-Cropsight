@@ -59,29 +59,38 @@ def mock_settings_for_email_watcher():
 class TestIsApprovalReply:
     """Tests for approval reply subject line detection."""
 
-    def test_approval_needed_in_subject(self, mock_settings_for_email_watcher):
-        """Should detect [APPROVAL NEEDED] in subject."""
+    def test_bare_approval_needed_is_NOT_a_reply(self, mock_settings_for_email_watcher):
+        """The bare '[APPROVAL NEEDED] …' subject is the bot's OWN outbound
+        request, not a reply. Treating it as a reply made the watcher auto-approve
+        the bot's own request (2026-07-16 self-approval incident). It must be
+        detected as our own request instead."""
         from schedulers.email_watcher import EmailWatcher
 
         watcher = EmailWatcher()
-        assert watcher._is_approval_reply("[APPROVAL NEEDED] Meeting Summary: MVP Focus")
+        subj = "[APPROVAL NEEDED] Meeting Summary: MVP Focus [ref:abcd1234]"
+        assert not watcher._is_approval_reply(subj)
+        assert watcher._is_own_approval_request(subj)
 
     def test_re_approval_needed_in_subject(self, mock_settings_for_email_watcher):
-        """Should detect Re: [APPROVAL NEEDED] in subject."""
+        """A genuine reply (starts with 'Re:') IS an approval reply — and is NOT
+        mistaken for our own outbound request."""
         from schedulers.email_watcher import EmailWatcher
 
         watcher = EmailWatcher()
-        assert watcher._is_approval_reply(
-            "Re: [APPROVAL NEEDED] Meeting Summary: MVP Focus"
-        )
+        subj = "Re: [APPROVAL NEEDED] Meeting Summary: MVP Focus"
+        assert watcher._is_approval_reply(subj)
+        assert not watcher._is_own_approval_request(subj)
 
     def test_case_insensitive(self, mock_settings_for_email_watcher):
-        """Should be case insensitive."""
+        """Should be case insensitive — but still only 'Re:' replies count."""
         from schedulers.email_watcher import EmailWatcher
 
         watcher = EmailWatcher()
-        assert watcher._is_approval_reply("[approval needed] Summary")
-        assert watcher._is_approval_reply("[Approval Needed] Summary")
+        assert watcher._is_approval_reply("re: [approval needed] Summary")
+        assert watcher._is_approval_reply("RE: [Approval Needed] Summary")
+        # Bare requests (any case) are our own outbound mail, not replies.
+        assert not watcher._is_approval_reply("[approval needed] Summary")
+        assert not watcher._is_approval_reply("[Approval Needed] Summary")
 
     def test_regular_email_not_approval(self, mock_settings_for_email_watcher):
         """Should not match regular email subjects."""
@@ -292,6 +301,51 @@ class TestCheckInbox:
             assert call_kwargs["response_source"] == "email"
 
     @pytest.mark.asyncio
+    async def test_own_approval_request_is_NOT_auto_approved(
+        self, mock_settings_for_email_watcher
+    ):
+        """REGRESSION (2026-07-16 self-approval incident): the bot sends
+        '[APPROVAL NEEDED] … [ref:xxxx]' from Eyal's own Gmail, so it echoes back
+        into his inbox looking like it's 'from Eyal'. The body says 'Reply
+        APPROVE …'. The watcher must NOT route that as an approval — it must be
+        skipped, and process_response must never be called."""
+        from schedulers.email_watcher import EmailWatcher
+
+        watcher = EmailWatcher()
+
+        meeting_id = "bda45538-e224-4056-9ff6-680da8f2a888"
+        mock_messages = [
+            {
+                "id": "msg-own-req",
+                "from": "Eyal Zror <eyalz111@gmail.com>",
+                # Bare '[APPROVAL NEEDED]' (no 'Re:') = our own outbound request.
+                "subject": f"[APPROVAL NEEDED] Meeting Summary: CropSight <> X [ref:{meeting_id[:8]}]",
+                "body": "Approval Request: ...\n\nReply APPROVE to distribute to the team",
+                "attachments": [],
+            }
+        ]
+
+        with patch("schedulers.email_watcher.gmail_service") as mock_gmail, \
+             patch("schedulers.email_watcher.supabase_client") as mock_supa, \
+             patch("schedulers.email_watcher.is_team_email", return_value=True), \
+             patch("schedulers.email_watcher.get_team_member_by_email",
+                   return_value={"name": "Eyal Zror", "role": "CEO"}), \
+             patch(
+                 "guardrails.approval_flow.process_response",
+                 new_callable=AsyncMock,
+             ) as mock_process:
+            mock_gmail.get_unread_messages = AsyncMock(return_value=mock_messages)
+            mock_gmail.mark_as_read = AsyncMock(return_value=True)
+
+            await watcher._check_inbox()
+
+            # The bot's own request must never be processed as an approval.
+            mock_process.assert_not_called()
+            # It should be quarantined (marked read + deduped) so it stops re-routing.
+            assert "msg-own-req" in watcher._processed_ids
+            mock_gmail.mark_as_read.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_routes_attachment_email(self, mock_settings_for_email_watcher):
         """Should route emails with attachments to document ingestion."""
         from schedulers.email_watcher import EmailWatcher
@@ -483,11 +537,14 @@ class TestCheckInbox:
                     member_name="Eyal Zror",
                 )
 
-            # Should have called the agent with conversation history
+            # Should have called the agent with conversation history + privilege
+            # (member "eyal" -> writes + full clearance; audit AC-01 email sibling)
             mock_agent.process_message.assert_called_once_with(
                 user_message="What is our Q1 budget?",
                 user_id="eyal",
                 conversation_history=[],
+                allow_writes=True,
+                max_sensitivity_level=4,
             )
 
             # Should have sent reply email
@@ -537,6 +594,8 @@ class TestCheckInbox:
                 user_message="What is our runway?",
                 user_id="eyal",
                 conversation_history=[],
+                allow_writes=True,
+                max_sensitivity_level=4,
             )
 
     @pytest.mark.asyncio

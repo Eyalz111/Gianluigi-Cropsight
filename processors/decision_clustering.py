@@ -139,6 +139,24 @@ async def propose_decision_consolidation(max_proposals: int = _DEFAULT_MAX) -> d
     return {"created": len(proposals), "proposals": proposals}
 
 
+def _resolve_active_winner(decision_id: str, _depth: int = 0) -> str:
+    """Follow a decision's superseded_by chain to the ultimate ACTIVE winner.
+
+    A merge proposal may name a winner that was itself merged away since; pointing
+    the loser at a retired winner would strand it (audit KP-01). Guards against
+    cycles / runaway depth by capping the walk.
+    """
+    if _depth > 10:
+        return decision_id
+    d = supabase_client.get_decision(decision_id)
+    if not d or (d.get("decision_status") or "active") == "active":
+        return decision_id
+    nxt = d.get("superseded_by")
+    if not nxt or nxt == decision_id:
+        return decision_id
+    return _resolve_active_winner(nxt, _depth + 1)
+
+
 def apply_decision_merge(content: dict) -> dict:
     """Retire the older duplicate: mark superseded + bi-temporally close + link.
 
@@ -154,11 +172,20 @@ def apply_decision_merge(content: dict) -> dict:
         return {"status": "gone"}
     if (old.get("decision_status") or "active") != "active":
         return {"status": "already_superseded"}
+    # Resolve the winner to the ultimate ACTIVE decision — if it was itself merged
+    # away since the proposal was created, point the loser at the live winner, not
+    # a retired one (audit KP-01).
+    winner = _resolve_active_winner(winner)
+    if winner == loser:
+        return {"status": "invalid", "reason": "winner resolves to loser"}
     supabase_client.mark_decision_superseded(loser, winner)          # status='superseded', superseded_by
     supabase_client.supersede_decision(loser, superseded_by=winner)  # valid_to + superseded_at
     supabase_client.create_knowledge_link(
         "decision", winner, "decision", loser, "supersedes", created_by="eyal"
     )
+    # Retire the merged-away duplicate from the semantic index. [Phase 2]
+    from processors.semantic_index import deindex as _si_deindex
+    _si_deindex("decision", loser)
     return {"status": "applied", "merged": loser, "into": winner}
 
 

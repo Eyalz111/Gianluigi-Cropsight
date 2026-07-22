@@ -825,8 +825,25 @@ class QAScheduler:
                 except Exception as e:
                     logger.warning(f"QA finalize re-pickup failed (non-fatal): {e}")
 
+                # Heartbeat so a wedged/dead QA loop is visible to /status and the
+                # health monitor, like every other scheduler (audit SC-02).
+                try:
+                    supabase_client.upsert_scheduler_heartbeat(
+                        "qa_scheduler",
+                        details={"score": report.get("score"),
+                                 "issues": len(report.get("issues", []))},
+                    )
+                except Exception:
+                    pass
+
             except Exception as e:
                 logger.error(f"QA scheduler cycle failed: {e}")
+                try:
+                    supabase_client.upsert_scheduler_heartbeat(
+                        "qa_scheduler", status="error", details={"error": str(e)}
+                    )
+                except Exception:
+                    pass
                 await asyncio.sleep(3600)  # Wait 1h on error
 
     async def _sleep_until_next_run(self) -> None:

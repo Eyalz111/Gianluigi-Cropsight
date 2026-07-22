@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     MEETING_PREP_FOLDER_ID: str = Field(default="", description="Meeting Prep folder ID")
     WEEKLY_DIGESTS_FOLDER_ID: str = Field(default="", description="Weekly Digests folder ID")
     DOCUMENTS_FOLDER_ID: str = Field(default="", description="Documents folder ID for team uploads")
+    DATA_PACKAGE_FOLDER_ID: str = Field(default="", description="Drive folder ID of CropSight-Data-Package; lets the cost report read its _metrics.json footprint. Optional.")
 
     # ==========================================================================
     # Google Sheets IDs
@@ -375,6 +376,47 @@ class Settings(BaseSettings):
     MCP_RATE_LIMIT_PER_HOUR: int = Field(
         default=100, description="Max MCP tool calls per hour per token"
     )
+    MCP_ALLOW_AUTHLESS: bool = Field(
+        default=False,
+        description=(
+            "If True, /mcp requests with NO Bearer token are allowed through "
+            "(the old 'authless for Claude.ai' behavior — closes June audit P3-01 "
+            "when False). Default False = require a valid token. This is a safety "
+            "valve: if a legit client (e.g. the Claude.ai connector) can't send the "
+            "token and gets locked out, flip this to True via env var (no redeploy) "
+            "to instantly restore access while you fix the client auth. Ignored when "
+            "MCP_OAUTH_ENABLED (the SDK's RequireAuthMiddleware enforces auth then)."
+        ),
+    )
+    MCP_OAUTH_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Enable the built-in OAuth 2.1 authorization server on /mcp so Claude.ai "
+            "connects via OAuth (DCR + PKCE) instead of authless — the proper close of "
+            "June P3-01. When True: the legacy MCPAuthMiddleware token/authless gate is "
+            "bypassed and the SDK's RequireAuthMiddleware enforces auth; /authorize, "
+            "/token, /register, /.well-known/* and the PIN-gated /login page are served. "
+            "Requires the mcp_oauth table (scripts/migrate_mcp_oauth.sql) + MCP_OAUTH_PIN."
+        ),
+    )
+    MCP_OAUTH_PIN: str = Field(
+        default="",
+        description=(
+            "The single owner PIN/password that gates the OAuth /login consent page. "
+            "Only someone who knows it can complete a connection; Claude.ai never sees "
+            "it. Set in .env / Cloud Run and keep secret. Empty = login fails closed."
+        ),
+    )
+    MCP_PUBLIC_URL: str = Field(
+        default="https://gianluigi-378037201341.europe-west1.run.app",
+        description=(
+            "Public HTTPS base URL of this server — the OAuth issuer_url + resource "
+            "identifier. Must exactly match what Claude.ai connects to (no trailing /)."
+        ),
+    )
+    MCP_OAUTH_SCOPE: str = Field(
+        default="user", description="OAuth scope name for the MCP connection."
+    )
 
     # ==========================================================================
     # v1.0 — Weekly Review
@@ -446,6 +488,21 @@ class Settings(BaseSettings):
             "meeting_summary / weekly_digest approval emails, nor the team "
             "distribution emails sent after Eyal approves. Flip True to restore "
             "the prep/gantt approval emails without a code change."
+        ),
+    )
+    APPROVAL_EMAIL_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Send the '[APPROVAL NEEDED]' EMAIL to Eyal for meeting_summary, "
+            "weekly_digest and morning_brief approvals. Default False = approvals "
+            "are TELEGRAM-ONLY. Disabled 2026-07-16 after the self-approval "
+            "incident: the bot sends this email FROM Eyal's own Gmail, so it "
+            "bounced back into his inbox and the email watcher read it as Eyal's "
+            "approval and auto-approved a meeting. The watcher now ignores its own "
+            "requests, but keeping the email OFF removes the whole class. Flip "
+            "True only if the watcher's own-request guard is trusted AND Eyal "
+            "wants email approvals back. Does NOT affect team distribution emails "
+            "sent AFTER Eyal approves."
         ),
     )
 
@@ -635,7 +692,7 @@ class Settings(BaseSettings):
         default=4, description="IST hour for weekly knowledge synthesis"
     )
     KNOWLEDGE_CLUSTER_ENABLED: bool = Field(
-        default=False, description="Enable semantic topic/area clustering -> proposals (Eyal approves)"
+        default=False, description="RESERVED (not yet wired in code): semantic topic/area clustering -> proposals. [audit SC-04]"
     )
     KNOWLEDGE_READBACK_COST_CEILING_USD: float = Field(
         default=0.05, description="Per-meeting added-cost budget for read-back; warn at 1x, trip per-meeting fallback at 2x"
@@ -654,6 +711,10 @@ class Settings(BaseSettings):
     DISTRIBUTION_TIER_CAPPING_ENABLED: bool = Field(
         default=True,
         description="When True, a meeting summary distributed to a band below its sensitivity has above-band decisions/tasks/questions stripped + the narrative/attachment rebuilt (CEO-safe). Set False to send the FULL summary to whoever is on the distribution list (recipient bands still control WHO gets it). Capability is preserved either way — this only toggles the content-level filtering. [Eyal 2026-07-12]"
+    )
+    SEMANTIC_INDEX_ENABLED: bool = Field(
+        default=False,
+        description="Embed approved decisions + active topic narratives into the shared `embeddings` table (source_type='decision'/'topic') so the curated brain is semantically searchable — not just raw meeting transcripts. Powers find_relevant_decisions, the make-prep topic section, and search_memory. Off = dormant (no indexing hooks fire). Requires migrate_semantic_index.sql (RPC returns sensitivity) + a one-time backfill. [Eyal 2026-07-13]"
     )
 
     # ==========================================================================
@@ -698,13 +759,13 @@ class Settings(BaseSettings):
         default=False, description="Enable the copy+add-rows engine (+1 Planning/+2 Execution per area). Cutover to live also requires confirm=True. Copy-first, never auto."
     )
     GANTT_LINKAGE_ENABLED: bool = Field(
-        default=False, description="Enable per-lane->topics linkage proposals (knowledge_links 'gantt_covers'); proposal-only, DB-only"
+        default=False, description="RESERVED (not yet wired in code): per-lane->topics linkage proposals ('gantt_covers'). [audit SC-04]"
     )
     GANTT_NUDGE_ENABLED: bool = Field(
         default=False, description="Surface the weekly 'Gantt updates' nudges (brief<->board divergence) in the weekly review"
     )
     GANTT_ALERT_ENABLED: bool = Field(
-        default=False, description="Enable the rare high-bar Telegram pop for critical+blocked+board-active Gantt divergences (cooldown 1/topic/week)"
+        default=False, description="RESERVED (not yet wired in code): high-bar Telegram pop for critical Gantt divergences. [audit SC-04]"
     )
 
     # ==========================================================================
@@ -883,6 +944,10 @@ class Settings(BaseSettings):
     )
     CLOUD_RUN_SERVICE_NAME: str = Field(
         default="gianluigi", description="Cloud Run service name targeted by rollout env-var updates."
+    )
+    WORKSPACE_STORAGE_USD_PER_GB_MONTH: float = Field(
+        default=0.0,
+        description="Rate ($/GB/month) for Google Drive/Workspace storage in the weekly cost report + get_cost_summary. 0 = disabled (dark-safe). E.g. Google One 2TB ≈ 0.005; pooled Workspace ≈ 0.",
     )
 
     @property

@@ -122,7 +122,8 @@ class TestToolUseLoop:
             assert len(result["actions"]) == 1
             assert result["actions"][0]["tool"] == "search_meetings"
             assert result["actions"][0]["success"] is True
-            mock_executor.assert_called_once_with("search_meetings", {"query": "Moldova"})
+            # Executor now also receives the caller's max_sensitivity_level (default 4=CEO)
+            mock_executor.assert_called_once_with("search_meetings", {"query": "Moldova"}, 4)
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls(self):

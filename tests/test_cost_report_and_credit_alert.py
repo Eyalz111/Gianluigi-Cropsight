@@ -107,6 +107,35 @@ class TestCostReportBuild:
         assert "GCP (actual" in r["doc"]
         assert "NOT in this figure" not in r["telegram"]  # estimate replaced
 
+    def test_storage_dark_safe(self, monkeypatch):
+        """Drive/Workspace storage is silent until the rate is configured."""
+        from processors import cost_report as cr
+        monkeypatch.setattr(cr.supabase_client, "get_token_usage_summary", lambda days=7: [])
+        monkeypatch.setattr(cr, "compute_cost_summary", lambda recs: self._fake_summary(5.0))
+        monkeypatch.setattr("services.gcp_billing.get_gcp_mtd_costs", lambda: {"available": False})
+        monkeypatch.setattr("services.drive_storage_cost.get_drive_storage_cost",
+                            lambda: {"available": False, "reason": "rate not set"})
+        assert cr._drive_storage_lines() == ("", [])
+        r = cr.build_cost_report()
+        assert "Drive/Workspace storage" not in r["telegram"]
+        assert "Google Drive / Workspace" not in r["doc"]
+
+    def test_storage_configured(self, monkeypatch):
+        """When configured, the storage cost appears in both the telegram + doc."""
+        from processors import cost_report as cr
+        monkeypatch.setattr(cr.supabase_client, "get_token_usage_summary", lambda days=7: [])
+        monkeypatch.setattr(cr, "compute_cost_summary", lambda recs: self._fake_summary(5.0))
+        monkeypatch.setattr("services.gcp_billing.get_gcp_mtd_costs", lambda: {"available": False})
+        monkeypatch.setattr("services.drive_storage_cost.get_drive_storage_cost",
+                            lambda: {"available": True, "used_gb": 92.0, "quota_gb": 2048.0,
+                                     "package_gb": 89.0, "monthly_usd": 0.46, "currency": "USD", "reason": "ok"})
+        tg, doc = cr._drive_storage_lines()
+        assert "Drive/Workspace storage" in tg and "$0.46/mo" in tg
+        r = cr.build_cost_report()
+        assert "Google Drive / Workspace" in r["doc"]
+        assert "CropSight Data Package" in r["doc"]      # package footprint shown
+        assert "$0.46/mo" in r["telegram"]
+
 
 # =============================================================================
 # Scheduler window + fire-once (schedulers/cost_report_scheduler.py)

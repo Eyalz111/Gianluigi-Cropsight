@@ -226,6 +226,10 @@ async def find_relevant_decisions(
             limit=limit,
             source_type="decision",
         )
+        # Tier-filter the semantic hits — the RPC now returns each row's
+        # sensitivity (migrate_semantic_index.sql), so a below-tier decision
+        # never leaks through this (previously unfiltered) branch. [Phase 3]
+        similar = filter_by_sensitivity(similar, max_sensitivity_level)
 
         for item in similar:
             decision_id = item.get("source_id") or item.get("id", "")
@@ -923,6 +927,54 @@ def _html_escape(text: str) -> str:
     )
 
 
+_HL_LABEL_KEYS = ("description", "title", "task", "label", "name", "text",
+                  "question", "summary", "commitment")
+
+
+def _extract_section_highlights(section: dict, limit: int = 2) -> list[str]:
+    """Pull a few real one-liners from a section's gathered data so the prep
+    card shows ACTUAL content (decisions/tasks/Gantt status), not just counts —
+    and stays useful even if the Haiku narrative/agenda calls fail during an
+    Anthropic outage (which otherwise collapses the card to "N items" + a
+    generic "Review X" agenda). Defensive: handles list-of-dicts and
+    dict-of-lists shapes; never raises. [2026-07-13]"""
+    out: list[str] = []
+
+    def _one(item) -> str | None:
+        if isinstance(item, str):
+            return item.strip() or None
+        if not isinstance(item, dict):
+            return None
+        base = next((str(item[k]).strip() for k in _HL_LABEL_KEYS
+                     if item.get(k) and str(item[k]).strip()), None)
+        if not base:
+            return None
+        who = item.get("assignee") or item.get("owner") or item.get("led_by")
+        st = item.get("status")
+        extra = " · ".join(x for x in (who, st) if x)
+        return base[:100] + (f" ({extra})" if extra else "")
+
+    def _walk(v):
+        if len(out) >= limit:
+            return
+        if isinstance(v, list):
+            for it in v:
+                if len(out) >= limit:
+                    return
+                s = _one(it)
+                if s and s not in out:
+                    out.append(s)
+        elif isinstance(v, dict):
+            for vv in v.values():
+                _walk(vv)
+
+    try:
+        _walk(section.get("data"))
+    except Exception:
+        pass
+    return out[:limit]
+
+
 def format_outline_for_telegram(outline: dict, confidence: str = "auto") -> str:
     """
     Format a prep outline as a Telegram briefing card (HTML).
@@ -1007,6 +1059,21 @@ def format_outline_for_telegram(outline: dict, confidence: str = "auto") -> str:
     if unavailable:
         lines.append(f"Unavailable: {', '.join(s['name'].lower() for s in unavailable)}")
     lines.append("")
+
+    # Real-content highlights — a couple of concrete items per section (actual
+    # decisions/tasks/Gantt status), so the card is connected to the DB rather
+    # than a wall of counts. Deterministic → survives an LLM outage that would
+    # otherwise collapse the card to counts + a generic "Review X" agenda.
+    highlight_lines: list[str] = []
+    for s in ok_sections[:4]:
+        hl = _extract_section_highlights(s, limit=2)
+        if hl:
+            highlight_lines.append(f"<b>{_html_escape(s['name'])}:</b>")
+            for h in hl:
+                highlight_lines.append(f"  • {_html_escape(h)}")
+    if highlight_lines:
+        lines.extend(highlight_lines)
+        lines.append("")
 
     # Suggested focus — the most useful part
     if agenda:
@@ -1290,6 +1357,51 @@ def calculate_timeline_mode(hours_until: float) -> str:
         return "skip"
 
 
+async def find_relevant_topics(topic: str, limit: int = 5,
+                               max_sensitivity_level: int = 3) -> list[dict]:
+    """Semantic-match active topic threads to a meeting title, tier-filtered.
+
+    Returns [{topic_id, topic_name, narrative}]. Empty when the semantic index
+    holds no topics (SEMANTIC_INDEX_ENABLED off / not backfilled) — the caller
+    just renders nothing. Best-effort. [semantic-index Phase 3]
+    """
+    try:
+        query_embedding = await embedding_service.embed_text(topic)
+        hits = supabase_client.search_embeddings(
+            query_embedding=query_embedding, limit=limit, source_type="topic",
+        )
+        hits = filter_by_sensitivity(hits, max_sensitivity_level)
+        out, seen = [], set()
+        for h in hits:
+            tid = h.get("source_id") or h.get("id")
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            meta = h.get("metadata") or {}
+            out.append({
+                "topic_id": tid,
+                "topic_name": meta.get("topic_name") or "",
+                "narrative": meta.get("narrative") or h.get("chunk_text", ""),
+            })
+        return out
+    except Exception as e:
+        logger.warning(f"Semantic topic search failed: {e}")
+        return []
+
+
+def _format_topics_section(topics: list[dict]) -> str:
+    """Render a 'Where Key Topics Stand' Markdown block. Empty -> empty string."""
+    if not topics:
+        return ""
+    lines = ["## Where Key Topics Stand", ""]
+    for t in topics:
+        name = t.get("topic_name") or "Topic"
+        narrative = (t.get("narrative") or "").strip()
+        lines.append(f"**{name}** — {narrative}" if narrative else f"**{name}**")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 async def generate_meeting_prep_from_outline(approval_id: str) -> dict:
     """
     Generate a full prep document from a stored outline.
@@ -1335,6 +1447,22 @@ async def generate_meeting_prep_from_outline(approval_id: str) -> dict:
     from guardrails.sensitivity_classifier import classify_sensitivity
 
     sensitivity = classify_sensitivity({"title": title})
+
+    # Semantic "Where Key Topics Stand" — full make-prep doc only (not the
+    # lightweight outline card). Topics matched to the meeting title, tier-safe.
+    # No-op until the semantic index is populated. [semantic-index Phase 3]
+    try:
+        _topics = await find_relevant_topics(title, limit=5, max_sensitivity_level=3)
+        _topic_block = _format_topics_section(_topics)
+        if _topic_block:
+            _footer = "\n---\n"
+            if _footer in prep_document:
+                prep_document = prep_document.replace(_footer, f"\n{_topic_block}\n{_footer}", 1)
+            else:
+                prep_document = f"{prep_document}\n\n{_topic_block}"
+    except Exception as e:
+        logger.warning(f"[prep] topic section injection failed: {e}")
+
     prep_approval_id = f"prep-{event.get('id', approval_id.replace('outline-', ''))}"
 
     await submit_for_approval(

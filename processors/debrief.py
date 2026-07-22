@@ -789,6 +789,16 @@ async def _inject_debrief_items(
             exc_info=True,
         )
 
+    # Debrief bypasses the normal approval flow (where the semantic-index hook
+    # lives), so index the newly-approved decisions here or CEO-authored decisions
+    # are never searchable (audit TS-05).
+    if counts.get("decisions"):
+        try:
+            from processors.semantic_index import index_decisions_for_meeting
+            await index_decisions_for_meeting(meeting_id)
+        except Exception as si_err:
+            logger.debug(f"Debrief semantic index skipped (non-fatal): {si_err}")
+
     summary_parts = []
     if counts["tasks"]:
         summary_parts.append(f"{counts['tasks']} tasks")

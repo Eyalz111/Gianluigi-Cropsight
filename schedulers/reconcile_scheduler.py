@@ -66,8 +66,13 @@ class ReconcileScheduler:
                 if slot == self._last_slot:
                     await asyncio.sleep(3600)
                     continue
-                await self._run(slot)
-                self._last_slot = slot
+                # Only mark the slot done if it succeeded, else retry — a swallowed
+                # failure must not skip the live Sheet<->DB reconcile for the day
+                # (audit SC-05, same class as SC-01).
+                if await self._run(slot):
+                    self._last_slot = slot
+                else:
+                    await asyncio.sleep(300)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -111,7 +116,8 @@ class ReconcileScheduler:
         await asyncio.sleep(sleep_s)
         return f"{trig.strftime('%Y-%m-%d')}:{name}"
 
-    async def _run(self, slot: str) -> None:
+    async def _run(self, slot: str) -> bool:
+        """Run the reconcile slot. Returns True on success, False on failure (audit SC-05)."""
         name = slot.split(":", 1)[1]
         logger.info(f"Reconcile triggering ({slot})")
         from services.supabase_client import supabase_client
@@ -136,6 +142,7 @@ class ReconcileScheduler:
                              **(summary if isinstance(summary, dict) else {}),
                              "decisions": dec_summary if isinstance(dec_summary, dict) else None},
                 )
+            return True
         except Exception as e:
             logger.error(f"Reconcile failed ({slot}): {e}")
             try:
@@ -149,6 +156,7 @@ class ReconcileScheduler:
                 await check_and_alert("reconcile", e)
             except Exception:
                 pass
+            return False
 
     async def _run_gantt(self) -> None:
         """Pre-digest Gantt pass: read-back (board -> knowledge, DB-only) + nudges. Never paints the board."""

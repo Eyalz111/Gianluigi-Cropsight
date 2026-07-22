@@ -401,6 +401,9 @@ def _sync_brief_from_state(
         }
         validated = TopicBrief(**brief).model_dump(mode="json")
         supabase_client.update_topic_brief(topic_id, validated)
+        # Re-embed the refreshed topic narrative into the semantic index. [Phase 2]
+        from processors.semantic_index import schedule_reindex_topic
+        schedule_reindex_topic(topic_id)
 
         # Links: belongs_to (topic -> area) + advances (decision/task -> topic).
         area_id = thread.get("area_id")
@@ -540,6 +543,9 @@ def merge_threads(source_id: str, target_id: str) -> dict:
 
     # Delete source thread
     supabase_client.client.table("topic_threads").delete().eq("id", source_id).execute()
+    # Retire the deleted source thread from the semantic index. [Phase 2]
+    from processors.semantic_index import deindex as _si_deindex
+    _si_deindex("topic", source_id)
 
     logger.info(f"Merged topic thread {source_id} into {target_id}")
 
@@ -555,6 +561,11 @@ def rename_thread(topic_id: str, new_name: str) -> dict:
     }).eq("id", topic_id).execute()
 
     logger.info(f"Renamed topic thread {topic_id} to '{new_name}'")
+
+    # topic_name is part of the embedded text, so a rename must reindex or the
+    # semantic index keeps surfacing the old name (audit TS-04).
+    from processors.semantic_index import schedule_reindex_topic
+    schedule_reindex_topic(topic_id)
 
     result = supabase_client.client.table("topic_threads").select("*").eq("id", topic_id).execute()
     return result.data[0] if result.data else {}

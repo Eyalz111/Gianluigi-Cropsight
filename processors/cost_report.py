@@ -59,6 +59,36 @@ def _infra_lines() -> tuple[str, list[str]]:
     return tg, doc
 
 
+def _drive_storage_lines() -> tuple[str, list[str]]:
+    """Return (telegram_line, doc_lines) for Google Drive/Workspace storage cost —
+    the ~89 GB CropSight Data Package + account total. Dark-safe: silent (empty)
+    until WORKSPACE_STORAGE_USD_PER_GB_MONTH is set (mirrors the GCP-infra pattern)."""
+    try:
+        from services.drive_storage_cost import get_drive_storage_cost
+        st = get_drive_storage_cost()
+    except Exception as e:
+        logger.warning(f"Drive storage cost lookup failed: {e}")
+        st = {"available": False}
+
+    if not st.get("available"):
+        return "", []
+
+    used = st.get("used_gb") or 0.0
+    mo = st.get("monthly_usd") or 0.0
+    pkg = st.get("package_gb")
+    quota = st.get("quota_gb")
+    quota_str = f" / {quota:,.0f} GB" if quota else ""
+    pkg_str = f" · CropSight Data Package {pkg:,.0f} GB" if pkg else ""
+    tg = f"💾 <b>Drive/Workspace storage:</b> {_money(mo)}/mo — {used:,.0f}{quota_str} used{pkg_str}"
+    doc = [
+        "## Storage — Google Drive / Workspace",
+        "",
+        f"**Est. storage:** {_money(mo)}/mo  ·  **Used:** {used:,.1f} GB{quota_str}"
+        + (f"  ·  **CropSight Data Package:** {pkg:,.1f} GB" if pkg else ""),
+    ]
+    return tg, doc
+
+
 def _money(x: float) -> str:
     return f"${x:,.2f}"
 
@@ -107,6 +137,9 @@ def build_cost_report() -> dict:
         tg.append("")
     infra_tg, infra_doc = _infra_lines()
     tg.append(infra_tg)
+    storage_tg, storage_doc = _drive_storage_lines()
+    if storage_tg:
+        tg.append(storage_tg)
     telegram_text = "\n".join(tg)
 
     # ---- Markdown doc (fuller, for the Drive archive) ----
@@ -118,6 +151,7 @@ def build_cost_report() -> dict:
         f"**Prior 7 days:** {_money(prev7)}",
         "",
         *infra_doc,
+        *(["", *storage_doc] if storage_doc else []),
         "",
         "## By model",
         "",
@@ -145,8 +179,8 @@ def build_cost_report() -> dict:
         "",
         "---",
         "*Claude spend is read from the `token_usage` ledger (every call is logged). "
-        "Infra (Cloud Run, Supabase) and any Perplexity/ElevenLabs usage are billed "
-        "separately — see `docs/COST_ANALYSIS_2026_06.md`.*",
+        "GCP infra + Google Drive/Workspace storage are shown above when configured; "
+        "Supabase / Perplexity / ElevenLabs are billed separately — see `docs/COST_ANALYSIS_2026_06.md`.*",
     ]
     doc_markdown = "\n".join(md)
 

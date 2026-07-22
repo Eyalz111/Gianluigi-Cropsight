@@ -45,6 +45,7 @@ _EXPECTED_INTERVALS = {
     "knowledge_nightly": 86400,     # daily
     "knowledge_weekly": 604800,     # weekly
     "reconcile": 86400,             # runs midday + pre-digest daily
+    "qa_scheduler": 86400,          # daily (heartbeat added, audit SC-02/RG-03)
 }
 
 

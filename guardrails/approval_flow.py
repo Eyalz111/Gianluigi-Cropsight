@@ -576,11 +576,16 @@ async def submit_for_approval(
             summary_preview=preview,
             meeting_id=meeting_id,
         )
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title=f"Weekly Digest — Week of {week_of}",
-            summary_preview=digest_doc[:1000],
-            meeting_id=meeting_id,
-        )
+        # Telegram-only unless re-enabled — same self-approval risk as the
+        # meeting_summary email. [APPROVAL_EMAIL_ENABLED, 2026-07-16]
+        if settings.APPROVAL_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title=f"Weekly Digest — Week of {week_of}",
+                summary_preview=digest_doc[:1000],
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     elif content_type == "gantt_update":
         # Gantt update proposal — render human-readable diff for approval
@@ -640,11 +645,16 @@ async def submit_for_approval(
             summary_preview=preview,
             meeting_id=meeting_id,
         )
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title="Morning Brief",
-            summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""),
-            meeting_id=meeting_id,
-        )
+        # Telegram-only unless re-enabled — same self-approval risk as the
+        # meeting_summary email. [APPROVAL_EMAIL_ENABLED, 2026-07-16]
+        if settings.APPROVAL_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title="Morning Brief",
+                summary_preview=preview.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""),
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     elif content_type == "weekly_review":
         # Weekly review — handled by its own session flow.
@@ -691,16 +701,23 @@ async def submit_for_approval(
             sensitivity=meeting_sensitivity,
         )
 
-        email_sent = await gmail_service.send_approval_request(
-            meeting_title=meeting_title,
-            summary_preview=discussion_summary or summary[:600],
-            executive_summary=executive_summary,
-            decisions=decisions,
-            tasks=tasks,
-            follow_ups=follow_ups,
-            open_questions=open_questions,
-            meeting_id=meeting_id,
-        )
+        # Meeting-summary approval is TELEGRAM-ONLY unless re-enabled. The email
+        # is sent from Eyal's own Gmail and bounced back into his inbox where the
+        # watcher read it as his approval and auto-approved (2026-07-16 incident).
+        # [APPROVAL_EMAIL_ENABLED]
+        if settings.APPROVAL_EMAIL_ENABLED:
+            email_sent = await gmail_service.send_approval_request(
+                meeting_title=meeting_title,
+                summary_preview=discussion_summary or summary[:600],
+                executive_summary=executive_summary,
+                decisions=decisions,
+                tasks=tasks,
+                follow_ups=follow_ups,
+                open_questions=open_questions,
+                meeting_id=meeting_id,
+            )
+        else:
+            email_sent = False
 
     # Inject approval context into conversation memory so the agent knows
     # what summary it just sent (enables follow-up questions and edits)
@@ -875,6 +892,18 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
     # any Drive write permission.
     counts: dict = {}
     try:
+        # Capture decision ids BEFORE the cascade so we can retire their
+        # semantic-index embeddings — delete_meeting_cascade drops the meeting's
+        # transcript embeddings (source_id=meeting_id) but decision embeddings
+        # key on the decision id. [semantic-index Phase 2]
+        _rejected_decision_ids: list[str] = []
+        try:
+            _rejected_decision_ids = [
+                d["id"] for d in supabase_client.list_decisions(
+                    meeting_id=meeting_id, include_pending=True) if d.get("id")
+            ]
+        except Exception:
+            pass
         counts = supabase_client.delete_meeting_cascade(meeting_id, keep_tombstone=True)
         supabase_client.log_action(
             action="meeting_rejected_tombstoned",
@@ -882,6 +911,12 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
             triggered_by="eyal",
         )
         logger.info(f"Tombstoned rejected meeting {meeting_id}: {counts}")
+        try:
+            from processors.semantic_index import deindex as _si_deindex
+            for _did in _rejected_decision_ids:
+                _si_deindex("decision", _did)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Cascade+tombstone failed for rejected meeting {meeting_id}: {e}")
         try:
@@ -995,6 +1030,25 @@ async def process_response(
     cancel_approval_reminders(meeting_id)
 
     if action == "approve":
+        # IDEMPOTENCY GUARD (2026-07-12 double-distribution incident) --------
+        # A meeting summary distributes AT MOST ONCE. A second approve — a
+        # duplicate/stale card tap, a Telegram+email race, a retry — must NOT
+        # re-send. The first pass flips approval_status to 'approved' early
+        # (below) and deletes the pending row, so a re-entry with the meeting
+        # already 'approved' means distribution already happened. Refuse it.
+        # [robustness #1 — defense-in-depth below the Telegram stale-card guard]
+        if not is_non_meeting and (meeting.get("approval_status") or "") == "approved":
+            logger.warning(
+                f"process_response(approve) re-entered for already-approved "
+                f"meeting {meeting_id} — skipping re-distribution (idempotent)."
+            )
+            return {
+                "action": "already_approved",
+                "edits": None,
+                "next_step": "Already approved and distributed — nothing was re-sent.",
+                "distribution": {},
+            }
+
         # Delete from persistent store (already fetched above, now remove it)
         supabase_client.delete_pending_approval(meeting_id)
 
@@ -1089,6 +1143,15 @@ async def process_response(
                     logger.warning(
                         f"[decision_intel] supersession proposal failed for {meeting_id}: {e}"
                     )
+
+            # Semantic index (own flag): embed the newly-approved decisions so
+            # they become semantically searchable (find_relevant_decisions,
+            # search_memory). Best-effort — never breaks approval. [Phase 2]
+            try:
+                from processors.semantic_index import index_decisions_for_meeting
+                await index_decisions_for_meeting(meeting_id)
+            except Exception as e:
+                logger.warning(f"[semantic_index] approval index failed for {meeting_id}: {e}")
 
         # v2.3 PR 3: log approval observation. Single call covers all
         # content_type branches below — placed here so early-returning
@@ -1232,39 +1295,33 @@ async def process_response(
         if pending_content.get("__distribution"):
             content["__distribution"] = pending_content["__distribution"]
 
-        # Always use pending_approvals as source of truth for structured data.
-        # Falls back to DB only if pending_approvals has no structured data at all
-        # (shouldn't happen — submit_for_approval always stores full content).
-        if any(key in pending_content for key in ("tasks", "decisions", "follow_ups", "open_questions")):
-            content["decisions"] = pending_content.get("decisions", [])
-            content["tasks"] = pending_content.get("tasks", [])
-            content["follow_ups"] = pending_content.get("follow_ups", [])
-            content["open_questions"] = pending_content.get("open_questions", [])
-            logger.info("Using content from pending_approvals for distribution")
-        else:
-            # Safety fallback — should not normally be reached
-            logger.warning(
-                f"pending_approvals for {meeting_id} has no structured data — "
-                f"falling back to DB tables. This may indicate a bug in submit_for_approval."
-            )
-            # Tier 3.1: this is the approve branch fallback — children for
-            # this meeting are still 'pending' at this point (promote happens
-            # above us in the caller). Must include pending to see anything.
-            decisions = supabase_client.list_decisions(
-                meeting_id=meeting_id, include_pending=True
-            )
-            tasks = supabase_client.get_tasks(status=None, include_pending=True)
-            tasks = [t for t in tasks if t.get("meeting_id") == meeting_id]
-            follow_ups = supabase_client.list_follow_up_meetings(
-                source_meeting_id=meeting_id, include_pending=True
-            )
-            open_questions = supabase_client.get_open_questions(
-                meeting_id=meeting_id, include_pending=True
-            )
-            content["decisions"] = decisions
-            content["tasks"] = tasks
-            content["follow_ups"] = follow_ups
-            content["open_questions"] = open_questions
+        # STRUCTURED LISTS ALWAYS FROM THE DB — source of truth. [robustness #3,
+        # 2026-07-12 wrong-first-email incident]
+        # The post-edit pending_approvals copy is an LLM-regenerated DISPLAY
+        # snapshot that can blank task owners/priorities — they then render as
+        # "team"/"M". The DB rows carry the correct values the edit wrote in
+        # place, which is exactly why the DB-fallback email came out right while
+        # the pending-content email was wrong. So NEVER source the structured
+        # lists from pending_content; read them from the DB every time. The
+        # narrative text (summary/executive/discussion) still comes from
+        # pending_content-or-meeting above — that's Eyal's edited prose, not a
+        # lossy field. Children were promoted to 'approved' just above (or are
+        # still 'pending' on a straight approve) — include_pending sees both.
+        db_tasks = supabase_client.get_tasks(status=None, include_pending=True)
+        content["tasks"] = [t for t in db_tasks if t.get("meeting_id") == meeting_id]
+        content["decisions"] = supabase_client.list_decisions(
+            meeting_id=meeting_id, include_pending=True
+        )
+        content["follow_ups"] = supabase_client.list_follow_up_meetings(
+            source_meeting_id=meeting_id, include_pending=True
+        )
+        content["open_questions"] = supabase_client.get_open_questions(
+            meeting_id=meeting_id, include_pending=True
+        )
+        logger.info(
+            f"Distribution sourced structured data from DB for {meeting_id}: "
+            f"{len(content['tasks'])} tasks, {len(content['decisions'])} decisions."
+        )
 
         # v0.3: Carry cross-reference data through to distribution
         if pending_info and pending_info.get("content", {}).get("cross_reference"):
@@ -1687,10 +1744,16 @@ Return a JSON object with these keys:
 Return ONLY the JSON object, no other text."""
 
     try:
+        # 16000 (not 8192): the edited JSON re-emits the ENTIRE summary +
+        # every decision/task/follow-up/question, so a large meeting (e.g. 30
+        # tasks / 14 decisions) overruns 8192 and truncates mid-string, which
+        # then fails json.loads ("Unterminated string ..."). 16000 is the safe
+        # ceiling for a non-streaming Sonnet 4.6 call (no beta header needed;
+        # higher risks the SDK's ~10-min idle-timeout guard).
         response_text, _ = call_llm(
             prompt=prompt,
             model=settings.model_background,
-            max_tokens=8192,
+            max_tokens=16000,
             call_site="edit_application",
             meeting_id=meeting_id,
         )
@@ -1785,7 +1848,26 @@ Return ONLY the JSON object, no other text."""
                 # (the 2026-06-11 data-loss class).
                 supabase_client.update_task(task_id, **upd)
 
-            for t in edited.get("tasks", []):
+            # [robustness #4, 2026-07-12 duplicate-rows incident] The edit LLM
+            # sometimes emits the SAME task twice — once matching an original
+            # (updates in place), once as a reworded variant that fails the
+            # index/title match and gets CREATED as a fresh row -> a duplicate
+            # (the 16 dup rows this incident). Drop exact normalized-title
+            # repeats from the LLM's own output before applying. Additive and
+            # safe: only collapses byte-identical (case/space-normalized) titles
+            # the model returned more than once — never merges distinct tasks.
+            _seen_task_titles: set = set()
+            _edited_tasks: list = []
+            for _t in edited.get("tasks", []):
+                _k = (_t.get("title") or "").strip().lower()
+                if _k and _k in _seen_task_titles:
+                    logger.info(f"apply_edits: dropped duplicate edited task '{_k[:40]}'")
+                    continue
+                if _k:
+                    _seen_task_titles.add(_k)
+                _edited_tasks.append(_t)
+
+            for t in _edited_tasks:
                 payload = {
                     "title": t.get("title", ""),
                     "assignee": t.get("assignee", ""),
@@ -1837,7 +1919,18 @@ Return ONLY the JSON object, no other text."""
                 ).append(d)
             claimed_dec_ids: set = set()
             new_decisions: list[dict] = []
-            for d in edited.get("decisions", []):
+            # [robustness #4] Same LLM-duplicate guard as tasks above.
+            _seen_dec_desc: set = set()
+            _edited_decisions: list = []
+            for _d in edited.get("decisions", []):
+                _k = (_d.get("description") or "").strip().lower()
+                if _k and _k in _seen_dec_desc:
+                    logger.info("apply_edits: dropped duplicate edited decision")
+                    continue
+                if _k:
+                    _seen_dec_desc.add(_k)
+                _edited_decisions.append(_d)
+            for d in _edited_decisions:
                 desc = d.get("description", "")
                 idx = d.get("index")
                 orig = old_dec_by_index.get(idx) if isinstance(idx, int) else None
@@ -1865,6 +1958,10 @@ Return ONLY the JSON object, no other text."""
                     supabase_client.client.table("decisions").delete().eq(
                         "id", d["id"]
                     ).execute()
+                    # Retire the removed decision from the semantic index —
+                    # re-approval re-indexes the KEPT decisions but never these.
+                    from processors.semantic_index import deindex as _si_deindex
+                    _si_deindex("decision", d["id"])
             if new_decisions:
                 supabase_client.create_decisions_batch(meeting_id, new_decisions)
 
@@ -2533,12 +2630,17 @@ async def distribute_approved_prep(
                         f"Meeting prep document for '{title}' ({start_time}) "
                         f"is ready: {drive_link}"
                     )
-                    await gmail_service.send_email(
+                    sent = await gmail_service.send_email(
                         to=attendee_emails,
                         subject=f"Meeting Prep: {title}",
                         body=email_body,
                     )
-                    results["email_sent"] = True
+                    results["email_sent"] = bool(sent)
+                    if not sent:
+                        logger.error(
+                            f"Prep email to {attendee_emails} did NOT send "
+                            "(send_email returned False) — audit SS-01"
+                        )
             except Exception as e:
                 logger.warning(f"Failed to send prep email: {e}")
 
@@ -3124,13 +3226,18 @@ async def distribute_approved_review(
             if digest_link:
                 body += f"\nFull digest: {digest_link}"
 
-            await gmail_service.send_email(
+            sent = await gmail_service.send_email(
                 to=review_emails,
                 subject=subject,
                 body=body,
             )
-            results["email_sent"] = True
+            results["email_sent"] = bool(sent)
             results["emails_to"] = review_emails
+            if not sent:
+                logger.error(
+                    f"Weekly-review email to {review_emails} did NOT send "
+                    "(send_email returned False) — audit SS-01"
+                )
     except Exception as e:
         logger.error(f"Review email failed: {e}")
 

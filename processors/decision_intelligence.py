@@ -84,6 +84,13 @@ def apply_decision_supersede(content: dict, approve: bool) -> dict:
     if (old.get("decision_status") or "active") != "active":
         return {"status": "already_superseded"}
 
+    # Resolve the winner to the live active decision — don't point the old one at a
+    # winner that was itself superseded since the proposal was raised (audit KP-03).
+    from processors.decision_clustering import _resolve_active_winner
+    new_id = _resolve_active_winner(new_id)
+    if new_id == old_id:
+        return {"status": "invalid", "reason": "winner resolves to old decision"}
+
     supabase_client.mark_decision_superseded(old_id, new_id)
     # Record the chain edge in the knowledge graph (mirrors topic-merge 'supersedes').
     supabase_client.create_knowledge_link(
@@ -91,6 +98,9 @@ def apply_decision_supersede(content: dict, approve: bool) -> dict:
         to_type="decision", to_id=old_id,
         link_type="supersedes", created_by="eyal",
     )
+    # Retire the superseded decision from the semantic index. [Phase 2]
+    from processors.semantic_index import deindex as _si_deindex
+    _si_deindex("decision", old_id)
     return {"status": "applied", "old_id": old_id, "new_id": new_id}
 
 
@@ -136,6 +146,16 @@ def apply_decision_update(content: dict, approve: bool) -> dict:
 
     supabase_client.update_decision(decision_id, **{_decision_column(field): proposed})
     supabase_client.mark_decision_field_manual(decision_id, field, "eyal")
+    # Keep the semantic index honest: a content-field edit re-indexes; a status
+    # change to non-active retires the decision. [semantic-index Phase 2]
+    try:
+        from processors.semantic_index import schedule_reindex_decision, deindex as _si_deindex
+        if field == "status" and str(proposed).lower() != "active":
+            _si_deindex("decision", decision_id)
+        elif field in ("description", "label", "rationale"):
+            schedule_reindex_decision(decision_id)
+    except Exception:
+        pass
     return {"status": "applied", "decision_id": decision_id, "field": field, "value": proposed}
 
 

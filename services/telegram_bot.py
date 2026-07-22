@@ -402,9 +402,14 @@ class TelegramBot:
         from services.supabase_client import supabase_client
         sessions = []
 
-        review = supabase_client.get_active_weekly_review_session()
-        if review:
-            sessions.append(("weekly_review", review.get("created_at", "")))
+        # Guard each lookup independently so a transient DB error on one doesn't
+        # abort reconstruction of the other (audit SS-05).
+        try:
+            review = supabase_client.get_active_weekly_review_session()
+            if review:
+                sessions.append(("weekly_review", review.get("created_at", "")))
+        except Exception:
+            pass
 
         try:
             debrief = supabase_client.get_active_debrief_session()
@@ -873,8 +878,18 @@ class TelegramBot:
         # [distribution-groups 2026-07-05] Replaces the single 4-way sensitivity toggle.
         reply_markup = self._build_approval_keyboard(meeting_id, sensitivity)
 
-        # Delete old approval messages for this meeting (cleanup on resubmit after edit)
-        old_msg_ids = self._approval_message_ids.pop(meeting_id, [])
+        # Delete old approval messages for this meeting so only ONE live card
+        # ever exists. [robustness #5/#6, 2026-07-12] In-memory ids cover the
+        # common resubmit-after-edit case; the PERSISTED ids (pending_approvals
+        # content) additionally cover a Cloud Run restart that dropped the map
+        # and any card sent out-of-band — the two orphan sources behind today's
+        # dead/duplicate cards.
+        from services.supabase_client import supabase_client as _sb_cards
+        old_msg_ids = set(self._approval_message_ids.pop(meeting_id, []))
+        try:
+            old_msg_ids |= set(_sb_cards.get_card_message_ids(meeting_id))
+        except Exception:
+            pass
         for msg_id in old_msg_ids:
             try:
                 await self.app.bot.delete_message(
@@ -917,6 +932,10 @@ class TelegramBot:
                 else:
                     raise
             self._approval_message_ids[meeting_id] = sent_message_ids
+            try:
+                _sb_cards.set_card_message_ids(meeting_id, sent_message_ids)
+            except Exception:
+                pass  # persistence is best-effort; never fail the card send
             return True
         except Exception as e:
             logger.error(f"Error sending approval request: {e}")
@@ -1577,6 +1596,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         query = " ".join(args)
 
+        # Caller privilege — the group is read-only + TEAM-capped (audit TS-01).
+        _, allow_writes, max_sens = self._chat_privilege(update)
+
         await self.send_message(
             update.effective_chat.id,
             "Let me look into that...",
@@ -1585,6 +1607,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         from services.supabase_client import supabase_client
         from services.embeddings import embedding_service
+        from models.schemas import filter_by_sensitivity
 
         try:
             # Embed the query for semantic search
@@ -1594,6 +1617,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 limit=10,
                 source_type=source_filter,
             )
+            # Drop any hit above the chat's clearance before rendering.
+            results = filter_by_sensitivity(results, max_sens)
 
             if not results:
                 await self.send_message(
@@ -1645,6 +1670,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             result = await gianluigi_agent.process_message(
                 user_message=f"Search our meeting history for: {query}",
                 user_id=user_id,
+                allow_writes=allow_writes,
+                max_sensitivity_level=max_sens,
             )
             await self.send_message(
                 update.effective_chat.id,
@@ -1662,8 +1689,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         Lists recent decisions.
         """
         from services.supabase_client import supabase_client
+        from models.schemas import filter_by_sensitivity
 
-        decisions = supabase_client.list_decisions()[:10]
+        # Tier-filter to the chat's clearance — the group only sees TEAM/PUBLIC
+        # decisions, never CEO/FOUNDERS content (audit TS-01).
+        _, _, max_sens = self._chat_privilege(update)
+        decisions = filter_by_sensitivity(supabase_client.list_decisions(), max_sens)[:10]
 
         if not decisions:
             await self.send_message(update.effective_chat.id, "No decisions recorded yet.")
@@ -1688,8 +1719,15 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         Lists open questions.
         """
         from services.supabase_client import supabase_client
+        from models.schemas import filter_by_sensitivity
 
-        questions = supabase_client.list_open_questions(status="open")[:10]
+        # Tier-filter to the chat's clearance (audit TS-01). Items without an
+        # explicit sensitivity default to FOUNDERS, so the group sees only
+        # genuinely team/public open questions.
+        _, _, max_sens = self._chat_privilege(update)
+        questions = filter_by_sensitivity(
+            supabase_client.list_open_questions(status="open"), max_sens
+        )[:10]
 
         if not questions:
             await self.send_message(update.effective_chat.id, "No open questions at the moment.")
@@ -2861,6 +2899,22 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
     # Message Handlers
     # =========================================================================
 
+    def _chat_privilege(self, update: Update) -> tuple[bool, bool, int]:
+        """Return (is_eyal, allow_writes, max_sensitivity_level) for this sender/chat.
+
+        Audience-based access control (audit 2026-07 AC-01 / TS-01 / TS-02):
+        writes execute ONLY in Eyal's private DM; the Telegram group — where the
+        office manager interacts — and any non-Eyal sender are read-only and capped
+        at FOUNDERS clearance (level 3). The group can query decisions/meetings/tasks
+        but never CEO-only content, and never write — even when Eyal asks there.
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+        is_eyal = bool(user) and str(user.id) == str(self.eyal_chat_id)
+        is_dm = bool(chat) and int(chat.id) > 0
+        eyal_dm = is_eyal and is_dm
+        return is_eyal, eyal_dm, (4 if eyal_dm else 3)
+
     async def _route_inbound_text(
         self,
         message_text: str,
@@ -2868,6 +2922,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         history: list,
         chat_id: str | int,
         message_id: str | None,
+        allow_writes: bool = True,
+        max_sensitivity_level: int = 4,
     ) -> dict:
         """Dispatch an inbound text message to the brain (flag-gated seam).
 
@@ -2875,7 +2931,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         inbound entry shared with voice — which normalizes the event, calls the brain,
         and returns the agent result dict. Otherwise call the agent directly. Either
         way the caller renders the same dict, so this is behavior-preserving while the
-        flag is off.
+        flag is off. allow_writes / max_sensitivity_level carry the caller's privilege
+        (audit AC-01) through both routes.
         """
         if settings.ORCHESTRATION_SPINE_ENABLED:
             from services.orchestrator.spine import comms_spine
@@ -2890,6 +2947,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     text=message_text,
                     message_id=message_id,
                     conversation_history=history,
+                    allow_writes=allow_writes,
+                    max_sensitivity_level=max_sensitivity_level,
                 )
             )
         from core.agent import gianluigi_agent
@@ -2898,6 +2957,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             user_message=message_text,
             user_id=user_id,
             conversation_history=history,
+            allow_writes=allow_writes,
+            max_sensitivity_level=max_sensitivity_level,
         )
 
     async def _handle_message(
@@ -3056,6 +3117,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                                 status_lines.append("  - Notification sent")
                             if dist.get("email_sent"):
                                 status_lines.append("  - Email sent")
+                            if len(status_lines) == 1:
+                                # No channel succeeded — don't imply success (audit AD-03).
+                                status_lines = [
+                                    "⚠️ Distribution FAILED on all channels — nothing went out. "
+                                    "It's approved in the DB; please retry or check the logs."
+                                ]
                             await self.send_to_eyal(
                                 "\n".join(status_lines), parse_mode=None
                             )
@@ -3138,6 +3205,10 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # Get conversation history for context
         history = conversation_memory.get_history(chat_id_str)
 
+        # Caller privilege: writes only in Eyal's DM; the group is read-only +
+        # TEAM-capped (audit AC-01 / TS-02).
+        _, allow_writes, max_sens = self._chat_privilege(update)
+
         try:
             result = await self._route_inbound_text(
                 message_text=message_text,
@@ -3145,6 +3216,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 history=history,
                 chat_id=update.effective_chat.id,
                 message_id=str(update.message.message_id) if update.message else None,
+                allow_writes=allow_writes,
+                max_sensitivity_level=max_sens,
             )
 
             # Handle quick injection confirmation
@@ -3684,7 +3757,24 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # still passes (from_user is him). The review/debrief sub-handlers keep
         # their own checks as defense-in-depth. Guarded only when eyal_chat_id is
         # configured, so a missing config can't brick every button. [audit P3-14]
-        if self.eyal_chat_id and str(query.from_user.id) != str(self.eyal_chat_id):
+        # Fail CLOSED if we cannot verify the approver: an unconfigured
+        # eyal_chat_id must NOT let anyone action a CEO control (audit AC-02).
+        # If it's unset the bot is already misconfigured (it can't DM Eyal), so
+        # blocking the callback is the safe outcome.
+        if not self.eyal_chat_id:
+            logger.error(
+                f"Rejecting callback {action!r}: TELEGRAM_EYAL_CHAT_ID is not "
+                "configured — cannot verify the approver."
+            )
+            try:
+                await query.answer(
+                    "Cannot verify approver (misconfigured) — action blocked.",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
+            return
+        if str(query.from_user.id) != str(self.eyal_chat_id):
             logger.warning(
                 f"Ignoring callback {action!r} from non-Eyal user {query.from_user.id}"
             )
@@ -3830,6 +3920,70 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             process_response,
         )
 
+        # ---- Stale-card guard (2026-07-12) --------------------------------
+        # Approval cards can outlive the pending state: an out-of-band resend,
+        # a Cloud Run restart that drops the in-memory _approval_message_ids
+        # map, or a leftover duplicate all leave live-looking buttons on a
+        # meeting that's already approved/rejected. Tapping them re-ran the
+        # action — worst case "Approve" re-distributed the summary to the whole
+        # team. For the lifecycle actions, verify the meeting is still pending;
+        # if not, close the stale card with a toast instead of re-processing.
+        # Non-meeting content (prep-, digest-, outline-, gantt-, brief-, review-)
+        # uses PREFIXED ids, not meeting UUIDs — DB queries keyed on the meetings/
+        # tasks UUID columns 400 on them ("invalid input syntax for type uuid").
+        # The lifecycle guard here + the reject-confirmation gate below are
+        # meeting-only. [regression fix 2026-07-13: prep reject threw 22P02]
+        _non_meeting_id = meeting_id.startswith(
+            ("digest-", "prep-", "outline-", "gantt-", "brief-", "review-")
+        )
+        if action in ("approve", "edit", "reject", "reject_confirm") and not _non_meeting_id:
+            _m = supabase_client.get_meeting(meeting_id)
+            _status = (_m or {}).get("approval_status")
+            if _status != "pending":
+                _label = {
+                    "approved": "already approved & sent",
+                    "rejected": "already rejected",
+                    "editing": "being edited right now — hang on a moment",
+                }.get(_status, "already handled" if _m else "no longer available")
+                try:
+                    await query.answer(f"This summary was {_label}.", show_alert=True)
+                except Exception:
+                    pass
+                # Close the card for terminal states; leave it be while 'editing'
+                # (that's transient — a fresh pending card follows when it lands).
+                if _status != "editing":
+                    try:
+                        # Escape the title — meeting titles routinely contain <, >,
+                        # and & (e.g. "CropSight <> Shemer...", "Weekly R&D Status").
+                        # Interpolated raw into a parse_mode=HTML message they make
+                        # Telegram 400 "can't parse entities", which the bare except
+                        # below swallowed — so the stale card never closed and the
+                        # buttons stayed live, re-firing this toast on every tap.
+                        # That was the "Request Changes is stuck" report. [2026-07-16]
+                        _title = _escape_html((_m or {}).get("title") or "This summary")
+                        await query.edit_message_text(
+                            f"✅ <b>{_title}</b> — {_label}.\n"
+                            f"<i>(This card is closed — no action needed.)</i>",
+                            parse_mode="HTML", reply_markup=None,
+                        )
+                    except Exception as _close_err:
+                        # Last resort: strip formatting so a still-odd title can't
+                        # keep the card alive. Plain text can't fail entity parsing.
+                        logger.warning(
+                            f"Stale-card HTML close failed ({_close_err}); "
+                            f"retrying as plain text for {meeting_id}"
+                        )
+                        try:
+                            _plain = (_m or {}).get("title") or "This summary"
+                            await query.edit_message_text(
+                                f"{_plain} — {_label}. "
+                                "(This card is closed — no action needed.)",
+                                reply_markup=None,
+                            )
+                        except Exception:
+                            pass
+                return
+
         if action == "approve":
             # Delete orphan multi-part messages (all except the button message)
             await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
@@ -3858,6 +4012,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 if dist.get("email_sent"):
                     status_lines.append("  - Email sent to team")
 
+                if len(status_lines) == 1:
+                    # No channel succeeded — don't imply success (audit AD-03).
+                    status_lines = [
+                        "⚠️ Distribution FAILED on all channels — nothing went out. "
+                        "It's approved in the DB; please retry or check the logs."
+                    ]
                 await self.send_to_eyal("\n".join(status_lines), parse_mode=None)
 
             except Exception as e:
@@ -3870,6 +4030,23 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 )
 
         elif action == "reject":
+            if _non_meeting_id:
+                # Non-meeting content (prep/digest/outline/…) has no task/decision
+                # children — skip the deletion gate and discard it directly.
+                await self._cleanup_approval_parts(meeting_id, keep_message_id=query.message.message_id)
+                await query.edit_message_text("Got it — rejecting.")
+                try:
+                    result = await process_response(
+                        meeting_id=meeting_id, response="reject",
+                        response_source="telegram", force_action="reject",
+                    )
+                    await query.edit_message_text(result.get("next_step") or "Rejected.")
+                    logger.info(f"{meeting_id} rejected by Eyal (non-meeting)")
+                except Exception as e:
+                    logger.error(f"Reject failed for {meeting_id}: {e}")
+                    await query.edit_message_text(f"Reject failed: {e}")
+                conversation_memory.clear(str(self.eyal_chat_id))
+                return
             # CONFIRMATION GATE (2026-07-12 incident: a single tap deleted 190
             # tasks + 100 decisions with no warning). Show exactly what will be
             # deleted and require a SECOND tap. Nothing is deleted here.
