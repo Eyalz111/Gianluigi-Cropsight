@@ -1307,8 +1307,13 @@ async def process_response(
         # pending_content-or-meeting above — that's Eyal's edited prose, not a
         # lossy field. Children were promoted to 'approved' just above (or are
         # still 'pending' on a straight approve) — include_pending sees both.
-        db_tasks = supabase_client.get_tasks(status=None, include_pending=True)
-        content["tasks"] = [t for t in db_tasks if t.get("meeting_id") == meeting_id]
+        # meeting_id filters SERVER-SIDE. Fetching all tasks and filtering in
+        # Python silently returned [] once the table outgrew the default
+        # limit=100 (2026-07-17 blank-summary incident) — the meeting's rows
+        # simply weren't in the window. [robustness #4]
+        content["tasks"] = supabase_client.get_tasks(
+            status=None, include_pending=True, meeting_id=meeting_id, limit=500
+        )
         content["decisions"] = supabase_client.list_decisions(
             meeting_id=meeting_id, include_pending=True
         )
@@ -1671,8 +1676,9 @@ async def apply_edits(
     )
     all_tasks = structured_data.get("tasks")
     if all_tasks is None:
-        all_tasks_list = supabase_client.get_tasks(status=None, include_pending=True)
-        all_tasks = [t for t in all_tasks_list if t.get("meeting_id") == meeting_id]
+        all_tasks = supabase_client.get_tasks(
+            status=None, include_pending=True, meeting_id=meeting_id, limit=500
+        )
     follow_ups = structured_data.get("follow_ups") or supabase_client.list_follow_up_meetings(
         source_meeting_id=meeting_id, include_pending=True
     )
@@ -2023,6 +2029,57 @@ Return ONLY the JSON object, no other text."""
         return {"error": str(e)}
 
 
+def _distribution_content_intact(meeting_id: str, content: dict) -> tuple[bool, str]:
+    """
+    Verify the content about to be distributed still matches the database.
+
+    Guards the one failure mode that has actually reached the team: a summary
+    whose structured lists came back empty because of a read bug, distributed
+    as though the meeting genuinely had no tasks or decisions.
+
+    Only reports a problem when the DB POSITIVELY contradicts `content` — the
+    DB holds rows for this meeting while `content` carries none. A genuinely
+    empty meeting (no rows either side) distributes normally, and a failed
+    count check never blocks a legitimate send.
+
+    Returns:
+        (True, "") when safe to distribute, else (False, reason).
+    """
+    checks = [
+        ("tasks", "tasks", "meeting_id"),
+        ("decisions", "decisions", "meeting_id"),
+        ("open_questions", "open_questions", "meeting_id"),
+        ("follow_ups", "follow_up_meetings", "source_meeting_id"),
+    ]
+    for content_key, table, fk in checks:
+        if content.get(content_key):
+            continue  # content has rows — nothing to contradict
+        try:
+            raw_count = (
+                supabase_client.client.table(table)
+                .select("id", count="exact")
+                .eq(fk, meeting_id)
+                .execute()
+                .count
+            )
+        except Exception as e:
+            # Can't verify (transient DB error) — don't block a legitimate
+            # distribution. The rail is a net, not the primary path.
+            logger.warning(f"Distribution intactness check failed for {table}: {e}")
+            continue
+        # A real PostgREST exact-count is a plain int. Anything else (None, or a
+        # non-int from a mocked client) means we couldn't actually verify — skip
+        # rather than block. bool is an int subclass but count is never a bool.
+        if not isinstance(raw_count, int) or isinstance(raw_count, bool):
+            continue
+        if raw_count > 0:
+            return False, (
+                f"content['{content_key}'] is empty but the database has "
+                f"{raw_count} {table} row(s) for this meeting"
+            )
+    return True, ""
+
+
 async def distribute_approved_content(
     meeting_id: str,
     content: dict,
@@ -2046,6 +2103,37 @@ async def distribute_approved_content(
         Dict with distribution results.
     """
     logger.info(f"Distributing approved content: {meeting_id}")
+
+    # SAFETY RAIL — refuse to send a summary that lost its content en route.
+    # Both blank/wrong sends so far (2026-07-12 wrong-first-email, 2026-07-17
+    # blank-summary) had the same shape: `content` arrived structurally empty
+    # while the DB held the real rows, and the team got a summary with no
+    # action items. A send can't be recalled, so when the DB positively
+    # contradicts `content`, abort and alert instead of guessing. [robustness #5]
+    intact, reason = _distribution_content_intact(meeting_id, content)
+    if not intact:
+        logger.critical(
+            f"BLOCKED distribution of {meeting_id}: {reason}. Nothing was sent."
+        )
+        try:
+            from services.alerting import send_system_alert, AlertSeverity
+            await send_system_alert(
+                AlertSeverity.CRITICAL,
+                "approval_flow.distribute",
+                f"Blocked a blank distribution for '{content.get('title', meeting_id)}': "
+                f"{reason}. Nothing was sent to anyone. The summary content did not "
+                f"match the database — investigate before re-sending.",
+            )
+        except Exception as alert_err:
+            logger.error(f"Alert on blocked distribution also failed: {alert_err}")
+        return {
+            "blocked": True,
+            "reason": reason,
+            "drive_saved": False,
+            "sheets_updated": False,
+            "telegram_sent": False,
+            "email_sent": False,
+        }
 
     # Word doc bytes for email attachment (stored separately — bytes aren't JSON serializable)
     _docx_bytes_for_email = None
@@ -2138,13 +2226,14 @@ async def distribute_approved_content(
             # from re-creating the row as a duplicate task.
             _db_task_index: dict[tuple, dict] = {}
             try:
-                for _t in supabase_client.get_tasks(status=None, include_pending=True):
-                    if _t.get("meeting_id") == meeting_id:
-                        _k = (
-                            (_t.get("title") or "").strip().lower(),
-                            (_t.get("assignee") or "").strip().lower(),
-                        )
-                        _db_task_index[_k] = _t
+                for _t in supabase_client.get_tasks(
+                    status=None, include_pending=True, meeting_id=meeting_id, limit=500
+                ):
+                    _k = (
+                        (_t.get("title") or "").strip().lower(),
+                        (_t.get("assignee") or "").strip().lower(),
+                    )
+                    _db_task_index[_k] = _t
             except Exception as _idx_err:
                 logger.warning(f"Could not index DB tasks for sheet-add enrichment: {_idx_err}")
 

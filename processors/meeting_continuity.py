@@ -114,8 +114,9 @@ def build_meeting_continuity_context(
         try:
             decisions = supabase_client.list_decisions(meeting_id=meeting_id)
             decisions = filter_by_sensitivity(decisions, max_sensitivity_level)
-            tasks_all = supabase_client.get_tasks(status=None)
-            tasks = [t for t in tasks_all if t.get("meeting_id") == meeting_id]
+            tasks = supabase_client.get_tasks(
+                status=None, meeting_id=meeting_id, limit=500
+            )
             tasks = filter_by_sensitivity(tasks, max_sensitivity_level)
             open_tasks = [t for t in tasks if t.get("status") in ("pending", "in_progress")]
             questions = supabase_client.get_open_questions(meeting_id=meeting_id)
@@ -406,8 +407,9 @@ async def _build_pre_meeting_context_inner(
                     mid = m.get("id", "")
                     # Get per-meeting task stats
                     try:
-                        all_tasks = supabase_client.get_tasks(status=None)
-                        mtasks = [t for t in all_tasks if t.get("meeting_id") == mid]
+                        mtasks = supabase_client.get_tasks(
+                            status=None, meeting_id=mid, limit=500
+                        )
                     except Exception:
                         mtasks = []
 

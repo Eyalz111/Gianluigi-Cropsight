@@ -32,8 +32,9 @@ async def main(meeting_id: str, out_path: str) -> None:
         decisions = supabase_client.list_decisions(meeting_id=meeting_id, include_pending=True)
     tasks = content.get("tasks")
     if tasks is None:
-        tasks = [t for t in supabase_client.get_tasks(status=None, include_pending=True)
-                 if t.get("meeting_id") == meeting_id]
+        tasks = supabase_client.get_tasks(
+            status=None, include_pending=True, meeting_id=meeting_id, limit=500
+        )
     follow_ups = content.get("follow_ups") or []
     open_questions = content.get("open_questions")
     if open_questions is None:
