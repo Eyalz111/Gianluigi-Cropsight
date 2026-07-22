@@ -47,6 +47,17 @@ DEFAULT_TOKEN_THRESHOLD = 0.75
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+# Function words carry no identity — removing them before the token comparison
+# is what lets us tell an article/punctuation rewording (a duplicate: "boost THE
+# client" ≡ "boost client") apart from a one-content-word change (a DISTINCT
+# item: "pilot in Q3" ≠ "pilot in Q4"). Raw token-Jaccard cannot: both differ by
+# exactly one token. Comparing CONTENT tokens shrinks the sets so a content-word
+# swap is a large Jaccard penalty while a stopword drop is none.
+_STOPWORDS = frozenset(
+    "a an and are as at be but by for from has have in into is it its of on or "
+    "that the this to was were will with we our you your they their he she".split()
+)
+
 
 def normalize(text: object) -> str:
     """Lowercase, keep only alphanumeric tokens, single-space-joined. Collapses
@@ -60,12 +71,35 @@ def _words(text: object) -> set[str]:
     return set(_WORD_RE.findall(str(text or "").lower()))
 
 
+def _content_tokens(text: object) -> frozenset:
+    """Meaning-bearing tokens: all words minus stopwords."""
+    return frozenset(w for w in _words(text) if w not in _STOPWORDS)
+
+
+def _content_str(text: object) -> str:
+    """Content tokens joined in ORIGINAL order — the string the char gate runs
+    on. A dropped stopword leaves it unchanged (char ratio 1.0), while reordered
+    content words score low (so 'Eyal calls Roye' != 'Roye calls Eyal')."""
+    return " ".join(w for w in _WORD_RE.findall(str(text or "").lower())
+                    if w not in _STOPWORDS)
+
+
 def jaccard(a: object, b: object) -> float:
-    """Token-set overlap |A∩B| / |A∪B|. 0 when either side has no tokens."""
+    """Token-set overlap |A∩B| / |A∪B| over ALL tokens. 0 when either is empty."""
     aw, bw = _words(a), _words(b)
     if not aw or not bw:
         return 0.0
     return len(aw & bw) / len(aw | bw)
+
+
+def content_jaccard(a: object, b: object) -> float:
+    """Token-set overlap over CONTENT tokens (stopwords removed). This is the
+    signal is_near_dup gates on — it treats a dropped 'the' as identical but a
+    swapped 'Q3'->'Q4' as clearly different."""
+    ca, cb = _content_tokens(a), _content_tokens(b)
+    if not ca or not cb:
+        return 0.0
+    return len(ca & cb) / len(ca | cb)
 
 
 def char_ratio(a: object, b: object) -> float:
@@ -82,23 +116,34 @@ def is_near_dup(
     char_threshold: float = DEFAULT_CHAR_THRESHOLD,
     token_threshold: float = DEFAULT_TOKEN_THRESHOLD,
 ) -> bool:
-    """True when two texts are near-duplicates by BOTH signals.
+    """True when two texts are near-duplicates — same content words, only
+    stopword/punctuation/casing reworded.
 
-    Dual-signal (char AND token) is deliberately high-precision: a reworded
-    variant ('at a potential unicorn' vs 'at potential unicorn') clears both,
-    while two distinct items that merely share words ('Follow up with Sara at
-    Banca Intesa' vs 'Follow up with Sara's father') fail at least one and are
-    left as separate rows.
+    Dual-signal and content-token based on purpose: 'Connect with Bar Topper at
+    A potential unicorn' vs '...at potential unicorn' clears both (a real
+    reword-duplicate), while a single meaning-bearing change — 'pilot in Q3' vs
+    'pilot in Q4', 'runway budget' vs 'hiring budget', 'Sara at Banca Intesa' vs
+    'Sara's father' — drops the CONTENT-token overlap below the bar and is left
+    as a separate row. This is what keeps every destructive path (dedup on
+    extraction, the edit reconcile, the self-healing backstop) from silently
+    merging two genuinely-distinct items.
     """
     na, nb = normalize(a), normalize(b)
     if not na or not nb:
         return False
     if na == nb:
         return True
-    return (
-        char_ratio(a, b) >= char_threshold
-        and jaccard(a, b) >= token_threshold
-    )
+    ca, cb = _content_tokens(a), _content_tokens(b)
+    if not ca or not cb:
+        # All-stopword text (rare) — fall back to character similarity alone.
+        return char_ratio(a, b) >= char_threshold
+    cj = len(ca & cb) / len(ca | cb)
+    if cj < token_threshold:
+        return False
+    # Char gate on the CONTENT strings, not the full text: dropping 'the' leaves
+    # the content string identical (ratio 1.0) so short stopword-rewords aren't
+    # rejected by length, while a reorder of content words still scores low.
+    return SequenceMatcher(None, _content_str(a), _content_str(b)).ratio() >= char_threshold
 
 
 def _similarity(a: object, b: object) -> float:
@@ -180,11 +225,23 @@ def reconcile_children(
           "deletes": [old_id, ...],                 # rows the edit removed
         }
 
-    Cascade per item (first hit wins): exact index -> exact normalized text ->
-    guarded fuzzy. A row is claimed at most once. The LLM output is de-duped
-    first, so 'emitted twice (once matching, once reworded)' can no longer
-    produce one in-place update PLUS one spurious create.
+    Matching runs in TWO passes so exact matches always win over fuzzy ones,
+    globally — never per-item. Pass 1 claims every item that has an exact index
+    or exact normalized text (both honour the secondary guard). Pass 2 fuzzy-
+    matches only what's left, against only still-unclaimed rows. This stops an
+    early reworded item from fuzzy-claiming a row that a later item would have
+    matched exactly (identity swap). A row is claimed at most once; the LLM
+    output is de-duped first.
+
+    Empty-section guard: if the LLM returns NOTHING for a section that still has
+    rows, that is overwhelmingly an omission/truncation, not an intent to delete
+    everything — so preserve the rows rather than wipe them (the blank-summary
+    failure class). A real "remove every item" must be done explicitly, not by
+    the model dropping a key.
     """
+    if not edited_items and old_rows:
+        return {"updates": [], "creates": [], "deletes": [], "protected_empty": True}
+
     old_by_index = {i + 1: r for i, r in enumerate(old_rows)}
 
     accepted = dedup_llm_output(
@@ -196,21 +253,17 @@ def reconcile_children(
     )
 
     claimed: set = set()
-    updates: list[tuple] = []
-    creates: list[dict] = []
+    matched: dict = {}  # position in `accepted` -> old row
 
-    for it in accepted:
+    # --- Pass 1: exact matches only (index, then normalized text) ---
+    for i, it in enumerate(accepted):
         orig = None
-
-        # Tier 1 — exact index the LLM echoed.
         idx = index_of(it)
         if isinstance(idx, int) and idx in old_by_index:
             cand = old_by_index[idx]
             cid = id_of(cand)
-            if cid and cid not in claimed:
+            if cid and cid not in claimed and _secondary_ok(it, cand, secondary_of):
                 orig = cand
-
-        # Tier 2 — exact normalized text, first unclaimed row.
         if orig is None:
             nt = normalize(text_of(it))
             orig = next(
@@ -218,31 +271,35 @@ def reconcile_children(
                     r for r in old_rows
                     if id_of(r) and id_of(r) not in claimed
                     and normalize(text_of(r)) == nt
+                    and _secondary_ok(it, r, secondary_of)
                 ),
                 None,
             )
-
-        # Tier 3 — guarded fuzzy, best dual-signal unclaimed match.
-        if orig is None:
-            best, best_score = None, 0.0
-            for r in old_rows:
-                rid = id_of(r)
-                if not rid or rid in claimed:
-                    continue
-                if not _secondary_ok(it, r, secondary_of):
-                    continue
-                if is_near_dup(text_of(it), text_of(r), char_threshold, token_threshold):
-                    sc = _similarity(text_of(it), text_of(r))
-                    if sc > best_score:
-                        best, best_score = r, sc
-            orig = best
-
         if orig is not None:
             claimed.add(id_of(orig))
-            updates.append((id_of(orig), it))
-        else:
-            creates.append(it)
+            matched[i] = orig
 
+    # --- Pass 2: guarded fuzzy for whatever exact matching left unclaimed ---
+    for i, it in enumerate(accepted):
+        if i in matched:
+            continue
+        best, best_score = None, 0.0
+        for r in old_rows:
+            rid = id_of(r)
+            if not rid or rid in claimed:
+                continue
+            if not _secondary_ok(it, r, secondary_of):
+                continue
+            if is_near_dup(text_of(it), text_of(r), char_threshold, token_threshold):
+                sc = _similarity(text_of(it), text_of(r))
+                if sc > best_score:
+                    best, best_score = r, sc
+        if best is not None:
+            claimed.add(id_of(best))
+            matched[i] = best
+
+    updates = [(id_of(matched[i]), it) for i, it in enumerate(accepted) if i in matched]
+    creates = [it for i, it in enumerate(accepted) if i not in matched]
     deletes = [id_of(r) for r in old_rows if id_of(r) and id_of(r) not in claimed]
     return {"updates": updates, "creates": creates, "deletes": deletes}
 

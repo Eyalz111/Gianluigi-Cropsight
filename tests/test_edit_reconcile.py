@@ -270,3 +270,125 @@ class TestCollapseBackstop:
             await af._collapse_duplicate_children("m1")
         sc.update_task.assert_not_called()
         alert.assert_not_awaited()
+
+
+# ===========================================================================
+# Review-driven hardening (2026-07-22 code review) — one test per fix
+# ===========================================================================
+class TestContentTokenDiscriminator:
+    """The false-merge risk root: raw Jaccard can't tell a stopword reword from a
+    one-content-word change. Content tokens can."""
+
+    def test_stopword_reword_is_dup(self):
+        assert is_near_dup("boost the client acquisition process",
+                           "boost client acquisition process")
+
+    def test_single_content_word_change_is_not_dup(self):
+        # 'Q3' vs 'Q4' — one content token differs -> distinct, must NOT merge.
+        assert not is_near_dup("prioritize the North-region pilot in Q3",
+                               "prioritize the North-region pilot in Q4")
+
+    def test_content_word_swap_is_not_dup(self):
+        assert not is_near_dup("Approved a 12-month runway budget",
+                               "Approved a 12-month hiring budget")
+
+
+class TestFinding1_DbRowsHaveIds:
+    """The critical one: the summary-edit path passes id-LESS structured_data;
+    apply_edits must still reconcile against the DB rows (which carry ids), or
+    every item becomes a create (duplicate-on-edit)."""
+
+    async def test_idless_structured_data_still_matches_db_rows_in_place(self):
+        sc = _sc(tasks=[{"id": "uuid-a", "meeting_id": "m1", "title": "Alpha",
+                         "assignee": "Eyal", "priority": "M", "deadline": None,
+                         "category": "", "status": "pending"}])
+        payload = {"summary": "S", "tasks": [
+            {"index": 1, "title": "Alpha v2", "assignee": "Eyal", "priority": "M",
+             "deadline": None, "category": "", "status": "pending"}],
+            "decisions": [], "follow_ups": [], "open_questions": []}
+        # structured_data carries an ID-LESS copy (as the real pending content does)
+        idless = {"tasks": [{"title": "Alpha", "assignee": "Eyal"}],
+                  "decisions": [], "follow_ups": [], "open_questions": []}
+        with patch.object(af, "supabase_client", sc), \
+             patch.object(af, "call_llm", return_value=(json.dumps(payload), None)):
+            await af.apply_edits("m1", [{"op": "rename"}], structured_data=idless)
+        # matched the DB row in place; did NOT create a duplicate
+        sc.update_task.assert_called_once()
+        assert sc.update_task.call_args.args[0] == "uuid-a"
+        sc.create_tasks_batch.assert_not_called()
+
+
+class TestFinding6_Tier2SecondaryGuard:
+    def test_tier2_indexless_respects_assignee(self):
+        # Two same-title tasks, LLM drops indices and swaps order -> must NOT
+        # swap assignees (Tier 2 now checks the secondary key).
+        old = [{"id": "e", "title": "Prepare deck", "assignee": "Eyal"},
+               {"id": "r", "title": "Prepare deck", "assignee": "Roye"}]
+        edited = [{"title": "Prepare deck", "assignee": "Roye"},
+                  {"title": "Prepare deck", "assignee": "Eyal"}]
+        plan = reconcile_children(old, edited, lambda t: t.get("title", ""),
+                                  secondary_of=lambda t: t.get("assignee", ""))
+        # Roye's edited item must map to Roye's row, Eyal's to Eyal's
+        by_id = {oid: it for oid, it in plan["updates"]}
+        assert by_id["r"]["assignee"] == "Roye"
+        assert by_id["e"]["assignee"] == "Eyal"
+        assert plan["deletes"] == []
+
+
+class TestFinding2_ExactBeforeFuzzy:
+    def test_no_identity_swap_between_similar_originals(self):
+        # Reworded items must each land on the original with matching content,
+        # never fuzzy-claim a sibling's row.
+        old = [{"id": "a", "title": "Review the Q3 revenue report"},
+               {"id": "b", "title": "Review the Q4 revenue report"}]
+        edited = [{"title": "Review Q4 revenue report"},   # -> b
+                  {"title": "Review Q3 revenue report"}]   # -> a
+        plan = reconcile_children(old, edited, lambda t: t.get("title", ""))
+        by_id = {oid: it for oid, it in plan["updates"]}
+        assert "Q4" in by_id["b"]["title"] and "Q3" in by_id["a"]["title"]
+        assert plan["deletes"] == []
+
+
+class TestFinding5_EmptySectionGuard:
+    def test_empty_edited_section_preserves_rows(self):
+        old = [{"id": "a", "title": "T1"}, {"id": "b", "title": "T2"}]
+        plan = reconcile_children(old, [], lambda t: t.get("title", ""))
+        assert plan["deletes"] == [] and plan["creates"] == []
+        assert plan.get("protected_empty") is True
+
+
+class TestFinding3_BackstopSecondaryGuards:
+    def test_distinct_followups_by_led_by_not_grouped(self):
+        rows = [{"id": "1", "title": "Board update", "led_by": "Eyal"},
+                {"id": "2", "title": "Board update", "led_by": "Roye"}]
+        groups = find_duplicate_groups(rows, lambda f: f.get("title", ""),
+                                       secondary_of=lambda f: f.get("led_by", ""))
+        assert groups == []
+
+    async def test_backstop_does_not_touch_distinct_followups(self):
+        sc = _sc(follow_ups=[
+            {"id": "1", "title": "Board update", "led_by": "Eyal", "created_at": "1"},
+            {"id": "2", "title": "Board update", "led_by": "Roye", "created_at": "2"},
+        ])
+        alert = AsyncMock()
+        with patch.object(af, "supabase_client", sc), \
+             patch("services.alerting.send_system_alert", alert):
+            await af._collapse_duplicate_children("m1")
+        sc.client.table.return_value.delete.return_value.eq.assert_not_called()
+        alert.assert_not_awaited()
+
+
+class TestFinding8_BackstopDeindexes:
+    async def test_collapsed_decision_is_deindexed(self):
+        sc = _sc(decisions=[
+            {"id": "d-old", "description": "Ship the MVP in Q3", "created_at": "1"},
+            {"id": "d-new", "description": "Ship MVP in Q3", "created_at": "2"},
+        ])
+        alert = AsyncMock()
+        deindex = MagicMock()
+        with patch.object(af, "supabase_client", sc), \
+             patch("services.alerting.send_system_alert", alert), \
+             patch("processors.semantic_index.deindex", deindex):
+            await af._collapse_duplicate_children("m1")
+        sc.supersede_decision.assert_called_once_with("d-new", superseded_by="d-old")
+        deindex.assert_called_once_with("decision", "d-new")

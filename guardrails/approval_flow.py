@@ -1671,18 +1671,24 @@ async def apply_edits(
     # not edit time). Must include pending to see them.
     if structured_data is None:
         structured_data = {}
-    decisions = structured_data.get("decisions") or supabase_client.list_decisions(
-        meeting_id=meeting_id, include_pending=True
+    # Reconcile old_rows MUST carry DB ids so an edited item updates its row IN
+    # PLACE (UUID preserved — the Sheet reconcile + mention/threading tables key
+    # on it). The `structured_data` fed in by the summary-edit path is the
+    # pending_approvals `content`, whose children come from process_transcript's
+    # extracted lists and carry NO id. Matching against those id-less rows made
+    # every item fail to match and get re-created — the duplicate-on-edit this
+    # module exists to kill, and the reason the earlier in-place fix never
+    # actually took on the summary-edit path. Always read the live DB rows: the
+    # children are inserted before approval, so the DB IS the current, id-stamped
+    # state. structured_data is retained only for backward-compatible callers.
+    decisions = supabase_client.list_decisions(meeting_id=meeting_id, include_pending=True)
+    all_tasks = supabase_client.get_tasks(
+        status=None, include_pending=True, meeting_id=meeting_id, limit=500
     )
-    all_tasks = structured_data.get("tasks")
-    if all_tasks is None:
-        all_tasks = supabase_client.get_tasks(
-            status=None, include_pending=True, meeting_id=meeting_id, limit=500
-        )
-    follow_ups = structured_data.get("follow_ups") or supabase_client.list_follow_up_meetings(
+    follow_ups = supabase_client.list_follow_up_meetings(
         source_meeting_id=meeting_id, include_pending=True
     )
-    open_questions = structured_data.get("open_questions") or supabase_client.get_open_questions(
+    open_questions = supabase_client.get_open_questions(
         meeting_id=meeting_id, include_pending=True
     )
 
@@ -1786,36 +1792,50 @@ Return ONLY the JSON object, no other text."""
             approval_status="pending",
         )
 
-        # Build edited structured data for the approval message.
-        # Map LLM output back to the format expected by submit_for_approval.
-        edited_decisions = []
-        for d in edited.get("decisions", []):
-            edited_decisions.append({"description": d.get("description", "")})
+        # Build edited structured data for the approval message. De-dup the
+        # LLM's output the SAME way the DB reconcile does (same helper +
+        # thresholds), so the approval card Eyal sees matches exactly what lands
+        # in the DB — no phantom repeat shown for an item the reconcile collapsed.
+        from guardrails.edit_reconcile import dedup_within as _dedup
+        _ect = settings.EDIT_RECONCILE_CHAR_THRESHOLD
+        _ett = settings.EDIT_RECONCILE_TOKEN_THRESHOLD
 
-        edited_tasks = []
-        for t in edited.get("tasks", []):
-            edited_tasks.append({
+        edited_decisions = [
+            {"description": d.get("description", "")}
+            for d in _dedup(
+                edited.get("decisions", []), lambda d: d.get("description", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
+        edited_tasks = [
+            {
                 "title": t.get("title", ""),
                 "assignee": t.get("assignee", ""),
                 "priority": t.get("priority", "M"),
                 "deadline": t.get("deadline"),
                 "category": t.get("category", ""),
                 "status": t.get("status", "pending"),
-            })
-
-        edited_follow_ups = []
-        for f in edited.get("follow_ups", []):
-            edited_follow_ups.append({
-                "title": f.get("title", ""),
-                "led_by": f.get("led_by", ""),
-            })
-
-        edited_questions = []
-        for q in edited.get("open_questions", []):
-            edited_questions.append({
-                "question": q.get("question", ""),
-                "raised_by": q.get("raised_by", ""),
-            })
+            }
+            for t in _dedup(
+                edited.get("tasks", []), lambda t: t.get("title", ""),
+                secondary_of=lambda t: t.get("assignee", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
+        edited_follow_ups = [
+            {"title": f.get("title", ""), "led_by": f.get("led_by", "")}
+            for f in _dedup(
+                edited.get("follow_ups", []), lambda f: f.get("title", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
+        edited_questions = [
+            {"question": q.get("question", ""), "raised_by": q.get("raised_by", "")}
+            for q in _dedup(
+                edited.get("open_questions", []), lambda q: q.get("question", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
 
         logger.info(f"Applied {len(edits)} edits to meeting {meeting_id}")
 
@@ -1942,9 +1962,24 @@ Return ONLY the JSON object, no other text."""
                     raised_by=_it.get("raised_by", ""),
                 )
 
-            # Layer 4 — deterministic self-healing backstop. If any near-dup
-            # still slipped the cascade, collapse it (keep the original) + alert.
-            # Guarantees no duplicate survives an edit, whatever the LLM returns.
+            # Surface any section the empty-section guard preserved (the LLM
+            # returned nothing for a populated section — an omission, not a wipe).
+            for _sec, _plan in (
+                ("tasks", t_plan), ("decisions", d_plan),
+                ("follow_ups", f_plan), ("open_questions", q_plan),
+            ):
+                if _plan.get("protected_empty"):
+                    logger.warning(
+                        f"apply_edits: LLM returned no {_sec} for {meeting_id} but "
+                        f"the DB still holds rows — preserved them rather than wipe."
+                    )
+
+            # Layer 4 — deterministic self-healing backstop. Independently of the
+            # cascade, it re-scans the meeting and collapses any stopword-reword
+            # duplicate that slipped (keep the original) + alerts. It shares the
+            # cascade's near-dup discriminator, so it catches the same class the
+            # cascade targets — the belt to the cascade's suspenders, not a proof
+            # against arbitrarily-reworded output.
             await _collapse_duplicate_children(meeting_id)
 
             logger.info(f"Synced edited data to DB for meeting {meeting_id}")
@@ -1984,16 +2019,20 @@ Return ONLY the JSON object, no other text."""
 async def _collapse_duplicate_children(meeting_id: str) -> None:
     """Post-edit self-healing backstop (Layer 4).
 
-    Re-reads the meeting's children and, for any near-duplicate cluster the
-    matching cascade let through, keeps the OLDEST row (its original identity)
-    and collapses the rest — tasks archived, decisions superseded, follow-ups
-    and questions deleted — then alerts. Auto-collapse means a duplicate never
-    survives an edit; the alert means Eyal still hears about it. Deterministic
-    and independent of the LLM, so it holds no matter how the edit output looks.
-
-    Reusable as a standalone repair pass (e.g. from the QA scheduler).
+    Re-reads the meeting's children and, for any near-duplicate cluster (same
+    content words, only stopword-reworded — the discriminator that will NOT group
+    two genuinely-distinct items), keeps the OLDEST row (its original identity)
+    and collapses the rest — tasks archived, decisions superseded, follow-ups and
+    questions deleted — then alerts. It catches the stopword-reword duplicate
+    class the reconcile handles; a heavily-reworded item that changes content
+    words is left as-is by both (precision over recall — never a false merge).
+    Every child type carries its own secondary guard so two same-title items with
+    different owners are never merged. Auto-collapse + alert means Eyal always
+    hears about it. Reusable as a standalone repair pass (e.g. from the QA
+    scheduler).
     """
     from guardrails.edit_reconcile import find_duplicate_groups
+    from processors.semantic_index import deindex as _si_deindex
     ct = settings.EDIT_RECONCILE_CHAR_THRESHOLD
     tt = settings.EDIT_RECONCILE_TOKEN_THRESHOLD
     collapsed: list[str] = []
@@ -2023,6 +2062,13 @@ async def _collapse_duplicate_children(meeting_id: str) -> None:
             keeper = grp[0].get("id")
             for dup in grp[1:]:
                 supabase_client.supersede_decision(dup["id"], superseded_by=keeper)
+                # Retire the collapsed decision from the semantic index too —
+                # otherwise its stale embedding keeps surfacing in "ask the brain"
+                # even though it's hidden from list_decisions / the Sheet.
+                try:
+                    _si_deindex("decision", dup["id"])
+                except Exception as _de:
+                    logger.warning(f"deindex of collapsed decision {dup['id']} failed: {_de}")
                 collapsed.append(f"decision '{(dup.get('description') or '')[:40]}'")
 
         fus = supabase_client.list_follow_up_meetings(
@@ -2030,6 +2076,7 @@ async def _collapse_duplicate_children(meeting_id: str) -> None:
         )
         for grp in find_duplicate_groups(
             _oldest_first(fus), lambda f: f.get("title", ""),
+            secondary_of=lambda f: f.get("led_by", ""),
             char_threshold=ct, token_threshold=tt,
         ):
             for dup in grp[1:]:
@@ -2041,6 +2088,7 @@ async def _collapse_duplicate_children(meeting_id: str) -> None:
         qs = supabase_client.get_open_questions(meeting_id=meeting_id, include_pending=True)
         for grp in find_duplicate_groups(
             _oldest_first(qs), lambda q: q.get("question", ""),
+            secondary_of=lambda q: q.get("raised_by", ""),
             char_threshold=ct, token_threshold=tt,
         ):
             for dup in grp[1:]:

@@ -216,10 +216,19 @@ class TestApplyEditsDedup:
         monkeypatch.setattr(af, "call_llm", lambda **k: (llm, {}))
         sc = MagicMock()
         sc._serialize_datetime.return_value = None
+        # apply_edits reconciles against the LIVE DB rows (which carry ids), NOT
+        # the id-less pending content — so the existing task is supplied via the
+        # get_tasks mock. The edit LLM emits "Same task" twice; it must collapse
+        # onto the one existing row (update in place), never create a new row.
+        sc.get_meeting.return_value = {"summary": "s", "title": "M", "date": "2026-07-16"}
+        sc.get_tasks.return_value = [{"id": "t1", "meeting_id": "m1", "title": "Same task",
+                                      "assignee": "A", "priority": "H", "deadline": None,
+                                      "category": "", "status": "pending"}]
+        sc.list_decisions.return_value = []
+        sc.list_follow_up_meetings.return_value = []
+        sc.get_open_questions.return_value = []
         monkeypatch.setattr(af, "supabase_client", sc)
-        structured = {"tasks": [{"id": "t1", "title": "Same task", "assignee": "A"}],
-                      "decisions": [], "follow_ups": [], "open_questions": []}
-        await af.apply_edits("m1", [{"type": "noop"}], structured_data=structured)
+        await af.apply_edits("m1", [{"type": "noop"}])
         # dup collapsed -> original updated in place once, NO new row created
         sc.create_tasks_batch.assert_not_called()
         assert sc.update_task.call_count == 1
