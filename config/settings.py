@@ -203,6 +203,15 @@ class Settings(BaseSettings):
     SIMILARITY_THRESHOLD_CONTEXTUAL: float = Field(
         default=0.4, description="Lower threshold for contextual/parent chunk retrieval"
     )
+    # Edit-reconcile (apply_edits) near-duplicate matching. Dual-signal, high bar
+    # by design: the fuzzy tier only fires when a reworded item clears BOTH, so
+    # genuinely-distinct items are never merged. Raise to be stricter.
+    EDIT_RECONCILE_CHAR_THRESHOLD: float = Field(
+        default=0.88, description="Min difflib char-ratio for an edit-reconcile fuzzy match"
+    )
+    EDIT_RECONCILE_TOKEN_THRESHOLD: float = Field(
+        default=0.75, description="Min token-Jaccard for an edit-reconcile fuzzy match"
+    )
     RECENCY_HALFLIFE_DAYS: int = Field(
         default=30, description="Half-life in days for time-weighted RAG recency boost"
     )
