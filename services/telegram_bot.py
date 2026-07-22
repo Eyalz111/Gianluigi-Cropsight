@@ -2083,7 +2083,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         try:
             # v3: route through the reconcile engine (dry-run preview).
-            from processors.sheets_sync import reconcile_tasks, reconcile_decisions
+            from processors.sheets_sync import (
+                reconcile_tasks, reconcile_decisions, reconcile_meetings,
+            )
 
             summary = await reconcile_tasks(dry_run=True)
             if summary.get("error"):
@@ -2095,13 +2097,20 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             dec_pulled = dec_summary.get("pulled", 0)
             dec_pushed = dec_summary.get("pushed", 0)
             dec_readded = dec_summary.get("readded", 0)
+            # Meetings preview — self-guards on MEETING_RECONCILE_ENABLED.
+            mtg_summary = await reconcile_meetings(dry_run=True)
+            mtg_pulled = mtg_summary.get("pulled", 0)
+            mtg_pushed = mtg_summary.get("pushed", 0)
+            mtg_created = mtg_summary.get("created", 0)
+            mtg_readded = mtg_summary.get("readded", 0)
 
             pulled = summary.get("pulled", 0)
             pushed = summary.get("pushed", 0)
             created = summary.get("created", 0)
             readded = summary.get("readded", 0)
             if not (pulled or pushed or created or readded
-                    or dec_pulled or dec_pushed or dec_readded):
+                    or dec_pulled or dec_pushed or dec_readded
+                    or mtg_pulled or mtg_pushed or mtg_created or mtg_readded):
                 await self.send_to_eyal("Sheets and DB are in sync. No changes needed.")
             else:
                 lines = [
@@ -2116,6 +2125,13 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                         f"  • {dec_pulled} decision edit(s) → DB",
                         f"  • {dec_pushed} decision update(s) → Sheet",
                         f"  • {dec_readded} decision(s) re-added to Sheet",
+                    ]
+                if mtg_pulled or mtg_pushed or mtg_created or mtg_readded:
+                    lines += [
+                        f"  • {mtg_pulled} meeting edit(s) → DB",
+                        f"  • {mtg_pushed} meeting update(s) → Sheet",
+                        f"  • {mtg_created} new meeting(s) from Sheet",
+                        f"  • {mtg_readded} meeting(s) re-added to Sheet",
                     ]
                 if settings.RECONCILE_SHADOW_MODE:
                     lines.append("\n⚠️ Shadow mode is ON — Apply will still write nothing until it's off.")
@@ -3875,7 +3891,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # ---- Sheets sync callbacks (Phase 11 C7) ----
         if action == "sync_apply":
             if meeting_id == "confirm":
-                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
+                from processors.sheets_sync import (
+                    reconcile_tasks, reconcile_decisions, reconcile_meetings,
+                )
                 summary = await reconcile_tasks(dry_run=False)  # v3 engine recomputes fresh
                 if summary.get("error"):
                     await self._safe_edit(query, f"Sync error: {summary['error']}")
@@ -3889,6 +3907,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     return
                 # Decisions apply — self-guards on DECISION_RECONCILE_ENABLED.
                 dec = await reconcile_decisions(dry_run=False)
+                mtg = await reconcile_meetings(dry_run=False)
                 msg = (
                     f"Sync applied — {summary.get('pulled', 0)} edit(s)→DB, "
                     f"{summary.get('pushed', 0)} DB→Sheet, "
