@@ -1671,18 +1671,24 @@ async def apply_edits(
     # not edit time). Must include pending to see them.
     if structured_data is None:
         structured_data = {}
-    decisions = structured_data.get("decisions") or supabase_client.list_decisions(
-        meeting_id=meeting_id, include_pending=True
+    # Reconcile old_rows MUST carry DB ids so an edited item updates its row IN
+    # PLACE (UUID preserved — the Sheet reconcile + mention/threading tables key
+    # on it). The `structured_data` fed in by the summary-edit path is the
+    # pending_approvals `content`, whose children come from process_transcript's
+    # extracted lists and carry NO id. Matching against those id-less rows made
+    # every item fail to match and get re-created — the duplicate-on-edit this
+    # module exists to kill, and the reason the earlier in-place fix never
+    # actually took on the summary-edit path. Always read the live DB rows: the
+    # children are inserted before approval, so the DB IS the current, id-stamped
+    # state. structured_data is retained only for backward-compatible callers.
+    decisions = supabase_client.list_decisions(meeting_id=meeting_id, include_pending=True)
+    all_tasks = supabase_client.get_tasks(
+        status=None, include_pending=True, meeting_id=meeting_id, limit=500
     )
-    all_tasks = structured_data.get("tasks")
-    if all_tasks is None:
-        all_tasks = supabase_client.get_tasks(
-            status=None, include_pending=True, meeting_id=meeting_id, limit=500
-        )
-    follow_ups = structured_data.get("follow_ups") or supabase_client.list_follow_up_meetings(
+    follow_ups = supabase_client.list_follow_up_meetings(
         source_meeting_id=meeting_id, include_pending=True
     )
-    open_questions = structured_data.get("open_questions") or supabase_client.get_open_questions(
+    open_questions = supabase_client.get_open_questions(
         meeting_id=meeting_id, include_pending=True
     )
 
@@ -1720,6 +1726,9 @@ CRITICAL RULES:
 - If an edit says to rename someone, rename them EVERYWHERE they appear.
 - If an edit says to delete/remove something, remove it from ALL sections where it appears.
 - Preserve the exact format and structure of each section. Only change what the edits require.
+- For every item you KEEP, return its original "index" UNCHANGED — this is how the item keeps its identity. Only a brand-new item that an edit ADDS may omit "index".
+- Return each task, decision, question, and follow-up EXACTLY ONCE. Never emit both an original and a reworded copy of the same item — that creates a duplicate.
+- Keeping an item means returning it VERBATIM. Do not reword, reorder, or re-punctuate an item you are not explicitly editing.
 - Return valid JSON with the structure shown below.
 
 CURRENT SUMMARY:
@@ -1783,60 +1792,73 @@ Return ONLY the JSON object, no other text."""
             approval_status="pending",
         )
 
-        # Build edited structured data for the approval message.
-        # Map LLM output back to the format expected by submit_for_approval.
-        edited_decisions = []
-        for d in edited.get("decisions", []):
-            edited_decisions.append({"description": d.get("description", "")})
+        # Build edited structured data for the approval message. De-dup the
+        # LLM's output the SAME way the DB reconcile does (same helper +
+        # thresholds), so the approval card Eyal sees matches exactly what lands
+        # in the DB — no phantom repeat shown for an item the reconcile collapsed.
+        from guardrails.edit_reconcile import dedup_within as _dedup
+        _ect = settings.EDIT_RECONCILE_CHAR_THRESHOLD
+        _ett = settings.EDIT_RECONCILE_TOKEN_THRESHOLD
 
-        edited_tasks = []
-        for t in edited.get("tasks", []):
-            edited_tasks.append({
+        edited_decisions = [
+            {"description": d.get("description", "")}
+            for d in _dedup(
+                edited.get("decisions", []), lambda d: d.get("description", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
+        edited_tasks = [
+            {
                 "title": t.get("title", ""),
                 "assignee": t.get("assignee", ""),
                 "priority": t.get("priority", "M"),
                 "deadline": t.get("deadline"),
                 "category": t.get("category", ""),
                 "status": t.get("status", "pending"),
-            })
-
-        edited_follow_ups = []
-        for f in edited.get("follow_ups", []):
-            edited_follow_ups.append({
-                "title": f.get("title", ""),
-                "led_by": f.get("led_by", ""),
-            })
-
-        edited_questions = []
-        for q in edited.get("open_questions", []):
-            edited_questions.append({
-                "question": q.get("question", ""),
-                "raised_by": q.get("raised_by", ""),
-            })
+            }
+            for t in _dedup(
+                edited.get("tasks", []), lambda t: t.get("title", ""),
+                secondary_of=lambda t: t.get("assignee", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
+        edited_follow_ups = [
+            {"title": f.get("title", ""), "led_by": f.get("led_by", "")}
+            for f in _dedup(
+                edited.get("follow_ups", []), lambda f: f.get("title", ""),
+                secondary_of=lambda f: f.get("led_by", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
+        edited_questions = [
+            {"question": q.get("question", ""), "raised_by": q.get("raised_by", "")}
+            for q in _dedup(
+                edited.get("open_questions", []), lambda q: q.get("question", ""),
+                secondary_of=lambda q: q.get("raised_by", ""),
+                char_threshold=_ect, token_threshold=_ett,
+            )
+        ]
 
         logger.info(f"Applied {len(edits)} edits to meeting {meeting_id}")
 
         # Sync edited structured data back to DB tables.
         # This ensures DB, pending_approvals, distribution, and Sheets stay consistent.
         try:
-            # Tasks — UPDATE IN PLACE by the original index so a task's UUID
-            # SURVIVES an edit. The old delete+recreate minted new UUIDs, which
-            # orphaned the already-distributed Sheet rows (they carry the old
-            # UUID) AND re-added the tasks as fresh rows — two rows per task (the
-            # 43-vs-25 count on the 07-06 weekly). Map each returned task to the
-            # SAME all_tasks list the LLM saw (index i+1); update matched ones,
-            # create only genuinely-added ones, delete only genuinely-removed
-            # ones. [Phase 1 Step 2 / P2, 2026-07]
-            old_by_index = {i + 1: t for i, t in enumerate(all_tasks)}
-            title_buckets: dict = {}  # lower(title) -> [originals], indexless fallback
-            for t in all_tasks:
-                title_buckets.setdefault(
-                    (t.get("title") or "").strip().lower(), []
-                ).append(t)
-            claimed_ids: set = set()
-            new_tasks: list[dict] = []
+            # Every child type is reconciled through guardrails/edit_reconcile:
+            # a precision-first cascade (exact index -> exact normalized text ->
+            # guarded dual-signal fuzzy) that updates a KEPT item IN PLACE (UUID
+            # preserved — the Sheet reconcile + mention/threading rows key on it)
+            # and creates ONLY a genuinely-new one. This replaces the byte-exact
+            # matcher whose missed rewordings duplicated tasks/decisions and
+            # reached the team (2026-07 apply_edits duplication — the "43-vs-25
+            # count on the 07-06 weekly"). Follow-ups and open questions used to
+            # be delete-all+recreate (which churned their UUIDs); they now
+            # reconcile in place too. [holistic edit-reconcile, 2026-07-22]
+            from guardrails.edit_reconcile import reconcile_children
+            _ct = settings.EDIT_RECONCILE_CHAR_THRESHOLD
+            _tt = settings.EDIT_RECONCILE_TOKEN_THRESHOLD
 
-            def _apply_in_place(task_id: str, p: dict) -> None:
+            def _apply_task_in_place(task_id: str, p: dict) -> None:
                 upd = {
                     "title": p.get("title", ""),
                     "assignee": p.get("assignee", ""),
@@ -1854,146 +1876,119 @@ Return ONLY the JSON object, no other text."""
                 # (the 2026-06-11 data-loss class).
                 supabase_client.update_task(task_id, **upd)
 
-            # [robustness #4, 2026-07-12 duplicate-rows incident] The edit LLM
-            # sometimes emits the SAME task twice — once matching an original
-            # (updates in place), once as a reworded variant that fails the
-            # index/title match and gets CREATED as a fresh row -> a duplicate
-            # (the 16 dup rows this incident). Drop exact normalized-title
-            # repeats from the LLM's own output before applying. Additive and
-            # safe: only collapses byte-identical (case/space-normalized) titles
-            # the model returned more than once — never merges distinct tasks.
-            _seen_task_titles: set = set()
-            _edited_tasks: list = []
-            for _t in edited.get("tasks", []):
-                _k = (_t.get("title") or "").strip().lower()
-                if _k and _k in _seen_task_titles:
-                    logger.info(f"apply_edits: dropped duplicate edited task '{_k[:40]}'")
-                    continue
-                if _k:
-                    _seen_task_titles.add(_k)
-                _edited_tasks.append(_t)
+            # --- Tasks (assignee is the fuzzy secondary key, so an intentional
+            #     same-title / different-owner split is never merged) ---
+            t_plan = reconcile_children(
+                all_tasks, edited.get("tasks", []),
+                text_of=lambda t: t.get("title", ""),
+                secondary_of=lambda t: t.get("assignee", ""),
+                char_threshold=_ct, token_threshold=_tt,
+            )
+            for _old_id, _it in t_plan["updates"]:
+                try:
+                    _apply_task_in_place(_old_id, _it)
+                except Exception as ue:
+                    logger.warning(f"apply_edits: task in-place update failed for {_old_id}: {ue}")
+            for _old_id in t_plan["deletes"]:
+                supabase_client.client.table("tasks").delete().eq("id", _old_id).execute()
+            if t_plan["creates"]:
+                supabase_client.create_tasks_batch(meeting_id, [
+                    {
+                        "title": _it.get("title", ""),
+                        "assignee": _it.get("assignee", ""),
+                        "priority": _it.get("priority", "M"),
+                        "deadline": _it.get("deadline"),
+                        "category": _it.get("category", ""),
+                        "status": _it.get("status", "pending"),
+                    }
+                    for _it in t_plan["creates"]
+                ])
 
-            for t in _edited_tasks:
-                payload = {
-                    "title": t.get("title", ""),
-                    "assignee": t.get("assignee", ""),
-                    "priority": t.get("priority", "M"),
-                    "deadline": t.get("deadline"),
-                    "category": t.get("category", ""),
-                    "status": t.get("status", "pending"),
-                }
-                idx = t.get("index")
-                orig = old_by_index.get(idx) if isinstance(idx, int) else None
-                if orig is None:
-                    # LLM dropped the index — match an unclaimed original by exact
-                    # title so a kept task still updates in place instead of dup'ing.
-                    bucket = title_buckets.get((t.get("title") or "").strip().lower(), [])
-                    orig = next(
-                        (o for o in bucket if o.get("id") and o["id"] not in claimed_ids),
-                        None,
-                    )
-                if orig and orig.get("id") and orig["id"] not in claimed_ids:
-                    try:
-                        _apply_in_place(orig["id"], payload)
-                    except Exception as ue:
-                        # Keep the old row rather than lose the task; just log.
-                        logger.warning(
-                            f"apply_edits: in-place update failed for {orig['id']}: {ue}"
-                        )
-                    claimed_ids.add(orig["id"])  # claimed either way -> never deleted
-                else:
-                    new_tasks.append(payload)  # genuinely new task from an edit
+            # --- Decisions (UUID = Sheet col-H identity + supersession chain) ---
+            d_plan = reconcile_children(
+                decisions, edited.get("decisions", []),
+                text_of=lambda d: d.get("description", ""),
+                char_threshold=_ct, token_threshold=_tt,
+            )
+            for _old_id, _it in d_plan["updates"]:
+                try:
+                    supabase_client.update_decision(_old_id, description=_it.get("description", ""))
+                except Exception as ue:
+                    logger.warning(f"apply_edits: decision in-place update failed for {_old_id}: {ue}")
+            for _old_id in d_plan["deletes"]:
+                supabase_client.client.table("decisions").delete().eq("id", _old_id).execute()
+                # Retire the removed decision from the semantic index.
+                from processors.semantic_index import deindex as _si_deindex
+                _si_deindex("decision", _old_id)
+            if d_plan["creates"]:
+                supabase_client.create_decisions_batch(
+                    meeting_id,
+                    [{"description": _it.get("description", "")} for _it in d_plan["creates"]],
+                )
 
-            # Delete only the originals the edit removed (shown to the LLM, absent now).
-            for t in all_tasks:
-                if t.get("id") and t["id"] not in claimed_ids:
-                    supabase_client.client.table("tasks").delete().eq("id", t["id"]).execute()
+            # --- Follow-up meetings (in place now — keeps the UUID) ---
+            # led_by is the secondary guard: two same-title follow-ups with
+            # different owners are distinct and must not collapse into one.
+            f_plan = reconcile_children(
+                follow_ups, edited.get("follow_ups", []),
+                text_of=lambda f: f.get("title", ""),
+                secondary_of=lambda f: f.get("led_by", ""),
+                char_threshold=_ct, token_threshold=_tt,
+            )
+            for _old_id, _it in f_plan["updates"]:
+                supabase_client.client.table("follow_up_meetings").update(
+                    {"title": _it.get("title", ""), "led_by": _it.get("led_by", "")}
+                ).eq("id", _old_id).execute()
+            for _old_id in f_plan["deletes"]:
+                supabase_client.client.table("follow_up_meetings").delete().eq("id", _old_id).execute()
+            for _it in f_plan["creates"]:
+                supabase_client.create_follow_up_meeting(
+                    source_meeting_id=meeting_id,
+                    title=_it.get("title", ""),
+                    led_by=_it.get("led_by", ""),
+                )
 
-            if new_tasks:
-                supabase_client.create_tasks_batch(meeting_id, new_tasks)
+            # --- Open questions (in place now — questions carry downstream identity) ---
+            # raised_by is the secondary guard: the same question raised by two
+            # different people is two distinct rows, not a duplicate.
+            q_plan = reconcile_children(
+                open_questions, edited.get("open_questions", []),
+                text_of=lambda q: q.get("question", ""),
+                secondary_of=lambda q: q.get("raised_by", ""),
+                char_threshold=_ct, token_threshold=_tt,
+            )
+            for _old_id, _it in q_plan["updates"]:
+                supabase_client.client.table("open_questions").update(
+                    {"question": _it.get("question", ""), "raised_by": _it.get("raised_by", "")}
+                ).eq("id", _old_id).execute()
+            for _old_id in q_plan["deletes"]:
+                supabase_client.client.table("open_questions").delete().eq("id", _old_id).execute()
+            for _it in q_plan["creates"]:
+                supabase_client.create_open_question(
+                    meeting_id=meeting_id,
+                    question=_it.get("question", ""),
+                    raised_by=_it.get("raised_by", ""),
+                )
 
-            # Decisions — UPDATE IN PLACE by the original index so a decision's
-            # UUID (its Sheet col-H identity) + supersession chain SURVIVE an edit.
-            # The old delete+recreate minted new UUIDs, which orphaned the Sheet
-            # rows the reconcile keys on and dropped decision_status/parent links.
-            # Mirror the task in-place fix. [Phase 2 PR B, 2026-07]
-            old_dec_by_index = {i + 1: d for i, d in enumerate(decisions)}
-            dec_desc_buckets: dict = {}
-            for d in decisions:
-                dec_desc_buckets.setdefault(
-                    (d.get("description") or "").strip().lower(), []
-                ).append(d)
-            claimed_dec_ids: set = set()
-            new_decisions: list[dict] = []
-            # [robustness #4] Same LLM-duplicate guard as tasks above.
-            _seen_dec_desc: set = set()
-            _edited_decisions: list = []
-            for _d in edited.get("decisions", []):
-                _k = (_d.get("description") or "").strip().lower()
-                if _k and _k in _seen_dec_desc:
-                    logger.info("apply_edits: dropped duplicate edited decision")
-                    continue
-                if _k:
-                    _seen_dec_desc.add(_k)
-                _edited_decisions.append(_d)
-            for d in _edited_decisions:
-                desc = d.get("description", "")
-                idx = d.get("index")
-                orig = old_dec_by_index.get(idx) if isinstance(idx, int) else None
-                if orig is None:
-                    # LLM dropped the index — match an unclaimed original by exact
-                    # description so a kept decision updates in place, not dup'd.
-                    bucket = dec_desc_buckets.get((desc or "").strip().lower(), [])
-                    orig = next(
-                        (o for o in bucket if o.get("id") and o["id"] not in claimed_dec_ids),
-                        None,
-                    )
-                if orig and orig.get("id") and orig["id"] not in claimed_dec_ids:
-                    try:
-                        supabase_client.update_decision(orig["id"], description=desc)
-                    except Exception as ue:
-                        logger.warning(
-                            f"apply_edits: in-place decision update failed for {orig['id']}: {ue}"
-                        )
-                    claimed_dec_ids.add(orig["id"])  # claimed either way -> never deleted
-                else:
-                    new_decisions.append({"description": desc})  # genuinely new
-            # Delete only the decisions the edit removed (shown to the LLM, absent now).
-            for d in decisions:
-                if d.get("id") and d["id"] not in claimed_dec_ids:
-                    supabase_client.client.table("decisions").delete().eq(
-                        "id", d["id"]
-                    ).execute()
-                    # Retire the removed decision from the semantic index —
-                    # re-approval re-indexes the KEPT decisions but never these.
-                    from processors.semantic_index import deindex as _si_deindex
-                    _si_deindex("decision", d["id"])
-            if new_decisions:
-                supabase_client.create_decisions_batch(meeting_id, new_decisions)
-
-            # Follow-ups
-            supabase_client.client.table("follow_up_meetings").delete().eq(
-                "source_meeting_id", meeting_id
-            ).execute()
-            if edited_follow_ups:
-                for fu in edited_follow_ups:
-                    supabase_client.create_follow_up_meeting(
-                        source_meeting_id=meeting_id,
-                        title=fu.get("title", ""),
-                        led_by=fu.get("led_by", ""),
+            # Surface any section the empty-section guard preserved (the LLM
+            # returned nothing for a populated section — an omission, not a wipe).
+            for _sec, _plan in (
+                ("tasks", t_plan), ("decisions", d_plan),
+                ("follow_ups", f_plan), ("open_questions", q_plan),
+            ):
+                if _plan.get("protected_empty"):
+                    logger.warning(
+                        f"apply_edits: LLM returned no {_sec} for {meeting_id} but "
+                        f"the DB still holds rows — preserved them rather than wipe."
                     )
 
-            # Open questions
-            supabase_client.client.table("open_questions").delete().eq(
-                "meeting_id", meeting_id
-            ).execute()
-            if edited_questions:
-                for q in edited_questions:
-                    supabase_client.create_open_question(
-                        meeting_id=meeting_id,
-                        question=q.get("question", ""),
-                        raised_by=q.get("raised_by", ""),
-                    )
+            # Layer 4 — deterministic self-healing backstop. Independently of the
+            # cascade, it re-scans the meeting and collapses any stopword-reword
+            # duplicate that slipped (keep the original) + alerts. It shares the
+            # cascade's near-dup discriminator, so it catches the same class the
+            # cascade targets — the belt to the cascade's suspenders, not a proof
+            # against arbitrarily-reworded output.
+            await _collapse_duplicate_children(meeting_id)
 
             logger.info(f"Synced edited data to DB for meeting {meeting_id}")
         except Exception as e:
@@ -2027,6 +2022,113 @@ Return ONLY the JSON object, no other text."""
     except Exception as e:
         logger.error(f"Error applying edits: {e}")
         return {"error": str(e)}
+
+
+async def _collapse_duplicate_children(meeting_id: str) -> None:
+    """Post-edit self-healing backstop (Layer 4).
+
+    Re-reads the meeting's children and, for any near-duplicate cluster (same
+    content words, only stopword-reworded — the discriminator that will NOT group
+    two genuinely-distinct items), keeps the OLDEST row (its original identity)
+    and collapses the rest — tasks archived, decisions superseded, follow-ups and
+    questions deleted — then alerts. It catches the stopword-reword duplicate
+    class the reconcile handles; a heavily-reworded item that changes content
+    words is left as-is by both (precision over recall — never a false merge).
+    Every child type carries its own secondary guard so two same-title items with
+    different owners are never merged. Auto-collapse + alert means Eyal always
+    hears about it. Reusable as a standalone repair pass (e.g. from the QA
+    scheduler).
+    """
+    from guardrails.edit_reconcile import find_duplicate_groups
+    from processors.semantic_index import deindex as _si_deindex
+    ct = settings.EDIT_RECONCILE_CHAR_THRESHOLD
+    tt = settings.EDIT_RECONCILE_TOKEN_THRESHOLD
+    collapsed: list[str] = []
+
+    def _oldest_first(rows: list) -> list:
+        # created_at ASC -> the original row is group[0], collapse the rest.
+        return sorted(rows, key=lambda r: str(r.get("created_at") or ""))
+
+    try:
+        tasks = supabase_client.get_tasks(
+            status=None, include_pending=True, meeting_id=meeting_id, limit=500
+        )
+        for grp in find_duplicate_groups(
+            _oldest_first(tasks), lambda t: t.get("title", ""),
+            secondary_of=lambda t: t.get("assignee", ""),
+            char_threshold=ct, token_threshold=tt,
+        ):
+            for dup in grp[1:]:
+                supabase_client.update_task(dup["id"], status="archived")
+                collapsed.append(f"task '{(dup.get('title') or '')[:40]}'")
+
+        decs = supabase_client.list_decisions(meeting_id=meeting_id, include_pending=True)
+        for grp in find_duplicate_groups(
+            _oldest_first(decs), lambda d: d.get("description", ""),
+            char_threshold=ct, token_threshold=tt,
+        ):
+            keeper = grp[0].get("id")
+            for dup in grp[1:]:
+                supabase_client.supersede_decision(dup["id"], superseded_by=keeper)
+                # Retire the collapsed decision from the semantic index too —
+                # otherwise its stale embedding keeps surfacing in "ask the brain"
+                # even though it's hidden from list_decisions / the Sheet.
+                try:
+                    _si_deindex("decision", dup["id"])
+                except Exception as _de:
+                    logger.warning(f"deindex of collapsed decision {dup['id']} failed: {_de}")
+                collapsed.append(f"decision '{(dup.get('description') or '')[:40]}'")
+
+        fus = supabase_client.list_follow_up_meetings(
+            source_meeting_id=meeting_id, include_pending=True
+        )
+        for grp in find_duplicate_groups(
+            _oldest_first(fus), lambda f: f.get("title", ""),
+            secondary_of=lambda f: f.get("led_by", ""),
+            char_threshold=ct, token_threshold=tt,
+        ):
+            for dup in grp[1:]:
+                supabase_client.client.table("follow_up_meetings").delete().eq(
+                    "id", dup["id"]
+                ).execute()
+                collapsed.append(f"follow-up '{(dup.get('title') or '')[:40]}'")
+
+        qs = supabase_client.get_open_questions(meeting_id=meeting_id, include_pending=True)
+        for grp in find_duplicate_groups(
+            _oldest_first(qs), lambda q: q.get("question", ""),
+            secondary_of=lambda q: q.get("raised_by", ""),
+            char_threshold=ct, token_threshold=tt,
+        ):
+            for dup in grp[1:]:
+                supabase_client.client.table("open_questions").delete().eq(
+                    "id", dup["id"]
+                ).execute()
+                collapsed.append(f"question '{(dup.get('question') or '')[:40]}'")
+    except Exception as e:
+        # A backstop failure must never break the edit itself — the cascade
+        # already did the primary work; just log.
+        logger.error(f"Duplicate-collapse backstop failed for {meeting_id}: {e}")
+        return
+
+    if collapsed:
+        logger.warning(
+            f"apply_edits backstop collapsed {len(collapsed)} duplicate(s) on "
+            f"{meeting_id} (kept the original of each): {collapsed}"
+        )
+        try:
+            from services.alerting import send_system_alert, AlertSeverity
+            await send_system_alert(
+                AlertSeverity.WARNING,
+                "approval_flow.apply_edits",
+                f"Auto-collapsed {len(collapsed)} duplicate item(s) after an edit to "
+                f"meeting {meeting_id} (kept the original of each): "
+                f"{', '.join(collapsed[:8])}"
+                + (" …" if len(collapsed) > 8 else "")
+                + ". This is the edit-reconcile safety net — the summary is correct; "
+                "flag it if it recurs.",
+            )
+        except Exception as alert_err:
+            logger.error(f"Alert on duplicate-collapse also failed: {alert_err}")
 
 
 def _distribution_content_intact(meeting_id: str, content: dict) -> tuple[bool, str]:

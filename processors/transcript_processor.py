@@ -251,11 +251,30 @@ async def process_transcript(
             _areas = []
         _normalize_task_urgency_area(tasks_to_store, _areas)
 
+    # Layer 6 — collapse near-identical items WITHIN this single extraction run
+    # before insert. The extraction LLM occasionally emits the same decision (or
+    # task) twice, reworded, in one pass — the "single-batch" duplicates the
+    # 2026-07 sweep found (cross_reference already dedups tasks against EXISTING
+    # rows, but not against each other). Tasks carry the assignee guard so an
+    # intentional same-title / different-owner split survives.
+    from guardrails.edit_reconcile import dedup_within
+    decisions_to_store = dedup_within(
+        extracted.get("decisions", []), lambda d: d.get("description", ""),
+        char_threshold=settings.EDIT_RECONCILE_CHAR_THRESHOLD,
+        token_threshold=settings.EDIT_RECONCILE_TOKEN_THRESHOLD,
+    )
+    tasks_to_store = dedup_within(
+        tasks_to_store, lambda t: t.get("title", ""),
+        secondary_of=lambda t: t.get("assignee", ""),
+        char_threshold=settings.EDIT_RECONCILE_CHAR_THRESHOLD,
+        token_threshold=settings.EDIT_RECONCILE_TOKEN_THRESHOLD,
+    )
+
     # Store extracted data (with deduplicated tasks). [audit P1-01] Pass the
     # meeting tier so children are tagged atomically at insert.
     await store_meeting_data(
         meeting_id=meeting_id,
-        decisions=extracted.get("decisions", []),
+        decisions=decisions_to_store,
         tasks=tasks_to_store,
         follow_ups=extracted.get("follow_ups", []),
         open_questions=extracted.get("open_questions", []),
@@ -452,7 +471,11 @@ async def process_transcript(
         "meeting_id": meeting_id,
         "summary": summary,
         "executive_summary": extracted.get("executive_summary", ""),
-        "decisions": extracted.get("decisions", []),
+        # Return the SAME deduped lists that were written to the DB — the watcher
+        # copies these straight onto the approval card + distributed summary, so
+        # returning the raw extracted['decisions'] would show a duplicate the DB
+        # already collapsed (card/summary vs DB disagreement).
+        "decisions": decisions_to_store,
         "tasks": tasks_to_store,
         "follow_ups": extracted.get("follow_ups", []),
         "open_questions": extracted.get("open_questions", []),
