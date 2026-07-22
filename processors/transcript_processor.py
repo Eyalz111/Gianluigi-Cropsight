@@ -471,7 +471,11 @@ async def process_transcript(
         "meeting_id": meeting_id,
         "summary": summary,
         "executive_summary": extracted.get("executive_summary", ""),
-        "decisions": extracted.get("decisions", []),
+        # Return the SAME deduped lists that were written to the DB — the watcher
+        # copies these straight onto the approval card + distributed summary, so
+        # returning the raw extracted['decisions'] would show a duplicate the DB
+        # already collapsed (card/summary vs DB disagreement).
+        "decisions": decisions_to_store,
         "tasks": tasks_to_store,
         "follow_ups": extracted.get("follow_ups", []),
         "open_questions": extracted.get("open_questions", []),

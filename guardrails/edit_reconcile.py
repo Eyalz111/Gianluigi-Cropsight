@@ -45,7 +45,11 @@ from typing import Callable
 DEFAULT_CHAR_THRESHOLD = 0.88
 DEFAULT_TOKEN_THRESHOLD = 0.75
 
-_WORD_RE = re.compile(r"[a-z0-9]+")
+# Unicode-aware: word chars minus underscore, so Hebrew/accented text tokenizes
+# instead of vanishing. An ASCII-only tokenizer collapsed two distinct non-Latin
+# items that shared an embedded Latin token ("call Bar Topper" vs "email Bar
+# Topper" both → "bar topper") into an exact-match false-merge.
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 # Function words carry no identity — removing them before the token comparison
 # is what lets us tell an article/punctuation rewording (a duplicate: "boost THE
@@ -53,8 +57,12 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 # item: "pilot in Q3" ≠ "pilot in Q4"). Raw token-Jaccard cannot: both differ by
 # exactly one token. Comparing CONTENT tokens shrinks the sets so a content-word
 # swap is a large Jaccard penalty while a stopword drop is none.
+#
+# NOTE: single letters are deliberately NOT stopwords — 'a'/'b' etc. are the sole
+# distinguisher in "Series A" vs "Series B", "Plan A"/"Plan B", "Option A/B".
+# Stripping 'a' as an article would silently merge those distinct items.
 _STOPWORDS = frozenset(
-    "a an and are as at be but by for from has have in into is it its of on or "
+    "an and are as at be but by for from has have in into is it its of on or "
     "that the this to was were will with we our you your they their he she".split()
 )
 

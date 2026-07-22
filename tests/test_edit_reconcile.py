@@ -392,3 +392,47 @@ class TestFinding8_BackstopDeindexes:
             await af._collapse_duplicate_children("m1")
         sc.supersede_decision.assert_called_once_with("d-new", superseded_by="d-old")
         deindex.assert_called_once_with("decision", "d-new")
+
+
+# ===========================================================================
+# Re-review round 2 (2026-07-22) — fixes for what the first fixes missed
+# ===========================================================================
+class TestReReviewFixes:
+    def test_series_a_vs_b_not_merged(self):
+        # 'a' is NOT a stopword — it's the sole distinguisher here.
+        assert not is_near_dup("Approve the Series A term sheet",
+                               "Approve the Series B term sheet")
+        assert not is_near_dup("Prepare the Plan A deck", "Prepare the Plan B deck")
+        assert not is_near_dup("Go with Option A", "Go with Option B")
+
+    def test_article_reword_still_merges(self):
+        # dropping 'the' (still a stopword) is still a duplicate
+        assert is_near_dup("boost the client acquisition process",
+                           "boost client acquisition process")
+
+    def test_hebrew_items_sharing_latin_token_not_merged(self):
+        # Two distinct Hebrew items embedding the same Latin name must NOT
+        # collapse to one via the exact-normalized path.
+        assert not is_near_dup("שיחה עם Bar Topper",
+                               "מייל ל Bar Topper")
+
+    def test_followup_cascade_respects_led_by(self):
+        # The RECONCILE (not just the backstop) must guard follow-ups by led_by,
+        # or a distinct same-title follow-up is deleted on an unrelated edit.
+        old = [{"id": "e", "title": "Board update", "led_by": "Eyal"},
+               {"id": "r", "title": "Board update", "led_by": "Roye"}]
+        edited = [{"title": "Board update", "led_by": "Eyal"},
+                  {"title": "Board update", "led_by": "Roye"}]
+        plan = reconcile_children(old, edited, lambda f: f.get("title", ""),
+                                  secondary_of=lambda f: f.get("led_by", ""))
+        assert plan["deletes"] == [] and plan["creates"] == []
+        assert {oid for oid, _ in plan["updates"]} == {"e", "r"}
+
+    def test_question_cascade_respects_raised_by(self):
+        old = [{"id": "a", "question": "Do we need a PhD agronomist?", "raised_by": "Eyal"},
+               {"id": "b", "question": "Do we need a PhD agronomist?", "raised_by": "Paolo"}]
+        edited = [{"question": "Do we need a PhD agronomist?", "raised_by": "Eyal"},
+                  {"question": "Do we need a PhD agronomist?", "raised_by": "Paolo"}]
+        plan = reconcile_children(old, edited, lambda q: q.get("question", ""),
+                                  secondary_of=lambda q: q.get("raised_by", ""))
+        assert plan["deletes"] == [] and plan["creates"] == []

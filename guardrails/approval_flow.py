@@ -1826,6 +1826,7 @@ Return ONLY the JSON object, no other text."""
             {"title": f.get("title", ""), "led_by": f.get("led_by", "")}
             for f in _dedup(
                 edited.get("follow_ups", []), lambda f: f.get("title", ""),
+                secondary_of=lambda f: f.get("led_by", ""),
                 char_threshold=_ect, token_threshold=_ett,
             )
         ]
@@ -1833,6 +1834,7 @@ Return ONLY the JSON object, no other text."""
             {"question": q.get("question", ""), "raised_by": q.get("raised_by", "")}
             for q in _dedup(
                 edited.get("open_questions", []), lambda q: q.get("question", ""),
+                secondary_of=lambda q: q.get("raised_by", ""),
                 char_threshold=_ect, token_threshold=_ett,
             )
         ]
@@ -1925,9 +1927,12 @@ Return ONLY the JSON object, no other text."""
                 )
 
             # --- Follow-up meetings (in place now — keeps the UUID) ---
+            # led_by is the secondary guard: two same-title follow-ups with
+            # different owners are distinct and must not collapse into one.
             f_plan = reconcile_children(
                 follow_ups, edited.get("follow_ups", []),
                 text_of=lambda f: f.get("title", ""),
+                secondary_of=lambda f: f.get("led_by", ""),
                 char_threshold=_ct, token_threshold=_tt,
             )
             for _old_id, _it in f_plan["updates"]:
@@ -1944,9 +1949,12 @@ Return ONLY the JSON object, no other text."""
                 )
 
             # --- Open questions (in place now — questions carry downstream identity) ---
+            # raised_by is the secondary guard: the same question raised by two
+            # different people is two distinct rows, not a duplicate.
             q_plan = reconcile_children(
                 open_questions, edited.get("open_questions", []),
                 text_of=lambda q: q.get("question", ""),
+                secondary_of=lambda q: q.get("raised_by", ""),
                 char_threshold=_ct, token_threshold=_tt,
             )
             for _old_id, _it in q_plan["updates"]:
