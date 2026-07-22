@@ -1,0 +1,361 @@
+{
+  "revision": "1385",
+  "modified": "2026-06-11T07:45:08.871Z",
+  "rows": 82,
+  "kept_uuids": [
+    "143f6101-a7e2-42ac-b041-be1ca8c68431",
+    "c495d303-c60f-480f-bf27-1dbacd58a9e6",
+    "7e6b6c01-ce7a-489c-b284-e5fa0f427ece",
+    "496c2a10-b0d8-4612-8b48-6ddd488e9442",
+    "9764908d-b8ab-4438-8e17-ade0262ddf78",
+    "cc3f2557-371f-4053-8713-3b6b1ebf675a",
+    "93c80b89-6cd5-4ce0-a071-a8cf3e0542c1",
+    "1249cd63-0af0-453a-8aaf-7d439cf2224b",
+    "11fe0574-36d1-4385-aaa8-c248c7c40731",
+    "23348981-064f-4e33-90f3-c2d5bbe2564e",
+    "ecb43244-244a-4ded-b263-75dfebd0b984",
+    "f7120e9b-dcaa-4a24-a3e5-b275d0956c12",
+    "6cc502d0-df71-4ca5-8bd9-c38438e6ec1c",
+    "859659e0-e1c4-4aa7-a5f4-4fb62484690e",
+    "a6e2aaaa-33cb-48cb-954b-a58f62d55d3c",
+    "d2e8f80a-e5bc-4dba-b044-c8dafc772956",
+    "983d5f55-53c7-4495-92a7-8967aa42c00e",
+    "7b5b238a-5695-44bb-8996-52a5c278a7dc",
+    "bd0e2a7e-7248-4bf0-8074-59cec3fd32df",
+    "988882f4-f3bb-44db-b225-7ca0440b1fa6",
+    "7dad7b12-7c6d-41ff-98c2-a7e59a681d3b",
+    "f5248f09-bd70-40e5-87eb-050af199602e",
+    "ca8a4d11-dbe2-44ae-a046-3349964907df",
+    "6c6a4f62-3527-4970-9c0a-086d75eec3b2",
+    "c2b023c9-e30b-40cb-8cc6-b922b09219ad",
+    "4c5c70c0-5c5e-4cca-97d5-b3c0ff083c44",
+    "789abd47-060a-4118-84ee-875ce16ecd7d",
+    "b05f2846-a2fa-4d88-b594-ed834b65a5a7",
+    "7bbbe7b0-eabe-48f8-a5bf-5003b0672823",
+    "8dd6b7bb-9abe-4c64-8e19-fdffd8b92230",
+    "19ed7b58-29d5-4744-9177-d4167fbb1be8",
+    "717b2a91-2f7d-4004-ab4a-4146a1a635ba",
+    "6d9c4e08-d016-46cd-a6e5-d7f23e93fe57",
+    "cacfadaa-af49-4f30-a99a-8a72a7b1c264",
+    "d733b99e-e04d-4022-ba97-6b47c69adb31",
+    "7333ef7d-303c-4e46-990b-6c13587f86e0",
+    "3ad6725f-36ee-4123-a8f4-b5ca3e2ae9c3",
+    "21027ec7-5aee-4fe7-9cac-22a6d4562908",
+    "4eb459ea-8ab2-4747-97df-74608430deb6",
+    "98b685ff-4578-43f1-b4fe-11826d3085a7",
+    "82ed10bf-f574-43d6-a435-50f16f953324",
+    "8b5ee37e-e729-4299-a865-626a724f0ca3",
+    "467abc36-3a95-469c-82ed-5c3b8fd5f016",
+    "def6f51b-c357-4b74-9ac4-43b028b7c384",
+    "53ba0704-314a-4b3d-804f-07e8e8d0a552",
+    "76866954-e75c-4aec-abbf-8e90874128da",
+    "a0582717-2c44-4c82-9a91-f774e8fd5b55",
+    "4e5f3070-b1b0-42ce-a7da-631410e7ada8",
+    "3fdbcf44-411b-4d89-bf89-b54bc6a5426a",
+    "338fc629-6217-4e1f-98bc-7db5d218e8d8",
+    "c593cdf3-4280-48ad-93a3-cbe6f71de0a7",
+    "2e736aab-2906-4a20-9219-eed93bf0844e",
+    "a0da339c-58ba-44ed-b8e4-cb138322c2df",
+    "926bd817-3346-4f35-9d27-cc621cea77e3",
+    "5c87191d-54c0-4ef7-9241-29f91c08b8d0",
+    "a8eb9c52-ca36-4d58-8e0d-5607927e2a6f",
+    "78b809f9-2886-4d02-a0e0-6f48a1eeed62",
+    "85f08be7-b4d8-4539-bf53-9da014243b0a",
+    "f32d8c19-8157-49da-8b6f-ec0cee01cbc8",
+    "c838e0b7-7d55-4a6a-b31e-0fa5ab1ce3e1",
+    "5dd81a4a-4f7c-421e-88d5-52cc43e6ff3d",
+    "365f70bc-d738-4d07-9a6a-87667f017b38",
+    "2163cc37-08a5-4e74-bc35-960b7a75df21",
+    "ce37330b-6373-48a7-bf74-aa03b4f0aa07",
+    "8cf353fe-6d29-482c-b618-7a90bde476e9",
+    "e9204808-14a6-47d8-8b6f-5c18dfa1d82a",
+    "4916fd03-64e3-412e-8735-f8cf921a254c",
+    "e25bf9e3-4061-4fa4-b051-ced47d3cc0ac",
+    "aeb1f78d-daaf-49b3-879d-e48e67f014f5",
+    "94a18de0-4b40-4153-bcf8-219d803e1542",
+    "0b8ccd00-e671-4bb6-b77b-7e6adde594ac",
+    "01cc3cf6-7de5-4e00-8792-834485410c2c",
+    "55f832eb-b59f-44c7-8f69-11cc71356cad",
+    "44545a7e-c7f3-4811-8f89-619406cff7a5",
+    "5e72c4d6-acbb-43c5-9a4f-411ca9c8bcf2",
+    "0cb0a7f9-0606-49fa-983c-a9093074eb49",
+    "933cb457-ca3c-4a5e-903b-d7bea5a5ddcb",
+    "2a99bd20-1bfd-4830-bb99-03b715e6c83e",
+    "53066643-095a-468b-b308-de0f17cf2340",
+    "ad8aa70e-318f-4af7-a1a5-42a0a410590f",
+    "fa086a8e-16a9-4bc3-89c8-159a7ea4cdd8",
+    "a4718f7d-a1f2-4265-adb1-e6ab14e1a91c"
+  ],
+  "deadline_edits": [
+    {
+      "id": "143f6101-a7e2-42ac-b041-be1ca8c68431",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Prepare a 1-2 page personalized commercial document for Fran"
+    },
+    {
+      "id": "c495d303-c60f-480f-bf27-1dbacd58a9e6",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Schedule: Paolo & Eyal Franciacorta Document Walkthrough"
+    },
+    {
+      "id": "7e6b6c01-ce7a-489c-b284-e5fa0f427ece",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Schedule: R&D meeting with Franciacorta consortium research "
+    },
+    {
+      "id": "9764908d-b8ab-4438-8e17-ade0262ddf78",
+      "cell": "30.6.26",
+      "iso": "2026-06-30",
+      "title": "Arrange D&O insurance before Franciacorta signing"
+    },
+    {
+      "id": "cc3f2557-371f-4053-8713-3b6b1ebf675a",
+      "cell": "30.6.26",
+      "iso": "2026-06-30",
+      "title": "Build a Franciacorta financial business case — use the ~90% "
+    },
+    {
+      "id": "1249cd63-0af0-453a-8aaf-7d439cf2224b",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Build prediction accuracy vs. lead-time analysis — create fu"
+    },
+    {
+      "id": "11fe0574-36d1-4385-aaa8-c248c7c40731",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Work on the lead-time component of the model over the next 2"
+    },
+    {
+      "id": "23348981-064f-4e33-90f3-c2d5bbe2564e",
+      "cell": "2026-05-03",
+      "iso": "2026-05-03",
+      "title": "Meet with Orit today to deliver a direct message: CropSight "
+    },
+    {
+      "id": "ecb43244-244a-4ded-b263-75dfebd0b984",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Begin search for an Italy-based saleswoman to work alongside"
+    },
+    {
+      "id": "f7120e9b-dcaa-4a24-a3e5-b275d0956c12",
+      "cell": "30.6.26",
+      "iso": "2026-06-30",
+      "title": "Prepare and send a detailed marketing and communication plan"
+    },
+    {
+      "id": "6cc502d0-df71-4ca5-8bd9-c38438e6ec1c",
+      "cell": "2026-06-30",
+      "iso": "2026-06-30",
+      "title": "Initiate AI compliance workstream — audit and address all AI"
+    },
+    {
+      "id": "859659e0-e1c4-4aa7-a5f4-4fb62484690e",
+      "cell": "30.6.26",
+      "iso": "2026-06-30",
+      "title": "Update the P&L and technology personnel sections in the BP f"
+    },
+    {
+      "id": "d2e8f80a-e5bc-4dba-b044-c8dafc772956",
+      "cell": "2026-06-01",
+      "iso": "2026-06-01",
+      "title": "Prepare and send a combined document for Sarah Catalani — in"
+    },
+    {
+      "id": "983d5f55-53c7-4495-92a7-8967aa42c00e",
+      "cell": "2026-06-01",
+      "iso": "2026-06-01",
+      "title": "Prepare and send a POC description document to the Israeli E"
+    },
+    {
+      "id": "7b5b238a-5695-44bb-8996-52a5c278a7dc",
+      "cell": "2026-06-01",
+      "iso": "2026-06-01",
+      "title": "File the CRM request on the Israeli Ministry of Economy port"
+    },
+    {
+      "id": "bd0e2a7e-7248-4bf0-8074-59cec3fd32df",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Initiate contact with 2-3 Italian wine consortiums (from Olt"
+    },
+    {
+      "id": "988882f4-f3bb-44db-b225-7ca0440b1fa6",
+      "cell": "15.6.26",
+      "iso": "2026-06-15",
+      "title": "Gather detailed information on Italian farmer technology gra"
+    },
+    {
+      "id": "7dad7b12-7c6d-41ff-98c2-a7e59a681d3b",
+      "cell": "2026-06-13",
+      "iso": "2026-06-13",
+      "title": "UPDATE: Conduct call with Francesca Servale (president of Ol"
+    },
+    {
+      "id": "f5248f09-bd70-40e5-87eb-050af199602e",
+      "cell": "2026-06-13",
+      "iso": "2026-06-13",
+      "title": "Update Mati's existing term sheet draft with key engagement "
+    },
+    {
+      "id": "6c6a4f62-3527-4970-9c0a-086d75eec3b2",
+      "cell": "2026-06-13",
+      "iso": "2026-06-13",
+      "title": "Review the repurchase right ruling document and add or modif"
+    },
+    {
+      "id": "717b2a91-2f7d-4004-ab4a-4146a1a635ba",
+      "cell": "30.6.26",
+      "iso": "2026-06-30",
+      "title": "Call back the Israeli agribusiness contact (introduced by Re"
+    },
+    {
+      "id": "6d9c4e08-d016-46cd-a6e5-d7f23e93fe57",
+      "cell": "30.6.26",
+      "iso": "2026-06-30",
+      "title": "All founders and key contributors (Eyal, Roye, Paolo, Mati) "
+    },
+    {
+      "id": "cacfadaa-af49-4f30-a99a-8a72a7b1c264",
+      "cell": "15.6.26",
+      "iso": "2026-06-15",
+      "title": "Complete Tomasz Hoffmann's 9-question project questionnaire "
+    },
+    {
+      "id": "d733b99e-e04d-4022-ba97-6b47c69adb31",
+      "cell": "15.6.26",
+      "iso": "2026-06-15",
+      "title": "Schedule a follow-up meeting with Daniele Balzaretti to disc"
+    },
+    {
+      "id": "7333ef7d-303c-4e46-990b-6c13587f86e0",
+      "cell": "15.6.26",
+      "iso": "2026-06-15",
+      "title": "Prepare for the expected discussion regarding competitive an"
+    },
+    {
+      "id": "21027ec7-5aee-4fe7-9cac-22a6d4562908",
+      "cell": "15.6.26",
+      "iso": "2026-06-15",
+      "title": "Contact IBI trustee to initiate the ESOP submission process "
+    },
+    {
+      "id": "4eb459ea-8ab2-4747-97df-74608430deb6",
+      "cell": "20.6.26",
+      "iso": "2026-06-20",
+      "title": "Yoram to resolve legal issues with company incorporation"
+    },
+    {
+      "id": "82ed10bf-f574-43d6-a435-50f16f953324",
+      "cell": "2026-04-12",
+      "iso": "2026-04-12",
+      "title": "Finalize and launch the CropSight website (cropsight.io doma"
+    },
+    {
+      "id": "467abc36-3a95-469c-82ed-5c3b8fd5f016",
+      "cell": "2026-04-09",
+      "iso": "2026-04-09",
+      "title": "Meet with Paolo to add a representative test case layer to h"
+    },
+    {
+      "id": "76866954-e75c-4aec-abbf-8e90874128da",
+      "cell": "2026-03-26",
+      "iso": "2026-03-26",
+      "title": "Send Chapter 12 (Funding & Investment) of the business plan "
+    },
+    {
+      "id": "a0582717-2c44-4c82-9a91-f774e8fd5b55",
+      "cell": "2026-03-27",
+      "iso": "2026-03-27",
+      "title": "Review Chapter 12 of the business plan in detail — understan"
+    },
+    {
+      "id": "4e5f3070-b1b0-42ce-a7da-631410e7ada8",
+      "cell": "2026-03-27",
+      "iso": "2026-03-27",
+      "title": "Coordinate with Yoram (via Shimrit) to schedule a one-hour m"
+    },
+    {
+      "id": "c593cdf3-4280-48ad-93a3-cbe6f71de0a7",
+      "cell": "2026-04-01",
+      "iso": "2026-04-01",
+      "title": "Translate and summarize the Franciacorta consortium document"
+    },
+    {
+      "id": "2e736aab-2906-4a20-9219-eed93bf0844e",
+      "cell": "2026-04-11",
+      "iso": "2026-04-11",
+      "title": "UPDATE: Finalize and launch the CropSight website — second r"
+    },
+    {
+      "id": "926bd817-3346-4f35-9d27-cc621cea77e3",
+      "cell": "2026-04-03",
+      "iso": "2026-04-03",
+      "title": "Sign the new DocuSign documents sent by lawyers (updated due"
+    },
+    {
+      "id": "5c87191d-54c0-4ef7-9241-29f91c08b8d0",
+      "cell": "2026-04-05",
+      "iso": "2026-04-05",
+      "title": "Hold a 45-minute session with Paolo to walk through the Fran"
+    },
+    {
+      "id": "a8eb9c52-ca36-4d58-8e0d-5607927e2a6f",
+      "cell": "2026-04-13",
+      "iso": "2026-04-13",
+      "title": "Run CropSight's weather-based yield model on the Franciacort"
+    },
+    {
+      "id": "5dd81a4a-4f7c-421e-88d5-52cc43e6ff3d",
+      "cell": "2026-04-03",
+      "iso": "2026-04-03",
+      "title": "Create V2 of Business Plan Section 6 — adjust technical term"
+    },
+    {
+      "id": "365f70bc-d738-4d07-9a6a-87667f017b38",
+      "cell": "2026-04-03",
+      "iso": "2026-04-03",
+      "title": "Write the go-to-market strategy chapter of the business plan"
+    },
+    {
+      "id": "ce37330b-6373-48a7-bf74-aa03b4f0aa07",
+      "cell": "2026-04-06",
+      "iso": "2026-04-06",
+      "title": "Prepare and lead a customer-scenario simulation for the Mond"
+    },
+    {
+      "id": "4916fd03-64e3-412e-8735-f8cf921a254c",
+      "cell": "2026-04-13",
+      "iso": "2026-04-13",
+      "title": "Deliver early validation results for CropSight — internal V&"
+    },
+    {
+      "id": "e25bf9e3-4061-4fa4-b051-ced47d3cc0ac",
+      "cell": "2026-04-14",
+      "iso": "2026-04-14",
+      "title": "Deliver early validation results for the Franciacorta region"
+    },
+    {
+      "id": "aeb1f78d-daaf-49b3-879d-e48e67f014f5",
+      "cell": "2026-04-25",
+      "iso": "2026-04-25",
+      "title": "Finish the \"investor's package\" by the end of this week — co"
+    },
+    {
+      "id": "94a18de0-4b40-4153-bcf8-219d803e1542",
+      "cell": "2026-05-11",
+      "iso": "2026-05-11",
+      "title": "Build lead-time prediction analysis for Franciacorta — creat"
+    },
+    {
+      "id": "0b8ccd00-e671-4bb6-b77b-7e6adde594ac",
+      "cell": "2026-05-18",
+      "iso": "2026-05-18",
+      "title": "Prepare presentation-ready graphs for Franciacorta: (1) pred"
+    }
+  ]
+}

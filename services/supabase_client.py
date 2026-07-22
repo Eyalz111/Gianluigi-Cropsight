@@ -747,7 +747,17 @@ class SupabaseClient:
         decision_id: str,
         **updates,
     ) -> dict:
-        """Update a decision's fields (status, review_date, rationale, etc.)."""
+        """Update a decision's fields (status, review_date, rationale, etc.).
+
+        `label` is canonicalized here, mirroring update_task. Without it the
+        sheet-reconcile pull path could write a raw shorthand ('moldova')
+        straight over a canonical value ('Moldova Pilot') — decisions share the
+        project vocabulary with tasks, and Area is derived through it, so an
+        un-canonicalized label silently misfiles the decision in every rollup.
+        Membership, not truthiness: label="" must still resolve. [2026-07-23]
+        """
+        if "label" in updates:
+            updates["label"] = self.resolve_label(updates["label"])
         result = (
             self.client.table("decisions")
             .update(updates)

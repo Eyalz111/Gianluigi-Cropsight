@@ -39,6 +39,7 @@ class _Tbl:
     def select(self, *a, **k): return self
     def eq(self, *a, **k): return self
     def lt(self, *a, **k): return self
+    def in_(self, *a, **k): return self
     def order(self, *a, **k): return self
     def limit(self, *a, **k): return self
 
@@ -118,10 +119,16 @@ class TestResolutionProposals:
         monkeypatch.setattr(emb.embedding_service, "embed_text",
                             lambda t: _async([0.1] * 8))
         # A decision made BEFORE the question was raised must be ignored.
+        # match_embeddings returns NO created_at — the date is hydrated from
+        # the decisions table. Mocking it into the hit would hide the bug.
         monkeypatch.setattr(sc, "search_embeddings", lambda **k: [
-            {"source_id": "d1", "chunk_text": "We went with AWS",
-             "created_at": "2026-06-01T00:00:00Z", "similarity": 0.95},
+            {"source_id": "d1", "chunk_text": "We went with AWS", "similarity": 0.95},
         ])
+        monkeypatch.setattr(
+            sc, "_client",
+            MagicMock(table=lambda name, _t=tbl: (
+                _Tbl([{"id": "d1", "created_at": "2026-06-01T00:00:00Z"}])
+                if name == "decisions" else _t)))
         monkeypatch.setattr(sc, "create_pending_approval",
                             lambda **k: pytest.fail("stale decision must not propose"))
 
@@ -142,9 +149,13 @@ class TestResolutionProposals:
         monkeypatch.setattr(emb.embedding_service, "embed_text",
                             lambda t: _async([0.1] * 8))
         monkeypatch.setattr(sc, "search_embeddings", lambda **k: [
-            {"source_id": "d9", "chunk_text": "Decided: AWS over Azure",
-             "created_at": "2026-07-10T00:00:00Z", "similarity": 0.93},
+            {"source_id": "d9", "chunk_text": "Decided: AWS over Azure", "similarity": 0.93},
         ])
+        monkeypatch.setattr(
+            sc, "_client",
+            MagicMock(table=lambda name, _t=tbl: (
+                _Tbl([{"id": "d9", "created_at": "2026-07-10T00:00:00Z"}])
+                if name == "decisions" else _t)))
         stored = []
         monkeypatch.setattr(sc, "create_pending_approval",
                             lambda **k: stored.append(k) or {})

@@ -214,7 +214,15 @@ def rollback(path: str) -> int:
             updates = {"assignee": row["before"]}
             if row["title_after"] != row["title_before"]:
                 updates["title"] = row["title_before"]
-            sc.update_task(row["id"], **updates)
+            # Write DIRECTLY, bypassing update_task: it canonicalizes `assignee`
+            # on every write, so replaying a pre-canonical value like 'eyal'
+            # just resolves back to 'Eyal Zror' and the rollback is a silent
+            # no-op — for the ROSTER short names, which are the majority of what
+            # this backfill changed. The docstring promises "--rollback replays
+            # exactly"; only a raw write actually does. [2026-07-23]
+            from datetime import datetime as _dt, timezone as _tz
+            updates["updated_at"] = _dt.now(_tz.utc).isoformat()
+            sc.client.table("tasks").update(updates).eq("id", row["id"]).execute()
             sc.log_action(
                 action="assignee_backfill_rollback",
                 details={"task_id": row["id"], "restored_to": row["before"]},

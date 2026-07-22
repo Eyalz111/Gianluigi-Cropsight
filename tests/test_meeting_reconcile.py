@@ -226,3 +226,46 @@ class TestReadd:
 
         assert res["shadow"] is True
         assert calls["update"] == [] and calls["snapshot"] == []
+
+
+class TestReviewFindings:
+    """Regressions for the 2026-07-23 cloud-review findings."""
+
+    async def test_readd_seeds_a_snapshot(self, monkeypatch):
+        """bug_001 — reconcile_tasks seeds snapshots on re-add ([audit P1-04]);
+        the meetings copy dropped it, so the next cycle read snap={} and pulled
+        every field as a phantom human edit, freezing them. Worse here than on
+        tasks: proposed_date's Rule 1 has no '!= db' guard, so it froze with no
+        DB change at all."""
+        db = [_dbrow(id="m9", title="Missing", led_by="Eyal Zror",
+                     participants=["Eyal Zror"], status="not_scheduled")]
+        calls, fake = _setup(monkeypatch, [], db, {})
+
+        res = await ss.reconcile_meetings()
+
+        assert res["readded"] == 1
+        assert len(calls["snapshot"]) == 1, "a re-added row MUST get a snapshot"
+        assert calls["snapshot"][0][0] == "m9"
+
+    async def test_hand_added_row_syncs_canonical_values_back_to_the_cells(self, monkeypatch):
+        """bug_003 — create canonicalizes ('roye' -> 'Roye Tadmor') but the cell
+        kept the raw text, so snapshot != cell and the next reconcile marked the
+        field manually-sticky: a fake human edit produced by our own write."""
+        sheet = [_srow(id="", title="Sync with Roye", led_by="roye",
+                       label="moldova", row_number=5)]
+        calls, fake = _setup(monkeypatch, sheet, [], {})
+        monkeypatch.setattr(
+            ss.supabase_client, "create_follow_up_meeting_manual",
+            lambda **k: {"id": "new-m", **k,
+                         "led_by": "Roye Tadmor", "label": "Moldova Pilot"},
+        )
+
+        res = await ss.reconcile_meetings()
+
+        assert res["created"] == 1
+        body = fake.service.spreadsheets.return_value.values.return_value.batchUpdate.call_args
+        written = [w["values"][0][0] for w in body.kwargs["body"]["data"]]
+        assert "Roye Tadmor" in written, "canonical led_by must reach the cell"
+        assert "Moldova Pilot" in written, "canonical label must reach the cell"
+        # and the snapshot matches what is now in the sheet
+        assert calls["snapshot"][0][4] == "Roye Tadmor"

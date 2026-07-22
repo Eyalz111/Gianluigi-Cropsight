@@ -2504,14 +2504,22 @@ class MCPServer:
                     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     await sheets_service.add_task(
                         task=title,
-                        assignee=assignee,
+                        # Mirror the CANONICALIZED values that create_task wrote
+                        # to the DB, not the raw MCP arguments. This tool
+                        # documents accepting short names ("eyal", "moldova"),
+                        # and _sc.create_task resolves them — writing the raw
+                        # form to the Sheet made every MCP-created row diverge
+                        # on arrival, so the first reconcile read it as a human
+                        # edit and marked assignee+label permanently sticky.
+                        # _category already did this correctly. [2026-07-23]
+                        assignee=(task or {}).get("assignee", assignee),
                         source_meeting="Via Claude.ai",
                         deadline=parsed_deadline.isoformat() if parsed_deadline else None,
                         status="pending",
                         priority=priority,
                         created_date=today,
                         category=_category,
-                        label=label,
+                        label=(task or {}).get("label", label),
                         # PR10: write the UUID (col J) + urgency so the row is
                         # reconcile-complete — otherwise it'd be re-created as a dup.
                         task_id=task.get("id", "") if isinstance(task, dict) else "",

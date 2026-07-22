@@ -132,7 +132,16 @@ async def build_areas_view() -> dict:
             status=None, limit=5000, include_pending=False, include_archived=False)
         questions = (
             supabase_client.client.table("open_questions")
-            .select("label, status").eq("status", "open").limit(2000).execute().data or []
+            # approval_status filter MUST match build_questions_view above:
+            # Areas is the rollup and Open Questions is its drilldown, so an
+            # asymmetric filter makes the two tabs disagree for the whole window
+            # a meeting sits unapproved (extraction writes questions as
+            # 'pending'). Every sibling read here — get_tasks,
+            # list_follow_up_meetings — already defaults to approved-only.
+            # [2026-07-23]
+            .select("label, status")
+            .eq("status", "open").eq("approval_status", "approved")
+            .limit(2000).execute().data or []
         )
         meetings = supabase_client.list_follow_up_meetings(limit=2000)
     except Exception as e:

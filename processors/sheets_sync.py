@@ -1332,6 +1332,26 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                         "id", new_id).execute()
                     continue
                 summary["created"] += 1
+                # Push the CANONICALIZED values back into the cells before
+                # snapshotting. create_follow_up_meeting_manual canonicalizes
+                # label + led_by ("moldova" -> "Moldova Pilot", "roye" ->
+                # "Roye Tadmor"), but the cell still holds what was typed.
+                # Snapshotting the canonical form against a raw cell makes the
+                # NEXT reconcile see sheet != snap != db, fire Rule 1, and mark
+                # the field manually-sticky forever — a fake human edit created
+                # by our own write. Accepting shorthand is the advertised
+                # behaviour, so this hits essentially every hand-added row.
+                # [2026-07-23]
+                canon_cells = {
+                    "title": created.get("title"),
+                    "label": created.get("label"),
+                    "led_by": created.get("led_by"),
+                    "participants": ", ".join(created.get("participants") or []),
+                    "status": created.get("status"),
+                }
+                for _field, _canon in canon_cells.items():
+                    if _normalize(_canon) != _normalize(sm.get(_field)):
+                        _cell(_field, row, _canon)
                 supabase_client.upsert_meeting_snapshot(
                     new_id, row, created.get("title"), created.get("label"),
                     created.get("led_by"), str(created.get("proposed_date") or "")[:10],
@@ -1353,6 +1373,22 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         missing = []
     if missing and write_allowed:
         await sheets_service.add_meetings_batch_to_sheet(missing)
+        # Seed a snapshot per re-added row from the values we just wrote.
+        # Without it the next cycle reads snap={} → every field compares unequal
+        # to None → pulled as a phantom human edit + marked manual, freezing the
+        # field against future DB→Sheet refresh. reconcile_tasks fixes exactly
+        # this at its own re-add ([audit P1-04]); the meetings copy dropped it.
+        # `proposed_date` is worse here than on tasks: its Rule 1 has no
+        # "!= db" guard, so a missing snapshot freezes it on the very next
+        # reconcile with no DB change at all. [2026-07-23]
+        for m in missing:
+            if m.get("id"):
+                supabase_client.upsert_meeting_snapshot(
+                    m["id"], None, m.get("title"), m.get("label"), m.get("led_by"),
+                    str(m.get("proposed_date") or "")[:10],
+                    ", ".join(m.get("participants") or []),
+                    m.get("status") or "not_scheduled",
+                )
         summary["readded"] = len(missing)
 
     if not write_allowed:
@@ -1656,6 +1692,16 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
                 continue
             summary["created"] = summary.get("created", 0) + 1
             summary["blank_id"] -= 1
+            # Push the CANONICALIZED label back into the cell before
+            # snapshotting. create_manual_decision canonicalizes the label, but
+            # the cell still holds the shorthand that was typed — so the next
+            # reconcile sees sheet != snap != db, fires Rule 1, and pulls the
+            # RAW value back into the DB. update_decision does NOT canonicalize
+            # (bare .update()), so that pull silently OVERWRITES 'Moldova Pilot'
+            # with 'moldova' and marks the field sticky, undoing the very
+            # canonicalization the vocabulary work exists for. [2026-07-23]
+            if _normalize(created.get("label")) != _normalize(sd.get("label")):
+                _cell("label", row_no, created.get("label"))
             supabase_client.upsert_decision_snapshot(
                 new_id, row_no, created.get("description"), created.get("label"),
                 created.get("rationale"), created.get("confidence"),

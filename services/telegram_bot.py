@@ -3920,6 +3920,26 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                         f"\nDecisions — {dec.get('pulled', 0)} edit(s)→DB, "
                         f"{dec.get('pushed', 0)} DB→Sheet, {dec.get('readded', 0)} re-added."
                     )
+                # The preview promises "N meeting edit(s) → DB"; without this the
+                # confirmation reports only tasks+decisions, so meetings work
+                # reads as a silent failure even though it ran and wrote.
+                if isinstance(mtg, dict) and not mtg.get("skipped") and (
+                        mtg.get("pulled") or mtg.get("pushed")
+                        or mtg.get("created") or mtg.get("readded")):
+                    msg += (
+                        f"\nMeetings — {mtg.get('pulled', 0)} edit(s)→DB, "
+                        f"{mtg.get('pushed', 0)} DB→Sheet, "
+                        f"{mtg.get('created', 0)} created, "
+                        f"{mtg.get('readded', 0)} re-added."
+                    )
+                # MEETING_RECONCILE_SHADOW_MODE is independent of
+                # RECONCILE_SHADOW_MODE, so the tasks-only guard above lets the
+                # meetings side no-op silently under a plain "Sync applied" —
+                # exactly the cutover state (tasks live, meetings shadow) the
+                # rollout recommends. Say so rather than imply it wrote.
+                if isinstance(mtg, dict) and mtg.get("shadow"):
+                    msg += ("\n⚠️ Meetings reconcile is in SHADOW mode — the "
+                            "Meetings tab was NOT written.")
                 await self._safe_edit(query, msg)
             else:
                 await self._safe_edit(query, "Sync cancelled.")

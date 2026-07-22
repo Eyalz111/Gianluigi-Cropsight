@@ -173,10 +173,27 @@ async def propose_question_resolutions(max_proposals: int = _DEFAULT_MAX_PROPOSA
         if not hits:
             continue
         # Only a decision made AFTER the question was raised can answer it.
+        #
+        # match_embeddings does NOT return created_at (see its RETURNS TABLE in
+        # migrate_semantic_index.sql), so comparing h["created_at"] directly
+        # compared "" against the timestamp every time — always False, so this
+        # function could never propose anything. Hydrate the dates from the
+        # decisions table instead of widening the RPC contract. [2026-07-23]
         raised = str(q.get("created_at") or "")
+        dec_ids = [h.get("source_id") for h in hits if h.get("source_id")]
+        made_at: dict[str, str] = {}
+        if dec_ids:
+            try:
+                for d in (supabase_client.client.table("decisions")
+                          .select("id, created_at").in_("id", dec_ids)
+                          .execute().data or []):
+                    made_at[str(d["id"])] = str(d.get("created_at") or "")
+            except Exception as e:
+                logger.debug(f"[question_lifecycle] decision date lookup failed: {e}")
+                continue
         candidates = [
             h for h in hits
-            if str(h.get("created_at") or "") > raised
+            if made_at.get(str(h.get("source_id")), "") > raised
         ]
         if not candidates:
             continue
