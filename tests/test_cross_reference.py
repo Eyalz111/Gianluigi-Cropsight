@@ -518,6 +518,13 @@ class TestApprovalFlowCrossReference:
         with patch("guardrails.approval_flow.supabase_client") as mock_db:
             mock_db.update_task = MagicMock(return_value={"id": "t-1", "status": "done"})
             mock_db.resolve_question = MagicMock(return_value={"id": "q-1", "status": "resolved"})
+            # Neither task is human-owned -> both changes apply directly. Must be
+            # explicit: an auto-MagicMock makes .get("manual_status") truthy, which
+            # would silently route everything down the propose branch.
+            mock_db.get_task = MagicMock(
+                side_effect=lambda tid: {"id": tid, "title": "T", "status": "pending",
+                                         "manual_status": False}
+            )
 
             from guardrails.approval_flow import _apply_cross_reference_changes
 
@@ -543,6 +550,7 @@ class TestApprovalFlowCrossReference:
 
             # Should have applied 2 status changes (1 from status_changes + 1 from dedup updates)
             assert result["status_changes_applied"] == 2
+            assert result["status_changes_proposed"] == 0
             # Should have resolved 1 question
             assert result["questions_resolved"] == 1
             # Verify the calls
@@ -551,6 +559,36 @@ class TestApprovalFlowCrossReference:
                 question_id="q-1",
                 resolved_in_meeting_id="meeting-1",
             )
+
+    @pytest.mark.asyncio
+    async def test_sticky_status_is_proposed_not_overwritten(self):
+        """Rule 2: a human-owned status must never be clobbered by inference.
+
+        Before 2026-07-22 this path called update_task() unconditionally; the
+        write landed in the DB and the next reconcile pushed it into the Sheet
+        over Eyal's value, counted only as a generic "pushed".
+        """
+        with patch("guardrails.approval_flow.supabase_client") as mock_db:
+            mock_db.update_task = MagicMock()
+            mock_db.create_task_update_proposal = MagicMock(return_value={"id": "p-1"})
+            mock_db.get_task = MagicMock(
+                return_value={"id": "t-1", "title": "Sticky task",
+                              "status": "in_progress", "manual_status": True}
+            )
+
+            from guardrails.approval_flow import _apply_cross_reference_changes
+
+            result = await _apply_cross_reference_changes(
+                meeting_id="meeting-1",
+                cross_ref={"status_changes": [{"task_id": "t-1", "new_status": "done"}]},
+                meeting_title="Team Meeting",
+                meeting_date="2026-02-28",
+            )
+
+            mock_db.update_task.assert_not_called()
+            mock_db.create_task_update_proposal.assert_called_once()
+            assert result["status_changes_proposed"] == 1
+            assert result["status_changes_applied"] == 0
 
 
 # =============================================================================

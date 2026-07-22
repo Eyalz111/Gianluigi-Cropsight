@@ -38,6 +38,8 @@ class TestRejectMeetingCascade:
             }
             mock_sb.get_tasks.return_value = [{"id": "t1"}]
             mock_sb.list_decisions.return_value = [{"id": "d1"}]
+            mock_sheets.delete_task_rows_by_id = AsyncMock(return_value=1)
+            mock_sheets.delete_decision_rows_by_id = AsyncMock(return_value=1)
             mock_sheets.rebuild_tasks_sheet = AsyncMock()
             mock_sheets.rebuild_decisions_sheet = AsyncMock()
 
@@ -45,8 +47,21 @@ class TestRejectMeetingCascade:
 
             # T1.9: cascade is called with keep_tombstone=True
             mock_sb.delete_meeting_cascade.assert_called_once_with("meeting-123", keep_tombstone=True)
-            mock_sheets.rebuild_tasks_sheet.assert_called_once()
-            mock_sheets.rebuild_decisions_sheet.assert_called_once()
+
+            # 2026-07-22: the Sheet cleanup removes ONLY the rejected meeting's
+            # rows. It used to clear-and-rewrite the whole tab from the DB, which
+            # silently destroyed any human edit not yet pulled by reconcile (the
+            # cell is the only record of an un-pulled edit, and the rebuild left
+            # sheet_snapshots untouched so nothing ever detected the loss).
+            mock_sheets.delete_task_rows_by_id.assert_called_once_with(["t1"])
+            mock_sheets.delete_decision_rows_by_id.assert_called_once_with(["d1"])
+            mock_sheets.rebuild_tasks_sheet.assert_not_called()
+            mock_sheets.rebuild_decisions_sheet.assert_not_called()
+
+            # the meeting_id filter must be SERVER-side (limit applies before a
+            # client-side filter would run — the 2026-07-17 blank-summary bug)
+            assert mock_sb.get_tasks.call_args.kwargs.get("meeting_id") == "meeting-123"
+
             assert result["deleted"]["tasks"] == 3
             assert result["deleted"]["decisions"] == 4
             assert result["deleted"]["tombstone"] == 1

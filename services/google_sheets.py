@@ -925,6 +925,75 @@ class GoogleSheetsService:
         logger.info(f"Archived {len(archive_rows)} task rows to Archive tab")
         return len(archive_rows)
 
+    async def _delete_rows_by_id(
+        self, tab_name: str, ids: list[str], reader, label: str
+    ) -> int:
+        """
+        Remove specific rows from `tab_name` by their UUID column, bottom-up.
+
+        Targeted alternative to the rebuild_*_sheet clear-and-rewrite. A full
+        rebuild repaints EVERY cell from the DB, which silently destroys any
+        human edit not yet pulled by reconcile — until the next reconcile runs,
+        the sheet cell is the ONLY record of that edit, and the rebuild also
+        leaves `sheet_snapshots` untouched so the loss is undetectable
+        afterwards (cell == snapshot => reconcile does nothing). With two people
+        editing the sheet daily that is a routine data-loss path, so paths that
+        only need to REMOVE rows must remove exactly those rows. [2026-07-22]
+
+        Returns the number of rows deleted. Never raises — callers treat sheet
+        upkeep as best-effort and must not fail their primary operation on it.
+        """
+        wanted = {str(i).strip() for i in (ids or []) if str(i or "").strip()}
+        if not wanted:
+            return 0
+        try:
+            rows = await reader()
+            row_numbers = sorted(
+                [r["row_number"] for r in rows
+                 if str(r.get("id") or "").strip() in wanted and r.get("row_number")],
+                reverse=True,
+            )
+            if not row_numbers:
+                return 0
+            sid = self._get_sheet_id_by_name(settings.TASK_TRACKER_SHEET_ID, tab_name)
+            if sid is None:
+                logger.warning(f"[{label}] tab {tab_name!r} not found — no rows removed")
+                return 0
+            requests = [
+                {"deleteDimension": {
+                    "range": {"sheetId": sid, "dimension": "ROWS",
+                              "startIndex": r - 1, "endIndex": r}
+                }}
+                for r in row_numbers
+            ]
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
+            logger.info(f"[{label}] removed {len(row_numbers)} row(s) from {tab_name}")
+            return len(row_numbers)
+        except Exception as e:
+            logger.error(f"[{label}] targeted row removal from {tab_name} failed: {e}")
+            return 0
+
+    async def delete_task_rows_by_id(self, task_ids: list[str]) -> int:
+        """Remove specific Tasks-tab rows by col-J UUID. See _delete_rows_by_id."""
+        tab = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+        return await self._delete_rows_by_id(
+            tab, task_ids, self.get_all_tasks, "reject-cascade"
+        )
+
+    async def delete_decision_rows_by_id(self, decision_ids: list[str]) -> int:
+        """Remove specific Decisions-tab rows by col-H UUID. See _delete_rows_by_id."""
+        if not _decision_id_enabled():
+            # No id column => no safe way to identify rows. Caller falls back.
+            return 0
+        return await self._delete_rows_by_id(
+            "Decisions", decision_ids, self.get_all_decisions, "reject-cascade"
+        )
+
     async def rebuild_tasks_sheet(
         self, tasks_from_db: list[dict], force_empty: bool = False
     ) -> bool:
@@ -1224,6 +1293,11 @@ class GoogleSheetsService:
         """
         Find the row number for a task by its description.
 
+        PREFER `find_task_row_by_id` — title matching is ambiguous (two tasks can
+        share a title, and a renamed task no longer matches), which is why the
+        reconcile engine abandoned it for the col-J UUID (audit P1-03). This is
+        kept for callers that genuinely have no id.
+
         Args:
             task_description: The task text to search for.
 
@@ -1236,6 +1310,23 @@ class GoogleSheetsService:
             if task["task"].lower() == task_description.lower():
                 return task["row_number"]
 
+        return None
+
+    async def find_task_row_by_id(self, task_id: str) -> int | None:
+        """
+        Find a task's row number by its col-J UUID — the unambiguous identity.
+
+        Title matching can resolve to the WRONG row when two tasks share a title,
+        which means a targeted cell write lands on someone else's task. The UUID
+        is written to col J by every creation path, so callers holding a task id
+        should always use this. [2026-07-22]
+        """
+        tid = str(task_id or "").strip()
+        if not tid:
+            return None
+        for task in await self.get_all_tasks():
+            if str(task.get("id") or "").strip() == tid:
+                return task.get("row_number")
         return None
 
     # =========================================================================

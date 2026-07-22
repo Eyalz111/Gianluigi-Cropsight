@@ -927,6 +927,18 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
             ]
         except Exception:
             pass
+        # Task ids too — the Sheet cleanup below removes exactly these rows
+        # instead of repainting the whole tab. Server-side meeting_id filter
+        # (never fetch-then-filter: limit applies first — the 2026-07-17 bug).
+        _rejected_task_ids: list[str] = []
+        try:
+            _rejected_task_ids = [
+                t["id"] for t in supabase_client.get_tasks(
+                    meeting_id=meeting_id, status=None, limit=1000,
+                    include_pending=True, include_archived=True) if t.get("id")
+            ]
+        except Exception:
+            pass
         counts = supabase_client.delete_meeting_cascade(meeting_id, keep_tombstone=True)
         supabase_client.log_action(
             action="meeting_rejected_tombstoned",
@@ -955,23 +967,37 @@ async def _reject_meeting_cascade(meeting_id: str, is_non_meeting: bool) -> dict
             logger.error(f"Alert on reject cascade failure also failed: {alert_err}")
         return {"deleted": {}, "error": str(e)}
 
-    # Rebuild Sheets from fresh DB state (best-effort — don't fail the reject)
+    # Remove ONLY the rejected meeting's rows from the Sheets (best-effort —
+    # don't fail the reject).
+    #
+    # This used to call rebuild_tasks_sheet + rebuild_decisions_sheet, which
+    # clear-and-rewrite EVERY row from the DB. Rejecting one meeting therefore
+    # repainted the whole sheet and silently destroyed any edit Eyal (or now
+    # Nechama) had made since the last reconcile — the cell is the only record
+    # of an un-pulled edit, and the rebuild left `sheet_snapshots` untouched, so
+    # the next reconcile saw cell == snapshot and never noticed. Targeted removal
+    # touches nothing but the rows that actually went away. [2026-07-22]
+    #
+    # The child rows are already gone from the DB (cascade above), and
+    # sheet_snapshots rows follow via ON DELETE CASCADE, so no snapshot cleanup
+    # is needed here.
     try:
         from services.google_sheets import sheets_service
 
-        fresh_tasks = supabase_client.get_tasks(status=None, limit=1000)
-        fresh_decisions = supabase_client.list_decisions(limit=1000)
-        await sheets_service.rebuild_tasks_sheet(fresh_tasks)
-        await sheets_service.rebuild_decisions_sheet(fresh_decisions)
-        logger.info("Rebuilt Tasks + Decisions sheets after cascading reject")
+        removed_t = await sheets_service.delete_task_rows_by_id(_rejected_task_ids)
+        removed_d = await sheets_service.delete_decision_rows_by_id(_rejected_decision_ids)
+        logger.info(
+            f"Removed rejected meeting {meeting_id} rows from Sheets: "
+            f"{removed_t} task(s), {removed_d} decision(s)"
+        )
     except Exception as e:
-        logger.error(f"Sheets rebuild after reject failed (non-fatal): {e}")
+        logger.error(f"Sheets row removal after reject failed (non-fatal): {e}")
         try:
             await send_system_alert(
                 AlertSeverity.WARNING,
                 "approval_flow._reject_meeting_cascade",
-                f"Sheets rebuild failed after rejecting {meeting_id} — "
-                f"run scripts/rebuild_sheets.py to reconcile. Error: {e}",
+                f"Sheet row removal failed after rejecting {meeting_id} — "
+                f"stale rows may remain. Error: {e}",
             )
         except Exception:
             pass
@@ -2659,23 +2685,47 @@ async def _apply_cross_reference_changes(
     """
     applied = {
         "status_changes_applied": 0,
+        "status_changes_proposed": 0,
         "questions_resolved": 0,
     }
 
+    def _apply_or_propose_status(task_id: str, new_status: str, source: str) -> None:
+        """Rule 2: inference proposes, it never clobbers a human-owned field.
+
+        Both call sites below used to call update_task() unconditionally. When
+        the field was sticky, the write landed in the DB and the next reconcile
+        pushed it into the Sheet over Eyal's value — a silent revert counted only
+        as a generic "pushed". The sibling inference path
+        (cross_reference._apply_inferred_status_changes) already proposed instead
+        of writing; this one was missed. [2026-07-22]
+        """
+        try:
+            task = supabase_client.get_task(task_id)
+            if task and task.get("manual_status"):
+                supabase_client.create_task_update_proposal(
+                    task_id, "status", new_status,
+                    title=task.get("title", ""),
+                    current=task.get("status"),
+                    source=source,
+                )
+                applied["status_changes_proposed"] += 1
+                logger.info(
+                    f"Proposed status '{new_status}' for sticky task {task_id} "
+                    f"(manual_status set) — not clobbering"
+                )
+                return
+            supabase_client.update_task(task_id, status=new_status)
+            applied["status_changes_applied"] += 1
+            logger.info(f"Applied status change: task {task_id} -> {new_status}")
+        except Exception as e:
+            logger.error(f"Error applying status change for task {task_id}: {e}")
+
     # Apply task status changes
-    status_changes = cross_ref.get("status_changes", [])
-    for change in status_changes:
+    for change in cross_ref.get("status_changes", []):
         task_id = change.get("task_id")
         new_status = change.get("new_status")
         if task_id and new_status:
-            try:
-                supabase_client.update_task(task_id, status=new_status)
-                applied["status_changes_applied"] += 1
-                logger.info(
-                    f"Applied status change: task {task_id} -> {new_status}"
-                )
-            except Exception as e:
-                logger.error(f"Error applying status change for task {task_id}: {e}")
+            _apply_or_propose_status(task_id, new_status, f"meeting:{meeting_id}")
 
     # Apply task status changes from dedup updates
     dedup = cross_ref.get("dedup", {})
@@ -2683,11 +2733,7 @@ async def _apply_cross_reference_changes(
         task_id = update.get("existing_task_id")
         new_status = update.get("new_status")
         if task_id and new_status:
-            try:
-                supabase_client.update_task(task_id, status=new_status)
-                applied["status_changes_applied"] += 1
-            except Exception as e:
-                logger.error(f"Error applying dedup update for task {task_id}: {e}")
+            _apply_or_propose_status(task_id, new_status, f"dedup:{meeting_id}")
 
     # Resolve open questions
     resolved_qs = cross_ref.get("resolved_questions", [])
@@ -2706,6 +2752,7 @@ async def _apply_cross_reference_changes(
 
     logger.info(
         f"Cross-reference applied: {applied['status_changes_applied']} status changes, "
+        f"{applied['status_changes_proposed']} proposed (sticky), "
         f"{applied['questions_resolved']} questions resolved"
     )
     return applied

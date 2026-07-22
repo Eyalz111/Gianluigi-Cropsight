@@ -30,6 +30,18 @@ from config.settings import settings
 
 _ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 from config.team import CROPSIGHT_TEAM_EMAILS, TEAM_TELEGRAM_IDS
+
+
+class _EverythingSet(frozenset):
+    """A set that reports containing every item — used to fail closed."""
+
+    def __contains__(self, item) -> bool:  # noqa: D105
+        return True
+
+
+# Returned when we cannot determine which statuses are human-owned: every id
+# tests as "manual", so no automatic status write happens at all.
+_ALL_STATUS_WRITES_SUPPRESSED = _EverythingSet()
 from services.google_sheets import sheets_service
 from services.supabase_client import supabase_client
 from services.telegram_bot import telegram_bot  # kept for eyal_chat_id
@@ -232,6 +244,31 @@ class TaskReminderScheduler:
             # every deadlined task). Better over-notify than go silent.
             return set()
 
+    def _get_manual_status_ids(self) -> set[str]:
+        """
+        Task ids whose `status` Eyal (or Nechama) set by hand.
+
+        The overdue marker must never overwrite a human-owned status: if someone
+        deliberately set 'in_progress', an automatic flip to 'overdue' is a
+        silent revert of their call. Reminders still SEND for these tasks — only
+        the status write is suppressed.
+        """
+        try:
+            rows = (
+                supabase_client.client.table("tasks")
+                .select("id")
+                .eq("manual_status", True)
+                .limit(10000)
+                .execute()
+            )
+            return {str(r.get("id")) for r in (rows.data or []) if r.get("id")}
+        except Exception as e:
+            # Fail CLOSED: if we can't tell which statuses are human-owned, don't
+            # write any of them. A missed 'overdue' flag is cosmetic; clobbering
+            # a human edit is data loss.
+            logger.warning(f"manual_status lookup failed; suppressing status writes: {e}")
+            return _ALL_STATUS_WRITES_SUPPRESSED
+
     async def _check_and_send_reminders(self) -> dict:
         """
         Check all tasks and send appropriate reminders.
@@ -254,6 +291,7 @@ class TaskReminderScheduler:
         # silently dropping every reminder on a transient Supabase blip.
         explicit_keys = self._get_explicit_task_keys()
         filter_active = bool(explicit_keys)
+        manual_status_ids = self._get_manual_status_ids()
 
         today = datetime.now(_ISRAEL_TZ).date()
         lookback_cutoff = today - timedelta(days=settings.ALERT_LOOKBACK_DAYS)
@@ -317,14 +355,22 @@ class TaskReminderScheduler:
                 self._mark_reminded(task_id)
                 summary["reminders_sent"] += 1
 
-                # Update status to overdue in sheet
-                row = task.get("row_number")
-                if row:
-                    await sheets_service.update_task_status(
-                        row_number=row,
-                        status="overdue",
-                        updated_date=today.strftime("%Y-%m-%d")
-                    )
+                # Mark overdue in the DB and let reconcile push the cell.
+                #
+                # This used to write the Sheet cell directly (update_task_status
+                # by row number), which had two failure modes: it overwrote
+                # whatever a human had typed there since the last reconcile, and
+                # the next reconcile then saw cell != snapshot, attributed the
+                # system's OWN write to Eyal, and set a FAKE manual_status=True —
+                # which permanently suppressed cross_reference's status inference
+                # for that task. Going through the DB makes the sheet update a
+                # normal Rule 4 refresh. [2026-07-22]
+                tid = str(task.get("id") or "").strip()
+                if tid and tid not in manual_status_ids:
+                    try:
+                        supabase_client.update_task(tid, status="overdue")
+                    except Exception as e:
+                        logger.warning(f"Could not mark {tid} overdue in DB: {e}")
 
             elif days_until == 0:
                 # Due today

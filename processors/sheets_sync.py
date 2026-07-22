@@ -723,9 +723,11 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             creates.append(st)
 
     summary = {"matched": 0, "pulled": 0, "pushed": 0, "created": 0, "readded": 0,
-               "archived": 0, "bad_dates": 0, "shadow": shadow, "dry_run": dry_run}
+               "archived": 0, "bad_dates": 0, "manual_held": 0,
+               "shadow": shadow, "dry_run": dry_run}
     db_updates: dict[str, dict] = {}   # task_id -> {field: value}
     manual_marks: list[tuple] = []     # (task_id, field)
+    manual_held: list[tuple] = []      # (task_id, field, db_val, sheet_val) — Rule 4 suppressed
     cell_writes: list[dict] = []       # {"range": ..., "values": [[v]]}
     snapshot_writes: list[tuple] = []  # (task_id, row, status, deadline, priority, assignee, title, label)
     archive_moves: list[dict] = []     # sheet-row dicts to move to the Archive tab
@@ -770,11 +772,23 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 summary["pulled"] += 1
                 final[field] = sheet_val
             elif _normalize(db_val) != _normalize(sheet_val):
-                _cell(_ACTION_SHEET_KEY[field], row, db_val)  # DB advanced -> refresh (Rule 4)
-                summary["pushed"] += 1
-                final[field] = db_val
-                if field == "deadline":
-                    deadline_cell_written = True
+                if dt.get(f"manual_{field}"):
+                    # Rule 2 rail: never clobber a manually-set field. Until
+                    # 2026-07-22 the manual_* flags were write-only (one reader in
+                    # the whole codebase) and Rule 4 pushed straight over Eyal's
+                    # sticky value. The authoritative HUMAN paths (Telegram, MCP)
+                    # write the cell as well as the DB, so a DB-only divergence on
+                    # a sticky field means a system/inference path wrote it — hold
+                    # the human's cell and surface it instead of reverting.
+                    summary["manual_held"] += 1
+                    manual_held.append((sid, field, db_val, sheet_val))
+                    final[field] = sheet_val
+                else:
+                    _cell(_ACTION_SHEET_KEY[field], row, db_val)  # DB advanced -> refresh (Rule 4)
+                    summary["pushed"] += 1
+                    final[field] = db_val
+                    if field == "deadline":
+                        deadline_cell_written = True
             else:
                 final[field] = sheet_val
         # Normalize sloppy-but-valid date cells ("20.6.26" -> "2026-06-20") so
@@ -804,9 +818,15 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 summary["pulled"] += 1
                 final[db_key] = c_sheet
             elif _normalize(c_db) != _normalize(c_sheet):
-                _cell(col_key, row, c_db)                  # DB advanced -> refresh (Rule 4)
-                summary["pushed"] += 1
-                final[db_key] = c_db
+                if dt.get(f"manual_{db_key}"):
+                    # Same Rule 2 rail as the action fields above. [2026-07-22]
+                    summary["manual_held"] += 1
+                    manual_held.append((sid, db_key, c_db, c_sheet))
+                    final[db_key] = c_sheet
+                else:
+                    _cell(col_key, row, c_db)              # DB advanced -> refresh (Rule 4)
+                    summary["pushed"] += 1
+                    final[db_key] = c_db
             else:
                 final[db_key] = c_sheet
         # Urgency is a simple Sheet->DB pull (no snapshot needed — nothing
@@ -1057,6 +1077,19 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             supabase_client.upsert_sheet_snapshot(
                 tid, row, sstatus, sdeadline, spriority, sassignee, stitle, slabel)
 
+    # Surface any Rule 4 pushes we suppressed to protect a sticky field. Silent
+    # divergence is how the old clobber went unnoticed for months — name it.
+    if manual_held:
+        summary["manual_held_fields"] = [
+            {"task_id": t, "field": f, "db": str(d or ""), "sheet": str(s or "")}
+            for (t, f, d, s) in manual_held[:20]
+        ]
+        logger.warning(
+            f"[reconcile] held {len(manual_held)} manually-set field(s) against a "
+            f"DB-side change (Sheet value kept): "
+            + ", ".join(f"{t[:8]}.{f}" for (t, f, _, _) in manual_held[:10])
+        )
+
     try:
         supabase_client.log_action("reconcile_applied", details=summary, triggered_by="auto")
     except Exception:
@@ -1127,8 +1160,9 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
             blank_id += 1  # hand-authored row — first cut leaves it
 
     summary = {"matched": 0, "pulled": 0, "pushed": 0, "readded": 0,
-               "blank_id": blank_id, "status_guarded": 0,
+               "blank_id": blank_id, "status_guarded": 0, "manual_held": 0,
                "shadow": shadow, "dry_run": dry_run}
+    manual_held: list[tuple] = []      # (decision_id, field, db_val, sheet_val)
 
     # CUTOVER BOOTSTRAP: pre-cutover state — the sheet still holds the historical
     # A:G rows (decision text present) but NONE carry an id, and no snapshots exist
@@ -1208,9 +1242,16 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
                 summary["pulled"] += 1
                 final[db_key] = val
             elif _normalize(c_db) != _normalize(c_sheet):
-                _cell(col_key, row, c_db)              # DB advanced -> refresh (Rule 4)
-                summary["pushed"] += 1
-                final[db_key] = c_db
+                if dd.get(f"manual_{db_key}"):
+                    # Same Rule 2 rail as reconcile_tasks: a sticky field is never
+                    # reverted by a DB-side change. [2026-07-22]
+                    summary["manual_held"] += 1
+                    manual_held.append((sid, db_key, c_db, c_sheet))
+                    final[db_key] = c_sheet
+                else:
+                    _cell(col_key, row, c_db)          # DB advanced -> refresh (Rule 4)
+                    summary["pushed"] += 1
+                    final[db_key] = c_db
             else:
                 final[db_key] = c_sheet
 
@@ -1331,6 +1372,16 @@ async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None)
         ok = supabase_client.upsert_decision_snapshot(did, row, sdesc, slabel, srat, sconf, sstatus)
         if not ok:
             supabase_client.upsert_decision_snapshot(did, row, sdesc, slabel, srat, sconf, sstatus)
+
+    if manual_held:
+        summary["manual_held_fields"] = [
+            {"decision_id": d, "field": f, "db": str(v or ""), "sheet": str(s or "")}
+            for (d, f, v, s) in manual_held[:20]
+        ]
+        logger.warning(
+            f"[decision-reconcile] held {len(manual_held)} manually-set field(s) "
+            f"against a DB-side change (Sheet value kept)"
+        )
 
     try:
         supabase_client.log_action("decision_reconcile_applied", details=summary, triggered_by="auto")

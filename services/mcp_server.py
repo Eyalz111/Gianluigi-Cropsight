@@ -2322,32 +2322,38 @@ class MCPServer:
                 # Update in Supabase
                 updated = _sc.update_task(task_id, **updates)
 
-                # Sheets sync: find row and update
+                # Sheets sync: find row and update.
+                # Resolve the row by col-J UUID, not by title — two tasks can
+                # share a title, and a title match then writes these cells onto
+                # the WRONG task (the reconcile engine dropped title matching for
+                # this reason, audit P1-03). Falls back to title only when the
+                # row carries no id. [2026-07-22]
                 warnings: list[str] = []
                 try:
                     title = updated.get("title", "") or (current or {}).get("title", "")
-                    if title:
+                    row = await sheets_service.find_task_row_by_id(task_id)
+                    if row is None and title:
                         row = await sheets_service.find_task_row(title)
-                        if row:
-                            sheet_fields = {}
-                            if assignee is not None:
-                                sheet_fields["assignee"] = assignee
-                            if status is not None:
-                                sheet_fields["status"] = status
-                            if priority is not None:
-                                sheet_fields["priority"] = priority
-                            if parsed_deadline is not None:
-                                sheet_fields["deadline"] = parsed_deadline.isoformat()
-                            # Keep the Sheet's Urgency/Category cells in lockstep
-                            # so the reconcile pull doesn't revert this edit
-                            # (urgency no-ops when the K column isn't enabled).
-                            if "urgency" in updates:
-                                sheet_fields["urgency"] = updates["urgency"]
-                            if _cat_label is not None:
-                                sheet_fields["category"] = _cat_label
-                            await sheets_service.update_task_row(row, **sheet_fields)
-                        else:
-                            warnings.append("Task not found in Google Sheets — Sheets not synced")
+                    if row:
+                        sheet_fields = {}
+                        if assignee is not None:
+                            sheet_fields["assignee"] = assignee
+                        if status is not None:
+                            sheet_fields["status"] = status
+                        if priority is not None:
+                            sheet_fields["priority"] = priority
+                        if parsed_deadline is not None:
+                            sheet_fields["deadline"] = parsed_deadline.isoformat()
+                        # Keep the Sheet's Urgency/Category cells in lockstep
+                        # so the reconcile pull doesn't revert this edit
+                        # (urgency no-ops when the K column isn't enabled).
+                        if "urgency" in updates:
+                            sheet_fields["urgency"] = updates["urgency"]
+                        if _cat_label is not None:
+                            sheet_fields["category"] = _cat_label
+                        await sheets_service.update_task_row(row, **sheet_fields)
+                    else:
+                        warnings.append("Task not found in Google Sheets — Sheets not synced")
                 except Exception as sheets_err:
                     warnings.append(f"Sheets sync failed: {sheets_err}")
 

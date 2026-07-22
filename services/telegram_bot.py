@@ -4851,11 +4851,25 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         sheets_ok = False
         sheets_error: str | None = None
         try:
-            if row_number:
-                from services.google_sheets import sheets_service
-                await sheets_service.update_task_row(row_number, **updates)
+            from services.google_sheets import sheets_service
+
+            # Prefer the col-J UUID over the row number carried in the callback:
+            # rows shift whenever anything above them is inserted or archived, so
+            # a stale row_number writes these cells onto a DIFFERENT task. Same
+            # reason the reconcile engine keys on the id (audit P1-03). [2026-07-22]
+            target_row = None
+            if resolved_task_id:
+                try:
+                    target_row = await sheets_service.find_task_row_by_id(resolved_task_id)
+                except Exception:
+                    target_row = None
+            if target_row is None:
+                target_row = row_number
+
+            if target_row:
+                await sheets_service.update_task_row(target_row, **updates)
                 sheets_ok = True
-                logger.info(f"Updated task in Sheets row {row_number} -> {updates}")
+                logger.info(f"Updated task in Sheets row {target_row} -> {updates}")
             else:
                 # No row number — skip Sheets silently, not a failure
                 sheets_ok = True

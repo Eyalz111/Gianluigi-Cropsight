@@ -22,8 +22,11 @@ def sc():
 
 
 class _Chain:
-    def __init__(self):
+    def __init__(self, rows=None):
         object.__setattr__(self, "updated", None)
+        # rows returned by execute() — lets a test drive the select() probe that
+        # clear_manual_flag uses to decide whether any sticky field remains.
+        object.__setattr__(self, "rows", rows if rows is not None else [])
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -37,7 +40,7 @@ class _Chain:
         return method
 
     def execute(self):
-        return SimpleNamespace(data=[])
+        return SimpleNamespace(data=self.rows)
 
 
 class TestManualFlagHelpers:
@@ -59,4 +62,29 @@ class TestManualFlagHelpers:
         chain = _Chain()
         monkeypatch.setattr(sc, "_client", SimpleNamespace(table=lambda *a, **k: chain))
         assert sc.clear_manual_flag("t1", "deadline") is True
-        assert chain.updated == {"manual_deadline": False}
+        assert chain.updated["manual_deadline"] is False
+
+    def test_clear_last_flag_also_clears_provenance(self, sc, monkeypatch):
+        """With no sticky field left, manual_set_at/source must not linger —
+        stale provenance claims a human edit that has been released. [2026-07-22]"""
+        chain = _Chain(rows=[{
+            "manual_status": False, "manual_deadline": True, "manual_priority": False,
+            "manual_assignee": False, "manual_title": False, "manual_label": False,
+        }])
+        monkeypatch.setattr(sc, "_client", SimpleNamespace(table=lambda *a, **k: chain))
+        assert sc.clear_manual_flag("t1", "deadline") is True
+        assert chain.updated["manual_deadline"] is False
+        assert chain.updated["manual_set_at"] is None
+        assert chain.updated["manual_set_source"] is None
+
+    def test_clear_one_of_several_keeps_provenance(self, sc, monkeypatch):
+        """Another field is still sticky -> provenance must survive."""
+        chain = _Chain(rows=[{
+            "manual_status": True, "manual_deadline": True, "manual_priority": False,
+            "manual_assignee": False, "manual_title": False, "manual_label": False,
+        }])
+        monkeypatch.setattr(sc, "_client", SimpleNamespace(table=lambda *a, **k: chain))
+        assert sc.clear_manual_flag("t1", "deadline") is True
+        assert chain.updated["manual_deadline"] is False
+        assert "manual_set_at" not in chain.updated
+        assert "manual_set_source" not in chain.updated

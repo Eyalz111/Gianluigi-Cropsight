@@ -4867,14 +4867,33 @@ class SupabaseClient:
             return False
 
     def clear_manual_flag(self, task_id: str, field: str) -> bool:
-        """Clear a sticky flag so inference can write the field again."""
+        """Clear a sticky flag so inference can write the field again.
+
+        Also clears the provenance pair when no sticky field remains: leaving a
+        stale `manual_set_at`/`manual_set_source` behind makes the audit trail
+        claim a human edit that has been released. [2026-07-22]
+        """
         if field not in self._MANUAL_FIELDS:
             logger.warning(f"clear_manual_flag: unknown field '{field}'")
             return False
         try:
-            self.client.table("tasks").update(
-                {f"manual_{field}": False}
-            ).eq("id", task_id).execute()
+            updates: dict = {f"manual_{field}": False}
+            try:
+                row = (
+                    self.client.table("tasks")
+                    .select(",".join(f"manual_{f}" for f in self._MANUAL_FIELDS))
+                    .eq("id", task_id).limit(1).execute()
+                )
+                remaining = row.data[0] if row.data else {}
+                still_sticky = any(
+                    remaining.get(f"manual_{f}") for f in self._MANUAL_FIELDS if f != field
+                )
+                if not still_sticky:
+                    updates["manual_set_at"] = None
+                    updates["manual_set_source"] = None
+            except Exception:
+                pass  # provenance tidy-up is best-effort; the clear itself matters
+            self.client.table("tasks").update(updates).eq("id", task_id).execute()
             return True
         except Exception as e:
             logger.error(f"Error clearing manual flag ({task_id}.{field}): {e}")
