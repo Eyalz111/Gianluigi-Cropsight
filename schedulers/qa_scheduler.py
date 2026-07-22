@@ -67,6 +67,8 @@ def run_qa_check() -> dict:
     report["checks"]["topic_state_staleness"] = _check_topic_state_staleness(report["issues"])
     report["checks"]["category_taxonomy"] = _check_category_taxonomy(report["issues"])
     report["checks"]["assignee_taxonomy"] = _check_assignee_taxonomy(report["issues"])
+    report["checks"]["question_aging"] = _run_question_aging(report["issues"])
+    report["checks"]["project_learning"] = _run_project_learning(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -573,6 +575,61 @@ def _check_assignee_taxonomy(issues: list[str]) -> dict:
             )
     except Exception as e:
         logger.warning(f"Assignee taxonomy check failed: {e}")
+    return result
+
+
+def _run_question_aging(issues: list[str]) -> dict:
+    """
+    Age `open` questions untouched for 60 days to `stale`. [2026-07-22]
+
+    Open questions were an inbox with no outbox — 100+ accumulated since May
+    because the only exit was a later meeting explicitly answering one. Aging
+    never deletes: the row keeps its text and can be flipped back to `open`.
+
+    Reported, not flagged as an issue — aging is healthy maintenance, not a
+    defect. It only becomes an issue line if the backlog is still large after.
+    """
+    result: dict = {"aged": 0, "still_open": 0}
+    try:
+        from processors.question_lifecycle import age_out_questions
+
+        result.update(age_out_questions())
+        remaining = (
+            supabase_client.client.table("open_questions")
+            .select("id", count="exact").eq("status", "open").limit(1).execute()
+        )
+        result["still_open"] = remaining.count or 0
+        if result["still_open"] > 60:
+            issues.append(
+                f"Open questions backlog is large ({result['still_open']} open) — "
+                f"worth a triage pass"
+            )
+    except Exception as e:
+        logger.warning(f"Question aging failed: {e}")
+    return result
+
+
+def _run_project_learning(issues: list[str]) -> dict:
+    """
+    Propose canonical projects for labels that keep recurring. [2026-07-22]
+
+    Closes the auto-learn loop Phase 10 built but never wired: labels that don't
+    match the vocabulary are captured by resolve_label(capture=True), and a
+    label seen in 2+ distinct meetings is PROPOSED here for Eyal's approval.
+    Never auto-created — a wrong canonical name fuses two real projects.
+    """
+    result: dict = {"proposed": 0}
+    try:
+        from processors.project_learning import propose_new_projects
+
+        result.update(propose_new_projects())
+        if result.get("proposed"):
+            issues.append(
+                f"{result['proposed']} new project label(s) awaiting your approval: "
+                + ", ".join(result.get("labels", [])[:5])
+            )
+    except Exception as e:
+        logger.warning(f"Project learning failed: {e}")
     return result
 
 

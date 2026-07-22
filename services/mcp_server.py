@@ -703,6 +703,10 @@ class MCPServer:
 
                 if type == "knowledge":
                     types = ("topic_merge", "topic_assign")
+                elif type == "project":
+                    types = ("project_new",)
+                elif type == "question":
+                    types = ("question_resolved",)
                 elif type == "task":
                     types = ("task_update_proposal",)
                 elif type == "decision":
@@ -772,6 +776,34 @@ class MCPServer:
                         details={"proposal_id": proposal_id, **content},
                         triggered_by="eyal",
                     )
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
+                    return _success({"decision": "rejected"})
+
+                # --- new canonical project (auto-learn) / question closure ---
+                if content_type in ("project_new", "question_resolved"):
+                    if content_type == "project_new":
+                        from processors.project_learning import apply_project_proposal as _apply
+                    else:
+                        from processors.question_lifecycle import apply_question_resolution as _apply
+
+                    c = pending.get("content") or {}
+                    if decision == "approve":
+                        result = _apply(c)
+                        if not result.get("ok"):
+                            # Keep the proposal pending so it can be retried
+                            # rather than reporting a success that didn't happen.
+                            return _error(f"Could not apply {content_type}: {result.get('error')}")
+                        supabase_client.delete_pending_approval(proposal_id)
+                        supabase_client.log_action(
+                            f"{content_type}_approved",
+                            details={"proposal_id": proposal_id, **c, "result": result},
+                            triggered_by="eyal",
+                        )
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "approve"})
+                        return _success({"decision": "approved", "result": result})
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action(f"{content_type}_rejected",
+                                               details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
                     mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
                     return _success({"decision": "rejected"})
 
@@ -2265,6 +2297,7 @@ class MCPServer:
             priority: str | None = None,
             urgency: str | None = None,
             category: str | None = None,
+            label: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -2274,6 +2307,10 @@ class MCPServer:
                 updates = {}
                 if assignee is not None:
                     updates["assignee"] = assignee
+                # `label` (the project) had NO parameter at all, so a task's
+                # project was uneditable from Claude.ai. [2026-07-22]
+                if label is not None:
+                    updates["label"] = label
                 if status is not None:
                     updates["status"] = status
                 if priority is not None:
@@ -2351,6 +2388,11 @@ class MCPServer:
                             sheet_fields["urgency"] = updates["urgency"]
                         if _cat_label is not None:
                             sheet_fields["category"] = _cat_label
+                        # Mirror the CANONICALIZED label (update_task resolved
+                        # it), so the cell matches the DB and reconcile doesn't
+                        # treat the difference as a fresh human edit.
+                        if "label" in updates:
+                            sheet_fields["label"] = (updated or {}).get("label", updates["label"])
                         await sheets_service.update_task_row(row, **sheet_fields)
                     else:
                         warnings.append("Task not found in Google Sheets — Sheets not synced")
@@ -2440,7 +2482,12 @@ class MCPServer:
                 _u = _coerce_urgency(urgency)
                 _category = _sc.resolve_category(category)
 
-                # Create in Supabase
+                # Create in Supabase.
+                # `label` was accepted by this tool and written to the SHEET but
+                # omitted from the DB insert, so the DB label came back NULL and
+                # the next reconcile pulled it back from the sheet — marking the
+                # field manually-sticky as a side effect. Pass it through.
+                # [2026-07-22]
                 task = _sc.create_task(
                     title=title,
                     assignee=assignee,
@@ -2448,6 +2495,7 @@ class MCPServer:
                     deadline=parsed_deadline,
                     category=_category,
                     urgency=_u,
+                    label=label,
                 )
 
                 # Sheets sync

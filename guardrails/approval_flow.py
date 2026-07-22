@@ -1750,10 +1750,17 @@ async def apply_edits(
          for i, d in enumerate(decisions)],
         indent=2,
     )
+    # `label` (the project) must round-trip through the edit path. It used to be
+    # absent from BOTH the prompt payload and the rebuilt list, so any task
+    # created during a summary edit landed with label=NULL and any existing
+    # label survived only by omission. That is the exact bypass Eyal flagged:
+    # extraction canonicalizes labels, but his Telegram edits skip extraction
+    # entirely and flow through here. [2026-07-22]
     tasks_text = json.dumps(
         [{"index": i + 1, "title": t.get("title", ""), "assignee": t.get("assignee", ""),
           "priority": t.get("priority", "M"), "deadline": t.get("deadline"),
-          "category": t.get("category", ""), "status": t.get("status", "pending")}
+          "category": t.get("category", ""), "label": t.get("label", ""),
+          "status": t.get("status", "pending")}
          for i, t in enumerate(all_tasks)],
         indent=2,
     )
@@ -1801,7 +1808,7 @@ EDITS TO APPLY:
 Return a JSON object with these keys:
 - "summary": the full updated summary text
 - "decisions": updated array of decisions (same format as above). For every decision you KEEP, include its original "index" from CURRENT DECISIONS UNCHANGED — this preserves the decision's identity (its Sheet id + supersession chain). Omit "index" (or set it to null) ONLY for a brand-new decision an edit adds. Remove decisions the edits delete.
-- "tasks": updated array of tasks (same format as above). For every task you KEEP, include its original "index" from CURRENT TASKS UNCHANGED — this preserves the task's identity. Omit "index" (or set it to null) ONLY for a brand-new task that an edit adds. Remove tasks the edits delete.
+- "tasks": updated array of tasks (same format as above). For every task you KEEP, include its original "index" from CURRENT TASKS UNCHANGED — this preserves the task's identity. Omit "index" (or set it to null) ONLY for a brand-new task that an edit adds. Remove tasks the edits delete. Carry each task's "label" (its project) through UNCHANGED unless an edit explicitly changes the project; for a brand-new task, reuse an existing project label from CURRENT TASKS when it clearly belongs to one, otherwise leave "label" empty.
 - "follow_ups": updated array of follow-up meetings (same format)
 - "open_questions": updated array of open questions (same format)
 
@@ -1863,6 +1870,7 @@ Return ONLY the JSON object, no other text."""
                 "priority": t.get("priority", "M"),
                 "deadline": t.get("deadline"),
                 "category": t.get("category", ""),
+                "label": t.get("label", ""),
                 "status": t.get("status", "pending"),
             }
             for t in _dedup(
@@ -1915,6 +1923,10 @@ Return ONLY the JSON object, no other text."""
                     "category": p.get("category", ""),
                     "status": p.get("status", "pending"),
                 }
+                # Only write label when the edit actually carries one — an
+                # omitted field must never blank an existing project.
+                if p.get("label"):
+                    upd["label"] = p["label"]
                 dl = p.get("deadline")
                 ser = supabase_client._serialize_datetime(dl) if dl else None
                 if ser is not None:
@@ -1948,6 +1960,7 @@ Return ONLY the JSON object, no other text."""
                         "priority": _it.get("priority", "M"),
                         "deadline": _it.get("deadline"),
                         "category": _it.get("category", ""),
+                        "label": _it.get("label", ""),
                         "status": _it.get("status", "pending"),
                     }
                     for _it in t_plan["creates"]

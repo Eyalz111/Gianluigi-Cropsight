@@ -611,6 +611,9 @@ class SupabaseClient:
         Returns:
             List of created decision records.
         """
+        # One vocabulary fetch per batch (mirrors the areas/roster caches in
+        # create_tasks_batch) so resolve_label doesn't re-query per decision.
+        _dec_projects = self.get_canonical_projects(status="active")
         data = []
         for d in decisions:
             row = {
@@ -635,7 +638,12 @@ class SupabaseClient:
             # Phase 9A: label is part of the core schema — always write,
             # even empty string. NULL in DB breaks downstream filtering by
             # topic label (v2.4 agentic retrieval depends on it).
-            row["label"] = d.get("label")
+            # Canonicalized at this choke point (2026-07-22) so decisions share
+            # one project vocabulary with tasks — Area derives through it.
+            row["label"] = self.resolve_label(
+                d.get("label"), projects=_dec_projects, capture=True,
+                meeting_id=meeting_id,
+            )
             # Default review_date: 30 days from meeting
             if d.get("review_date"):
                 row["review_date"] = d["review_date"]
@@ -995,6 +1003,7 @@ class SupabaseClient:
             Created task record.
         """
         assignee = self.resolve_assignee(assignee)
+        label = self.resolve_label(label, capture=True, meeting_id=meeting_id)
         data = {
             "title": title,
             "assignee": assignee,
@@ -1050,8 +1059,11 @@ class SupabaseClient:
         # Canonicalize categories at this choke point (one areas fetch per batch)
         # so every batch-creation path stores the Gantt-area taxonomy.
         _areas = self.get_areas()
-        # Same for assignees — one roster fetch per batch (2026-07-22).
+        # Same for assignees and project labels — one fetch each per batch
+        # (2026-07-22). Extraction is where new labels are born, so capture is
+        # on here: an unrecognised label is recorded for the auto-learn loop.
         _roster = self.list_team_members()
+        _projects = self.get_canonical_projects(status="active")
 
         def _row(t: dict) -> dict:
             raw_deadline = t.get("deadline")
@@ -1078,7 +1090,10 @@ class SupabaseClient:
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
                 "category": self.resolve_category(t.get("category"), areas=_areas),
-                "label": t.get("label"),
+                "label": self.resolve_label(
+                    t.get("label"), projects=_projects, capture=True,
+                    meeting_id=meeting_id,
+                ),
                 "deadline_confidence": conf,
                 "urgency": t.get("urgency", "M"),
             }
@@ -1282,6 +1297,8 @@ class SupabaseClient:
             updates["category"] = self.resolve_category(updates["category"])
         if "assignee" in updates:
             updates["assignee"] = self.resolve_assignee(updates["assignee"])
+        if "label" in updates:
+            updates["label"] = self.resolve_label(updates["label"])
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         result = (
@@ -4406,15 +4423,52 @@ class SupabaseClient:
         name: str,
         description: str = "",
         aliases: list[str] | None = None,
+        area_id: str | None = None,
     ) -> dict | None:
-        """Add a new canonical project. Returns the created project or None."""
+        """Add or update a canonical project. Idempotent on name (UNIQUE).
+
+        Was a plain .insert() that returned None on conflict — surfaced by MCP
+        as "Failed to create project — may already exist". Auto-learn flows hit
+        that constantly, so this now mirrors add_area/add_team_member and
+        merges instead. [2026-07-22]
+
+        `area_id` is the single place an Area is stored: decisions, open
+        questions and follow-up meetings derive their Area through their
+        project rather than carrying a column each, so reclassifying a project
+        moves everything under it in one edit.
+        """
         try:
-            result = self.client.table("canonical_projects").insert({
+            existing = (
+                self.client.table("canonical_projects")
+                .select("*").eq("name", name).limit(1).execute()
+            )
+            if existing.data:
+                project = existing.data[0]
+                merged = sorted({*(project.get("aliases") or []), *(aliases or [])})
+                updates: dict = {}
+                if merged != (project.get("aliases") or []):
+                    updates["aliases"] = merged
+                if description and not project.get("description"):
+                    updates["description"] = description
+                if area_id and not project.get("area_id"):
+                    updates["area_id"] = area_id
+                if updates:
+                    self.client.table("canonical_projects").update(updates).eq(
+                        "id", project["id"]).execute()
+                    project = {**project, **updates}
+                    logger.info(f"Updated canonical project: {name} ({list(updates)})")
+                self._resolve_unmatched_labels(name, merged)
+                return project
+
+            payload = {
                 "name": name,
                 "description": description,
                 "aliases": aliases or [],
                 "status": "active",
-            }).execute()
+            }
+            if area_id:
+                payload["area_id"] = area_id
+            result = self.client.table("canonical_projects").insert(payload).execute()
 
             if result.data:
                 project = result.data[0]
@@ -4496,24 +4550,30 @@ class SupabaseClient:
             logger.error(f"Error getting unmatched labels: {e}")
             return []
 
-    def match_label_to_canonical(self, label: str) -> str | None:
+    def match_label_to_canonical(
+        self, label: str, projects: list[dict] | None = None
+    ) -> str | None:
         """
         Try to match a label to a canonical project name.
 
         Returns the canonical name if matched, None otherwise.
-        Checks exact name match first, then alias match.
+        Checks exact name match first, then alias match. Deterministic only —
+        the fuzzy tier lives in topic_threading._match_canonical_name and the
+        LLM tier in processors.label_resolver, so this stays cheap and callable
+        from any write path.
         """
         try:
-            projects = self.get_canonical_projects(status="active")
+            rows = projects if projects is not None else self.get_canonical_projects(
+                status="active")
             label_lower = label.lower().strip()
 
             # Exact name match
-            for p in projects:
+            for p in rows:
                 if p["name"].lower() == label_lower:
                     return p["name"]
 
             # Alias match
-            for p in projects:
+            for p in rows:
                 for alias in (p.get("aliases") or []):
                     if alias.lower() == label_lower:
                         return p["name"]
@@ -4522,6 +4582,68 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error matching label '{label}': {e}")
             return None
+
+    def resolve_label(
+        self,
+        name: str | None,
+        projects: list[dict] | None = None,
+        capture: bool = False,
+        meeting_id: str | None = None,
+        meeting_title: str = "",
+    ) -> str:
+        """Canonicalize a project label against canonical_projects.
+
+        The third member of the resolve_category / resolve_assignee family, and
+        the piece Phase 10 built but never connected: the canonical name was
+        computed in topic_threading, used to NAME A TOPIC THREAD, and then
+        thrown away — `task.label` itself was never rewritten. That is why live
+        data showed 34 distinct labels across 36 labelled tasks, and why every
+        off-vocabulary label also spawned a brand-new topic thread (50 threads,
+        46 of them single-mention).
+
+        Same contract as its siblings: exact -> alias -> fuzzy, and RETURN
+        UNKNOWN VALUES AS-IS (never destroy what a human typed).
+
+        `capture=True` records a genuinely-new label in `unmatched_labels` so
+        repeats can be proposed as canonical projects. It is OPT-IN and off by
+        default: a resolver that writes to the DB on every call would fire on
+        every update path and bloat the table. Turn it on where new labels are
+        actually born — extraction and batch creation. [2026-07-22]
+        """
+        raw = (name or "").strip()
+        if not raw:
+            return ""
+        try:
+            rows = projects if projects is not None else self.get_canonical_projects(
+                status="active")
+        except Exception as e:
+            logger.warning(f"resolve_label lookup failed (keeping label): {e}")
+            return raw
+
+        hit = self.match_label_to_canonical(raw, projects=rows)
+        if hit:
+            return hit
+
+        # Fuzzy tier — substring + significant-word overlap, already hardened
+        # against the "Investor Deck" vs "Investor Call" false merge (P1-14).
+        try:
+            from processors.topic_threading import _match_canonical_name
+            fuzzy = _match_canonical_name(raw)
+            if fuzzy:
+                return fuzzy
+        except Exception:
+            pass
+
+        # Genuinely new — keep it verbatim and (opt-in) record it so the
+        # auto-learn loop can propose it as a canonical project once it recurs.
+        if capture:
+            try:
+                self.store_unmatched_label(
+                    raw, meeting_id=meeting_id, meeting_title=meeting_title
+                )
+            except Exception:
+                pass
+        return raw
 
     # =========================================================================
     # Knowledge Foundation (v2.5) — areas, topic briefs, typed links (graph-lite)

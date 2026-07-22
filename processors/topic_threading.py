@@ -82,10 +82,27 @@ async def link_meeting_to_topics(
                         linked_threads.append(thread)
                         continue
 
-                # Create new thread
-                thread = _create_thread(canonical or label, meeting_id)
-                _create_mention(thread["id"], meeting_id, decisions, tasks, label)
-                linked_threads.append(thread)
+                # Genuinely unseen label.
+                #
+                # This used to create a thread UNCONDITIONALLY for every label
+                # over 2 chars, which is how 50 threads accumulated with 46 of
+                # them single-mention — the "hallucinated connections" problem
+                # KNOWN_ISSUES flagged. A thread is a claim that something is a
+                # recurring topic; one mention is not evidence of that.
+                #
+                # Now: record it for the auto-learn loop (repeats become a
+                # project proposal for Eyal), and only mint a thread once the
+                # label is part of the canonical vocabulary. [2026-07-22]
+                if canonical:
+                    thread = _create_thread(canonical, meeting_id)
+                    _create_mention(thread["id"], meeting_id, decisions, tasks, label)
+                    linked_threads.append(thread)
+                else:
+                    supabase_client.store_unmatched_label(label, meeting_id=meeting_id)
+                    logger.debug(
+                        f"[topic] '{label}' is not in the project vocabulary — "
+                        f"recorded for auto-learn, no thread created"
+                    )
 
         except Exception as e:
             logger.error(f"Error linking topic '{label}' for meeting {meeting_id}: {e}")
@@ -516,36 +533,36 @@ def list_active_threads(status: str | None = None) -> list[dict]:
 
 def merge_threads(source_id: str, target_id: str) -> dict:
     """
-    Merge source thread into target. Re-links all mentions, deletes source.
+    Merge source thread into target, bi-temporally.
 
-    Args:
-        source_id: Thread to merge FROM (will be deleted).
-        target_id: Thread to merge INTO (will be kept).
+    Delegates to topic_clustering.apply_topic_proposal so BOTH curation paths
+    (this MCP tool and the weekly merge proposals) share one implementation.
 
-    Returns:
-        Updated target thread.
+    This used to hard-DELETE the source row, which had three problems:
+      - `knowledge_links` references topic ids as untyped columns with NO FK, so
+        a delete left dangling belongs_to/advances/supersedes links pointing at
+        a topic that no longer exists, with no cleanup anywhere.
+      - The loser's `area_id`, `brief_json` and `state_json` went with the row.
+      - There was no chained-merge resolution, so merging A->B after B->C
+        stranded A's mentions on a closed intermediate.
+    It also recomputed meeting_count from a RAW mention count, reintroducing the
+    inflated "discussed in N meetings" that audit P1-07 fixed by counting
+    DISTINCT meetings. [2026-07-22]
     """
-    # Re-link mentions
-    supabase_client.client.table("topic_thread_mentions").update({
-        "topic_id": target_id,
-    }).eq("topic_id", source_id).execute()
+    from processors.topic_clustering import apply_topic_proposal
 
-    # Update target meeting count
-    mentions = supabase_client.client.table("topic_thread_mentions").select(
-        "id", count="exact"
-    ).eq("topic_id", target_id).execute()
-    new_count = mentions.count or 0
+    src = supabase_client.client.table("topic_threads").select(
+        "id, topic_name").eq("id", source_id).limit(1).execute()
+    tgt = supabase_client.client.table("topic_threads").select(
+        "id, topic_name").eq("id", target_id).limit(1).execute()
 
-    supabase_client.client.table("topic_threads").update({
-        "meeting_count": new_count,
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", target_id).execute()
-
-    # Delete source thread
-    supabase_client.client.table("topic_threads").delete().eq("id", source_id).execute()
-    # Retire the deleted source thread from the semantic index. [Phase 2]
-    from processors.semantic_index import deindex as _si_deindex
-    _si_deindex("topic", source_id)
+    apply_topic_proposal({
+        "proposal_type": "topic_merge",
+        "winner_id": target_id,
+        "winner_name": (tgt.data[0].get("topic_name") if tgt.data else None),
+        "loser_id": source_id,
+        "loser_name": (src.data[0].get("topic_name") if src.data else None),
+    })
 
     logger.info(f"Merged topic thread {source_id} into {target_id}")
 
