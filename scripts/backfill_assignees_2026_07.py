@@ -28,6 +28,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -119,6 +120,17 @@ def _snapshot(plan: list[dict]) -> str:
 
 
 def apply_plan(plan: list[dict]) -> int:
+    """Apply the plan to the DB.
+
+    NOTE on the Sheet: rows whose assignee is `manual_assignee=True` will NOT be
+    refreshed by reconcile — Rule 4 deliberately holds a human-owned field
+    against a DB-side change (2026-07-22 rail). That is correct in general, but
+    WRONG for this backfill: the flag records "a human chose this spelling", and
+    the backfill overrides that choice deliberately and with Eyal's approval. So
+    those cells must be written directly, or the Sheet keeps the old spelling
+    forever while the DB holds the corrected one. `sync_sheet_for_held_rows()`
+    below does that; run it after --apply.
+    """
     from services.supabase_client import supabase_client as sc
 
     applied = 0
@@ -140,6 +152,55 @@ def apply_plan(plan: list[dict]) -> int:
         except Exception as e:
             logger.error(f"FAILED {row['id']}: {e}")
     return applied
+
+
+async def sync_sheet_for_held_rows() -> int:
+    """Write the corrected assignee into cells reconcile will refuse to refresh.
+
+    Only touches rows where the Sheet disagrees with the DB AND
+    `manual_assignee` is set — i.e. exactly the rows the Rule 4 rail holds.
+    Everything else is left for the normal reconcile push.
+    """
+    from config.settings import settings
+    from services.google_sheets import sheets_service, TASK_COLUMNS
+    from services.supabase_client import supabase_client as sc
+
+    rows = await sheets_service.get_all_tasks()
+    if not rows:
+        logger.error("Sheet read returned 0 rows — refusing to write.")
+        return 0
+    db = {t["id"]: t for t in sc.get_tasks(
+        status=None, limit=5000, include_pending=True, include_archived=True)
+        if t.get("id")}
+    tab = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+
+    writes = []
+    for r in rows:
+        rid = str(r.get("id") or "").strip()
+        t = db.get(rid)
+        if not t or not r.get("row_number"):
+            continue
+        sheet_v = (r.get("assignee") or "").strip()
+        db_v = (t.get("assignee") or "").strip()
+        if sheet_v != db_v and t.get("manual_assignee"):
+            writes.append({
+                "range": f"'{tab}'!{TASK_COLUMNS['owner']}{r['row_number']}",
+                "values": [[db_v]],
+            })
+    if not writes:
+        return 0
+    sheets_service._execute_with_retry(
+        lambda: sheets_service.service.spreadsheets().values().batchUpdate(
+            spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+            body={"valueInputOption": "RAW", "data": writes},
+        )
+    )
+    sc.log_action(
+        action="assignee_backfill_sheet_sync",
+        details={"rows": len(writes)}, triggered_by="eyal",
+    )
+    logger.info(f"Synced {len(writes)} manual-held assignee cell(s) to the Sheet")
+    return len(writes)
 
 
 def rollback(path: str) -> int:
@@ -203,6 +264,10 @@ def main() -> int:
     path = _snapshot(plan)
     n = apply_plan(plan)
     print(f"\nApplied {n}/{len(plan)}.")
+    synced = asyncio.run(sync_sheet_for_held_rows())
+    if synced:
+        print(f"Synced {synced} manual-held cell(s) directly to the Sheet "
+              f"(reconcile's Rule 4 rail would have kept the old spelling there).")
     print(f"Rollback:  python scripts/backfill_assignees_2026_07.py --rollback {path}")
     return 0
 
