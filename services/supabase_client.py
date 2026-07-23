@@ -4428,6 +4428,81 @@ class SupabaseClient:
             logger.error(f"Error getting canonical projects: {e}")
             return []
 
+    # Tables whose free-text `label` column references a canonical project by
+    # name. A rename must sweep all of them or the vocabulary fractures — some
+    # rows on the old name, some on the new.
+    _LABEL_TABLES = ("tasks", "decisions", "open_questions", "follow_up_meetings")
+
+    def rename_canonical_project(self, project_id: str, new_name: str) -> dict:
+        """Rename a canonical project AND backfill every reference to it.
+
+        This is the operationally-correct way to rename a project — the switch,
+        not the symptom. Renaming per-row in a tab just fights the vocabulary
+        (resolve_label reverts it to the canonical). This:
+          1. renames the canonical row,
+          2. keeps the OLD name as an alias (so anything still saying it, and the
+             semantic index, still resolve to the new name),
+          3. backfills `label` across tasks/decisions/questions/meetings,
+          4. renames the matching topic_thread.
+
+        Generalises the manual SatYield→CropSight fix run live on 2026-07-23.
+        Returns a summary. Raises only on a hard failure of the rename itself.
+        """
+        new_name = (new_name or "").strip()
+        if not new_name:
+            raise ValueError("rename_canonical_project: new_name is blank")
+        row = (
+            self.client.table("canonical_projects").select("*")
+            .eq("id", project_id).limit(1).execute().data
+        )
+        if not row:
+            raise ValueError(f"canonical project {project_id} not found")
+        old_name = (row[0].get("name") or "").strip()
+        if old_name == new_name:
+            return {"renamed": False, "reason": "unchanged"}
+
+        # Name uniqueness: refuse a rename that would collide with another project.
+        clash = (
+            self.client.table("canonical_projects").select("id")
+            .eq("name", new_name).neq("id", project_id).execute().data
+        )
+        if clash:
+            raise ValueError(f"another project is already named {new_name!r}")
+
+        aliases = sorted(set(
+            (row[0].get("aliases") or []) + [old_name]
+        )) if old_name else (row[0].get("aliases") or [])
+        self.client.table("canonical_projects").update(
+            {"name": new_name, "aliases": aliases}
+        ).eq("id", project_id).execute()
+
+        summary = {"renamed": True, "old": old_name, "new": new_name, "relabelled": {}}
+        for tbl in self._LABEL_TABLES:
+            try:
+                ids = self.client.table(tbl).select("id").eq("label", old_name).execute().data or []
+                for r in ids:
+                    self.client.table(tbl).update({"label": new_name}).eq("id", r["id"]).execute()
+                summary["relabelled"][tbl] = len(ids)
+            except Exception as e:
+                logger.error(f"rename backfill failed for {tbl}: {e}")
+                summary["relabelled"][tbl] = f"error: {e}"
+        try:
+            tt = (self.client.table("topic_threads").select("id")
+                  .eq("topic_name_lower", old_name.lower()).execute().data or [])
+            for t in tt:
+                self.client.table("topic_threads").update(
+                    {"topic_name": new_name}).eq("id", t["id"]).execute()
+            summary["topic_threads"] = len(tt)
+        except Exception as e:
+            summary["topic_threads"] = f"error: {e}"
+
+        self.log_action(
+            action="canonical_project_renamed",
+            details={**summary}, triggered_by="eyal",
+        )
+        logger.info(f"Renamed canonical project {old_name!r} -> {new_name!r}: {summary['relabelled']}")
+        return summary
+
     def add_canonical_project(
         self,
         name: str,

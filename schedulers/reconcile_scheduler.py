@@ -142,12 +142,14 @@ class ReconcileScheduler:
             else:
                 from processors.sheets_sync import (
                     reconcile_tasks, reconcile_decisions, reconcile_meetings,
+                    reconcile_projects,
                 )
                 summary = await reconcile_tasks()
-                # Decisions + meetings reconcile self-guard on their enable flags
-                # (they return {"skipped": ...} until cutover) — safe to always call.
+                # Decisions + meetings + projects reconcile self-guard on their
+                # enable flags (they return {"skipped": ...} until cutover).
                 dec_summary = await reconcile_decisions()
                 meet_summary = await reconcile_meetings()
+                proj_summary = await reconcile_projects()
                 # Generated views LAST — they read the state the reconcile just
                 # settled, so running them first would render stale counts.
                 views = None
@@ -163,6 +165,7 @@ class ReconcileScheduler:
                              **(summary if isinstance(summary, dict) else {}),
                              "decisions": dec_summary if isinstance(dec_summary, dict) else None,
                              "meetings": meet_summary if isinstance(meet_summary, dict) else None,
+                             "projects": proj_summary if isinstance(proj_summary, dict) else None,
                              "views": views},
                 )
             return True

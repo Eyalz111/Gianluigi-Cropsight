@@ -752,6 +752,19 @@ class Settings(BaseSettings):
         default=False,
         description="Phase 2 (editable Decisions sheet): enable the Sheet<->DB decision reconcile AND the sheet id column (col H) + protected ranges. Off = historical one-way A:G layout, no reconcile. Flip ONLY at cutover (after migration + backfill)."
     )
+    PROJECTS_RECONCILE_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Enable the Sheet<->DB reconcile for the Projects tab (the editable "
+            "face of canonical_projects). Editing a project's Name RENAMES it and "
+            "backfills every label reference — so this is consequential; shadow "
+            "first. Off = the tab isn't synced."
+        ),
+    )
+    PROJECTS_RECONCILE_SHADOW_MODE: bool = Field(
+        default=True,
+        description="Projects reconcile computes + logs but writes nothing. Keep True until verified.",
+    )
     MEETING_RECONCILE_ENABLED: bool = Field(
         default=False,
         description=(

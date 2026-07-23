@@ -1441,6 +1441,134 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     return summary
 
 
+def _parse_aliases(text: str) -> list[str]:
+    return [a.strip() for a in (text or "").split(",") if a.strip()]
+
+
+async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) -> dict:
+    """Reconcile the Projects tab against canonical_projects.
+
+    The editable face of the vocabulary. Keyed on the id column (E):
+      - a row whose NAME changed vs the DB -> rename_canonical_project, which
+        backfills every `label` reference and keeps the old name as an alias.
+        This is the whole point: a rename is a one-cell edit, not a script.
+      - aliases / area / description changes -> a plain update.
+      - a row with no id -> a new canonical project (create + write id back).
+      - a DB project missing from the sheet -> re-added (never deleted from the
+        vocabulary by a blank row; deletion is out of scope on purpose).
+
+    Renames are consequential (they mutate labels across 5 tables), so this runs
+    only when the sheet value is unambiguously a deliberate edit — id present,
+    name non-blank, and different from the DB.
+    """
+    from services.google_sheets import sheets_service, PROJECTS_COLUMNS, PROJECTS_TAB_NAME
+
+    if not getattr(settings, "PROJECTS_RECONCILE_ENABLED", False):
+        return {"skipped": "PROJECTS_RECONCILE_ENABLED off"}
+    if shadow is None:
+        shadow = getattr(settings, "PROJECTS_RECONCILE_SHADOW_MODE", True)
+    write_allowed = not (dry_run or shadow)
+
+    try:
+        sheet_rows = await sheets_service.get_all_projects()
+    except Exception as e:
+        logger.error(f"[project-reconcile] could not read Sheet: {e}")
+        return {"error": str(e)}
+
+    db = supabase_client.get_canonical_projects(status="active")
+    db_by_id = {p["id"]: p for p in db if p.get("id")}
+    areas = supabase_client.get_areas()
+    area_id_by_name = {(a.get("name") or "").strip().lower(): a["id"] for a in areas}
+
+    summary = {"matched": 0, "renamed": 0, "updated": 0, "created": 0,
+               "readded": 0, "shadow": shadow, "dry_run": dry_run, "renames": []}
+
+    if not sheet_rows and db:
+        # A populated vocabulary reading as an empty sheet = bad read. Abort.
+        logger.error("[project-reconcile] sheet empty but DB has projects — aborting bad read.")
+        return {"error": "sheet_read_empty"}
+
+    seen_ids = set()
+    for sr in sheet_rows:
+        pid = sr.get("id")
+        name = sr.get("name")
+        if not pid:
+            # New project typed into a blank row.
+            if not name:
+                continue
+            summary["created"] += 1
+            if write_allowed:
+                area_id = area_id_by_name.get(sr.get("area", "").lower())
+                created = supabase_client.add_canonical_project(
+                    name=name, description=sr.get("description", ""),
+                    aliases=_parse_aliases(sr.get("aliases", "")), area_id=area_id,
+                )
+                if created and created.get("id") and sr.get("row_number"):
+                    try:
+                        await sheets_service._update_cell(
+                            sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                            range_name=f"'{PROJECTS_TAB_NAME}'!{PROJECTS_COLUMNS['id']}{sr['row_number']}",
+                            value=created["id"],
+                        )
+                    except Exception as we:
+                        logger.warning(f"[project-reconcile] id writeback failed row {sr['row_number']}: {we}")
+            continue
+
+        seen_ids.add(pid)
+        dbp = db_by_id.get(pid)
+        if not dbp:
+            continue  # sheet id the DB doesn't know — leave it
+        summary["matched"] += 1
+
+        # RENAME — the load-bearing case.
+        if name and _normalize(name) != _normalize(dbp.get("name")):
+            summary["renamed"] += 1
+            summary["renames"].append({"from": dbp.get("name"), "to": name})
+            if write_allowed:
+                try:
+                    supabase_client.rename_canonical_project(pid, name)
+                except Exception as e:
+                    logger.error(f"[project-reconcile] rename failed for {pid}: {e}")
+
+        # Aliases / area / description — plain updates (applied even alongside a
+        # rename; rename_canonical_project only touches name+aliases-with-old).
+        updates = {}
+        sheet_aliases = sorted(set(_parse_aliases(sr.get("aliases", ""))))
+        # After a rename the old name is folded into aliases by the rename call,
+        # so re-read below on the next cycle; here just honour explicit edits.
+        db_aliases = sorted(set(dbp.get("aliases") or []))
+        if sheet_aliases and sheet_aliases != db_aliases:
+            updates["aliases"] = sheet_aliases
+        area_id = area_id_by_name.get(sr.get("area", "").lower())
+        if area_id and area_id != dbp.get("area_id"):
+            updates["area_id"] = area_id
+        desc = sr.get("description", "")
+        if desc and desc != (dbp.get("description") or ""):
+            updates["description"] = desc
+        if updates:
+            summary["updated"] += 1
+            if write_allowed:
+                try:
+                    supabase_client.client.table("canonical_projects").update(
+                        updates).eq("id", pid).execute()
+                except Exception as e:
+                    logger.error(f"[project-reconcile] update failed for {pid}: {e}")
+
+    # DB projects missing from the sheet -> re-add (never delete the vocabulary).
+    missing = [p for p in db if p.get("id") and p["id"] not in seen_ids]
+    if missing and write_allowed:
+        area_names = {a["id"]: a.get("name", "") for a in areas}
+        await sheets_service.add_projects_batch(missing, area_names)
+        summary["readded"] = len(missing)
+
+    try:
+        supabase_client.log_action("project_reconcile_applied", details=summary, triggered_by="auto")
+    except Exception:
+        pass
+    logger.info(f"[project-reconcile] {'(preview) ' if not write_allowed else ''}{summary}")
+    return summary
+
+
 async def reconcile_decisions(dry_run: bool = False, shadow: bool | None = None) -> dict:
     """Reconcile the Decisions sheet against the DB (Phase 2 engine).
 

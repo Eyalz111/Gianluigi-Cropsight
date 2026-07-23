@@ -451,6 +451,26 @@ AREAS_HEADERS = [
     "Last Activity", "Current Focus",
 ]
 
+# ---------------------------------------------------------------------------
+# Projects tab (2026-07) — the editable face of canonical_projects.
+#
+# The vocabulary that resolve_label enforces, made visible and editable so a
+# rename is a one-cell edit (the reconcile backfills every reference) instead of
+# a script — the lesson from the SatYield→CropSight rename. Add a row = new
+# project; edit the Name = rename + backfill; edit Aliases/Area = update.
+# ---------------------------------------------------------------------------
+PROJECTS_TAB_NAME = "Projects"
+
+PROJECTS_COLUMNS = {
+    "name": "A",         # canonical project name — editing this RENAMES
+    "aliases": "B",      # comma-separated alternate names
+    "area": "C",         # the Area this project rolls up to (dropdown)
+    "description": "D",  # what it is
+    "id": "E",           # UUID — system-owned identity
+}
+PROJECTS_COL_INDEX = {k: ord(v) - ord("A") for k, v in PROJECTS_COLUMNS.items()}
+PROJECTS_HEADERS = ["Project", "Aliases", "Area", "Description", "ID"]
+
 
 def _fmt_day(value) -> str:
     """Render a DB timestamp as YYYY-MM-DD for a sheet cell.
@@ -2671,6 +2691,163 @@ class GoogleSheetsService:
         return await self._rebuild_readonly_tab(
             QUESTIONS_TAB_NAME, QUESTIONS_HEADERS, rows, force_empty=True
         )
+
+    async def get_all_projects(self) -> list[dict]:
+        """Read the Projects tab, one dict per row with row_number + id."""
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return []
+        num_cols = len(PROJECTS_HEADERS)
+        end_col = max(PROJECTS_COLUMNS.values())
+        rows = await self._read_sheet_range(
+            sheet_id=settings.TASK_TRACKER_SHEET_ID,
+            range_name=f"'{PROJECTS_TAB_NAME}'!A:{end_col}",
+        )
+        if not rows or len(rows) < 2:
+            return []
+        out = []
+        for i, row in enumerate(rows[1:], start=2):
+            while len(row) < num_cols:
+                row.append("")
+            out.append({
+                "row_number": i,
+                "name": row[PROJECTS_COL_INDEX["name"]].strip(),
+                "aliases": row[PROJECTS_COL_INDEX["aliases"]].strip(),
+                "area": row[PROJECTS_COL_INDEX["area"]].strip(),
+                "description": row[PROJECTS_COL_INDEX["description"]].strip(),
+                "id": row[PROJECTS_COL_INDEX["id"]].strip(),
+            })
+        return out
+
+    @staticmethod
+    def _project_row(p: dict, area_name: str = "") -> list:
+        return [
+            p.get("name") or "",
+            ", ".join(p.get("aliases") or []) if isinstance(p.get("aliases"), list)
+            else (p.get("aliases") or ""),
+            area_name,
+            p.get("description") or "",
+            p.get("id") or "",
+        ]
+
+    async def rebuild_projects_sheet(
+        self, projects: list[dict], area_names: dict, force_empty: bool = False
+    ) -> bool:
+        """Clear + rewrite the Projects tab from canonical_projects.
+
+        `area_names` maps area_id -> area name for the derived Area column.
+        Carries the force_empty guard (empty read must never clear a populated
+        tab). Editable A:D, id (E) protected.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+        if not projects and not force_empty:
+            logger.error("rebuild_projects_sheet: 0 rows and force_empty=False — refusing.")
+            return False
+        try:
+            sid = await self._ensure_tab(PROJECTS_TAB_NAME, PROJECTS_HEADERS)
+            if sid is None:
+                return False
+            end_col = max(PROJECTS_COLUMNS.values())
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().clear(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{PROJECTS_TAB_NAME}'!A2:{end_col}", body={},
+                )
+            )
+            if projects:
+                rows = [self._project_row(p, area_names.get(p.get("area_id"), ""))
+                        for p in sorted(projects, key=lambda x: (x.get("name") or "").lower())]
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().values().update(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=f"'{PROJECTS_TAB_NAME}'!A2:{end_col}{len(rows) + 1}",
+                        valueInputOption="RAW", body={"values": rows},
+                    )
+                )
+            await self._format_projects_tab(sid, area_names)
+            logger.info(f"Rebuilt {PROJECTS_TAB_NAME}: {len(projects)} project(s)")
+            return True
+        except Exception as e:
+            logger.error(f"Error rebuilding {PROJECTS_TAB_NAME}: {e}")
+            return False
+
+    async def add_projects_batch(self, projects: list[dict], area_names: dict) -> bool:
+        """Append canonical projects to the Projects tab (with their ids)."""
+        if not settings.TASK_TRACKER_SHEET_ID or not projects:
+            return False
+        try:
+            await self._ensure_tab(PROJECTS_TAB_NAME, PROJECTS_HEADERS)
+            values = [self._project_row(p, area_names.get(p.get("area_id"), ""))
+                      for p in projects]
+            end_col = max(PROJECTS_COLUMNS.values())
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().append(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{PROJECTS_TAB_NAME}'!A:{end_col}",
+                    valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+                    body={"values": values},
+                )
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error adding projects to sheet: {e}")
+            return False
+
+    async def _format_projects_tab(self, sid: int, area_names: dict) -> bool:
+        """Header, widths, an Area dropdown, and a lock on the ID column."""
+        try:
+            n = len(PROJECTS_HEADERS)
+            reqs: list[dict] = [
+                {"updateSheetProperties": {
+                    "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount"}},
+                {"repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                              "startColumnIndex": 0, "endColumnIndex": n},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": COLORS["header_bg"],
+                        "textFormat": {"bold": True, "foregroundColor": COLORS["header_text"]}}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+                _border_request(sid, n),
+                _text_wrap_request(sid, PROJECTS_COL_INDEX["description"]),
+            ]
+            for i, w in enumerate([200, 240, 220, 320, 70]):
+                reqs.append(_column_width_request(sid, i, w))
+            # Area dropdown (strict=False) from the live area names.
+            area_vals = sorted(set(v for v in area_names.values() if v))
+            if area_vals:
+                reqs.append(_data_validation_request(
+                    sid, PROJECTS_COL_INDEX["area"], area_vals))
+            # Lock the id column (E).
+            _ci = PROJECTS_COL_INDEX["id"]
+            reqs.append(_lock_tint_request(sid, _ci))
+            reqs.append(_lock_header_request(sid, _ci, "ID"))
+            _DESC = "Gianluigi: system-owned (project id)"
+            try:
+                pmeta = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        fields="sheets(properties.sheetId,protectedRanges)"))
+                for sh in pmeta.get("sheets", []):
+                    if sh.get("properties", {}).get("sheetId") != sid:
+                        continue
+                    for pr in sh.get("protectedRanges", []):
+                        if pr.get("description") == _DESC:
+                            reqs.append({"deleteProtectedRange": {
+                                "protectedRangeId": pr["protectedRangeId"]}})
+            except Exception:
+                pass
+            reqs.append({"addProtectedRange": {"protectedRange": {
+                "range": {"sheetId": sid, "startRowIndex": 1,
+                          "startColumnIndex": _ci, "endColumnIndex": _ci + 1},
+                "description": _DESC, "warningOnly": True}}})
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID, body={"requests": reqs}))
+            return True
+        except Exception as e:
+            logger.warning(f"Could not format {PROJECTS_TAB_NAME}: {e}")
+            return False
 
     async def rebuild_areas_tab(self, areas: list[dict]) -> bool:
         """Areas — the index into every other tab, one row per Gantt area."""

@@ -2080,10 +2080,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         try:
             from processors.sheets_sync import (
                 reconcile_tasks, reconcile_decisions, reconcile_meetings,
+                reconcile_projects,
             )
             t = await reconcile_tasks(dry_run=True)
             d = await reconcile_decisions(dry_run=True)
             m = await reconcile_meetings(dry_run=True)
+            pj = await reconcile_projects(dry_run=True)
 
             def _n(r, *keys):
                 return sum(int(r.get(k, 0) or 0) for k in keys) if isinstance(r, dict) else 0
@@ -2091,7 +2093,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             t_edits = _n(t, "pulled", "created")
             d_edits = _n(d, "pulled")
             m_edits = _n(m, "pulled", "created")
-            total = t_edits + d_edits + m_edits
+            p_edits = _n(pj, "renamed", "created", "updated")
+            total = t_edits + d_edits + m_edits + p_edits
 
             if isinstance(t, dict) and t.get("error"):
                 await self.send_message(chat_id, "Couldn't read the sheet just now — try again shortly.")
@@ -2107,6 +2110,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     lines.append(f"  • {m_edits} meeting edit(s)")
                 if d_edits:
                     lines.append(f"  • {d_edits} decision edit(s)")
+                if p_edits:
+                    lines.append(f"  • {p_edits} project change(s)")
                 _iv = int(getattr(settings, "RECONCILE_INTERVAL_MINUTES", 0) or 0)
                 if _iv > 0:
                     lines.append(f"\nThese sync automatically (about every {_iv} min).")
@@ -3950,6 +3955,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             if meeting_id == "confirm":
                 from processors.sheets_sync import (
                     reconcile_tasks, reconcile_decisions, reconcile_meetings,
+                    reconcile_projects,
                 )
                 summary = await reconcile_tasks(dry_run=False)  # v3 engine recomputes fresh
                 if summary.get("error"):
@@ -3965,6 +3971,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 # Decisions apply — self-guards on DECISION_RECONCILE_ENABLED.
                 dec = await reconcile_decisions(dry_run=False)
                 mtg = await reconcile_meetings(dry_run=False)
+                prj = await reconcile_projects(dry_run=False)
                 msg = (
                     f"Sync applied — {summary.get('pulled', 0)} edit(s)→DB, "
                     f"{summary.get('pushed', 0)} DB→Sheet, "
