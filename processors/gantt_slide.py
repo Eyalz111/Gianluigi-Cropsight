@@ -32,7 +32,15 @@ OWNER_LEGEND = {
     "Roye": "[R]",
     "Paolo": "[P]",
     "Yoram": "[Y]",
-    "Prof. Yoram Weiss": "[Y]",
+    # Full names are now the canonical assignee form (2026-07-22), so the map
+    # must carry them or every owner initial silently stops resolving.
+    "Eyal Zror": "[E]",
+    "Roye Tadmor": "[R]",
+    "Paolo Vailetti": "[P]",
+    "Yoram Weiss": "[Y]",
+    "Prof. Yoram Weiss": "[Y]",   # legacy spelling, kept for old rows
+    "Nechama": "[N]",
+    "Nechama Tik": "[N]",
 }
 
 # Milestone markers
@@ -265,7 +273,7 @@ def _add_legend(slide, y_offset) -> None:
     tf = txBox.text_frame
     p = tf.paragraphs[0]
     p.text = (
-        "Owners: [E] Eyal  [R] Roye  [P] Paolo  [Y] Prof. Yoram    "
+        "Owners: [E] Eyal  [R] Roye  [P] Paolo  [Y] Yoram    "
         "Milestones: ★ Tech  ● Commercial  ◆ Funding    "
         "Colors: Green=Active  Blue=Planned  Red=Blocked  Gray=Completed"
     )

@@ -82,6 +82,14 @@ COLORS = {
     "banding_odd": _hex_color("#FFFFFF"),          # White
     "border_gray": _hex_color("#E0E0E0"),         # Light Gray
 
+    # Staleness (Last Update column) — deliberately distinct from the status
+    # palette: a stale row is a prompt to look, not a status of its own.
+    "stale_warn": _hex_color("#FFE0B2"),          # Light Orange — 30d+
+    "stale_alert": _hex_color("#FFCDD2"),         # Light Red — 60d+
+
+    # System-owned (locked) column fill — quiet grey, distinct from banding.
+    "locked_tint": _hex_color("#ECEFF1"),         # Blue-grey 50
+
     # Header
     "header_bg": _hex_color("#1A237E"),           # Dark Blue
     "header_text": _hex_color("#FFFFFF"),         # White
@@ -144,6 +152,41 @@ def _column_width_request(sheet_id: int, col_index: int, width_px: int) -> dict:
             },
             "properties": {"pixelSize": width_px},
             "fields": "pixelSize",
+        }
+    }
+
+
+def _staleness_format_rule(
+    sheet_id: int, col_index: int, days: int, color: dict, rule_index: int = 0
+) -> dict:
+    """Highlight a date cell older than `days` — the staleness signal.
+
+    A CUSTOM_FORMULA rule rather than TEXT_CONTAINS: the cell holds a date, and
+    what matters is how OLD it is, which no substring can express. Blank cells
+    are excluded so a task with no recorded update isn't painted as stale.
+    """
+    col_letter = chr(ord("A") + col_index)
+    return {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{
+                    "sheetId": sheet_id,
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
+                    "startRowIndex": 1,
+                }],
+                "booleanRule": {
+                    "condition": {
+                        "type": "CUSTOM_FORMULA",
+                        "values": [{
+                            "userEnteredValue":
+                                f"=AND(${col_letter}2<>\"\", TODAY()-DATEVALUE(${col_letter}2)>={days})"
+                        }],
+                    },
+                    "format": {"backgroundColor": color},
+                },
+            },
+            "index": rule_index,
         }
     }
 
@@ -216,6 +259,44 @@ def _data_validation_request(
     }
 
 
+def _lock_tint_request(sheet_id: int, col_index: int) -> dict:
+    """Light-grey fill on a system-owned column's data cells (rows 2-1000).
+
+    A visible companion to the warningOnly protected range: the colour tells a
+    human at a glance which columns are theirs to edit vs the system's, so they
+    don't fight the protection dialog. Header stays as-is (it carries the 🔒).
+    """
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "endRowIndex": 1000,
+                "startColumnIndex": col_index,
+                "endColumnIndex": col_index + 1,
+            },
+            "cell": {"userEnteredFormat": {"backgroundColor": COLORS["locked_tint"]}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }
+    }
+
+
+def _lock_header_request(sheet_id: int, col_index: int, header: str) -> dict:
+    """Prefix a system-owned column's header with 🔒 so the lock is obvious."""
+    label = header if header.startswith("🔒") else f"🔒 {header}"
+    return {
+        "updateCells": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0, "endRowIndex": 1,
+                "startColumnIndex": col_index, "endColumnIndex": col_index + 1,
+            },
+            "rows": [{"values": [{"userEnteredValue": {"stringValue": label}}]}],
+            "fields": "userEnteredValue",
+        }
+    }
+
+
 def _text_wrap_request(sheet_id: int, col_index: int) -> dict:
     """Build a repeatCell request that sets wrapStrategy: WRAP on a column."""
     return {
@@ -261,6 +342,17 @@ TASK_COLUMNS = {
 if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
     TASK_COLUMNS["urgency"] = "K"
 
+# Last Update = L, appended AFTER urgency by the same never-relocate rule.
+#
+# Why it exists: deadlines are legitimately optional here (75% of open tasks
+# have none), so a due-date view is nearly empty and reads as a defect list when
+# it isn't one. STALENESS is the pressure signal that always applies — but
+# `updated_at` was not in the sheet at all (col I is *Created*), so it could not
+# be computed or sorted on. Sorting by this column IS the weekly agenda.
+# System-owned: written by reconcile, protected alongside H:J. [2026-07-22]
+if getattr(settings, "TASK_SHEET_LAST_UPDATE_ENABLED", False):
+    TASK_COLUMNS["last_update"] = "L"
+
 # Column indices (0-based) for formatting operations
 TASK_COL_INDEX = {k: ord(v) - ord("A") for k, v in TASK_COLUMNS.items()}
 
@@ -277,18 +369,115 @@ DECISION_COLUMNS = {
 
 DECISION_COL_INDEX = {k: ord(v) - ord("A") for k, v in DECISION_COLUMNS.items()}
 
-# Header labels for sheet display (order matches column mapping)
-TASK_TRACKER_HEADERS = [
-    "Priority", "Label", "Task", "Owner", "Deadline",
-    "Status", "Category", "Source Meeting", "Created", "ID",
+# The decision id lives at col H but is deliberately NOT in DECISION_COLUMNS —
+# that map drives editable-cell writes, and the id is system-owned. Readers use
+# row[7] directly. Named here so writers stop reaching for a key that isn't
+# there: DECISION_COLUMNS['id'] raised KeyError. [2026-07-22]
+DECISION_ID_COLUMN = "H"
+
+# Header labels for sheet display (order matches column mapping).
+# _BASE is the always-present A:J layout; flag-gated columns are appended.
+TASK_TRACKER_HEADERS_BASE = [
+    "Priority", "Project", "Task", "Owner", "Deadline",
+    "Status", "Area", "Source Meeting", "Created", "ID",
 ]
+TASK_TRACKER_HEADERS = list(TASK_TRACKER_HEADERS_BASE)
 if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
     TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Urgency"]
+if getattr(settings, "TASK_SHEET_LAST_UPDATE_ENABLED", False):
+    TASK_TRACKER_HEADERS = TASK_TRACKER_HEADERS + ["Last Update"]
 
 DECISION_TRACKER_HEADERS = [
-    "Label", "Decision", "Rationale", "Confidence",
+    "Project", "Decision", "Rationale", "Confidence",
     "Source Meeting", "Date", "Status",
 ]
+
+# Archive = the Tasks layout + when it left + WHAT IT WAS + WHY.
+#
+# Prior Status exists because auto-archival flips `done` -> `archived`, which
+# erases the difference between work that was FINISHED and work that was
+# abandoned. Without it, Archive cannot answer "what did we ship last quarter",
+# which is the only reason to keep it rather than delete rows.
+ARCHIVE_HEADERS = TASK_TRACKER_HEADERS + ["Archived", "Prior Status", "Reason"]
+
+# ---------------------------------------------------------------------------
+# Meetings tab (2026-07) — follow_up_meetings, Nechama's queue.
+#
+# Editable A:F (snapshot-tracked, manual-wins). G:J are system-owned and
+# protected: Agenda/Prep are extraction context she reads, not fields she
+# manages, and Source/ID are identity. Keeping the editable set small is
+# deliberate — every editable column is a conflict surface.
+# ---------------------------------------------------------------------------
+MEETING_TAB_NAME = "Meetings"
+
+MEETING_COLUMNS = {
+    "title": "A",           # what the meeting is
+    "label": "B",           # Project — same vocabulary as Tasks/Decisions
+    "led_by": "C",          # who owns making it happen
+    "proposed_date": "D",   # when it was proposed for
+    "participants": "E",    # comma-separated
+    "status": "F",          # not_scheduled / scheduled / held / dropped
+    "agenda": "G",          # system-owned (from extraction)
+    "prep_needed": "H",     # system-owned
+    "source_meeting": "I",  # system-owned
+    "id": "J",              # UUID — the reconcile identity
+}
+MEETING_COL_INDEX = {k: ord(v) - ord("A") for k, v in MEETING_COLUMNS.items()}
+
+MEETING_TRACKER_HEADERS = [
+    "Meeting", "Project", "Led By", "Proposed Date", "Participants",
+    "Status", "Agenda", "Prep Needed", "Source Meeting", "ID",
+]
+
+# Monotonic, like decision statuses: a stale Sheet cell must never un-schedule
+# a meeting that already happened.
+MEETING_STATUSES = ("not_scheduled", "scheduled", "held", "dropped")
+MEETING_STATUS_ORDER = {"not_scheduled": 0, "scheduled": 1, "held": 2, "dropped": 3}
+
+# ---------------------------------------------------------------------------
+# Read-only reference tabs (2026-07).
+#
+# Generated from the DB, never edited. They exist so the workspace answers
+# "what's outstanding, and where does it sit?" without anyone querying anything.
+# ---------------------------------------------------------------------------
+QUESTIONS_TAB_NAME = "Open Questions"
+QUESTIONS_HEADERS = [
+    "Question", "Raised By", "Project", "Age (days)", "Source Meeting", "Status", "ID",
+]
+
+AREAS_TAB_NAME = "Areas"
+AREAS_HEADERS = [
+    "Area", "Open Tasks", "Overdue", "Open Questions", "Meetings to Schedule",
+    "Last Activity", "Current Focus",
+]
+
+
+def _fmt_day(value) -> str:
+    """Render a DB timestamp as YYYY-MM-DD for a sheet cell.
+
+    The Last Update column is read by humans and sorted on, so it carries the
+    day only — a full ISO timestamp sorts identically but is unreadable in a
+    narrow column. Unparseable/missing values become "" rather than "None".
+    """
+    if not value:
+        return ""
+    text = str(value)
+    return text[:10] if len(text) >= 10 else text
+
+
+def _sorted_meetings(meetings: list[dict]) -> list[dict]:
+    """Order the Meetings tab so it sorts itself into a worklist.
+
+    `not_scheduled` first — that IS the queue — then by proposed date, oldest
+    first, so the most overdue booking is the top row. Held/dropped sink to the
+    bottom as history.
+    """
+    def _key(m: dict):
+        order = MEETING_STATUS_ORDER.get(
+            (m.get("status") or "not_scheduled").strip().lower(), 0
+        )
+        return (order, str(m.get("proposed_date") or "9999"), m.get("title") or "")
+    return sorted(meetings, key=_key)
 
 
 def _decision_id_enabled() -> bool:
@@ -542,6 +731,8 @@ class GoogleSheetsService:
         ]
         if "urgency" in TASK_COLUMNS:
             values.append(urgency or "M")
+        if "last_update" in TASK_COLUMNS:
+            values.append(created_date)   # new row: last update == created
 
         return await self._append_row(
             sheet_id=settings.TASK_TRACKER_SHEET_ID,
@@ -720,6 +911,8 @@ class GoogleSheetsService:
             }
             if "urgency" in TASK_COL_INDEX:
                 _task["urgency"] = row[TASK_COL_INDEX["urgency"]]
+            if "last_update" in TASK_COL_INDEX:
+                _task["last_update"] = row[TASK_COL_INDEX["last_update"]]
             tasks.append(_task)
 
         return tasks
@@ -784,14 +977,14 @@ class GoogleSheetsService:
                 t for t in all_tasks
                 if t.get("task", "").lower() in titles_lower and t.get("status", "").lower() == "done"
             ]
-            return await self.archive_task_rows(rows_to_archive)
+            return await self.archive_task_rows(rows_to_archive, reason="auto-30d")
 
         except Exception as e:
             logger.error(f"Error archiving tasks: {e}")
             return 0
 
     def _ensure_archive_tab(self) -> None:
-        """Create the Archive tab (header = Tasks layout + Archived) if missing."""
+        """Create the Archive tab (Tasks layout + Archived/Prior Status/Reason)."""
         meta = self._execute_with_retry(
             lambda: self.service.spreadsheets().get(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
@@ -810,7 +1003,7 @@ class GoogleSheetsService:
                 body={"requests": [{"addSheet": {"properties": {"title": "Archive"}}}]},
             )
         )
-        archive_headers = TASK_TRACKER_HEADERS + ["Archived"]
+        archive_headers = ARCHIVE_HEADERS
         self._execute_with_retry(
             lambda: self.service.spreadsheets().values().update(
                 spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
@@ -820,13 +1013,22 @@ class GoogleSheetsService:
             )
         )
 
-    async def archive_task_rows(self, sheet_rows: list[dict]) -> int:
+    async def archive_task_rows(
+        self, sheet_rows: list[dict], reason: str = "manual"
+    ) -> int:
         """
         Move Tasks-tab rows (dicts from get_all_tasks, row_number included) to
         the Archive tab and delete them from the active tab.
 
-        The archive row mirrors the Tasks layout (including the col-J UUID so
-        an archived task stays identifiable) plus an Archived date column.
+        The archive row mirrors the Tasks layout (including the col-J UUID so an
+        archived task stays identifiable), plus Archived date, PRIOR STATUS and
+        REASON.
+
+        Prior Status matters because auto-archival flips `done` -> `archived`,
+        which would otherwise erase the distinction between work that was
+        FINISHED and work that was abandoned. Archive is meant to answer "what
+        did we ship last quarter, by area" — that is impossible if every row
+        just says `archived`. [2026-07-22]
 
         Returns the number of rows moved.
         """
@@ -871,11 +1073,18 @@ class GoogleSheetsService:
             ]
             if "urgency" in TASK_COLUMNS:
                 _row.append(t.get("urgency") or "")
+            if "last_update" in TASK_COLUMNS:
+                _row.append(t.get("last_update") or "")
             _row.append(datetime.now().strftime("%Y-%m-%d"))  # Archived date
+            # Prior Status: what the task was BEFORE the archive flip. Taken
+            # from the sheet row, which still holds the pre-archive value.
+            _prior = (t.get("prior_status") or t.get("status") or "").strip()
+            _row.append("done" if _prior == "archived" else _prior)
+            _row.append(reason)
             archive_rows.append(_row)
 
         if archive_rows:
-            num_archive_cols = len(TASK_TRACKER_HEADERS) + 1  # +1 for Archived
+            num_archive_cols = len(ARCHIVE_HEADERS)
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().append(
                     spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
@@ -924,6 +1133,75 @@ class GoogleSheetsService:
 
         logger.info(f"Archived {len(archive_rows)} task rows to Archive tab")
         return len(archive_rows)
+
+    async def _delete_rows_by_id(
+        self, tab_name: str, ids: list[str], reader, label: str
+    ) -> int:
+        """
+        Remove specific rows from `tab_name` by their UUID column, bottom-up.
+
+        Targeted alternative to the rebuild_*_sheet clear-and-rewrite. A full
+        rebuild repaints EVERY cell from the DB, which silently destroys any
+        human edit not yet pulled by reconcile — until the next reconcile runs,
+        the sheet cell is the ONLY record of that edit, and the rebuild also
+        leaves `sheet_snapshots` untouched so the loss is undetectable
+        afterwards (cell == snapshot => reconcile does nothing). With two people
+        editing the sheet daily that is a routine data-loss path, so paths that
+        only need to REMOVE rows must remove exactly those rows. [2026-07-22]
+
+        Returns the number of rows deleted. Never raises — callers treat sheet
+        upkeep as best-effort and must not fail their primary operation on it.
+        """
+        wanted = {str(i).strip() for i in (ids or []) if str(i or "").strip()}
+        if not wanted:
+            return 0
+        try:
+            rows = await reader()
+            row_numbers = sorted(
+                [r["row_number"] for r in rows
+                 if str(r.get("id") or "").strip() in wanted and r.get("row_number")],
+                reverse=True,
+            )
+            if not row_numbers:
+                return 0
+            sid = self._get_sheet_id_by_name(settings.TASK_TRACKER_SHEET_ID, tab_name)
+            if sid is None:
+                logger.warning(f"[{label}] tab {tab_name!r} not found — no rows removed")
+                return 0
+            requests = [
+                {"deleteDimension": {
+                    "range": {"sheetId": sid, "dimension": "ROWS",
+                              "startIndex": r - 1, "endIndex": r}
+                }}
+                for r in row_numbers
+            ]
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
+            logger.info(f"[{label}] removed {len(row_numbers)} row(s) from {tab_name}")
+            return len(row_numbers)
+        except Exception as e:
+            logger.error(f"[{label}] targeted row removal from {tab_name} failed: {e}")
+            return 0
+
+    async def delete_task_rows_by_id(self, task_ids: list[str]) -> int:
+        """Remove specific Tasks-tab rows by col-J UUID. See _delete_rows_by_id."""
+        tab = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+        return await self._delete_rows_by_id(
+            tab, task_ids, self.get_all_tasks, "reject-cascade"
+        )
+
+    async def delete_decision_rows_by_id(self, decision_ids: list[str]) -> int:
+        """Remove specific Decisions-tab rows by col-H UUID. See _delete_rows_by_id."""
+        if not _decision_id_enabled():
+            # No id column => no safe way to identify rows. Caller falls back.
+            return 0
+        return await self._delete_rows_by_id(
+            "Decisions", decision_ids, self.get_all_decisions, "reject-cascade"
+        )
 
     async def rebuild_tasks_sheet(
         self, tasks_from_db: list[dict], force_empty: bool = False
@@ -1016,6 +1294,8 @@ class GoogleSheetsService:
                 ]
                 if "urgency" in TASK_COLUMNS:
                     _row.append(t.get("urgency") or "M")
+                if "last_update" in TASK_COLUMNS:
+                    _row.append(_fmt_day(t.get("updated_at")))
                 rows.append(_row)
 
             # Clear the tab and write fresh data
@@ -1224,6 +1504,11 @@ class GoogleSheetsService:
         """
         Find the row number for a task by its description.
 
+        PREFER `find_task_row_by_id` — title matching is ambiguous (two tasks can
+        share a title, and a renamed task no longer matches), which is why the
+        reconcile engine abandoned it for the col-J UUID (audit P1-03). This is
+        kept for callers that genuinely have no id.
+
         Args:
             task_description: The task text to search for.
 
@@ -1236,6 +1521,23 @@ class GoogleSheetsService:
             if task["task"].lower() == task_description.lower():
                 return task["row_number"]
 
+        return None
+
+    async def find_task_row_by_id(self, task_id: str) -> int | None:
+        """
+        Find a task's row number by its col-J UUID — the unambiguous identity.
+
+        Title matching can resolve to the WRONG row when two tasks share a title,
+        which means a targeted cell write lands on someone else's task. The UUID
+        is written to col J by every creation path, so callers holding a task id
+        should always use this. [2026-07-22]
+        """
+        tid = str(task_id or "").strip()
+        if not tid:
+            return None
+        for task in await self.get_all_tasks():
+            if str(task.get("id") or "").strip() == tid:
+                return task.get("row_number")
         return None
 
     # =========================================================================
@@ -1408,6 +1710,8 @@ class GoogleSheetsService:
             ]
             if "urgency" in TASK_COLUMNS:
                 _row.append(task.get("urgency") or "M")
+            if "last_update" in TASK_COLUMNS:
+                _row.append(_fmt_day(task.get("updated_at")))
             values.append(_row)
 
         return await self._append_rows(
@@ -1423,9 +1727,18 @@ class GoogleSheetsService:
         created_date: str,
     ) -> bool:
         """
-        Add follow-up meetings to the Task Tracker as action items.
+        DEPRECATED (2026-07-22) — use add_meetings_batch_to_sheet().
 
-        Each follow-up becomes a task: "Schedule: [title]" assigned to the leader.
+        Added follow-up meetings to the TASKS tab as "Schedule: [title]" rows.
+        It wrote only 9 columns and NO col-J UUID, so the reconcile engine
+        classified every one as a hand-added row and created a DUPLICATE `tasks`
+        row for it on each run — the same real-world item then existed in both
+        `follow_up_meetings` and `tasks`. Confirmed live: Tasks row 200 was
+        "Schedule: Virtual Friday sync meeting" with an empty id.
+
+        Kept (unused) only so an old caller fails loudly in review rather than
+        silently reintroducing the duplication. Follow-ups now live on the
+        Meetings tab with their real UUID.
 
         Args:
             follow_ups: List of follow-up meeting dicts.
@@ -1617,6 +1930,38 @@ class GoogleSheetsService:
             if props.get("title") == tab_name:
                 return props.get("sheetId")
         return None
+
+    def _clear_conditional_format_rules_for_sheet(
+        self, spreadsheet_id: str, sheet_id: int
+    ) -> list[dict]:
+        """deleteConditionalFormatRule requests for ONE tab, by sheetId.
+
+        `_clear_conditional_format_rules` below resolves rules from
+        `sheets[0]` — the FIRST tab — which is correct for the Tasks tab it was
+        written for and catastrophic for any other caller: formatting the
+        Meetings tab with it would delete the Tasks tab's rules instead.
+        This variant matches on the sheetId. [2026-07-22]
+        """
+        try:
+            metadata = self._execute_with_retry(
+                lambda: self.service.spreadsheets().get(
+                    spreadsheetId=spreadsheet_id,
+                    fields="sheets(properties.sheetId,conditionalFormats)",
+                )
+            )
+            rules = []
+            for sheet in metadata.get("sheets", []):
+                if sheet.get("properties", {}).get("sheetId") == sheet_id:
+                    rules = sheet.get("conditionalFormats", []) or []
+                    break
+            # Reverse order so indices don't shift as rules are removed.
+            return [
+                {"deleteConditionalFormatRule": {"sheetId": sheet_id, "index": i}}
+                for i in range(len(rules) - 1, -1, -1)
+            ]
+        except Exception as e:
+            logger.warning(f"Could not enumerate conditional formats for {sheet_id}: {e}")
+            return []
 
     def _clear_conditional_format_rules(self, spreadsheet_id: str) -> list[dict]:
         """
@@ -1965,6 +2310,383 @@ class GoogleSheetsService:
             logger.error(f"Error ensuring Decisions tab: {e}")
             return None
 
+    # =========================================================================
+    # Meetings tab (2026-07) — follow_up_meetings get their own home.
+    # =========================================================================
+
+    async def ensure_meetings_tab(self) -> int | None:
+        """Ensure the 'Meetings' tab exists, with its header row.
+
+        Appended AFTER the existing tabs — never inserted before Tasks. A tab at
+        index 0 is what silently broke every sheet read in April 2026, because
+        bare A1 ranges resolve against whichever sheet sits first.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return None
+        try:
+            meta = self._execute_with_retry(
+                lambda: self.service.spreadsheets().get(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    fields="sheets.properties",
+                )
+            )
+            sheets = meta.get("sheets", [])
+            for sheet in sheets:
+                props = sheet.get("properties", {})
+                if props.get("title") == MEETING_TAB_NAME:
+                    return props["sheetId"]
+
+            resp = self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": [{"addSheet": {"properties": {
+                        "title": MEETING_TAB_NAME,
+                        "index": len(sheets),   # last, never index 0
+                    }}}]},
+                )
+            )
+            new_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+            logger.info(f"Created {MEETING_TAB_NAME} tab (sheetId={new_sheet_id})")
+
+            end_col = max(MEETING_COLUMNS.values())
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().update(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{MEETING_TAB_NAME}'!A1:{end_col}1",
+                    valueInputOption="RAW",
+                    body={"values": [MEETING_TRACKER_HEADERS]},
+                )
+            )
+            return new_sheet_id
+        except Exception as e:
+            logger.error(f"Error ensuring {MEETING_TAB_NAME} tab: {e}")
+            return None
+
+    @staticmethod
+    def _meeting_row(m: dict, source_meeting: str = "") -> list:
+        """Build one Meetings-tab row from a follow_up_meetings record."""
+        parts = m.get("participants") or []
+        agenda = m.get("agenda_items") or []
+        src = source_meeting
+        if not src:
+            mi = m.get("meetings") if isinstance(m.get("meetings"), dict) else {}
+            src = (mi or {}).get("title", "") or ""
+        return [
+            m.get("title") or "",
+            m.get("label") or "",
+            m.get("led_by") or "",
+            _fmt_day(m.get("proposed_date")),
+            ", ".join(parts) if isinstance(parts, list) else str(parts or ""),
+            m.get("status") or "not_scheduled",
+            "; ".join(agenda) if isinstance(agenda, list) else str(agenda or ""),
+            m.get("prep_needed") or "",
+            src,
+            m.get("id") or "",
+        ]
+
+    async def get_all_meetings(self) -> list[dict]:
+        """Read the Meetings tab, one dict per row with row_number + id."""
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return []
+        num_cols = len(MEETING_TRACKER_HEADERS)
+        end_col = max(MEETING_COLUMNS.values())
+        rows = await self._read_sheet_range(
+            sheet_id=settings.TASK_TRACKER_SHEET_ID,
+            range_name=f"'{MEETING_TAB_NAME}'!A:{end_col}",
+        )
+        if not rows or len(rows) < 2:
+            return []
+        out = []
+        for i, row in enumerate(rows[1:], start=2):
+            while len(row) < num_cols:
+                row.append("")
+            raw_date = row[MEETING_COL_INDEX["proposed_date"]]
+            out.append({
+                "row_number": i,
+                "title": row[MEETING_COL_INDEX["title"]],
+                "label": row[MEETING_COL_INDEX["label"]],
+                "led_by": row[MEETING_COL_INDEX["led_by"]],
+                # Day-first parsing, same convention as the Tasks deadline cell:
+                # "20.6.26" must mean 20 June everywhere.
+                "proposed_date": parse_human_date(raw_date) or raw_date,
+                "proposed_date_raw": raw_date,
+                "participants": row[MEETING_COL_INDEX["participants"]],
+                "status": row[MEETING_COL_INDEX["status"]],
+                "agenda": row[MEETING_COL_INDEX["agenda"]],
+                "prep_needed": row[MEETING_COL_INDEX["prep_needed"]],
+                "source_meeting": row[MEETING_COL_INDEX["source_meeting"]],
+                "id": row[MEETING_COL_INDEX["id"]],
+            })
+        return out
+
+    async def add_meetings_batch_to_sheet(
+        self, meetings: list[dict], source_meeting: str = ""
+    ) -> bool:
+        """Append follow-up meetings to the Meetings tab (with their UUIDs).
+
+        Replaces add_follow_ups_as_tasks(), which wrote a "Schedule: X" row into
+        the TASKS tab with NO col-J UUID — so reconcile classified every one as
+        hand-added and created a duplicate `tasks` row on each run.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID or not meetings:
+            return False
+        try:
+            await self.ensure_meetings_tab()
+            values = [self._meeting_row(m, source_meeting) for m in meetings]
+            end_col = max(MEETING_COLUMNS.values())
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().append(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{MEETING_TAB_NAME}'!A:{end_col}",
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": values},
+                )
+            )
+            logger.info(f"Added {len(values)} meeting(s) to the {MEETING_TAB_NAME} tab")
+            return True
+        except Exception as e:
+            logger.error(f"Error adding meetings to sheet: {e}")
+            return False
+
+    async def rebuild_meetings_sheet(
+        self, meetings_from_db: list[dict], force_empty: bool = False
+    ) -> bool:
+        """Clear + rewrite the Meetings tab from the DB.
+
+        Carries the same force_empty guard as rebuild_tasks_sheet: a transient
+        Supabase read returning [] must never clear a populated tab. That is
+        exactly how the Tasks sheet was wiped in April.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+        if not meetings_from_db and not force_empty:
+            logger.error(
+                "rebuild_meetings_sheet called with 0 rows and force_empty=False "
+                "— refusing to clear a populated tab (transient read guard)."
+            )
+            return False
+        try:
+            await self.ensure_meetings_tab()
+            end_col = max(MEETING_COLUMNS.values())
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().clear(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{MEETING_TAB_NAME}'!A2:{end_col}",
+                    body={},
+                )
+            )
+            if meetings_from_db:
+                rows = [self._meeting_row(m) for m in _sorted_meetings(meetings_from_db)]
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().values().update(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=f"'{MEETING_TAB_NAME}'!A2:{end_col}{len(rows) + 1}",
+                        valueInputOption="RAW",
+                        body={"values": rows},
+                    )
+                )
+            try:
+                from services.supabase_client import supabase_client
+                supabase_client.log_action(
+                    action="sheets_rebuild_meetings",
+                    details={"row_count": len(meetings_from_db)},
+                    triggered_by="system",
+                )
+            except Exception as log_err:
+                logger.warning(f"Could not audit-log meetings rebuild: {log_err}")
+            await self.format_meetings_tab()
+            return True
+        except Exception as e:
+            logger.error(f"Error rebuilding Meetings sheet: {e}")
+            return False
+
+    # =========================================================================
+    # Read-only reference tabs — Open Questions + Areas.
+    # =========================================================================
+
+    async def _ensure_tab(self, tab_name: str, headers: list[str]) -> int | None:
+        """Create `tab_name` with a header row if missing; return its sheetId.
+
+        Always appended LAST. A tab at index 0 is what silently broke every
+        sheet read in April 2026, because bare A1 ranges resolve against
+        whichever sheet sits first.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return None
+        try:
+            meta = self._execute_with_retry(
+                lambda: self.service.spreadsheets().get(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    fields="sheets.properties",
+                )
+            )
+            sheets = meta.get("sheets", [])
+            for sheet in sheets:
+                props = sheet.get("properties", {})
+                if props.get("title") == tab_name:
+                    return props["sheetId"]
+            resp = self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": [{"addSheet": {"properties": {
+                        "title": tab_name, "index": len(sheets),
+                    }}}]},
+                )
+            )
+            sid = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+            end_col = chr(ord("A") + len(headers) - 1)
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().update(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{tab_name}'!A1:{end_col}1",
+                    valueInputOption="RAW",
+                    body={"values": [headers]},
+                )
+            )
+            logger.info(f"Created {tab_name} tab (sheetId={sid})")
+            return sid
+        except Exception as e:
+            logger.error(f"Error ensuring {tab_name} tab: {e}")
+            return None
+
+    async def _rebuild_readonly_tab(
+        self, tab_name: str, headers: list[str], rows: list[list],
+        force_empty: bool = False,
+    ) -> bool:
+        """Clear + rewrite a generated tab, then lock it.
+
+        `force_empty` guard is mandatory here for the same reason as
+        rebuild_tasks_sheet: a transient Supabase read returning [] must never
+        clear a populated tab. That is precisely how the Tasks sheet was wiped
+        in April 2026.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+        if not rows and not force_empty:
+            logger.error(
+                f"_rebuild_readonly_tab({tab_name}) called with 0 rows and "
+                f"force_empty=False — refusing to clear a populated tab."
+            )
+            return False
+        try:
+            sid = await self._ensure_tab(tab_name, headers)
+            if sid is None:
+                return False
+            end_col = chr(ord("A") + len(headers) - 1)
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().clear(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{tab_name}'!A2:{end_col}",
+                    body={},
+                )
+            )
+            if rows:
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().values().update(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=f"'{tab_name}'!A2:{end_col}{len(rows) + 1}",
+                        valueInputOption="RAW",
+                        body={"values": rows},
+                    )
+                )
+            await self._format_readonly_tab(sid, tab_name, len(headers))
+            logger.info(f"Rebuilt {tab_name}: {len(rows)} row(s)")
+            return True
+        except Exception as e:
+            logger.error(f"Error rebuilding {tab_name}: {e}")
+            return False
+
+    async def _format_readonly_tab(self, sid: int, tab_name: str, n_cols: int) -> bool:
+        """Header styling, widths, banding, and a whole-tab protected range."""
+        try:
+            desc = f"Gianluigi: {tab_name} is generated — edits are overwritten"
+            requests: list[dict] = [
+                {"updateSheetProperties": {
+                    "properties": {"sheetId": sid,
+                                   "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount"}},
+                {"repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                              "startColumnIndex": 0, "endColumnIndex": n_cols},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": COLORS["header_bg"],
+                        "textFormat": {"bold": True,
+                                       "foregroundColor": COLORS["header_text"]}}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+                _border_request(sid, n_cols),
+            ]
+            requests.append(_text_wrap_request(sid, 0))
+            try:
+                pmeta = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        fields="sheets(properties.sheetId,protectedRanges)",
+                    )
+                )
+                for sheet in pmeta.get("sheets", []):
+                    if sheet.get("properties", {}).get("sheetId") != sid:
+                        continue
+                    for pr in sheet.get("protectedRanges", []):
+                        if pr.get("description") == desc:
+                            requests.append({"deleteProtectedRange": {
+                                "protectedRangeId": pr["protectedRangeId"]}})
+            except Exception:
+                pass
+            # Whole tab, not just some columns — every cell here is generated,
+            # and an edit would be silently discarded on the next rebuild.
+            requests.append({"addProtectedRange": {"protectedRange": {
+                "range": {"sheetId": sid},
+                "description": desc,
+                "warningOnly": True,
+            }}})
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Could not format {tab_name}: {e}")
+            return False
+
+    async def rebuild_questions_tab(self, questions: list[dict]) -> bool:
+        """Open Questions — open only, newest first, grouped by Project.
+
+        The FILTER is the feature. There are 100+ open questions going back to
+        May; dumping all of them produces a tab nobody opens. Aging (60d ->
+        stale) happens in processors/question_lifecycle; this renders whatever
+        is still `open`.
+        """
+        rows = [[
+            (q.get("question") or "")[:500],
+            q.get("raised_by") or "",
+            q.get("label") or "",
+            q.get("age_days", ""),
+            q.get("source_meeting") or "",
+            q.get("status") or "open",
+            q.get("id") or "",
+        ] for q in questions]
+        return await self._rebuild_readonly_tab(
+            QUESTIONS_TAB_NAME, QUESTIONS_HEADERS, rows, force_empty=True
+        )
+
+    async def rebuild_areas_tab(self, areas: list[dict]) -> bool:
+        """Areas — the index into every other tab, one row per Gantt area."""
+        rows = [[
+            a.get("name") or "",
+            a.get("open_tasks", 0),
+            a.get("overdue", 0),
+            a.get("open_questions", 0),
+            a.get("meetings_to_schedule", 0),
+            a.get("last_activity") or "",
+            (a.get("current_focus") or "")[:400],
+        ] for a in areas]
+        return await self._rebuild_readonly_tab(
+            AREAS_TAB_NAME, AREAS_HEADERS, rows
+        )
+
     async def add_decisions_batch_to_sheet(
         self,
         decisions: list[dict],
@@ -2026,6 +2748,118 @@ class GoogleSheetsService:
 
         except Exception as e:
             logger.error(f"Error adding decisions to sheet: {e}")
+            return False
+
+    async def format_meetings_tab(self) -> bool:
+        """Format the Meetings tab: header, widths, status colours, protection.
+
+        No data-validation dropdowns — they were removed from Tasks for causing
+        errors against existing data (and Hebrew values), so Status uses
+        conditional formatting instead.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return False
+        try:
+            sid = await self.ensure_meetings_tab()
+            if sid is None:
+                return False
+            n_cols = len(MEETING_TRACKER_HEADERS)
+            requests: list[dict] = []
+
+            requests.append({
+                "updateSheetProperties": {
+                    "properties": {"sheetId": sid,
+                                   "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            })
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                              "startColumnIndex": 0, "endColumnIndex": n_cols},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": COLORS["header_bg"],
+                        "textFormat": {"bold": True, "foregroundColor": COLORS["header_text"]},
+                    }},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+
+            # A=Meeting, B=Project, C=Led By, D=Proposed, E=Participants,
+            # F=Status, G=Agenda, H=Prep, I=Source, J=ID
+            for i, w in enumerate([300, 130, 120, 110, 180, 110, 260, 200, 150, 70]):
+                requests.append(_column_width_request(sid, i, w))
+            requests.append(_text_wrap_request(sid, MEETING_COL_INDEX["title"]))
+            requests.append(_text_wrap_request(sid, MEETING_COL_INDEX["agenda"]))
+
+            requests.extend(self._clear_conditional_format_rules_for_sheet(
+                settings.TASK_TRACKER_SHEET_ID, sid))
+            status_rules = [
+                ("not_scheduled", COLORS["status_overdue"]),   # the queue — stands out
+                ("scheduled", COLORS["status_in_progress"]),
+                ("held", COLORS["status_done"]),
+                ("dropped", COLORS["status_inactive"]),
+            ]
+            for idx, (text, color) in enumerate(status_rules):
+                requests.append(_conditional_format_rule(
+                    sid, MEETING_COL_INDEX["status"], text, color, idx))
+
+            # Status dropdown — strict=False, so a reconcile-written status can
+            # never error the cell. [2026-07-23]
+            requests.append(_data_validation_request(
+                sid, MEETING_COL_INDEX["status"], list(MEETING_STATUSES)))
+
+            requests.append(_border_request(sid, n_cols))
+
+            # G:J are system-owned (agenda / prep / source / id) — lock cues.
+            for _lk in ("agenda", "prep_needed", "source_meeting", "id"):
+                _ci = MEETING_COL_INDEX[_lk]
+                requests.append(_lock_tint_request(sid, _ci))
+                requests.append(_lock_header_request(
+                    sid, _ci, MEETING_TRACKER_HEADERS[_ci]))
+
+            _DESC = "Gianluigi: system-owned (agenda / prep / source / id)"
+            try:
+                pmeta = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        fields="sheets(properties.sheetId,protectedRanges)",
+                    )
+                )
+                for sheet in pmeta.get("sheets", []):
+                    if sheet.get("properties", {}).get("sheetId") != sid:
+                        continue
+                    for pr in sheet.get("protectedRanges", []):
+                        if pr.get("description") == _DESC:
+                            requests.append({"deleteProtectedRange": {
+                                "protectedRangeId": pr["protectedRangeId"]}})
+            except Exception:
+                pass
+            requests.append({
+                "addProtectedRange": {
+                    "protectedRange": {
+                        "range": {
+                            "sheetId": sid,
+                            "startRowIndex": 1,
+                            "startColumnIndex": MEETING_COL_INDEX["agenda"],
+                            "endColumnIndex": MEETING_COL_INDEX["id"] + 1,
+                        },
+                        "description": _DESC,
+                        "warningOnly": True,
+                    }
+                }
+            })
+
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    body={"requests": requests},
+                )
+            )
+            logger.info("Applied formatting to the Meetings tab")
+            return True
+        except Exception as e:
+            logger.error(f"Error formatting Meetings tab: {e}")
             return False
 
     async def format_decision_tracker(self, sheet_id: int | None = None) -> bool:
@@ -2210,10 +3044,22 @@ class GoogleSheetsService:
                 }
             })
 
-            # --- Fixed column widths (Phase 10 layout) ---
-            # A=Priority(50), B=Label(120), C=Task(350), D=Owner(90),
-            # E=Deadline(90), F=Status(90), G=Category(120), H=Source(150), I=Created(80)
-            col_widths = [50, 120, 350, 90, 90, 90, 120, 150, 80]
+            # --- Fixed column widths ---
+            # A=Priority(50), B=Project(120), C=Task(350), D=Owner(120),
+            # E=Deadline(90), F=Status(90), G=Area(150), H=Source(150),
+            # I=Created(80), J=ID(70), K=Urgency(70), L=Last Update(95)
+            #
+            # This list used to stop at I — 9 widths for a 10/11-column layout —
+            # so the identity and urgency columns rendered at whatever width
+            # they happened to have. Owner widened to 120 now that assignees are
+            # full names (was 90, which truncated "Paolo Vailetti"). [2026-07-22]
+            col_widths = [50, 120, 350, 120, 90, 90, 150, 150, 80]
+            if "id" in TASK_COL_INDEX:
+                col_widths.append(70)
+            if "urgency" in TASK_COL_INDEX:
+                col_widths.append(70)
+            if "last_update" in TASK_COL_INDEX:
+                col_widths.append(95)
             for i, w in enumerate(col_widths):
                 requests.append(_column_width_request(sid, i, w))
 
@@ -2262,7 +3108,47 @@ class GoogleSheetsService:
                 )
                 rule_idx += 1
 
-            # --- NO data validation dropdowns (removed — they cause errors) ---
+            # --- Staleness on Last Update (L) ---
+            # Red BEFORE amber: rules are evaluated in order and the first match
+            # wins, so the 60-day rule must be registered first or everything
+            # over 30 days would paint amber and the 60-day rule never fire.
+            if "last_update" in TASK_COL_INDEX:
+                for days, color in ((60, COLORS["stale_alert"]), (30, COLORS["stale_warn"])):
+                    requests.append(
+                        _staleness_format_rule(
+                            sid, TASK_COL_INDEX["last_update"], days, color, rule_idx
+                        )
+                    )
+                    rule_idx += 1
+
+            # --- Data validation dropdowns (strict=False: shows the picker but
+            #     NEVER rejects a value, so a reconcile-written or legacy/Hebrew
+            #     cell can't error — the failure mode that got dropdowns pulled
+            #     in Phase 10 was strict=True). Only the controlled enum columns.
+            #     [2026-07-23] ---
+            requests.append(_data_validation_request(
+                sid, TASK_COL_INDEX["status"], TASK_STATUSES))
+            requests.append(_data_validation_request(
+                sid, TASK_COL_INDEX["priority"], PRIORITIES))
+            requests.append(_data_validation_request(
+                sid, TASK_COL_INDEX["category"], TASK_CATEGORIES + ["General"]))
+            if "urgency" in TASK_COL_INDEX:
+                requests.append(_data_validation_request(
+                    sid, TASK_COL_INDEX["urgency"], PRIORITIES))
+
+            # --- 🔒 header markers on the system-owned columns (H,I,J + L).
+            #     The tint that pairs with these is applied AFTER banding below
+            #     (banding would otherwise paint over it), and deliberately SKIPS
+            #     column L — that column carries the staleness colours and a grey
+            #     fill would hide them. [2026-07-23] ---
+            _locked_cols = ["source_meeting", "created", "id"]
+            _header_locked = list(_locked_cols)
+            if "last_update" in TASK_COL_INDEX:
+                _header_locked.append("last_update")
+            for _lk in _header_locked:
+                _ci = TASK_COL_INDEX[_lk]
+                requests.append(_lock_header_request(
+                    sid, _ci, TASK_TRACKER_HEADERS[_ci]))
 
             # --- Remove existing banding then add fresh (idempotent) ---
             try:
@@ -2281,6 +3167,11 @@ class GoogleSheetsService:
                 pass
             requests.append(_banding_request(sid, num_cols))
 
+            # Lock-tint AFTER banding so the grey wins on H/I/J. Column L is
+            # excluded (staleness colours own it — see header block above).
+            for _lk in _locked_cols:
+                requests.append(_lock_tint_request(sid, TASK_COL_INDEX[_lk]))
+
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
 
@@ -2291,6 +3182,7 @@ class GoogleSheetsService:
             #     the bot's own writes are never blocked; idempotent (drop any
             #     prior Gianluigi protection, then re-add one covering H:J). ---
             _PROTECT_DESC = "Gianluigi: system-owned (source_meeting / created / id)"
+            _LAST_UPDATE_PROTECT_DESC = "Gianluigi: system-owned (last update)"
             try:
                 pmeta = self._execute_with_retry(
                     lambda: self.service.spreadsheets().get(
@@ -2302,7 +3194,7 @@ class GoogleSheetsService:
                     if sheet.get("properties", {}).get("sheetId") != sid:
                         continue
                     for pr in sheet.get("protectedRanges", []):
-                        if pr.get("description") == _PROTECT_DESC:
+                        if pr.get("description") in (_PROTECT_DESC, _LAST_UPDATE_PROTECT_DESC):
                             requests.append({
                                 "deleteProtectedRange": {
                                     "protectedRangeId": pr["protectedRangeId"]
@@ -2324,6 +3216,24 @@ class GoogleSheetsService:
                     }
                 }
             })
+            # Last Update (L) is system-owned too, but NOT contiguous with H:J —
+            # Urgency (K) sits between them and stays editable — so it needs its
+            # own range. Same delete-then-re-add idempotence via its description.
+            if "last_update" in TASK_COL_INDEX:
+                requests.append({
+                    "addProtectedRange": {
+                        "protectedRange": {
+                            "range": {
+                                "sheetId": sid,
+                                "startRowIndex": 1,
+                                "startColumnIndex": TASK_COL_INDEX["last_update"],
+                                "endColumnIndex": TASK_COL_INDEX["last_update"] + 1,
+                            },
+                            "description": _LAST_UPDATE_PROTECT_DESC,
+                            "warningOnly": True,
+                        }
+                    }
+                })
 
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().batchUpdate(
@@ -2489,17 +3399,21 @@ class GoogleSheetsService:
 
         try:
             # Same bare-range hazard as get_all_tasks(): qualify with the tab.
+            # Width comes from the live layout, not a hardcoded A1:J1 — that
+            # range predates the col-J UUID / col-K Urgency / col-L Last Update
+            # appends and would have truncated the header row. [2026-07-22]
             tab_name = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+            last_col = max(TASK_COLUMNS.values())
             rows = await self._read_sheet_range(
                 sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                range_name=f"'{tab_name}'!A1:J1"
+                range_name=f"'{tab_name}'!A1:{last_col}1"
             )
 
             if not rows:
                 # Add headers
                 await self._write_sheet_range(
                     sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                    range_name=f"'{tab_name}'!A1:J1",
+                    range_name=f"'{tab_name}'!A1:{last_col}1",
                     values=[TASK_TRACKER_HEADERS]
                 )
                 logger.info("Created Task Tracker headers")

@@ -239,9 +239,17 @@ class TestFormatTaskTracker:
             auto_resize = [r for r in requests if "autoResizeDimensions" in r]
             assert len(auto_resize) == 0, "Should NOT have autoResizeDimensions"
 
-            # Should have 9 column width requests (A-I)
+            # One width per COLUMN IN THE LAYOUT. This used to assert exactly 9
+            # (A-I), which pinned a bug rather than a behaviour: the layout has
+            # been 10-11 columns since the col-J UUID and col-K Urgency were
+            # added, so J/K/L rendered at whatever width they happened to have.
+            # [2026-07-22]
+            from services.google_sheets import TASK_COLUMNS
+
             dim_reqs = [r for r in requests if "updateDimensionProperties" in r]
-            assert len(dim_reqs) == 9, "Expected 9 column width requests"
+            assert len(dim_reqs) == len(TASK_COLUMNS), (
+                f"Expected one width per column ({len(TASK_COLUMNS)}), got {len(dim_reqs)}"
+            )
 
             # Phase 10: Priority column (A=0) is 50px, Task column (C=2) is 350px
             col_a = [
@@ -286,8 +294,15 @@ class TestFormatTaskTracker:
             assert 2 in col_indices, "Text wrap should include column C (index 2)"
 
     @pytest.mark.asyncio
-    async def test_no_data_validation_dropdowns(self):
-        """Phase 10: Data validation dropdowns removed (cause errors with existing data)."""
+    async def test_dropdowns_are_present_but_non_strict(self):
+        """Dropdowns restored 2026-07-23 on the controlled enum columns.
+
+        Phase 10 removed them because the OLD form used strict=True, which
+        REJECTS any cell value not in the list — reconcile-written statuses and
+        legacy/Hebrew cells then error-flagged en masse. strict=False shows the
+        picker but accepts anything, so the failure mode can't recur. This test
+        pins BOTH facts: dropdowns exist AND none is strict.
+        """
         svc, mock_api = _make_service()
 
         with patch("services.google_sheets.settings") as mock_settings:
@@ -297,7 +312,14 @@ class TestFormatTaskTracker:
 
             requests = _extract_requests(mock_api)
             validation_reqs = [r for r in requests if "setDataValidation" in r]
-            assert len(validation_reqs) == 0, "Data validation should be removed from Task Tracker"
+            assert len(validation_reqs) >= 3, "Status/Priority/Category dropdowns expected"
+            for r in validation_reqs:
+                rule = r["setDataValidation"]["rule"]
+                assert rule.get("strict") is False, (
+                    "every dropdown MUST be strict=False — a strict dropdown is "
+                    "exactly what broke Tasks in Phase 10"
+                )
+                assert rule["condition"]["type"] == "ONE_OF_LIST"
 
     @pytest.mark.asyncio
     async def test_alternating_row_banding(self):

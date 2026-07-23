@@ -460,6 +460,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("emailscan", self._handle_email_scan))
         self.app.add_handler(CommandHandler("review", self._handle_review))
         self.app.add_handler(CommandHandler("sync", self._handle_sync))
+        self.app.add_handler(CommandHandler("pending", self._handle_pending))
 
         # Add callback handler for inline buttons (approval flow, debrief)
         self.app.add_handler(
@@ -509,6 +510,7 @@ class TelegramBot:
                 BotCommand("reprocess", "Reprocess a meeting"),
                 BotCommand("review", "Start weekly review"),
                 BotCommand("sync", "Sync tasks from Sheets"),
+                BotCommand("pending", "Show unsynced Sheet edits (read-only)"),
                 BotCommand("emailscan", "Scan personal email for action items"),
                 BotCommand("cost", "Show API cost summary"),
                 BotCommand("help", "Show help"),
@@ -2061,6 +2063,61 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
     # Weekly Review Handlers
     # =========================================================================
 
+    async def _handle_pending(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Show unsynced Sheet edits — READ-ONLY, safe for the whole group.
+
+        This is Nechama's confirmation that her edits registered. She has no
+        write power (the group is read-only by design and /sync stays Eyal-only),
+        so the actual apply happens on the auto-sync timer or when Eyal runs
+        /sync. This just previews (dry_run=True) and reports COUNTS ONLY — no
+        task/decision content — so there is nothing to tier-filter.
+        """
+        chat_id = update.effective_chat.id
+        try:
+            from processors.sheets_sync import (
+                reconcile_tasks, reconcile_decisions, reconcile_meetings,
+            )
+            t = await reconcile_tasks(dry_run=True)
+            d = await reconcile_decisions(dry_run=True)
+            m = await reconcile_meetings(dry_run=True)
+
+            def _n(r, *keys):
+                return sum(int(r.get(k, 0) or 0) for k in keys) if isinstance(r, dict) else 0
+
+            t_edits = _n(t, "pulled", "created")
+            d_edits = _n(d, "pulled")
+            m_edits = _n(m, "pulled", "created")
+            total = t_edits + d_edits + m_edits
+
+            if isinstance(t, dict) and t.get("error"):
+                await self.send_message(chat_id, "Couldn't read the sheet just now — try again shortly.")
+                return
+
+            if total == 0:
+                msg = "✅ Everything's synced — no pending Sheet edits."
+            else:
+                lines = ["📝 <b>Pending Sheet edits</b> (not yet in the DB):"]
+                if t_edits:
+                    lines.append(f"  • {t_edits} task edit(s)")
+                if m_edits:
+                    lines.append(f"  • {m_edits} meeting edit(s)")
+                if d_edits:
+                    lines.append(f"  • {d_edits} decision edit(s)")
+                _iv = int(getattr(settings, "RECONCILE_INTERVAL_MINUTES", 0) or 0)
+                if _iv > 0:
+                    lines.append(f"\nThese sync automatically (about every {_iv} min).")
+                else:
+                    lines.append("\nEyal can apply these with /sync.")
+                msg = "\n".join(lines)
+            await self.send_message(chat_id, msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"/pending failed: {e}")
+            await self.send_message(chat_id, "Couldn't check pending edits right now.")
+
     async def _handle_sync(
         self,
         update: Update,
@@ -2083,7 +2140,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
 
         try:
             # v3: route through the reconcile engine (dry-run preview).
-            from processors.sheets_sync import reconcile_tasks, reconcile_decisions
+            from processors.sheets_sync import (
+                reconcile_tasks, reconcile_decisions, reconcile_meetings,
+            )
 
             summary = await reconcile_tasks(dry_run=True)
             if summary.get("error"):
@@ -2095,13 +2154,20 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             dec_pulled = dec_summary.get("pulled", 0)
             dec_pushed = dec_summary.get("pushed", 0)
             dec_readded = dec_summary.get("readded", 0)
+            # Meetings preview — self-guards on MEETING_RECONCILE_ENABLED.
+            mtg_summary = await reconcile_meetings(dry_run=True)
+            mtg_pulled = mtg_summary.get("pulled", 0)
+            mtg_pushed = mtg_summary.get("pushed", 0)
+            mtg_created = mtg_summary.get("created", 0)
+            mtg_readded = mtg_summary.get("readded", 0)
 
             pulled = summary.get("pulled", 0)
             pushed = summary.get("pushed", 0)
             created = summary.get("created", 0)
             readded = summary.get("readded", 0)
             if not (pulled or pushed or created or readded
-                    or dec_pulled or dec_pushed or dec_readded):
+                    or dec_pulled or dec_pushed or dec_readded
+                    or mtg_pulled or mtg_pushed or mtg_created or mtg_readded):
                 await self.send_to_eyal("Sheets and DB are in sync. No changes needed.")
             else:
                 lines = [
@@ -2116,6 +2182,13 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                         f"  • {dec_pulled} decision edit(s) → DB",
                         f"  • {dec_pushed} decision update(s) → Sheet",
                         f"  • {dec_readded} decision(s) re-added to Sheet",
+                    ]
+                if mtg_pulled or mtg_pushed or mtg_created or mtg_readded:
+                    lines += [
+                        f"  • {mtg_pulled} meeting edit(s) → DB",
+                        f"  • {mtg_pushed} meeting update(s) → Sheet",
+                        f"  • {mtg_created} new meeting(s) from Sheet",
+                        f"  • {mtg_readded} meeting(s) re-added to Sheet",
                     ]
                 if settings.RECONCILE_SHADOW_MODE:
                     lines.append("\n⚠️ Shadow mode is ON — Apply will still write nothing until it's off.")
@@ -3875,7 +3948,9 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # ---- Sheets sync callbacks (Phase 11 C7) ----
         if action == "sync_apply":
             if meeting_id == "confirm":
-                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
+                from processors.sheets_sync import (
+                    reconcile_tasks, reconcile_decisions, reconcile_meetings,
+                )
                 summary = await reconcile_tasks(dry_run=False)  # v3 engine recomputes fresh
                 if summary.get("error"):
                     await self._safe_edit(query, f"Sync error: {summary['error']}")
@@ -3889,6 +3964,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                     return
                 # Decisions apply — self-guards on DECISION_RECONCILE_ENABLED.
                 dec = await reconcile_decisions(dry_run=False)
+                mtg = await reconcile_meetings(dry_run=False)
                 msg = (
                     f"Sync applied — {summary.get('pulled', 0)} edit(s)→DB, "
                     f"{summary.get('pushed', 0)} DB→Sheet, "
@@ -3901,6 +3977,26 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                         f"\nDecisions — {dec.get('pulled', 0)} edit(s)→DB, "
                         f"{dec.get('pushed', 0)} DB→Sheet, {dec.get('readded', 0)} re-added."
                     )
+                # The preview promises "N meeting edit(s) → DB"; without this the
+                # confirmation reports only tasks+decisions, so meetings work
+                # reads as a silent failure even though it ran and wrote.
+                if isinstance(mtg, dict) and not mtg.get("skipped") and (
+                        mtg.get("pulled") or mtg.get("pushed")
+                        or mtg.get("created") or mtg.get("readded")):
+                    msg += (
+                        f"\nMeetings — {mtg.get('pulled', 0)} edit(s)→DB, "
+                        f"{mtg.get('pushed', 0)} DB→Sheet, "
+                        f"{mtg.get('created', 0)} created, "
+                        f"{mtg.get('readded', 0)} re-added."
+                    )
+                # MEETING_RECONCILE_SHADOW_MODE is independent of
+                # RECONCILE_SHADOW_MODE, so the tasks-only guard above lets the
+                # meetings side no-op silently under a plain "Sync applied" —
+                # exactly the cutover state (tasks live, meetings shadow) the
+                # rollout recommends. Say so rather than imply it wrote.
+                if isinstance(mtg, dict) and mtg.get("shadow"):
+                    msg += ("\n⚠️ Meetings reconcile is in SHADOW mode — the "
+                            "Meetings tab was NOT written.")
                 await self._safe_edit(query, msg)
             else:
                 await self._safe_edit(query, "Sync cancelled.")
@@ -4851,11 +4947,25 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         sheets_ok = False
         sheets_error: str | None = None
         try:
-            if row_number:
-                from services.google_sheets import sheets_service
-                await sheets_service.update_task_row(row_number, **updates)
+            from services.google_sheets import sheets_service
+
+            # Prefer the col-J UUID over the row number carried in the callback:
+            # rows shift whenever anything above them is inserted or archived, so
+            # a stale row_number writes these cells onto a DIFFERENT task. Same
+            # reason the reconcile engine keys on the id (audit P1-03). [2026-07-22]
+            target_row = None
+            if resolved_task_id:
+                try:
+                    target_row = await sheets_service.find_task_row_by_id(resolved_task_id)
+                except Exception:
+                    target_row = None
+            if target_row is None:
+                target_row = row_number
+
+            if target_row:
+                await sheets_service.update_task_row(target_row, **updates)
                 sheets_ok = True
-                logger.info(f"Updated task in Sheets row {row_number} -> {updates}")
+                logger.info(f"Updated task in Sheets row {target_row} -> {updates}")
             else:
                 # No row number — skip Sheets silently, not a failure
                 sheets_ok = True

@@ -8,6 +8,7 @@
 .env
 .env.local
 .env.*.local
+.env.production
 *.pem
 *.key
 credentials.json
@@ -153,3 +154,7 @@ tmpclaude-*
 # =============================================================================
 docs/_build/
 site/
+
+# Backfill rollback snapshots — operational artifacts containing live task/
+# assignee data. Kept on disk for --rollback, never committed.
+scripts/_backfill_snapshots/

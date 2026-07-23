@@ -277,28 +277,39 @@ class TestToolDefinitionsCategory:
 class TestSheetsTaskTrackerColumns:
     """Tests for category in Google Sheets Task Tracker."""
 
-    def test_columns_include_category(self):
-        """TASK_TRACKER_HEADERS should include Category."""
-        from services.google_sheets import TASK_TRACKER_HEADERS
+    def test_columns_include_the_area_taxonomy_column(self):
+        """The col-G taxonomy column exists and is labelled 'Area'.
 
-        assert "Category" in TASK_TRACKER_HEADERS
-        # Phase 10 layout: Priority, Label, Task, Owner, Deadline, Status, Category, Source Meeting, Created
+        Renamed from 'Category' to 'Area' on 2026-07-22 (display only —
+        TASK_COLUMNS is index-based, so nothing structural moved). Category IS
+        the Gantt-area taxonomy since the 2026-06 realignment, and the header
+        now says so; 'Project' likewise replaces the vaguer 'Label'. Together
+        they make the two topic levels legible in the workspace.
+        """
+        from services.google_sheets import TASK_TRACKER_HEADERS, TASK_COLUMNS
+
+        assert "Area" in TASK_TRACKER_HEADERS
+        assert TASK_COLUMNS["category"] == "G", "the taxonomy column must stay at G"
         assert TASK_TRACKER_HEADERS[0] == "Priority"
-        assert TASK_TRACKER_HEADERS[1] == "Label"
+        assert TASK_TRACKER_HEADERS[1] == "Project"
         assert TASK_TRACKER_HEADERS[2] == "Task"
 
     def test_columns_has_ten_entries_with_id(self):
         """v3 reconcile appended the UUID 'ID' column at the end (10 total).
-        The urgency flag appends only 'Urgency'/K after that — no Area/L."""
-        from services.google_sheets import TASK_TRACKER_HEADERS, TASK_COLUMNS
+        Flag-gated columns append AFTER it — never a separate area column."""
+        from services.google_sheets import (
+            TASK_TRACKER_HEADERS_BASE, TASK_COLUMNS,
+        )
         from config.settings import settings
 
-        base_headers = [h for h in TASK_TRACKER_HEADERS if h != "Urgency"]
-        assert len(base_headers) == 10
-        assert base_headers[9] == "ID"
+        assert len(TASK_TRACKER_HEADERS_BASE) == 10
+        assert TASK_TRACKER_HEADERS_BASE[9] == "ID"
         assert TASK_COLUMNS["id"] == "J"  # appended; A-I positions unchanged
-        assert "Area" not in TASK_TRACKER_HEADERS
+        # The 2026-06 realignment removed the SEPARATE area column. That is a
+        # structural invariant about the column map — assert it there, not on
+        # the display header, which now legitimately reads "Area" for col G.
         assert "area" not in TASK_COLUMNS
+        assert "area_label" not in TASK_COLUMNS
         if getattr(settings, "TASK_SHEET_URGENCY_AREA_ENABLED", False):
             assert TASK_COLUMNS["urgency"] == "K"
 

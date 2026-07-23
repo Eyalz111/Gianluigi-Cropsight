@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 REVIEWABLE_TYPES = (
     "topic_merge", "topic_assign", "task_update_proposal", "decision_supersede_proposal",
     "decision_update_proposal", "decision_merge", "decision_relate",
+    "project_new", "question_resolved",
 )
 
 
@@ -59,6 +60,20 @@ def _label(content_type: str, c: dict) -> str:
             f"<b>OLD:</b> \"{old}\"\n"
             f"<b>NEW:</b> \"{new}\"\n"
             f"<i>(mark the old one superseded by the new)</i>"
+        )
+    if content_type == "project_new":
+        seen = c.get("meeting_count", "?")
+        samples = ", ".join((c.get("sample_meetings") or [])[:2]) or "—"
+        return (
+            f"Add <b>\"{c.get('name', '?')}\"</b> as a project?\n"
+            f"<i>Used as a label in {seen} meetings — {samples}</i>"
+        )
+    if content_type == "question_resolved":
+        return (
+            f"Close this open question?\n"
+            f"<b>Q:</b> \"{(c.get('question') or '?')[:110]}\"\n"
+            f"<b>Answered by:</b> \"{(c.get('decision_summary') or '?')[:110]}\"\n"
+            f"<i>(match {c.get('score', '?')})</i>"
         )
     return "Review this suggestion?"
 
@@ -110,6 +125,26 @@ def apply_proposal_decision(proposal_id: str, decision: str) -> dict:
         supabase_client.delete_pending_approval(proposal_id)
         supabase_client.log_action(
             "knowledge_proposal_approved" if approve else "knowledge_proposal_rejected",
+            details={"proposal_id": proposal_id, "source": "telegram_sync", **content, "result": result},
+            triggered_by="eyal",
+        )
+        return {"status": "ok", "decision": "approved" if approve else "rejected", "result": result}
+
+    if content_type in ("project_new", "question_resolved"):
+        result = None
+        if approve:
+            if content_type == "project_new":
+                from processors.project_learning import apply_project_proposal as _apply
+            else:
+                from processors.question_lifecycle import apply_question_resolution as _apply
+            result = _apply(content)
+            if not result.get("ok"):
+                # Leave it pending so it can be retried, rather than reporting a
+                # success that didn't happen (mirrors the MCP surface).
+                return {"status": "error", "error": result.get("error")}
+        supabase_client.delete_pending_approval(proposal_id)
+        supabase_client.log_action(
+            f"{content_type}_approved" if approve else f"{content_type}_rejected",
             details={"proposal_id": proposal_id, "source": "telegram_sync", **content, "result": result},
             triggered_by="eyal",
         )

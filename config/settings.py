@@ -165,6 +165,18 @@ class Settings(BaseSettings):
             "churn.)"
         ),
     )
+    TASK_SHEET_LAST_UPDATE_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Add 'Last Update' (col L) to the Tasks sheet — the DB updated_at, "
+            "APPENDED after Urgency by the same never-relocate rule. Deadlines "
+            "are optional here (75% of open tasks have none), so a due-date view "
+            "is nearly empty; STALENESS is the pressure signal that always "
+            "applies, and it could not be computed in-sheet because updated_at "
+            "was absent (col I is Created). Sorting by this column is the weekly "
+            "review agenda. System-owned — protected alongside H:J."
+        ),
+    )
 
     # ==========================================================================
     # Calendar Configuration
@@ -739,6 +751,41 @@ class Settings(BaseSettings):
     DECISION_RECONCILE_ENABLED: bool = Field(
         default=False,
         description="Phase 2 (editable Decisions sheet): enable the Sheet<->DB decision reconcile AND the sheet id column (col H) + protected ranges. Off = historical one-way A:G layout, no reconcile. Flip ONLY at cutover (after migration + backfill)."
+    )
+    MEETING_RECONCILE_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Enable the Sheet<->DB reconcile for the Meetings tab "
+            "(follow_up_meetings). Off = the tab is not synced at all. Flip ONLY "
+            "after migrate_meeting_reconcile.sql + the snapshot backfill, and "
+            "run in shadow first — an un-backfilled snapshot makes every "
+            "untouched cell look like a human edit (phantom-pull)."
+        ),
+    )
+    MEETING_RECONCILE_SHADOW_MODE: bool = Field(
+        default=True,
+        description=(
+            "Meetings reconcile computes + logs but writes nothing. Keep True "
+            "until the first diff has been eyeballed."
+        ),
+    )
+    WORKSPACE_VIEWS_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Generate the read-only 'Open Questions' and 'Areas' tabs on the "
+            "reconcile cycle. Both are rebuilt from the DB every run, so any "
+            "hand edit is overwritten — they are protected in-sheet to say so."
+        ),
+    )
+    RECONCILE_INTERVAL_MINUTES: int = Field(
+        default=0,
+        description=(
+            "If > 0, also run the reconcile every N minutes (on top of the "
+            "fixed midday/pre-nightly slots). This is what lets Nechama's Sheet "
+            "edits reach the DB without anyone triggering a write — the system "
+            "syncs on a timer, so the 'group never writes' boundary stays "
+            "intact. 30 is a reasonable operational cadence. 0 = off (slots only)."
+        ),
     )
     RECONCILE_MIDDAY_HOUR: int = Field(default=13, description="IST hour for the midday reconcile")
     RECONCILE_PRENIGHTLY_HOUR: int = Field(

@@ -103,6 +103,11 @@ class ReconcileScheduler:
         if settings.RECONCILE_ENABLED:
             candidates.append((self._next_daily(now, settings.RECONCILE_MIDDAY_HOUR), "midday"))
             candidates.append((self._next_daily(now, settings.RECONCILE_PRENIGHTLY_HOUR), "prenightly"))
+            # Operational auto-sync: the next N-minute tick. This is what makes
+            # Nechama's Sheet edits land without a human trigger. [2026-07-23]
+            _iv = int(getattr(settings, "RECONCILE_INTERVAL_MINUTES", 0) or 0)
+            if _iv > 0:
+                candidates.append((now + timedelta(minutes=_iv), "interval"))
         if settings.GANTT_RECONCILE_ENABLED:
             candidates.append((
                 self._next_weekly(now, settings.WEEKLY_DIGEST_DAY, settings.GANTT_PREDIGEST_HOUR),
@@ -112,9 +117,13 @@ class ReconcileScheduler:
             return None
         trig, name = min(candidates, key=lambda c: c[0])
         sleep_s = max(0, (trig - now).total_seconds())
-        logger.info(f"Next reconcile ({name}): {trig.strftime('%a %Y-%m-%d %H:%M IST')} ({sleep_s/3600:.1f}h)")
+        logger.info(f"Next reconcile ({name}): {trig.strftime('%a %Y-%m-%d %H:%M IST')} ({sleep_s/60:.0f}m)")
         await asyncio.sleep(sleep_s)
-        return f"{trig.strftime('%Y-%m-%d')}:{name}"
+        # Interval ticks must carry HHMM so each is a DISTINCT slot — otherwise
+        # the `_last_slot` guard (built for once-a-day named slots) would run the
+        # interval once and then skip it for the rest of the day.
+        stamp = "%Y-%m-%d-%H%M" if name == "interval" else "%Y-%m-%d"
+        return f"{trig.strftime(stamp)}:{name}"
 
     async def _run(self, slot: str) -> bool:
         """Run the reconcile slot. Returns True on success, False on failure (audit SC-05)."""
@@ -131,16 +140,30 @@ class ReconcileScheduler:
                     "reconcile", details={"slot": slot, "kind": "gantt"}
                 )
             else:
-                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
+                from processors.sheets_sync import (
+                    reconcile_tasks, reconcile_decisions, reconcile_meetings,
+                )
                 summary = await reconcile_tasks()
-                # Decisions reconcile self-guards on DECISION_RECONCILE_ENABLED
-                # (returns {"skipped": ...} until cutover) — safe to always call.
+                # Decisions + meetings reconcile self-guard on their enable flags
+                # (they return {"skipped": ...} until cutover) — safe to always call.
                 dec_summary = await reconcile_decisions()
+                meet_summary = await reconcile_meetings()
+                # Generated views LAST — they read the state the reconcile just
+                # settled, so running them first would render stale counts.
+                views = None
+                if getattr(settings, "WORKSPACE_VIEWS_ENABLED", False):
+                    try:
+                        from processors.workspace_views import refresh_workspace_views
+                        views = await refresh_workspace_views()
+                    except Exception as ve:
+                        logger.warning(f"Workspace views refresh failed (non-fatal): {ve}")
                 supabase_client.upsert_scheduler_heartbeat(
                     "reconcile",
                     details={"slot": slot,
                              **(summary if isinstance(summary, dict) else {}),
-                             "decisions": dec_summary if isinstance(dec_summary, dict) else None},
+                             "decisions": dec_summary if isinstance(dec_summary, dict) else None,
+                             "meetings": meet_summary if isinstance(meet_summary, dict) else None,
+                             "views": views},
                 )
             return True
         except Exception as e:

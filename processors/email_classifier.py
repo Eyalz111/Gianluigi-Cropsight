@@ -29,7 +29,7 @@ def _classification_system(keywords_str: str, sharpened: bool) -> str:
     base = (
         "You are a classification assistant for CropSight, an Israeli AgTech startup. "
         "Classify emails by their relevance to CropSight business operations.\n"
-        "Team members: Eyal Zror (CEO), Roye Tadmor (CTO), Paolo Vailetti (BD), Prof. Yoram Weiss (Advisor).\n"
+        "Team members: Eyal Zror (CEO), Roye Tadmor (CTO), Paolo Vailetti (BD), Yoram Weiss (Advisor).\n"
         f"Relevant keywords: {keywords_str}\n\n"
         "Respond with EXACTLY one word: relevant, borderline, or false_positive.\n"
     )
@@ -172,7 +172,7 @@ async def extract_email_intelligence(
     system = (
         "You are an intelligence extraction assistant for CropSight, an AgTech startup. "
         "Extract structured operational items from email correspondence.\n\n"
-        "Team: Eyal Zror (CEO), Roye Tadmor (CTO), Paolo Vailetti (BD), Prof. Yoram Weiss (Advisor).\n\n"
+        "Team: Eyal Zror (CEO), Roye Tadmor (CTO), Paolo Vailetti (BD), Yoram Weiss (Advisor).\n\n"
         "RULES:\n"
         "- Summarize, don't quote raw email text\n"
         "- Attribute as 'from email correspondence'\n"

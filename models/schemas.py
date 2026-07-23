@@ -109,8 +109,18 @@ def filter_by_sensitivity(items: list[dict], max_level: int) -> list[dict]:
     Returns:
         Filtered list containing only items at or below max_level.
     """
-    # Include legacy mappings for safety
-    level_map = {**TIER_LEVELS, "ceo_only": 4, "restricted": 4, "sensitive": 4, "normal": 3}
+    # Include legacy mappings for safety.
+    # 'legal' MUST be here: distribution._SENSITIVITY_TO_BAND and
+    # Sensitivity.from_legacy both treat it as CEO-tier, but this map didn't —
+    # so a 'legal' item fell through to the default 3 and SURVIVED a
+    # founders-band cap. Not present in live data today (only team/ceo/normal/
+    # founders are stored), but the classifier's SENSITIVE_KEYWORDS include
+    # legal terms, so the two maps must not disagree. [2026-07-22]
+    level_map = {
+        **TIER_LEVELS,
+        "ceo_only": 4, "restricted": 4, "sensitive": 4, "legal": 4,
+        "normal": 3,
+    }
     return [
         item for item in items
         if level_map.get(item.get("sensitivity", "founders"), 3) <= max_level

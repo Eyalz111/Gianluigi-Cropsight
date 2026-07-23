@@ -66,7 +66,7 @@ _HARDCODED_TEAM_MEMBERS = {
         "is_admin": False,
     },
     "yoram": {
-        "name": "Prof. Yoram Weiss",
+        "name": "Yoram Weiss",
         "role": "Senior Advisor",
         "tier": "founders",
         "role_description": (

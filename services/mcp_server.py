@@ -703,6 +703,10 @@ class MCPServer:
 
                 if type == "knowledge":
                     types = ("topic_merge", "topic_assign")
+                elif type == "project":
+                    types = ("project_new",)
+                elif type == "question":
+                    types = ("question_resolved",)
                 elif type == "task":
                     types = ("task_update_proposal",)
                 elif type == "decision":
@@ -772,6 +776,34 @@ class MCPServer:
                         details={"proposal_id": proposal_id, **content},
                         triggered_by="eyal",
                     )
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
+                    return _success({"decision": "rejected"})
+
+                # --- new canonical project (auto-learn) / question closure ---
+                if content_type in ("project_new", "question_resolved"):
+                    if content_type == "project_new":
+                        from processors.project_learning import apply_project_proposal as _apply
+                    else:
+                        from processors.question_lifecycle import apply_question_resolution as _apply
+
+                    c = pending.get("content") or {}
+                    if decision == "approve":
+                        result = _apply(c)
+                        if not result.get("ok"):
+                            # Keep the proposal pending so it can be retried
+                            # rather than reporting a success that didn't happen.
+                            return _error(f"Could not apply {content_type}: {result.get('error')}")
+                        supabase_client.delete_pending_approval(proposal_id)
+                        supabase_client.log_action(
+                            f"{content_type}_approved",
+                            details={"proposal_id": proposal_id, **c, "result": result},
+                            triggered_by="eyal",
+                        )
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "approve"})
+                        return _success({"decision": "approved", "result": result})
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action(f"{content_type}_rejected",
+                                               details={"proposal_id": proposal_id, **c}, triggered_by="eyal")
                     mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
                     return _success({"decision": "rejected"})
 
@@ -2265,6 +2297,7 @@ class MCPServer:
             priority: str | None = None,
             urgency: str | None = None,
             category: str | None = None,
+            label: str | None = None,
         ) -> dict:
             try:
                 from services.supabase_client import supabase_client as _sc
@@ -2274,6 +2307,10 @@ class MCPServer:
                 updates = {}
                 if assignee is not None:
                     updates["assignee"] = assignee
+                # `label` (the project) had NO parameter at all, so a task's
+                # project was uneditable from Claude.ai. [2026-07-22]
+                if label is not None:
+                    updates["label"] = label
                 if status is not None:
                     updates["status"] = status
                 if priority is not None:
@@ -2322,32 +2359,43 @@ class MCPServer:
                 # Update in Supabase
                 updated = _sc.update_task(task_id, **updates)
 
-                # Sheets sync: find row and update
+                # Sheets sync: find row and update.
+                # Resolve the row by col-J UUID, not by title — two tasks can
+                # share a title, and a title match then writes these cells onto
+                # the WRONG task (the reconcile engine dropped title matching for
+                # this reason, audit P1-03). Falls back to title only when the
+                # row carries no id. [2026-07-22]
                 warnings: list[str] = []
                 try:
                     title = updated.get("title", "") or (current or {}).get("title", "")
-                    if title:
+                    row = await sheets_service.find_task_row_by_id(task_id)
+                    if row is None and title:
                         row = await sheets_service.find_task_row(title)
-                        if row:
-                            sheet_fields = {}
-                            if assignee is not None:
-                                sheet_fields["assignee"] = assignee
-                            if status is not None:
-                                sheet_fields["status"] = status
-                            if priority is not None:
-                                sheet_fields["priority"] = priority
-                            if parsed_deadline is not None:
-                                sheet_fields["deadline"] = parsed_deadline.isoformat()
-                            # Keep the Sheet's Urgency/Category cells in lockstep
-                            # so the reconcile pull doesn't revert this edit
-                            # (urgency no-ops when the K column isn't enabled).
-                            if "urgency" in updates:
-                                sheet_fields["urgency"] = updates["urgency"]
-                            if _cat_label is not None:
-                                sheet_fields["category"] = _cat_label
-                            await sheets_service.update_task_row(row, **sheet_fields)
-                        else:
-                            warnings.append("Task not found in Google Sheets — Sheets not synced")
+                    if row:
+                        sheet_fields = {}
+                        if assignee is not None:
+                            sheet_fields["assignee"] = assignee
+                        if status is not None:
+                            sheet_fields["status"] = status
+                        if priority is not None:
+                            sheet_fields["priority"] = priority
+                        if parsed_deadline is not None:
+                            sheet_fields["deadline"] = parsed_deadline.isoformat()
+                        # Keep the Sheet's Urgency/Category cells in lockstep
+                        # so the reconcile pull doesn't revert this edit
+                        # (urgency no-ops when the K column isn't enabled).
+                        if "urgency" in updates:
+                            sheet_fields["urgency"] = updates["urgency"]
+                        if _cat_label is not None:
+                            sheet_fields["category"] = _cat_label
+                        # Mirror the CANONICALIZED label (update_task resolved
+                        # it), so the cell matches the DB and reconcile doesn't
+                        # treat the difference as a fresh human edit.
+                        if "label" in updates:
+                            sheet_fields["label"] = (updated or {}).get("label", updates["label"])
+                        await sheets_service.update_task_row(row, **sheet_fields)
+                    else:
+                        warnings.append("Task not found in Google Sheets — Sheets not synced")
                 except Exception as sheets_err:
                     warnings.append(f"Sheets sync failed: {sheets_err}")
 
@@ -2434,7 +2482,12 @@ class MCPServer:
                 _u = _coerce_urgency(urgency)
                 _category = _sc.resolve_category(category)
 
-                # Create in Supabase
+                # Create in Supabase.
+                # `label` was accepted by this tool and written to the SHEET but
+                # omitted from the DB insert, so the DB label came back NULL and
+                # the next reconcile pulled it back from the sheet — marking the
+                # field manually-sticky as a side effect. Pass it through.
+                # [2026-07-22]
                 task = _sc.create_task(
                     title=title,
                     assignee=assignee,
@@ -2442,6 +2495,7 @@ class MCPServer:
                     deadline=parsed_deadline,
                     category=_category,
                     urgency=_u,
+                    label=label,
                 )
 
                 # Sheets sync
@@ -2450,14 +2504,22 @@ class MCPServer:
                     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     await sheets_service.add_task(
                         task=title,
-                        assignee=assignee,
+                        # Mirror the CANONICALIZED values that create_task wrote
+                        # to the DB, not the raw MCP arguments. This tool
+                        # documents accepting short names ("eyal", "moldova"),
+                        # and _sc.create_task resolves them — writing the raw
+                        # form to the Sheet made every MCP-created row diverge
+                        # on arrival, so the first reconcile read it as a human
+                        # edit and marked assignee+label permanently sticky.
+                        # _category already did this correctly. [2026-07-23]
+                        assignee=(task or {}).get("assignee", assignee),
                         source_meeting="Via Claude.ai",
                         deadline=parsed_deadline.isoformat() if parsed_deadline else None,
                         status="pending",
                         priority=priority,
                         created_date=today,
                         category=_category,
-                        label=label,
+                        label=(task or {}).get("label", label),
                         # PR10: write the UUID (col J) + urgency so the row is
                         # reconcile-complete — otherwise it'd be re-created as a dup.
                         task_id=task.get("id", "") if isinstance(task, dict) else "",
@@ -2779,12 +2841,15 @@ class MCPServer:
         )
         async def sync_from_sheets(apply: bool = False) -> dict:
             try:
-                from processors.sheets_sync import reconcile_tasks, reconcile_decisions
+                from processors.sheets_sync import (
+                    reconcile_tasks, reconcile_decisions, reconcile_meetings,
+                )
 
                 summary = await reconcile_tasks(dry_run=not apply)
                 # Decisions reconcile self-guards on DECISION_RECONCILE_ENABLED
                 # (returns {"skipped": ...} until cutover) — safe to always call.
                 dec_summary = await reconcile_decisions(dry_run=not apply)
+                mtg_summary = await reconcile_meetings(dry_run=not apply)
                 mcp_auth.log_call("sync_from_sheets", {"apply": apply})
                 if isinstance(summary, dict) and summary.get("error"):
                     return _error(summary["error"])
@@ -2793,6 +2858,7 @@ class MCPServer:
                     "status": "applied" if applied else "preview",
                     "summary": summary,
                     "decisions": dec_summary,
+                    "meetings": mtg_summary,
                     "note": (
                         "Reconcile is in SHADOW mode — nothing was written. "
                         "Set RECONCILE_SHADOW_MODE=false to apply."

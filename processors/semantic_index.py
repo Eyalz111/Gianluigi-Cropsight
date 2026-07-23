@@ -105,7 +105,10 @@ async def index_decision(decision: dict) -> None:
         if not did or not text:
             return
         embedding = await embedding_service.embed_text(text)
-        meta = {"kind": DECISION, "label": decision.get("label") or decision.get("manual_label") or ""}
+        # `manual_label` is a BOOLEAN sticky-flag column, not an alternate label.
+        # Falling back to it put the literal `True` into the index metadata
+        # whenever a decision had an empty label and a sticky flag. [2026-07-22]
+        meta = {"kind": DECISION, "label": decision.get("label") or ""}
         supabase_client.delete_embeddings_for_source(DECISION, did)
         supabase_client.store_embeddings_batch(
             [_record(DECISION, did, text, embedding,

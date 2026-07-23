@@ -227,3 +227,74 @@ class TestCutoverBootstrap:
         assert res.get("bootstrapped") == 1               # reported
         fake.rebuild_decisions_sheet.assert_not_awaited()  # but not executed
         assert calls["snapshot"] == []
+
+
+class TestHandAddedDecisions:
+    """Blank-id rows are now CREATED, not counted forever. [2026-07-22]
+
+    The first cut deliberately left them alone ("a decision needs a source
+    meeting"), which was defensible when the tab was read-mostly. But the tab is
+    advertised as editable, so they just accumulated — blank_id sat at 10 with
+    nothing ever consuming it. meeting_id is nullable, so a hand-authored
+    decision is legitimate.
+    """
+
+    async def test_blank_id_row_creates_and_writes_uuid_back(self, monkeypatch):
+        # An EXISTING decision + snapshot must be present, or the cutover
+        # bootstrap path fires instead (blank ids + no snapshots looks like the
+        # pre-id sheet) and returns before any create.
+        existing = _ddec(id="d1", description="Existing")
+        sheet = [_srow(id="d1", decision="Existing", row_number=2),
+                 _srow(decision="We will standardise on AWS", label="Product V1",
+                       rationale="cheaper egress", confidence="4", row_number=7)]
+        calls, fake = _setup(monkeypatch, sheet, [existing], {"d1": _snap(existing)})
+        fake._update_cell = AsyncMock(return_value=None)
+        created = []
+        monkeypatch.setattr(
+            ss.supabase_client, "create_manual_decision",
+            lambda **k: created.append(k) or {"id": "new-d", **k},
+        )
+
+        res = await ss.reconcile_decisions(shadow=False)
+
+        assert res.get("created") == 1
+        assert res["blank_id"] == 0, "the counter must go DOWN, not linger"
+        assert created[0]["description"] == "We will standardise on AWS"
+        fake._update_cell.assert_awaited_once()
+
+    async def test_uuid_writeback_failure_rolls_back_the_create(self, monkeypatch):
+        """Without the rollback a row keeps no UUID and is re-created every run."""
+        existing = _ddec(id="d1", description="Existing")
+        sheet = [_srow(id="d1", decision="Existing", row_number=2),
+                 _srow(decision="Adopt weekly ops review", row_number=9)]
+        calls, fake = _setup(monkeypatch, sheet, [existing], {"d1": _snap(existing)})
+        fake._update_cell = AsyncMock(side_effect=RuntimeError("sheets down"))
+        monkeypatch.setattr(
+            ss.supabase_client, "create_manual_decision",
+            lambda **k: {"id": "new-d", **k},
+        )
+        deleted = []
+
+        class _Tbl:
+            def delete(self): return self
+            def eq(self, col, val): deleted.append(val); return self
+            def execute(self): return MagicMock(data=[])
+
+        monkeypatch.setattr(ss.supabase_client, "_client",
+                            MagicMock(table=lambda *a, **k: _Tbl()))
+
+        res = await ss.reconcile_decisions(shadow=False)
+
+        assert res.get("created", 0) == 0
+        assert deleted == ["new-d"]
+
+    async def test_empty_decision_text_is_not_created(self, monkeypatch):
+        existing = _ddec(id="d1", description="Existing")
+        sheet = [_srow(id="d1", decision="Existing", row_number=2),
+                 _srow(decision="   ", row_number=4)]
+        calls, fake = _setup(monkeypatch, sheet, [existing], {"d1": _snap(existing)})
+        monkeypatch.setattr(
+            ss.supabase_client, "create_manual_decision",
+            lambda **k: pytest.fail("must not create from a blank row"))
+        res = await ss.reconcile_decisions(shadow=False)
+        assert res.get("created", 0) == 0

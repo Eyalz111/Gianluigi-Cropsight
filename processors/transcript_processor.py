@@ -871,6 +871,8 @@ ACTION ITEM EXTRACTION RULES:
   Rule of thumb: if deadline is non-null, deadline_confidence is almost always EXPLICIT. If deadline is null, deadline_confidence is NONE. Never leave this field missing — downstream reminders depend on it.{urgency_area_rules}
 - DEDUPLICATION: Never extract the same action as two separate items. If someone says "I'll do X" and is later formally assigned X, extract only once.
 - ASSIGNEE: Only assign to a specific person if the transcript makes it clear who is responsible. If unclear, set "assignee" to "" (empty string). Do NOT use "team", "everyone", or "TBD".
+  Use the person's FULL name, exactly as listed here for the CropSight team: Eyal Zror, Roye Tadmor, Paolo Vailetti, Yoram Weiss, Nechama Tik. A first name alone ("Eyal") is NOT acceptable — the same person stored under two spellings silently breaks every assignee filter. For someone outside the team, use their full name as spoken.
+  If a task genuinely has two owners, put the PRIMARY owner in "assignee" and name the other person in the title — never a combined "Paolo, Eyal" value.
 - EXISTING TASK AWARENESS: If the prompt includes an EXISTING OPEN TASKS section, reference it. When the discussion clearly refers to an existing task, do NOT extract it as new. Instead, use the "existing_task_match" field to link it:
   - Set "existing_task_match.task_id" to the existing task's ID
   - Set "confidence": "high" (explicit reference), "medium" (strong implication), "low" (possible match)

@@ -611,6 +611,9 @@ class SupabaseClient:
         Returns:
             List of created decision records.
         """
+        # One vocabulary fetch per batch (mirrors the areas/roster caches in
+        # create_tasks_batch) so resolve_label doesn't re-query per decision.
+        _dec_projects = self.get_canonical_projects(status="active")
         data = []
         for d in decisions:
             row = {
@@ -635,7 +638,12 @@ class SupabaseClient:
             # Phase 9A: label is part of the core schema — always write,
             # even empty string. NULL in DB breaks downstream filtering by
             # topic label (v2.4 agentic retrieval depends on it).
-            row["label"] = d.get("label")
+            # Canonicalized at this choke point (2026-07-22) so decisions share
+            # one project vocabulary with tasks — Area derives through it.
+            row["label"] = self.resolve_label(
+                d.get("label"), projects=_dec_projects, capture=True,
+                meeting_id=meeting_id,
+            )
             # Default review_date: 30 days from meeting
             if d.get("review_date"):
                 row["review_date"] = d["review_date"]
@@ -739,7 +747,17 @@ class SupabaseClient:
         decision_id: str,
         **updates,
     ) -> dict:
-        """Update a decision's fields (status, review_date, rationale, etc.)."""
+        """Update a decision's fields (status, review_date, rationale, etc.).
+
+        `label` is canonicalized here, mirroring update_task. Without it the
+        sheet-reconcile pull path could write a raw shorthand ('moldova')
+        straight over a canonical value ('Moldova Pilot') — decisions share the
+        project vocabulary with tasks, and Area is derived through it, so an
+        un-canonicalized label silently misfiles the decision in every rollup.
+        Membership, not truthiness: label="" must still resolve. [2026-07-23]
+        """
+        if "label" in updates:
+            updates["label"] = self.resolve_label(updates["label"])
         result = (
             self.client.table("decisions")
             .update(updates)
@@ -994,6 +1012,8 @@ class SupabaseClient:
         Returns:
             Created task record.
         """
+        assignee = self.resolve_assignee(assignee)
+        label = self.resolve_label(label, capture=True, meeting_id=meeting_id)
         data = {
             "title": title,
             "assignee": assignee,
@@ -1001,7 +1021,7 @@ class SupabaseClient:
             "deadline": self._serialize_datetime(deadline),
             "meeting_id": meeting_id,
             "transcript_timestamp": transcript_timestamp,
-            "status": status,
+            "status": self.resolve_status(status) or "pending",
             "category": self.resolve_category(category),
             "deadline_confidence": deadline_confidence,
             "urgency": urgency,
@@ -1049,6 +1069,11 @@ class SupabaseClient:
         # Canonicalize categories at this choke point (one areas fetch per batch)
         # so every batch-creation path stores the Gantt-area taxonomy.
         _areas = self.get_areas()
+        # Same for assignees and project labels — one fetch each per batch
+        # (2026-07-22). Extraction is where new labels are born, so capture is
+        # on here: an unrecognised label is recorded for the auto-learn loop.
+        _roster = self.list_team_members()
+        _projects = self.get_canonical_projects(status="active")
 
         def _row(t: dict) -> dict:
             raw_deadline = t.get("deadline")
@@ -1069,13 +1094,16 @@ class SupabaseClient:
             return {
                 "meeting_id": meeting_id,
                 "title": t.get("title"),
-                "assignee": t.get("assignee", ""),
+                "assignee": self.resolve_assignee(t.get("assignee", ""), roster=_roster),
                 "priority": t.get("priority", "M"),
                 "deadline": ser_deadline,
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
                 "category": self.resolve_category(t.get("category"), areas=_areas),
-                "label": t.get("label"),
+                "label": self.resolve_label(
+                    t.get("label"), projects=_projects, capture=True,
+                    meeting_id=meeting_id,
+                ),
                 "deadline_confidence": conf,
                 "urgency": t.get("urgency", "M"),
             }
@@ -1254,7 +1282,7 @@ class SupabaseClient:
         """
         updates = {**other_updates}
         if status is not None:
-            updates["status"] = status
+            updates["status"] = self.resolve_status(status)
         if deadline is not None:
             serialized = self._serialize_datetime(deadline)
             if serialized is None:
@@ -1269,8 +1297,18 @@ class SupabaseClient:
                 updates["deadline"] = serialized
         # Category carries the Gantt-area taxonomy — canonicalize at this
         # choke point so every update path stores one taxonomy.
-        if updates.get("category"):
+        #
+        # Membership, NOT truthiness: the old `if updates.get("category")` let
+        # category="" skip canonicalization AND still be written, so an edit
+        # whose LLM output omitted the field silently BLANKED a task's area —
+        # and the QA check couldn't flag it, because it skips empty values.
+        # resolve_category("") correctly returns 'General'. [2026-07-22]
+        if "category" in updates:
             updates["category"] = self.resolve_category(updates["category"])
+        if "assignee" in updates:
+            updates["assignee"] = self.resolve_assignee(updates["assignee"])
+        if "label" in updates:
+            updates["label"] = self.resolve_label(updates["label"])
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         result = (
@@ -2825,12 +2863,20 @@ class SupabaseClient:
         logger.info(f"Upserted pending approval: {approval_id} ({content_type})")
         return result.data[0] if result.data else {}
 
-    def get_pending_approvals_by_status(self, status: str = "pending") -> list[dict]:
+    def get_pending_approvals_by_status(
+        self, status: str = "pending", limit: int = 200
+    ) -> list[dict]:
         """
         Get all pending approvals with a given status, newest first.
 
-        Used to find the most recent pending approval when Eyal types
-        'approve' or 'reject' as free text instead of using buttons.
+        Originally written to find the most recent pending approval when Eyal
+        types 'approve'/'reject' as free text, and hard-capped at 5. It now also
+        backs MCP `get_proposals` and topic_clustering's dedupe set, where a
+        cap of 5 is actively wrong: get_proposals filters by TYPE *after* this
+        truncation, so `type="task"` could return [] while task proposals
+        existed, and the clustering dedupe would re-propose merges already
+        pending. Default raised to 200; the free-text caller only reads [0].
+        [2026-07-22]
 
         Returns:
             List of pending approval records.
@@ -2840,7 +2886,7 @@ class SupabaseClient:
             .select("*")
             .eq("status", status)
             .order("created_at", desc=True)
-            .limit(5)
+            .limit(limit)
             .execute()
         )
         return result.data
@@ -4387,15 +4433,52 @@ class SupabaseClient:
         name: str,
         description: str = "",
         aliases: list[str] | None = None,
+        area_id: str | None = None,
     ) -> dict | None:
-        """Add a new canonical project. Returns the created project or None."""
+        """Add or update a canonical project. Idempotent on name (UNIQUE).
+
+        Was a plain .insert() that returned None on conflict — surfaced by MCP
+        as "Failed to create project — may already exist". Auto-learn flows hit
+        that constantly, so this now mirrors add_area/add_team_member and
+        merges instead. [2026-07-22]
+
+        `area_id` is the single place an Area is stored: decisions, open
+        questions and follow-up meetings derive their Area through their
+        project rather than carrying a column each, so reclassifying a project
+        moves everything under it in one edit.
+        """
         try:
-            result = self.client.table("canonical_projects").insert({
+            existing = (
+                self.client.table("canonical_projects")
+                .select("*").eq("name", name).limit(1).execute()
+            )
+            if existing.data:
+                project = existing.data[0]
+                merged = sorted({*(project.get("aliases") or []), *(aliases or [])})
+                updates: dict = {}
+                if merged != (project.get("aliases") or []):
+                    updates["aliases"] = merged
+                if description and not project.get("description"):
+                    updates["description"] = description
+                if area_id and not project.get("area_id"):
+                    updates["area_id"] = area_id
+                if updates:
+                    self.client.table("canonical_projects").update(updates).eq(
+                        "id", project["id"]).execute()
+                    project = {**project, **updates}
+                    logger.info(f"Updated canonical project: {name} ({list(updates)})")
+                self._resolve_unmatched_labels(name, merged)
+                return project
+
+            payload = {
                 "name": name,
                 "description": description,
                 "aliases": aliases or [],
                 "status": "active",
-            }).execute()
+            }
+            if area_id:
+                payload["area_id"] = area_id
+            result = self.client.table("canonical_projects").insert(payload).execute()
 
             if result.data:
                 project = result.data[0]
@@ -4477,24 +4560,30 @@ class SupabaseClient:
             logger.error(f"Error getting unmatched labels: {e}")
             return []
 
-    def match_label_to_canonical(self, label: str) -> str | None:
+    def match_label_to_canonical(
+        self, label: str, projects: list[dict] | None = None
+    ) -> str | None:
         """
         Try to match a label to a canonical project name.
 
         Returns the canonical name if matched, None otherwise.
-        Checks exact name match first, then alias match.
+        Checks exact name match first, then alias match. Deterministic only —
+        the fuzzy tier lives in topic_threading._match_canonical_name and the
+        LLM tier in processors.label_resolver, so this stays cheap and callable
+        from any write path.
         """
         try:
-            projects = self.get_canonical_projects(status="active")
+            rows = projects if projects is not None else self.get_canonical_projects(
+                status="active")
             label_lower = label.lower().strip()
 
             # Exact name match
-            for p in projects:
+            for p in rows:
                 if p["name"].lower() == label_lower:
                     return p["name"]
 
             # Alias match
-            for p in projects:
+            for p in rows:
                 for alias in (p.get("aliases") or []):
                     if alias.lower() == label_lower:
                         return p["name"]
@@ -4503,6 +4592,68 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error matching label '{label}': {e}")
             return None
+
+    def resolve_label(
+        self,
+        name: str | None,
+        projects: list[dict] | None = None,
+        capture: bool = False,
+        meeting_id: str | None = None,
+        meeting_title: str = "",
+    ) -> str:
+        """Canonicalize a project label against canonical_projects.
+
+        The third member of the resolve_category / resolve_assignee family, and
+        the piece Phase 10 built but never connected: the canonical name was
+        computed in topic_threading, used to NAME A TOPIC THREAD, and then
+        thrown away — `task.label` itself was never rewritten. That is why live
+        data showed 34 distinct labels across 36 labelled tasks, and why every
+        off-vocabulary label also spawned a brand-new topic thread (50 threads,
+        46 of them single-mention).
+
+        Same contract as its siblings: exact -> alias -> fuzzy, and RETURN
+        UNKNOWN VALUES AS-IS (never destroy what a human typed).
+
+        `capture=True` records a genuinely-new label in `unmatched_labels` so
+        repeats can be proposed as canonical projects. It is OPT-IN and off by
+        default: a resolver that writes to the DB on every call would fire on
+        every update path and bloat the table. Turn it on where new labels are
+        actually born — extraction and batch creation. [2026-07-22]
+        """
+        raw = (name or "").strip()
+        if not raw:
+            return ""
+        try:
+            rows = projects if projects is not None else self.get_canonical_projects(
+                status="active")
+        except Exception as e:
+            logger.warning(f"resolve_label lookup failed (keeping label): {e}")
+            return raw
+
+        hit = self.match_label_to_canonical(raw, projects=rows)
+        if hit:
+            return hit
+
+        # Fuzzy tier — substring + significant-word overlap, already hardened
+        # against the "Investor Deck" vs "Investor Call" false merge (P1-14).
+        try:
+            from processors.topic_threading import _match_canonical_name
+            fuzzy = _match_canonical_name(raw)
+            if fuzzy:
+                return fuzzy
+        except Exception:
+            pass
+
+        # Genuinely new — keep it verbatim and (opt-in) record it so the
+        # auto-learn loop can propose it as a canonical project once it recurs.
+        if capture:
+            try:
+                self.store_unmatched_label(
+                    raw, meeting_id=meeting_id, meeting_title=meeting_title
+                )
+            except Exception:
+                pass
+        return raw
 
     # =========================================================================
     # Knowledge Foundation (v2.5) — areas, topic briefs, typed links (graph-lite)
@@ -4541,6 +4692,31 @@ class SupabaseClient:
         "fundraising": "FUNDRAISING & INVESTOR RELATIONS",
     }
 
+    # Canonical task statuses, keyed for case-insensitive normalization. Status
+    # is a controlled enum but was written RAW at every boundary, so a sheet
+    # cell like "Done" persisted and then get_tasks(status="done") missed it —
+    # found live 2026-07-23 (7 rows). Space/hyphen forms of the two-word status
+    # are folded to the underscore canonical too. [2026-07-23]
+    _STATUS_CANON = {
+        "pending": "pending", "in_progress": "in_progress",
+        "in progress": "in_progress", "in-progress": "in_progress",
+        "done": "done", "overdue": "overdue", "archived": "archived",
+    }
+
+    def resolve_status(self, value: str | None) -> str | None:
+        """Normalize a task status to its canonical enum, else return as-is.
+
+        None/blank passes through untouched (callers treat it as 'not provided').
+        An unrecognised value is kept verbatim — same sheets-wins contract as the
+        other resolvers; the QA pass would surface it rather than this dropping it.
+        """
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return raw
+        return self._STATUS_CANON.get(raw.lower(), raw)
+
     def resolve_category(
         self, name: str | None, areas: list[dict] | None = None
     ) -> str:
@@ -4564,6 +4740,104 @@ class SupabaseClient:
         except Exception as e:
             logger.warning(f"resolve_category lookup failed (keeping label): {e}")
         return self.LEGACY_CATEGORY_MAP.get(label.lower(), label)
+
+    # Honorifics stripped before name matching, so a roster entry like
+    # "Prof. Yoram Weiss" still matches "Yoram" and "Yoram Weiss".
+    _HONORIFICS = {"prof", "dr", "mr", "mrs", "ms", "adv", "eng"}
+
+    # Group/placeholder assignees that are NOT a person and must never be
+    # coerced into one. They stay verbatim; the QA pass surfaces them.
+    _NON_PERSON_ASSIGNEES = {
+        "team", "cropsight team", "cropsight technical team", "technical team",
+        "everyone", "all", "tbd", "n/a", "-", "unassigned",
+    }
+
+    def resolve_assignee(
+        self, name: str | None, roster: list[dict] | None = None
+    ) -> str:
+        """Canonicalize a task/decision assignee against the live team roster.
+
+        Mirrors resolve_category. Live data carried the SAME person under two
+        spellings — "Eyal Zror"(31) and "Eyal"(9), and likewise for Paolo, Roye
+        and Yoram — which silently broke every assignee filter: get_tasks
+        filters with `ilike` and no wildcards, so "Eyal" matched 9 of 40 rows.
+        Canonical form is FIRST + LAST (Eyal's call, 2026-07-22).
+
+        Resolution order:
+          1. blank                          -> "" (a genuinely unassigned task)
+          2. group/placeholder              -> returned verbatim, never guessed
+          3. exact match on a roster name   -> that name
+          4. first-name-only match          -> the roster's full name
+          5. multi-owner ("Paolo, Eyal")    -> the FIRST name, canonicalized
+                                               (never split: splitting changes
+                                                task counts and history)
+          6. anything else                  -> RETURNED AS-IS (never destroy
+                                               what a human typed; the QA pass
+                                               flags off-roster assignees)
+        """
+        raw = (name or "").strip()
+        if not raw:
+            return ""
+        if raw.lower() in self._NON_PERSON_ASSIGNEES:
+            return raw
+        try:
+            rows = roster if roster is not None else self.list_team_members()
+            names = [(m.get("name") or "").strip() for m in (rows or [])]
+            names = [n for n in names if n]
+        except Exception as e:
+            logger.warning(f"resolve_assignee roster lookup failed (keeping name): {e}")
+            return raw
+
+        # Roster names can carry an honorific ("Prof. Yoram Weiss"), so compare
+        # against the honorific-stripped form too — otherwise neither "Yoram"
+        # nor "Yoram Weiss" matches it and both silently stay off-roster.
+        _honorifics = self._HONORIFICS
+
+        def _strip_title(n: str) -> str:
+            parts = n.split()
+            while parts and parts[0].lower().rstrip(".") in _honorifics:
+                parts = parts[1:]
+            return " ".join(parts)
+
+        def _match(candidate: str) -> str | None:
+            c = _strip_title(candidate.strip()).lower()
+            if not c:
+                return None
+            bare = {full: _strip_title(full).lower() for full in names}
+            for full, b in bare.items():             # exact full name
+                if b == c or full.lower() == c:
+                    return full
+            for full, b in bare.items():             # first name alone
+                if b.split() and b.split()[0] == c:
+                    return full
+            # Last name alone — only when it is unambiguous across the roster.
+            surname_hits = [
+                full for full, b in bare.items()
+                if len(b.split()) > 1 and b.split()[-1] == c
+            ]
+            if len(surname_hits) == 1:
+                return surname_hits[0]
+            return None
+
+        hit = _match(raw)
+        if hit:
+            return hit
+        # Multi-owner cell: canonicalize the PRIMARY (first-named) owner only.
+        # The other names belong in the task title (Eyal, 2026-07-22).
+        #
+        # "or" and "/" are included deliberately. They read as UNDECIDED
+        # ownership rather than co-ownership, but Eyal's call (2026-07-22) is
+        # that the first-named person owns it — same rule, no special case.
+        lowered = raw.lower()
+        if "," in raw or "/" in raw or " and " in lowered or " or " in lowered:
+            primary = raw
+            for sep in (" and ", " or ", "/"):
+                primary = primary.replace(sep, ",").replace(sep.upper(), ",")
+            primary = primary.split(",")[0]
+            hit = _match(primary)
+            if hit:
+                return hit
+        return raw
 
     def add_area(
         self,
@@ -4867,14 +5141,33 @@ class SupabaseClient:
             return False
 
     def clear_manual_flag(self, task_id: str, field: str) -> bool:
-        """Clear a sticky flag so inference can write the field again."""
+        """Clear a sticky flag so inference can write the field again.
+
+        Also clears the provenance pair when no sticky field remains: leaving a
+        stale `manual_set_at`/`manual_set_source` behind makes the audit trail
+        claim a human edit that has been released. [2026-07-22]
+        """
         if field not in self._MANUAL_FIELDS:
             logger.warning(f"clear_manual_flag: unknown field '{field}'")
             return False
         try:
-            self.client.table("tasks").update(
-                {f"manual_{field}": False}
-            ).eq("id", task_id).execute()
+            updates: dict = {f"manual_{field}": False}
+            try:
+                row = (
+                    self.client.table("tasks")
+                    .select(",".join(f"manual_{f}" for f in self._MANUAL_FIELDS))
+                    .eq("id", task_id).limit(1).execute()
+                )
+                remaining = row.data[0] if row.data else {}
+                still_sticky = any(
+                    remaining.get(f"manual_{f}") for f in self._MANUAL_FIELDS if f != field
+                )
+                if not still_sticky:
+                    updates["manual_set_at"] = None
+                    updates["manual_set_source"] = None
+            except Exception:
+                pass  # provenance tidy-up is best-effort; the clear itself matters
+            self.client.table("tasks").update(updates).eq("id", task_id).execute()
             return True
         except Exception as e:
             logger.error(f"Error clearing manual flag ({task_id}.{field}): {e}")
@@ -4987,6 +5280,205 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error clearing decision manual flag ({decision_id}.{field}): {e}")
             return False
+
+    # =========================================================================
+    # Meeting reconcile helpers (2026-07 — editable Meetings tab).
+    # Fourth use of the entity_type recipe; reuses sheet_snapshots via
+    # entity_type='meeting'. follow_up_meetings had NO Sheet identity at all
+    # before this — its only surface was a "Schedule: X" row smuggled into the
+    # Tasks tab with no UUID, which reconcile then duplicated on every run.
+    # =========================================================================
+
+    _MEETING_MANUAL_FIELDS = (
+        "title", "label", "led_by", "proposed_date", "participants", "status",
+    )
+
+    def create_manual_decision(
+        self,
+        description: str,
+        label: str = "",
+        rationale: str = "",
+        confidence=None,
+        decision_status: str = "active",
+    ) -> dict | None:
+        """Create a decision typed straight into the Sheet (no source meeting).
+
+        `meeting_id` is nullable, so a hand-authored decision is legitimate.
+        approval_status is 'approved' immediately — a human typing it IS the
+        approval, the same reasoning debrief items use. Before this, blank-id
+        rows on the Decisions tab were counted and left, so they accumulated
+        forever while the tab was advertised as editable. [2026-07-22]
+        """
+        if not (description or "").strip():
+            return None
+        try:
+            conf = None
+            try:
+                conf = int(confidence) if confidence not in (None, "") else None
+            except (TypeError, ValueError):
+                conf = None
+            data = {
+                "description": description.strip(),
+                "label": self.resolve_label(label),
+                "rationale": (rationale or "").strip() or None,
+                "confidence": conf,
+                "decision_status": (decision_status or "active").strip().lower(),
+                "approval_status": "approved",
+            }
+            result = self.client.table("decisions").insert(data).execute()
+            if result.data:
+                logger.info(f"Created manual decision: {description[:60]}")
+                return result.data[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error creating manual decision: {e}")
+            return None
+
+    def get_meeting_snapshots(self) -> dict:
+        """Last-synced snapshot per follow-up meeting, keyed by meeting id."""
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", "meeting")
+                .execute()
+                .data
+                or []
+            )
+            return {r["follow_up_meeting_id"]: r for r in rows
+                    if r.get("follow_up_meeting_id")}
+        except Exception as e:
+            logger.error(f"Error getting meeting snapshots: {e}")
+            return {}
+
+    def upsert_meeting_snapshot(
+        self,
+        meeting_id: str,
+        sheet_row: int | None,
+        title: str | None,
+        label: str | None = None,
+        led_by: str | None = None,
+        proposed_date: str | None = None,
+        participants: str | None = None,
+        status: str | None = None,
+    ) -> bool:
+        """Write/refresh the snapshot row for one follow-up meeting."""
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "follow_up_meeting_id": meeting_id,
+                "entity_type": "meeting",
+                "sheet_row": sheet_row,
+                "title": (title or None),
+                "label": (label or None),
+                "led_by": (led_by or None),
+                "proposed_date": (proposed_date or None),
+                "participants": (participants or None),
+                "status": (status or None),
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("follow_up_meeting_id", meeting_id)
+                .eq("entity_type", "meeting")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "follow_up_meeting_id", meeting_id
+                ).eq("entity_type", "meeting").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting meeting snapshot ({meeting_id}): {e}")
+            return False
+
+    def mark_meeting_field_manual(
+        self, meeting_id: str, field: str, source: str = "sheet_edit"
+    ) -> bool:
+        """Mark a follow-up meeting field as human-owned (sticky)."""
+        if field not in self._MEETING_MANUAL_FIELDS:
+            logger.warning(f"mark_meeting_field_manual: unknown field '{field}'")
+            return False
+        try:
+            from datetime import datetime, timezone
+            self.client.table("follow_up_meetings").update({
+                f"manual_{field}": True,
+                "manual_set_at": datetime.now(timezone.utc).isoformat(),
+                "manual_set_source": source,
+            }).eq("id", meeting_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking meeting field manual ({meeting_id}.{field}): {e}")
+            return False
+
+    def clear_meeting_manual_flag(self, meeting_id: str, field: str) -> bool:
+        """Clear a meeting sticky flag so inference can write the field again."""
+        if field not in self._MEETING_MANUAL_FIELDS:
+            logger.warning(f"clear_meeting_manual_flag: unknown field '{field}'")
+            return False
+        try:
+            self.client.table("follow_up_meetings").update(
+                {f"manual_{field}": False}
+            ).eq("id", meeting_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing meeting manual flag ({meeting_id}.{field}): {e}")
+            return False
+
+    def update_follow_up_meeting(self, meeting_id: str, **updates) -> dict:
+        """Update a follow-up meeting; canonicalizes label and bumps updated_at."""
+        from datetime import datetime, timezone
+
+        if "label" in updates:
+            updates["label"] = self.resolve_label(updates["label"])
+        if "led_by" in updates:
+            updates["led_by"] = self.resolve_assignee(updates["led_by"])
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        result = (
+            self.client.table("follow_up_meetings")
+            .update(updates).eq("id", meeting_id).execute()
+        )
+        if not result.data:
+            raise ValueError(f"Follow-up meeting {meeting_id} not found or not updated")
+        return result.data[0]
+
+    def create_follow_up_meeting_manual(
+        self,
+        title: str,
+        led_by: str = "",
+        proposed_date: str | None = None,
+        participants: list[str] | None = None,
+        label: str = "",
+        status: str = "not_scheduled",
+    ) -> dict | None:
+        """Create a hand-added follow-up meeting (no source meeting).
+
+        `source_meeting_id` is nullable, so a meeting Eyal or Nechama types
+        straight into the Sheet simply has no source. approval_status is
+        'approved' immediately — a human typing it IS the approval, the same
+        reasoning debrief items use.
+        """
+        try:
+            data = {
+                "title": title,
+                "led_by": self.resolve_assignee(led_by),
+                "proposed_date": proposed_date,
+                "participants": participants or [],
+                "label": self.resolve_label(label),
+                "status": status or "not_scheduled",
+                "approval_status": "approved",
+            }
+            result = self.client.table("follow_up_meetings").insert(data).execute()
+            if result.data:
+                logger.info(f"Created manual follow-up meeting: {title}")
+                return result.data[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error creating manual follow-up meeting '{title}': {e}")
+            return None
 
     # =========================================================================
     # Gantt reconcile helpers (v3 chunk 2 — curated knowledge-view)
