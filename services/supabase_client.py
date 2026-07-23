@@ -1021,7 +1021,7 @@ class SupabaseClient:
             "deadline": self._serialize_datetime(deadline),
             "meeting_id": meeting_id,
             "transcript_timestamp": transcript_timestamp,
-            "status": status,
+            "status": self.resolve_status(status) or "pending",
             "category": self.resolve_category(category),
             "deadline_confidence": deadline_confidence,
             "urgency": urgency,
@@ -1282,7 +1282,7 @@ class SupabaseClient:
         """
         updates = {**other_updates}
         if status is not None:
-            updates["status"] = status
+            updates["status"] = self.resolve_status(status)
         if deadline is not None:
             serialized = self._serialize_datetime(deadline)
             if serialized is None:
@@ -4691,6 +4691,31 @@ class SupabaseClient:
         "investor relations": "FUNDRAISING & INVESTOR RELATIONS",
         "fundraising": "FUNDRAISING & INVESTOR RELATIONS",
     }
+
+    # Canonical task statuses, keyed for case-insensitive normalization. Status
+    # is a controlled enum but was written RAW at every boundary, so a sheet
+    # cell like "Done" persisted and then get_tasks(status="done") missed it —
+    # found live 2026-07-23 (7 rows). Space/hyphen forms of the two-word status
+    # are folded to the underscore canonical too. [2026-07-23]
+    _STATUS_CANON = {
+        "pending": "pending", "in_progress": "in_progress",
+        "in progress": "in_progress", "in-progress": "in_progress",
+        "done": "done", "overdue": "overdue", "archived": "archived",
+    }
+
+    def resolve_status(self, value: str | None) -> str | None:
+        """Normalize a task status to its canonical enum, else return as-is.
+
+        None/blank passes through untouched (callers treat it as 'not provided').
+        An unrecognised value is kept verbatim — same sheets-wins contract as the
+        other resolvers; the QA pass would surface it rather than this dropping it.
+        """
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return raw
+        return self._STATUS_CANON.get(raw.lower(), raw)
 
     def resolve_category(
         self, name: str | None, areas: list[dict] | None = None

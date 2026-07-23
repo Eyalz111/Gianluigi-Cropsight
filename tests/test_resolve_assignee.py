@@ -118,3 +118,24 @@ class TestHonorificsAndSurnames:
     @pytest.mark.parametrize("single", ["Hadar", "Ido"])
     def test_single_word_roster_names_still_work(self, sc, single):
         assert sc.resolve_assignee(single, roster=self.ROSTER) == single
+
+
+class TestResolveStatus:
+    """Status was written RAW at every boundary, so a sheet cell 'Done'
+    persisted and get_tasks(status='done') missed it — 7 live rows, 2026-07-23."""
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("Done", "done"), ("done", "done"), ("DONE", "done"),
+        ("Pending", "pending"), ("Overdue", "overdue"), ("Archived", "archived"),
+        ("In Progress", "in_progress"), ("in-progress", "in_progress"),
+        ("in_progress", "in_progress"),
+    ])
+    def test_normalizes_case_and_separators(self, sc, raw, expected):
+        assert sc.resolve_status(raw) == expected
+
+    def test_none_and_blank_pass_through(self, sc):
+        assert sc.resolve_status(None) is None
+        assert sc.resolve_status("") == ""
+
+    def test_unknown_kept_verbatim(self, sc):
+        assert sc.resolve_status("blocked") == "blocked"
