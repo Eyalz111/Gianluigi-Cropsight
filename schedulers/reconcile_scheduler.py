@@ -79,6 +79,56 @@ class ReconcileScheduler:
                 logger.error(f"Reconcile scheduler error: {e}")
                 await asyncio.sleep(300)
 
+    async def _notify_sync(self, tasks, meetings, decisions, projects) -> None:
+        """Post a one-line 'synced N edits' to the group after an auto-sync.
+
+        Only when something was actually applied — a no-op tick is silent, which
+        keeps the 30-min cadence from becoming noise. Names any canonicalization
+        the system applied to a typed value, so a correction like
+        'roye -> Roye Tadmor' is visible rather than a surprise next time.
+        """
+        if not getattr(settings, "SYNC_NOTIFY_ENABLED", False):
+            return
+
+        def _g(d, *keys):
+            return sum(int((d or {}).get(k, 0) or 0) for k in keys) if isinstance(d, dict) else 0
+
+        t = _g(tasks, "pulled", "created")
+        t_arch = _g(tasks, "archived")
+        m = _g(meetings, "pulled", "created")
+        m_arch = _g(meetings, "archived")
+        d = _g(decisions, "pulled")
+        p = _g(projects, "renamed", "created", "updated")
+        if not (t or t_arch or m or m_arch or d or p):
+            return  # no-op tick — stay quiet
+
+        parts = []
+        if t:
+            parts.append(f"{t} task edit(s)")
+        if t_arch:
+            parts.append(f"{t_arch} task(s) archived")
+        if m:
+            parts.append(f"{m} meeting edit(s)")
+        if m_arch:
+            parts.append(f"{m_arch} meeting(s) to Past Meetings")
+        if d:
+            parts.append(f"{d} decision edit(s)")
+        if p:
+            parts.append(f"{p} project change(s)")
+        lines = ["✅ <b>Synced from the sheet</b>: " + ", ".join(parts) + "."]
+
+        overrides = (tasks or {}).get("overrides") if isinstance(tasks, dict) else None
+        if overrides:
+            lines.append("Adjusted to the standard form:")
+            for o in overrides[:5]:
+                lines.append(f"  • {o['field']}: “{o['from']}” → “{o['to']}”")
+
+        try:
+            from services.orchestrator.spine import comms_spine
+            await comms_spine.send_to_group("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"sync notify failed (non-fatal): {e}")
+
     def stop(self) -> None:
         self._running = False
         logger.info("Reconcile scheduler stopped")
@@ -168,6 +218,10 @@ class ReconcileScheduler:
                              "projects": proj_summary if isinstance(proj_summary, dict) else None,
                              "views": views},
                 )
+                # Close the human->machine loop: after an auto-sync that actually
+                # applied edits, tell the group what landed (and any value the
+                # system adjusted). Silent on a no-op tick. [2026-07-23]
+                await self._notify_sync(summary, meet_summary, dec_summary, proj_summary)
             return True
         except Exception as e:
             logger.error(f"Reconcile failed ({slot}): {e}")

@@ -429,6 +429,11 @@ MEETING_TRACKER_HEADERS = [
     "Status", "Agenda", "Prep Needed", "Source Meeting", "ID",
 ]
 
+# Past Meetings = terminal (held/dropped) meetings moved off the working tab —
+# the meeting counterpart to the Tasks Archive. Same columns + when + outcome.
+MEETINGS_ARCHIVE_TAB_NAME = "Past Meetings"
+MEETINGS_ARCHIVE_HEADERS = MEETING_TRACKER_HEADERS + ["Moved", "Outcome"]
+
 # Monotonic, like decision statuses: a stale Sheet cell must never un-schedule
 # a meeting that already happened.
 MEETING_STATUSES = ("not_scheduled", "scheduled", "held", "dropped")
@@ -2468,6 +2473,74 @@ class GoogleSheetsService:
         except Exception as e:
             logger.error(f"Error adding meetings to sheet: {e}")
             return False
+
+    async def archive_meeting_rows(self, sheet_rows: list[dict]) -> int:
+        """Move held/dropped Meetings-tab rows to the Past Meetings tab.
+
+        Mirrors archive_task_rows: append-then-delete, idempotent by the col-J
+        UUID (skip rows already in Past Meetings from a half-completed prior
+        move), delete bottom-up. The follow_up_meetings DB row is NOT deleted —
+        it keeps its held/dropped status; only the sheet presence moves.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID or not sheet_rows:
+            return 0
+        sid_dest = await self._ensure_tab(MEETINGS_ARCHIVE_TAB_NAME, MEETINGS_ARCHIVE_HEADERS)
+        if sid_dest is None:
+            return 0
+
+        existing_ids: set[str] = set()
+        try:
+            id_col = MEETING_COLUMNS["id"]  # J
+            resp = self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().get(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!{id_col}2:{id_col}",
+                )
+            )
+            existing_ids = {(r[0] or "").strip() for r in (resp.get("values", []) or [])
+                            if r and (r[0] or "").strip()}
+        except Exception as e:
+            logger.warning(f"[past-meetings] could not read existing ids: {e}")
+
+        now = datetime.now().strftime("%Y-%m-%d")
+        arch_rows = []
+        for m in sheet_rows:
+            if (m.get("id") or "").strip() in existing_ids:
+                continue
+            arch_rows.append(self._meeting_row(m) + [now, m.get("status") or ""])
+
+        if arch_rows:
+            end_col = chr(ord("A") + len(MEETINGS_ARCHIVE_HEADERS) - 1)
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().append(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!A:{end_col}",
+                    valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+                    body={"values": arch_rows},
+                )
+            )
+
+        # Delete from the Meetings tab bottom-up. LOUD on delete failure (rows
+        # now on both tabs), same contract as archive_task_rows.
+        row_numbers = sorted([m["row_number"] for m in sheet_rows if m.get("row_number")],
+                             reverse=True)
+        sid_src = self._get_sheet_id_by_name(settings.TASK_TRACKER_SHEET_ID, MEETING_TAB_NAME)
+        if sid_src is not None and row_numbers:
+            requests = [{"deleteDimension": {
+                "range": {"sheetId": sid_src, "dimension": "ROWS",
+                          "startIndex": r - 1, "endIndex": r}}} for r in row_numbers]
+            try:
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().batchUpdate(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        body={"requests": requests}))
+            except Exception as e:
+                logger.critical(
+                    "[past-meetings] DELETE leg failed after append — rows now on "
+                    f"BOTH tabs, need manual removal. ids={[m.get('id') for m in sheet_rows]}. {e}")
+                raise
+        logger.info(f"Moved {len(arch_rows)} meeting(s) to {MEETINGS_ARCHIVE_TAB_NAME}")
+        return len(arch_rows)
 
     async def rebuild_meetings_sheet(
         self, meetings_from_db: list[dict], force_empty: bool = False

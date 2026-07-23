@@ -57,7 +57,9 @@ def _setup(monkeypatch, sheet, db, snap, enabled=True, shadow=False):
     monkeypatch.setattr(gs, "sheets_service", fake)
 
     sc = ss.supabase_client
-    calls = {"update": [], "manual": [], "snapshot": [], "create": [], "delete": []}
+    calls = {"update": [], "manual": [], "snapshot": [], "create": [], "delete": [], "archive": []}
+    fake.archive_meeting_rows = AsyncMock(
+        side_effect=lambda rows: calls["archive"].extend(rows) or len(rows))
     monkeypatch.setattr(sc, "list_follow_up_meetings", lambda *a, **k: db)
     monkeypatch.setattr(sc, "get_meeting_snapshots", lambda *a, **k: snap)
     monkeypatch.setattr(sc, "update_follow_up_meeting",
@@ -269,3 +271,52 @@ class TestReviewFindings:
         assert "Moldova Pilot" in written, "canonical label must reach the cell"
         # and the snapshot matches what is now in the sheet
         assert calls["snapshot"][0][4] == "Roye Tadmor"
+
+
+class TestTerminalArchive:
+    """Held/dropped meetings move OFF the Meetings tab to Past Meetings —
+    symmetric with an archived task, so the working tab shows only live
+    meetings. [2026-07-23]"""
+
+    async def test_meeting_set_to_held_is_archived_off_the_tab(self, monkeypatch):
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="scheduled")]
+        snap = {"m1": {"title": "Kickoff", "status": "scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived") == 1
+        assert len(calls["archive"]) == 1 and calls["archive"][0]["id"] == "m1"
+        # a moved row gets NO snapshot — it left the working view
+        assert calls["snapshot"] == []
+
+    async def test_dropped_meeting_is_archived_too(self, monkeypatch):
+        sheet = [_srow(id="m1", title="X", status="dropped")]
+        db = [_dbrow(id="m1", title="X", status="not_scheduled")]
+        snap = {"m1": {"title": "X", "status": "not_scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+        assert res.get("archived") == 1
+        assert calls["archive"][0]["id"] == "m1"
+
+    async def test_terminal_db_meeting_is_not_readded(self, monkeypatch):
+        """A held/dropped meeting absent from the sheet lives on Past Meetings —
+        it must NOT be re-added to the working tab."""
+        calls, fake = _setup(
+            monkeypatch, [], [_dbrow(id="m9", title="Gone", status="held")], {})
+        res = await ss.reconcile_meetings()
+        assert res["readded"] == 0
+        fake.add_meetings_batch_to_sheet.assert_not_called()
+
+    async def test_active_meeting_stays_and_gets_a_snapshot(self, monkeypatch):
+        sheet = [_srow(id="m1", title="Soon", status="scheduled")]
+        db = [_dbrow(id="m1", title="Soon", status="not_scheduled")]
+        snap = {"m1": {"title": "Soon", "status": "not_scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+        assert res.get("archived", 0) == 0
+        assert len(calls["snapshot"]) == 1
+        assert calls["archive"] == []

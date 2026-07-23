@@ -198,3 +198,40 @@ class TestManualRailDecisions:
         assert res["manual_held"] == 1 and res["pushed"] == 0
         assert calls["update"] == []
         assert calls["snapshot"][0][2] == "Eyal's wording"
+
+
+class TestOverrideSurfacing:
+    """Feedback loop: when the reconcile canonicalizes a typed value on pull, it
+    records the change so the human can be TOLD ('roye -> Roye Tadmor') rather
+    than have it silently corrected next cycle (the SatYield-revert class).
+    [2026-07-23]"""
+
+    async def test_assignee_canonicalization_is_surfaced(self, monkeypatch):
+        sheet = [_sheet_row(id="t1", task="A", assignee="roye")]
+        db = [{"id": "t1", "title": "A", "status": "pending", "deadline": None,
+               "priority": "M", "assignee": "Eyal Zror"}]
+        snap = {"t1": {"status": "pending", "deadline": None,
+                       "priority": "M", "assignee": "Eyal Zror"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        # roster so resolve_assignee turns 'roye' -> 'Roye Tadmor'
+        monkeypatch.setattr(ss.supabase_client, "list_team_members",
+                            lambda *a, **k: [{"name": "Roye Tadmor"}])
+
+        res = await ss.reconcile_tasks(shadow=False)
+
+        assert "overrides" in res
+        o = res["overrides"][0]
+        assert o == {"field": "assignee", "from": "roye", "to": "Roye Tadmor"}
+
+    async def test_no_override_when_value_already_canonical(self, monkeypatch):
+        sheet = [_sheet_row(id="t1", task="A", assignee="Roye Tadmor")]
+        db = [{"id": "t1", "title": "A", "status": "pending", "deadline": None,
+               "priority": "M", "assignee": "Eyal Zror"}]
+        snap = {"t1": {"status": "pending", "deadline": None,
+                       "priority": "M", "assignee": "Eyal Zror"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        monkeypatch.setattr(ss.supabase_client, "list_team_members",
+                            lambda *a, **k: [{"name": "Roye Tadmor"}])
+
+        res = await ss.reconcile_tasks(shadow=False)
+        assert "overrides" not in res or res["overrides"] == []

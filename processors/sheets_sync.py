@@ -731,6 +731,23 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     cell_writes: list[dict] = []       # {"range": ..., "values": [[v]]}
     snapshot_writes: list[tuple] = []  # (task_id, row, status, deadline, priority, assignee, title, label)
     archive_moves: list[dict] = []     # sheet-row dicts to move to the Archive tab
+    overrides: list[dict] = []         # {field, from, to} the system adjusted on pull
+
+    def _record_override(field: str, typed):
+        """If canonicalization changes a pulled value, note it so the human can
+        be told 'roye → Roye Tadmor' rather than have it silently corrected."""
+        typed = (typed or "").strip() if isinstance(typed, str) else typed
+        if not typed:
+            return
+        canon = None
+        if field == "assignee":
+            canon = supabase_client.resolve_assignee(typed)
+        elif field == "status":
+            canon = supabase_client.resolve_status(typed)
+        elif field == "label":
+            canon = supabase_client.resolve_label(typed)
+        if canon and canon != typed:
+            overrides.append({"field": field, "from": typed, "to": canon})
 
     def _cell(col_key, row, value):
         if row:
@@ -771,6 +788,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 manual_marks.append((sid, field))
                 summary["pulled"] += 1
                 final[field] = sheet_val
+                _record_override(field, sheet_val)
             elif _normalize(db_val) != _normalize(sheet_val):
                 if dt.get(f"manual_{field}"):
                     # Rule 2 rail: never clobber a manually-set field. Until
@@ -817,6 +835,7 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 manual_marks.append((sid, db_key))
                 summary["pulled"] += 1
                 final[db_key] = c_sheet
+                _record_override(db_key, c_sheet)
             elif _normalize(c_db) != _normalize(c_sheet):
                 if dt.get(f"manual_{db_key}"):
                     # Same Rule 2 rail as the action fields above. [2026-07-22]
@@ -1106,6 +1125,15 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
             f"DB-side change (Sheet value kept): "
             + ", ".join(f"{t[:8]}.{f}" for (t, f, _, _) in manual_held[:10])
         )
+    # Canonicalization adjustments the human should see, not have silently
+    # applied (the SatYield-revert class). Deduped for the summary.
+    if overrides:
+        seen, uniq = set(), []
+        for o in overrides:
+            k = (o["field"], o["from"], o["to"])
+            if k not in seen:
+                seen.add(k); uniq.append(o)
+        summary["overrides"] = uniq[:20]
 
     try:
         supabase_client.log_action("reconcile_applied", details=summary, triggered_by="auto")
@@ -1193,6 +1221,10 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     snapshot_writes: list[tuple] = []
     db_updates: dict[str, dict] = {}
     manual_marks: list[tuple] = []
+    archive_moves: list[dict] = []     # held/dropped rows -> Past Meetings tab
+    # Terminal statuses leave the working tab, mirroring an archived task. A
+    # meeting that was HELD or DROPPED is history, not work-to-manage.
+    _TERMINAL = ("held", "dropped")
 
     def _cell(col_key, row, value):
         if row:
@@ -1293,10 +1325,18 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
 
         if upd:
             db_updates[mid] = upd
-        snapshot_writes.append((
-            mid, row, final.get("title"), final.get("label"), final.get("led_by"),
-            final.get("proposed_date"), final.get("participants"), final.get("status"),
-        ))
+        # A meeting that has reached a terminal status leaves the Meetings tab
+        # for 'Past Meetings' — symmetric with an archived task, so the working
+        # tab shows only live meetings (not_scheduled / scheduled). No snapshot:
+        # the row is leaving the working view. [2026-07-23]
+        if _normalize(final.get("status")) in _TERMINAL:
+            archive_moves.append({**sm, "status": final.get("status")})
+            summary["archived"] = summary.get("archived", 0) + 1
+        else:
+            snapshot_writes.append((
+                mid, row, final.get("title"), final.get("label"), final.get("led_by"),
+                final.get("proposed_date"), final.get("participants"), final.get("status"),
+            ))
 
     # --- hand-added rows (no UUID) -> create in DB + write the UUID back ---
     if write_allowed:
@@ -1361,9 +1401,11 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                 logger.error(f"[meeting-reconcile] create failed for row {sm.get('row_number')}: {e}")
 
     # --- DB-only meetings -> re-add to the Sheet (never treated as deletes) ---
+    # Terminal statuses (held/dropped) are NOT re-added — they live on the Past
+    # Meetings tab now, so a DB row in that state is expected to be absent here.
     missing = [m for m in db_rows
                if m.get("id") and m["id"] not in sheet_by_id
-               and (m.get("status") or "not_scheduled") != "dropped"]
+               and (m.get("status") or "not_scheduled") not in _TERMINAL]
     _readd_cap = max(30, len(sheet_by_id))
     if len(missing) > _readd_cap:
         logger.error(
@@ -1426,6 +1468,15 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             continue
         supabase_client.upsert_meeting_snapshot(
             mid, row, title, label, led_by, pdate, parts, status)
+
+    # Move held/dropped rows to Past Meetings LAST — the delete leg shifts row
+    # numbers, so it must run after every cell write above (same ordering rule
+    # as archive_task_rows).
+    if archive_moves:
+        try:
+            await sheets_service.archive_meeting_rows(archive_moves)
+        except Exception as e:
+            logger.error(f"[meeting-reconcile] Past-Meetings move incomplete: {e}")
 
     if manual_held:
         summary["manual_held_fields"] = [

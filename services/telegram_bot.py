@@ -645,12 +645,19 @@ class TelegramBot:
             logger.error(f"Error sending message to {chat_id}: {e}")
             return False
 
-    async def send_to_group(self, text: str) -> bool:
+    async def send_to_group(self, text: str, parse_mode: str = "Markdown") -> bool:
         """
         Send a message to the CropSight team group chat.
 
+        Accepts parse_mode — several call sites (the meeting-summary teaser, the
+        weekly digest, the auto-sync notice) pass parse_mode="HTML". Until
+        2026-07-23 this signature took only `text`, so those kwargs raised
+        TypeError at the spine's verbatim forward (a known latent mismatch the
+        spine comment flagged). Forwarding it fixes them all.
+
         Args:
             text: Message text.
+            parse_mode: "Markdown" (default) or "HTML".
 
         Returns:
             True if message was sent successfully.
@@ -658,7 +665,7 @@ class TelegramBot:
         if not self.group_chat_id:
             logger.warning("Group chat ID not configured")
             return False
-        return await self.send_message(self.group_chat_id, text)
+        return await self.send_message(self.group_chat_id, text, parse_mode=parse_mode)
 
     async def _cleanup_approval_parts(
         self, meeting_id: str, keep_message_id: int | None = None

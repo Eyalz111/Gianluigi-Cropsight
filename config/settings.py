@@ -790,6 +790,15 @@ class Settings(BaseSettings):
             "hand edit is overwritten — they are protected in-sheet to say so."
         ),
     )
+    SYNC_NOTIFY_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "After an auto-sync that applied edits, post a one-line 'synced N "
+            "edits' to the Telegram group (silent on a no-op tick), naming any "
+            "value the system canonicalized. Closes the human->machine loop so "
+            "Eyal/Nechama know their sheet edits landed without asking."
+        ),
+    )
     RECONCILE_INTERVAL_MINUTES: int = Field(
         default=0,
         description=(
