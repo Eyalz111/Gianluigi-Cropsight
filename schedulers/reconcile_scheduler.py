@@ -222,6 +222,19 @@ class ReconcileScheduler:
                 # applied edits, tell the group what landed (and any value the
                 # system adjusted). Silent on a no-op tick. [2026-07-23]
                 await self._notify_sync(summary, meet_summary, dec_summary, proj_summary)
+
+                # Daily DEFAULT order — only on the pre-nightly slot (02:00), so
+                # the tabs open sorted each morning but the system never
+                # re-sorts mid-day and fights a live editor. Runs AFTER the
+                # reconcile has pulled the day's edits into the DB. [2026-07-23]
+                if name == "prenightly" and getattr(settings, "WORKSPACE_SORT_ENABLED", False):
+                    try:
+                        from services.google_sheets import sheets_service
+                        nt = await sheets_service.sort_tasks_tab()
+                        nm = await sheets_service.sort_meetings_tab()
+                        logger.info(f"Daily reorder: {nt} tasks, {nm} meetings")
+                    except Exception as se:
+                        logger.warning(f"Daily reorder failed (non-fatal): {se}")
             return True
         except Exception as e:
             logger.error(f"Reconcile failed ({slot}): {e}")

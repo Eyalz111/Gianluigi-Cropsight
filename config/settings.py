@@ -790,6 +790,17 @@ class Settings(BaseSettings):
             "hand edit is overwritten — they are protected in-sheet to say so."
         ),
     )
+    WORKSPACE_SORT_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Apply a daily DEFAULT order to the Tasks + Meetings tabs at the "
+            "pre-nightly reconcile (02:00 IST). Tasks: Area primary, then within "
+            "an area active-before-done, then combined priority+urgency (overdue "
+            "boosted). Meetings: to-schedule first, then by proposed date. Rows "
+            "are reordered in place (no clear, no DB read); a header filter lets "
+            "humans re-sort interactively. Off = no system sort."
+        ),
+    )
     SYNC_NOTIFY_ENABLED: bool = Field(
         default=False,
         description=(

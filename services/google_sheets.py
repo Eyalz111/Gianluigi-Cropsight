@@ -259,6 +259,27 @@ def _data_validation_request(
     }
 
 
+def _basic_filter_request(sheet_id: int, num_cols: int) -> dict:
+    """Turn on the header-row filter so a human can sort/filter interactively.
+
+    The system sets a sensible DEFAULT order once daily; this lets Eyal/Nechama
+    re-sort by any column any time without fighting it. setBasicFilter is
+    idempotent (replaces any existing filter on the sheet).
+    """
+    return {
+        "setBasicFilter": {
+            "filter": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": num_cols,
+                }
+            }
+        }
+    }
+
+
 def _lock_tint_request(sheet_id: int, col_index: int) -> dict:
     """Light-grey fill on a system-owned column's data cells (rows 2-1000).
 
@@ -488,6 +509,33 @@ def _fmt_day(value) -> str:
         return ""
     text = str(value)
     return text[:10] if len(text) >= 10 else text
+
+
+_PRI_SCORE = {"H": 3, "M": 2, "L": 1}
+
+
+def _task_sort_key(row: list, col_index: dict, today_iso: str):
+    """Order the Tasks tab: Area primary, then within an area active-before-done,
+    then combined priority+urgency (overdue boosted), then soonest deadline.
+
+    Eyal's call (2026-07-23): review area-by-area, most-pressing first inside
+    each. 'General'/blank (the triage bucket) sinks to the bottom.
+    """
+    def _cell(k):
+        i = col_index.get(k)
+        return (row[i].strip() if i is not None and i < len(row) else "")
+
+    area = _cell("category").lower()
+    # Real areas sort alphabetically; General/blank goes last.
+    area_key = ("zzzz_general" if area in ("", "general", "non-area") else area)
+    status = _cell("status").lower()
+    done_band = 1 if status in ("done", "archived") else 0
+    pri = _PRI_SCORE.get(_cell("priority").upper(), 2)
+    urg = _PRI_SCORE.get(_cell("urgency").upper(), 2) if "urgency" in col_index else 2
+    d = parse_human_date(_cell("deadline"))
+    overdue = bool(d and d < today_iso and not done_band)
+    score = pri + urg + (3 if overdue else 0)
+    return (area_key, done_band, -score, d or "9999-99-99", _cell("task").lower())
 
 
 def _sorted_meetings(meetings: list[dict]) -> list[dict]:
@@ -1228,6 +1276,66 @@ class GoogleSheetsService:
             "Decisions", decision_ids, self.get_all_decisions, "reject-cascade"
         )
 
+    async def _resort_tab(self, tab_name: str, headers: list[str], key_func) -> int:
+        """Reorder a tab's data rows IN PLACE by key_func(raw_row).
+
+        Reads the raw rows and rewrites them reordered — no clear, no DB read, no
+        value change (only position), so there is no wipe/data-loss path: every
+        row and its UUID is preserved, and a mid-write failure just leaves rows
+        partly reordered (recoverable). Returns the row count reordered.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return 0
+        end_col = chr(ord("A") + len(headers) - 1)
+        try:
+            raw = await self._read_sheet_range(
+                sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                range_name=f"'{tab_name}'!A2:{end_col}",
+            )
+            data = [r for r in (raw or []) if any((c or "").strip() for c in r)]
+            if len(data) < 2:
+                return 0
+            width = len(headers)
+            for r in data:
+                while len(r) < width:
+                    r.append("")
+            ordered = sorted(data, key=key_func)
+            if ordered == data:
+                return 0  # already sorted — skip the write
+            self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().update(
+                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    range=f"'{tab_name}'!A2:{end_col}{len(ordered) + 1}",
+                    valueInputOption="RAW", body={"values": ordered},
+                )
+            )
+            logger.info(f"Reordered {tab_name}: {len(ordered)} rows")
+            return len(ordered)
+        except Exception as e:
+            logger.error(f"Error reordering {tab_name}: {e}")
+            return 0
+
+    async def sort_tasks_tab(self) -> int:
+        """Daily default order for the Tasks tab (Area → active → pri+urg)."""
+        tab = settings.TASK_TRACKER_TAB_NAME or "Tasks"
+        today = datetime.now().strftime("%Y-%m-%d")
+        return await self._resort_tab(
+            tab, TASK_TRACKER_HEADERS,
+            lambda row: _task_sort_key(row, TASK_COL_INDEX, today),
+        )
+
+    async def sort_meetings_tab(self) -> int:
+        """Daily default order for the Meetings tab (to-schedule → by date)."""
+        def _key(row):
+            def _c(k):
+                i = MEETING_COL_INDEX.get(k)
+                return (row[i].strip() if i is not None and i < len(row) else "")
+            st = _c("status").lower()
+            rank = {"not_scheduled": 0, "scheduled": 1}.get(st, 2)
+            d = parse_human_date(_c("proposed_date"))
+            return (rank, 0 if d else 1, d or "9999-99-99", _c("title").lower())
+        return await self._resort_tab(MEETING_TAB_NAME, MEETING_TRACKER_HEADERS, _key)
+
     async def rebuild_tasks_sheet(
         self, tasks_from_db: list[dict], force_empty: bool = False
     ) -> bool:
@@ -1282,16 +1390,23 @@ class GoogleSheetsService:
                 t for t in tasks_from_db if (t.get("status") or "") != "archived"
             ]
 
-            # Sort tasks: active statuses first, then by priority, then newest
-            status_order = {"pending": 0, "in_progress": 1, "overdue": 2, "done": 3}
-            priority_order = {"H": 0, "M": 1, "L": 2}
+            # Same order as the daily _resort_tab: Area primary, then within an
+            # area active-before-done, then combined priority+urgency (overdue
+            # boosted), then soonest deadline. Keeps a rebuild and the nightly
+            # reorder consistent. [2026-07-23]
+            _today = datetime.now().strftime("%Y-%m-%d")
 
             def sort_key(t):
-                return (
-                    status_order.get(t.get("status", "pending"), 9),
-                    priority_order.get(t.get("priority", "M"), 9),
-                    t.get("created_at", ""),  # string sort, newest last
-                )
+                area = (t.get("category") or "").strip().lower()
+                area_key = "zzzz_general" if area in ("", "general", "non-area") else area
+                status = (t.get("status") or "pending").lower()
+                done_band = 1 if status in ("done", "archived") else 0
+                pri = _PRI_SCORE.get((t.get("priority") or "M").upper(), 2)
+                urg = _PRI_SCORE.get((t.get("urgency") or "M").upper(), 2)
+                dl = str(t.get("deadline") or "")[:10]
+                overdue = bool(dl and dl < _today and not done_band)
+                return (area_key, done_band, -(pri + urg + (3 if overdue else 0)),
+                        dl or "9999-99-99", (t.get("title") or "").lower())
 
             sorted_tasks = sorted(tasks_from_db, key=sort_key)
 
@@ -3060,6 +3175,7 @@ class GoogleSheetsService:
                 sid, MEETING_COL_INDEX["status"], list(MEETING_STATUSES)))
 
             requests.append(_border_request(sid, n_cols))
+            requests.append(_basic_filter_request(sid, n_cols))
 
             # G:J are system-owned (agenda / prep / source / id) — lock cues.
             for _lk in ("agenda", "prep_needed", "source_meeting", "id"):
@@ -3424,6 +3540,9 @@ class GoogleSheetsService:
 
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
+
+            # --- Header-row filter for interactive sort/filter ---
+            requests.append(_basic_filter_request(sid, num_cols))
 
             # --- Protect the system-owned info columns H/I/J (source_meeting,
             #     created, id) so they can't be hand-edited (Phase 1, 2026-07).
