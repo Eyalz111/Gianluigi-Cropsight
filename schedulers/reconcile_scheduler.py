@@ -103,6 +103,11 @@ class ReconcileScheduler:
         if settings.RECONCILE_ENABLED:
             candidates.append((self._next_daily(now, settings.RECONCILE_MIDDAY_HOUR), "midday"))
             candidates.append((self._next_daily(now, settings.RECONCILE_PRENIGHTLY_HOUR), "prenightly"))
+            # Operational auto-sync: the next N-minute tick. This is what makes
+            # Nechama's Sheet edits land without a human trigger. [2026-07-23]
+            _iv = int(getattr(settings, "RECONCILE_INTERVAL_MINUTES", 0) or 0)
+            if _iv > 0:
+                candidates.append((now + timedelta(minutes=_iv), "interval"))
         if settings.GANTT_RECONCILE_ENABLED:
             candidates.append((
                 self._next_weekly(now, settings.WEEKLY_DIGEST_DAY, settings.GANTT_PREDIGEST_HOUR),
@@ -112,9 +117,13 @@ class ReconcileScheduler:
             return None
         trig, name = min(candidates, key=lambda c: c[0])
         sleep_s = max(0, (trig - now).total_seconds())
-        logger.info(f"Next reconcile ({name}): {trig.strftime('%a %Y-%m-%d %H:%M IST')} ({sleep_s/3600:.1f}h)")
+        logger.info(f"Next reconcile ({name}): {trig.strftime('%a %Y-%m-%d %H:%M IST')} ({sleep_s/60:.0f}m)")
         await asyncio.sleep(sleep_s)
-        return f"{trig.strftime('%Y-%m-%d')}:{name}"
+        # Interval ticks must carry HHMM so each is a DISTINCT slot — otherwise
+        # the `_last_slot` guard (built for once-a-day named slots) would run the
+        # interval once and then skip it for the rest of the day.
+        stamp = "%Y-%m-%d-%H%M" if name == "interval" else "%Y-%m-%d"
+        return f"{trig.strftime(stamp)}:{name}"
 
     async def _run(self, slot: str) -> bool:
         """Run the reconcile slot. Returns True on success, False on failure (audit SC-05)."""

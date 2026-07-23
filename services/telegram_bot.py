@@ -460,6 +460,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("emailscan", self._handle_email_scan))
         self.app.add_handler(CommandHandler("review", self._handle_review))
         self.app.add_handler(CommandHandler("sync", self._handle_sync))
+        self.app.add_handler(CommandHandler("pending", self._handle_pending))
 
         # Add callback handler for inline buttons (approval flow, debrief)
         self.app.add_handler(
@@ -509,6 +510,7 @@ class TelegramBot:
                 BotCommand("reprocess", "Reprocess a meeting"),
                 BotCommand("review", "Start weekly review"),
                 BotCommand("sync", "Sync tasks from Sheets"),
+                BotCommand("pending", "Show unsynced Sheet edits (read-only)"),
                 BotCommand("emailscan", "Scan personal email for action items"),
                 BotCommand("cost", "Show API cost summary"),
                 BotCommand("help", "Show help"),
@@ -2060,6 +2062,61 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
     # =========================================================================
     # Weekly Review Handlers
     # =========================================================================
+
+    async def _handle_pending(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Show unsynced Sheet edits — READ-ONLY, safe for the whole group.
+
+        This is Nechama's confirmation that her edits registered. She has no
+        write power (the group is read-only by design and /sync stays Eyal-only),
+        so the actual apply happens on the auto-sync timer or when Eyal runs
+        /sync. This just previews (dry_run=True) and reports COUNTS ONLY — no
+        task/decision content — so there is nothing to tier-filter.
+        """
+        chat_id = update.effective_chat.id
+        try:
+            from processors.sheets_sync import (
+                reconcile_tasks, reconcile_decisions, reconcile_meetings,
+            )
+            t = await reconcile_tasks(dry_run=True)
+            d = await reconcile_decisions(dry_run=True)
+            m = await reconcile_meetings(dry_run=True)
+
+            def _n(r, *keys):
+                return sum(int(r.get(k, 0) or 0) for k in keys) if isinstance(r, dict) else 0
+
+            t_edits = _n(t, "pulled", "created")
+            d_edits = _n(d, "pulled")
+            m_edits = _n(m, "pulled", "created")
+            total = t_edits + d_edits + m_edits
+
+            if isinstance(t, dict) and t.get("error"):
+                await self.send_message(chat_id, "Couldn't read the sheet just now — try again shortly.")
+                return
+
+            if total == 0:
+                msg = "✅ Everything's synced — no pending Sheet edits."
+            else:
+                lines = ["📝 <b>Pending Sheet edits</b> (not yet in the DB):"]
+                if t_edits:
+                    lines.append(f"  • {t_edits} task edit(s)")
+                if m_edits:
+                    lines.append(f"  • {m_edits} meeting edit(s)")
+                if d_edits:
+                    lines.append(f"  • {d_edits} decision edit(s)")
+                _iv = int(getattr(settings, "RECONCILE_INTERVAL_MINUTES", 0) or 0)
+                if _iv > 0:
+                    lines.append(f"\nThese sync automatically (about every {_iv} min).")
+                else:
+                    lines.append("\nEyal can apply these with /sync.")
+                msg = "\n".join(lines)
+            await self.send_message(chat_id, msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"/pending failed: {e}")
+            await self.send_message(chat_id, "Couldn't check pending edits right now.")
 
     async def _handle_sync(
         self,

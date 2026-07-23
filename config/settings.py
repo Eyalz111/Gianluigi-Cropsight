@@ -777,6 +777,16 @@ class Settings(BaseSettings):
             "hand edit is overwritten — they are protected in-sheet to say so."
         ),
     )
+    RECONCILE_INTERVAL_MINUTES: int = Field(
+        default=0,
+        description=(
+            "If > 0, also run the reconcile every N minutes (on top of the "
+            "fixed midday/pre-nightly slots). This is what lets Nechama's Sheet "
+            "edits reach the DB without anyone triggering a write — the system "
+            "syncs on a timer, so the 'group never writes' boundary stays "
+            "intact. 30 is a reasonable operational cadence. 0 = off (slots only)."
+        ),
+    )
     RECONCILE_MIDDAY_HOUR: int = Field(default=13, description="IST hour for the midday reconcile")
     RECONCILE_PRENIGHTLY_HOUR: int = Field(
         default=2, description="IST hour for the pre-nightly reconcile (must be < KNOWLEDGE_NIGHTLY_HOUR so the DB is correct before nightly reads tasks)"

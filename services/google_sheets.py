@@ -87,6 +87,9 @@ COLORS = {
     "stale_warn": _hex_color("#FFE0B2"),          # Light Orange — 30d+
     "stale_alert": _hex_color("#FFCDD2"),         # Light Red — 60d+
 
+    # System-owned (locked) column fill — quiet grey, distinct from banding.
+    "locked_tint": _hex_color("#ECEFF1"),         # Blue-grey 50
+
     # Header
     "header_bg": _hex_color("#1A237E"),           # Dark Blue
     "header_text": _hex_color("#FFFFFF"),         # White
@@ -252,6 +255,44 @@ def _data_validation_request(
                 "showCustomUi": True,
                 "strict": False,
             },
+        }
+    }
+
+
+def _lock_tint_request(sheet_id: int, col_index: int) -> dict:
+    """Light-grey fill on a system-owned column's data cells (rows 2-1000).
+
+    A visible companion to the warningOnly protected range: the colour tells a
+    human at a glance which columns are theirs to edit vs the system's, so they
+    don't fight the protection dialog. Header stays as-is (it carries the 🔒).
+    """
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "endRowIndex": 1000,
+                "startColumnIndex": col_index,
+                "endColumnIndex": col_index + 1,
+            },
+            "cell": {"userEnteredFormat": {"backgroundColor": COLORS["locked_tint"]}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }
+    }
+
+
+def _lock_header_request(sheet_id: int, col_index: int, header: str) -> dict:
+    """Prefix a system-owned column's header with 🔒 so the lock is obvious."""
+    label = header if header.startswith("🔒") else f"🔒 {header}"
+    return {
+        "updateCells": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0, "endRowIndex": 1,
+                "startColumnIndex": col_index, "endColumnIndex": col_index + 1,
+            },
+            "rows": [{"values": [{"userEnteredValue": {"stringValue": label}}]}],
+            "fields": "userEnteredValue",
         }
     }
 
@@ -2763,9 +2804,20 @@ class GoogleSheetsService:
                 requests.append(_conditional_format_rule(
                     sid, MEETING_COL_INDEX["status"], text, color, idx))
 
+            # Status dropdown — strict=False, so a reconcile-written status can
+            # never error the cell. [2026-07-23]
+            requests.append(_data_validation_request(
+                sid, MEETING_COL_INDEX["status"], list(MEETING_STATUSES)))
+
             requests.append(_border_request(sid, n_cols))
 
-            # G:J are system-owned (agenda / prep / source / id).
+            # G:J are system-owned (agenda / prep / source / id) — lock cues.
+            for _lk in ("agenda", "prep_needed", "source_meeting", "id"):
+                _ci = MEETING_COL_INDEX[_lk]
+                requests.append(_lock_tint_request(sid, _ci))
+                requests.append(_lock_header_request(
+                    sid, _ci, MEETING_TRACKER_HEADERS[_ci]))
+
             _DESC = "Gianluigi: system-owned (agenda / prep / source / id)"
             try:
                 pmeta = self._execute_with_retry(
@@ -3069,7 +3121,34 @@ class GoogleSheetsService:
                     )
                     rule_idx += 1
 
-            # --- NO data validation dropdowns (removed — they cause errors) ---
+            # --- Data validation dropdowns (strict=False: shows the picker but
+            #     NEVER rejects a value, so a reconcile-written or legacy/Hebrew
+            #     cell can't error — the failure mode that got dropdowns pulled
+            #     in Phase 10 was strict=True). Only the controlled enum columns.
+            #     [2026-07-23] ---
+            requests.append(_data_validation_request(
+                sid, TASK_COL_INDEX["status"], TASK_STATUSES))
+            requests.append(_data_validation_request(
+                sid, TASK_COL_INDEX["priority"], PRIORITIES))
+            requests.append(_data_validation_request(
+                sid, TASK_COL_INDEX["category"], TASK_CATEGORIES + ["General"]))
+            if "urgency" in TASK_COL_INDEX:
+                requests.append(_data_validation_request(
+                    sid, TASK_COL_INDEX["urgency"], PRIORITIES))
+
+            # --- 🔒 header markers on the system-owned columns (H,I,J + L).
+            #     The tint that pairs with these is applied AFTER banding below
+            #     (banding would otherwise paint over it), and deliberately SKIPS
+            #     column L — that column carries the staleness colours and a grey
+            #     fill would hide them. [2026-07-23] ---
+            _locked_cols = ["source_meeting", "created", "id"]
+            _header_locked = list(_locked_cols)
+            if "last_update" in TASK_COL_INDEX:
+                _header_locked.append("last_update")
+            for _lk in _header_locked:
+                _ci = TASK_COL_INDEX[_lk]
+                requests.append(_lock_header_request(
+                    sid, _ci, TASK_TRACKER_HEADERS[_ci]))
 
             # --- Remove existing banding then add fresh (idempotent) ---
             try:
@@ -3087,6 +3166,11 @@ class GoogleSheetsService:
             except Exception:
                 pass
             requests.append(_banding_request(sid, num_cols))
+
+            # Lock-tint AFTER banding so the grey wins on H/I/J. Column L is
+            # excluded (staleness colours own it — see header block above).
+            for _lk in _locked_cols:
+                requests.append(_lock_tint_request(sid, TASK_COL_INDEX[_lk]))
 
             # --- Light gray borders on all cells ---
             requests.append(_border_request(sid, num_cols))
