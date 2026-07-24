@@ -195,6 +195,10 @@ class TestReconcile:
         assert created["category"] == "SALES & BUSINESS DEVELOPMENT"
         assert created["deadline"] is None
         assert created["deadline_confidence"] == "NONE"
+        # A human typing a task straight into the Sheet is approved on arrival,
+        # like manual decisions/meetings — else it lands DB-default 'pending',
+        # invisible to the approved-only read helpers. [2026-07-24]
+        assert created["approval_status"] == "approved"
 
     async def test_db_only_open_readded_done_archived_not(self, monkeypatch):
         db = [

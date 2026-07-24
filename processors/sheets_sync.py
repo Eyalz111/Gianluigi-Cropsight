@@ -922,6 +922,10 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 status=st.get("status") or "pending",
                 category=supabase_client.resolve_category(st.get("category"), areas=_areas_cache),
                 deadline_confidence="EXPLICIT" if _deadline else "NONE",
+                # Hand-typed into the Sheet by Eyal/Nechama -> approved on arrival,
+                # matching the manual decision/meeting create paths. Without this
+                # the row lands DB-default 'pending' and never surfaces to the bot.
+                approval_status="approved",
                 **extra,
             )
             new_id = created.get("id")

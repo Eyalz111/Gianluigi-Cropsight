@@ -986,6 +986,7 @@ class SupabaseClient:
         deadline_confidence: str = "NONE",
         urgency: str = "M",
         label: str | None = None,
+        approval_status: str | None = None,
     ) -> dict:
         """
         Create a new task.
@@ -1027,6 +1028,15 @@ class SupabaseClient:
             "urgency": urgency,
             "label": label,
         }
+        # Only set approval_status when a caller is explicit. Left as None the
+        # DB default ('pending') stands, preserving the extraction flow. A human
+        # typing a task straight into the Sheet passes 'approved' — the same
+        # "a human typing it IS the approval" rule create_manual_decision and
+        # create_follow_up_meeting_manual already use, so the row is visible to
+        # the approved-only read helpers immediately (else it lands pending,
+        # invisible to the bot, with no approval card to ever flip it). [2026-07-24]
+        if approval_status is not None:
+            data["approval_status"] = approval_status
 
         result = self.client.table("tasks").insert(data).execute()
         logger.info(f"Created task: {title} (assigned to {assignee})")
