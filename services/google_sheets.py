@@ -3251,6 +3251,57 @@ class GoogleSheetsService:
             _EF_DESC = "Gianluigi: system-owned (source_meeting / date)"
             _ID_DESC = "Gianluigi: system-owned (id)"
             requests: list[dict] = []
+            n_cols = len(_decision_headers())
+
+            # --- Full visual formatting (was MISSING — the tab only ever had
+            #     protection, so an old all-rows header paint bled dark blue over
+            #     every row on A:G and nothing reset it). Reset the data area to
+            #     white/black, then paint ONLY row 1 as the header. [2026-07-24] ---
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": 1000,
+                              "startColumnIndex": 0, "endColumnIndex": n_cols},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": COLORS["banding_odd"],   # white
+                        "textFormat": {"bold": False,
+                                       "foregroundColor": _hex_color("#000000")}}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+            requests.append({
+                "updateSheetProperties": {
+                    "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount"}
+            })
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                              "startColumnIndex": 0, "endColumnIndex": n_cols},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": COLORS["header_bg"],
+                        "textFormat": {"bold": True,
+                                       "foregroundColor": COLORS["header_text"]}}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+            # Widths: Project, Decision, Rationale, Confidence, Source, Date, Status, ID
+            for i, w in enumerate([130, 340, 260, 90, 150, 90, 110, 70][:n_cols]):
+                requests.append(_column_width_request(sid, i, w))
+            requests.append(_text_wrap_request(sid, DECISION_COL_INDEX["decision"]))
+            requests.append(_text_wrap_request(sid, DECISION_COL_INDEX["rationale"]))
+            # Status dropdown (strict=False) + header filter.
+            requests.append(_data_validation_request(
+                sid, DECISION_COL_INDEX["status"], ["Active", "Superseded", "Reversed"]))
+            requests.append(_border_request(sid, n_cols))
+            requests.append(_basic_filter_request(sid, n_cols))
+            # Lock cues on the system-owned columns (E source, F date, H id).
+            for _lk, _hdr in (("source_meeting", "Source Meeting"), ("date", "Date")):
+                _ci = DECISION_COL_INDEX[_lk]
+                requests.append(_lock_tint_request(sid, _ci))
+                requests.append(_lock_header_request(sid, _ci, _hdr))
+            _id_ci = len(DECISION_TRACKER_HEADERS)  # H
+            requests.append(_lock_tint_request(sid, _id_ci))
+            requests.append(_lock_header_request(sid, _id_ci, "ID"))
 
             # Drop any prior Gianluigi decision protections (idempotent re-apply).
             try:
