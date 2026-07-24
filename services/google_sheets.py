@@ -3303,6 +3303,37 @@ class GoogleSheetsService:
             requests.append(_lock_tint_request(sid, _id_ci))
             requests.append(_lock_header_request(sid, _id_ci, "ID"))
 
+            # Live cross-links to the always-updating Areas / Projects index tabs.
+            # Each decision's Project (col A) rolls up to an Area over there, so
+            # this LINKS to the live topics/areas instead of duplicating them as
+            # extra columns here. Placed in the frozen header row (cols I/J) so
+            # they stay pinned and clear of the A:H data the reconcile owns.
+            # `#gid=` jumps to the tab inside this same workbook. [2026-07-24]
+            _link_cell = lambda formula: {
+                "userEnteredValue": {"formulaValue": formula},
+                "userEnteredFormat": {"textFormat": {
+                    "bold": True, "foregroundColor": _hex_color("#1155CC")}},
+            }
+            _link_vals = []
+            _areas_sid = self._get_sheet_id_by_name(
+                settings.TASK_TRACKER_SHEET_ID, AREAS_TAB_NAME)
+            if _areas_sid is not None:
+                _link_vals.append(_link_cell(
+                    f'=HYPERLINK("#gid={_areas_sid}","↗ Areas (live index)")'))
+            _proj_sid = self._get_sheet_id_by_name(
+                settings.TASK_TRACKER_SHEET_ID, PROJECTS_TAB_NAME)
+            if _proj_sid is not None:
+                _link_vals.append(_link_cell(
+                    f'=HYPERLINK("#gid={_proj_sid}","↗ Projects (live)")'))
+            if _link_vals:
+                requests.append({"updateCells": {
+                    "rows": [{"values": _link_vals}],
+                    "fields": "userEnteredValue,userEnteredFormat",
+                    "start": {"sheetId": sid, "rowIndex": 0, "columnIndex": n_cols},
+                }})
+                for _off in range(len(_link_vals)):
+                    requests.append(_column_width_request(sid, n_cols + _off, 165))
+
             # Drop any prior Gianluigi decision protections (idempotent re-apply).
             try:
                 pmeta = self._execute_with_retry(
