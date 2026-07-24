@@ -340,6 +340,13 @@ class Settings(BaseSettings):
         description="Verify the DB<->Sheet<->distribution chain after every meeting "
                     "distribution and in the daily QA sweep; alert Eyal on inconsistency."
     )
+    EMAIL_WATCHER_ENABLED: bool = Field(
+        default=True,
+        description="Run the Gmail watcher (approval replies + email Q&A auto-answer). "
+                    "Off-switch: the bot reads AND sends from the same Gmail, so a Q&A "
+                    "auto-answer can bounce back and self-loop (guarded, but this lets "
+                    "you kill the whole channel without a deploy)."
+    )
 
     # ==========================================================================
     # v1.0 — Debrief

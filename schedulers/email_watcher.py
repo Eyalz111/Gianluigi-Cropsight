@@ -142,6 +142,26 @@ class EmailWatcher:
                     self._processed_ids.add(msg_id)
                     continue
 
+                # Same self-echo class as the approval-request skip above, but for
+                # the Q&A path. The bot reads AND sends from the same Gmail, so
+                # every answer it sends bounces back into the inbox looking "from
+                # Eyal"; without this the watcher treated its own reply as a fresh
+                # question and answered it — an every-~2h self-reply loop kicked
+                # off by an n8n-course test email. [2026-07-24 email self-loop]
+                if self._is_own_outbound_message(body):
+                    logger.warning(
+                        f"Skipping the bot's own outbound reply bouncing back "
+                        f"(self-loop guard): {subject}"
+                    )
+                    supabase_client.log_action(
+                        action="own_outbound_email_ignored",
+                        details={"subject": subject, "sender": sender_email},
+                        triggered_by="system",
+                    )
+                    await gmail_service.mark_as_read(msg_id)
+                    self._processed_ids.add(msg_id)
+                    continue
+
                 # Only process emails from team members
                 if not is_team_email(sender_email):
                     logger.debug(f"Skipping non-team email from {sender_email}")
@@ -243,6 +263,20 @@ class EmailWatcher:
         inbox. [2026-07-16 self-approval incident]"""
         s = subject.strip().lower()
         return "[approval needed]" in s and not s.startswith("re:")
+
+    def _is_own_outbound_message(self, body: str) -> bool:
+        """True when an inbound email is really the bot's OWN prior Q&A reply
+        bouncing back. Because the bot reads AND sends from the same Gmail, every
+        answer it sends lands back in the inbox looking 'from Eyal' — so without
+        this guard the watcher answered its own answer, forever (2026-07-24
+        self-reply loop). Discriminator: our replies sign off as 'Gianluigi,
+        CropSight AI Assistant' (and a bare 'Gianluigi' sign-off). A human email
+        that merely quotes an old reply is a rare, cheap false-skip — far cheaper
+        than an infinite loop."""
+        b = body or ""
+        if "CropSight AI Assistant" in b:
+            return True
+        return bool(re.search(r"(?mi)^-{2,}\s*\n\s*gianluigi\b", b))
 
     async def _extract_and_log(
         self,

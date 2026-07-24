@@ -382,8 +382,10 @@ async def start_services() -> None:
     )
     tasks.append(archival_task)
 
-    # Start email watcher (only if Gmail is available)
-    if init_status.get("gmail"):
+    # Start email watcher (only if Gmail is available AND enabled). The watcher
+    # reads+sends from the same Gmail, so the Q&A auto-answer path can self-loop
+    # (now guarded); EMAIL_WATCHER_ENABLED is the no-deploy kill switch. [2026-07-24]
+    if init_status.get("gmail") and settings.EMAIL_WATCHER_ENABLED:
         from schedulers.email_watcher import email_watcher
         logger.info("  Starting email watcher...")
         email_watcher_task = asyncio.create_task(
