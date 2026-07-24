@@ -274,11 +274,12 @@ class TestReviewFindings:
 
 
 class TestTerminalArchive:
-    """Held/dropped meetings move OFF the Meetings tab to Past Meetings —
-    symmetric with an archived task, so the working tab shows only live
-    meetings. [2026-07-23]"""
+    """Held meetings STAY on the tab as visible history; dropped meetings stay
+    too until they've been untouched for the archival window (TASK_ARCHIVAL_DAYS),
+    then age out to Past Meetings — the "60-day dropped timer". [2026-07-24]"""
 
-    async def test_meeting_set_to_held_is_archived_off_the_tab(self, monkeypatch):
+    async def test_held_meeting_stays_on_the_tab(self, monkeypatch):
+        # Eyal wants to SEE completed meetings — held no longer leaves the tab.
         sheet = [_srow(id="m1", title="Kickoff", status="held")]
         db = [_dbrow(id="m1", title="Kickoff", status="scheduled")]
         snap = {"m1": {"title": "Kickoff", "status": "scheduled"}}
@@ -286,14 +287,28 @@ class TestTerminalArchive:
 
         res = await ss.reconcile_meetings()
 
-        assert res.get("archived") == 1
-        assert len(calls["archive"]) == 1 and calls["archive"][0]["id"] == "m1"
-        # a moved row gets NO snapshot — it left the working view
-        assert calls["snapshot"] == []
+        assert res.get("archived", 0) == 0
+        assert calls["archive"] == []
+        assert len(calls["snapshot"]) == 1  # stays -> snapshotted
 
-    async def test_dropped_meeting_is_archived_too(self, monkeypatch):
+    async def test_recent_dropped_meeting_stays(self, monkeypatch):
+        # Dropped but touched recently: within the window, so it stays (greyed,
+        # sorted last) — it does NOT leave immediately anymore.
         sheet = [_srow(id="m1", title="X", status="dropped")]
-        db = [_dbrow(id="m1", title="X", status="not_scheduled")]
+        db = [_dbrow(id="m1", title="X", status="not_scheduled",
+                     updated_at="2099-01-01T00:00:00+00:00")]
+        snap = {"m1": {"title": "X", "status": "not_scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+        assert res.get("archived", 0) == 0
+        assert calls["archive"] == []
+
+    async def test_aged_dropped_meeting_archives(self, monkeypatch):
+        # Dropped and untouched well beyond the window -> ages out to Past Meetings.
+        sheet = [_srow(id="m1", title="X", status="dropped")]
+        db = [_dbrow(id="m1", title="X", status="not_scheduled",
+                     updated_at="2020-01-01T00:00:00+00:00")]
         snap = {"m1": {"title": "X", "status": "not_scheduled"}}
         calls, _ = _setup(monkeypatch, sheet, db, snap)
 

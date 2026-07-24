@@ -11,7 +11,7 @@ Usage:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from config.settings import settings
@@ -66,40 +66,55 @@ class TaskSyncScheduler:
         self._running = False
         logger.info("Task archival scheduler stopped")
 
+    @staticmethod
+    def _older_than(iso_value, cutoff) -> bool:
+        """True if a DB timestamp string is strictly older than `cutoff` (aware).
+
+        Parses the ISO value into a tz-aware datetime (naive => UTC) so the
+        comparison never depends on string offset formatting. A missing/garbage
+        value returns False — we never archive on the strength of a null clock.
+        """
+        if not iso_value:
+            return False
+        try:
+            dt = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        return dt < cutoff
+
     async def _archive_completed_tasks(self) -> None:
-        """Move completed tasks older than N days to Archive tab."""
+        """Flip DONE tasks untouched > N days to status 'archived'.
+
+        We set the DB STATUS ONLY — the reconcile engine then moves the sheet row
+        to the Archive tab on its next pass, reusing the UUID-keyed,
+        oscillation-guarded, snapshot-aware path. This scheduler never touches the
+        Sheet itself (the old title-matching version did, and never set the DB
+        status, so the row left the sheet while the DB still said 'done' — a
+        split-brain). Dropped MEETINGS age out to Past Meetings inside
+        reconcile_meetings, which is already UUID-keyed. [2026-07-24]
+        """
         from services.supabase_client import supabase_client
-        from services.google_sheets import sheets_service
 
-        archival_days = settings.TASK_ARCHIVAL_DAYS
+        days = settings.TASK_ARCHIVAL_DAYS
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-        # Get completed tasks older than threshold
-        cutoff = (datetime.now(_ISRAEL_TZ) - timedelta(days=archival_days)).isoformat()
         try:
-            all_tasks = supabase_client.get_tasks(status="done")
-            old_completed = [
-                t for t in all_tasks
-                if t.get("updated_at", "") < cutoff
-            ]
+            done = supabase_client.get_tasks(status="done", limit=2000)
         except Exception as e:
-            logger.debug(f"Could not fetch completed tasks: {e}")
+            logger.debug(f"Could not fetch done tasks: {e}")
             return
-
-        if not old_completed:
-            logger.debug("No completed tasks to archive")
-            return
-
-        logger.info(f"Found {len(old_completed)} completed tasks to archive (>{archival_days} days)")
-
-        # Archive to Sheets
-        try:
-            archived = await sheets_service.archive_completed_tasks(
-                [t.get("title", "") for t in old_completed]
-            )
-            if archived:
-                logger.info(f"Archived {archived} tasks to Sheets Archive tab")
-        except Exception as e:
-            logger.error(f"Sheets archival failed: {e}")
+        moved = 0
+        for t in done:
+            if self._older_than(t.get("updated_at"), cutoff):
+                try:
+                    supabase_client.update_task(t["id"], status="archived")
+                    moved += 1
+                except Exception as e:
+                    logger.warning(f"auto-archive task {t.get('id')} failed: {e}")
+        if moved:
+            logger.info(f"Auto-archived {moved} done task(s) >{days}d — reconcile will move the rows")
 
 
 # Singleton

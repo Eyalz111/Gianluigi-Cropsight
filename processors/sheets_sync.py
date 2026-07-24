@@ -15,7 +15,7 @@ Usage:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from config.settings import settings
 from core.dates import parse_human_date
@@ -1225,10 +1225,27 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     snapshot_writes: list[tuple] = []
     db_updates: dict[str, dict] = {}
     manual_marks: list[tuple] = []
-    archive_moves: list[dict] = []     # held/dropped rows -> Past Meetings tab
-    # Terminal statuses leave the working tab, mirroring an archived task. A
-    # meeting that was HELD or DROPPED is history, not work-to-manage.
+    archive_moves: list[dict] = []     # aged-out dropped rows -> Past Meetings tab
+    # HELD meetings stay on the tab as visible history (Eyal wants to see the
+    # completed ones); DROPPED meetings stay too, then age out to Past Meetings
+    # once untouched for the archival window — the "60-day dropped timer".
+    # _TERMINAL is still used to keep DB-only terminal meetings from being
+    # re-added to the sheet (no resurrection of already-archived history).
+    # [2026-07-24]
     _TERMINAL = ("held", "dropped")
+    _drop_days = int(getattr(settings, "TASK_ARCHIVAL_DAYS", 60) or 60)
+    _drop_cutoff = datetime.now(timezone.utc) - timedelta(days=_drop_days)
+
+    def _aged_out(iso) -> bool:
+        if not iso:
+            return False
+        try:
+            d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        return d < _drop_cutoff
 
     def _cell(col_key, row, value):
         if row:
@@ -1329,11 +1346,11 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
 
         if upd:
             db_updates[mid] = upd
-        # A meeting that has reached a terminal status leaves the Meetings tab
-        # for 'Past Meetings' — symmetric with an archived task, so the working
-        # tab shows only live meetings (not_scheduled / scheduled). No snapshot:
-        # the row is leaving the working view. [2026-07-23]
-        if _normalize(final.get("status")) in _TERMINAL:
+        # Held stays on the tab as history; dropped stays until it ages out of
+        # the archival window, then moves to 'Past Meetings'. Everything else
+        # (scheduled / not_scheduled / held / recent-dropped) snapshots + stays
+        # on the working tab. [2026-07-24]
+        if _normalize(final.get("status")) == "dropped" and _aged_out(dm.get("updated_at")):
             archive_moves.append({**sm, "status": final.get("status")})
             summary["archived"] = summary.get("archived", 0) + 1
         else:

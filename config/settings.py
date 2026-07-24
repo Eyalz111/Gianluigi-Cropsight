@@ -573,8 +573,8 @@ class Settings(BaseSettings):
         description="Enable daily archival of completed tasks to Sheets Archive tab"
     )
     TASK_ARCHIVAL_DAYS: int = Field(
-        default=30,
-        description="Archive completed tasks older than this many days"
+        default=60,
+        description="Auto-archive done tasks (and dropped meetings) untouched this many days"
     )
 
     # Phase 12 A2: Continuity-aware extraction

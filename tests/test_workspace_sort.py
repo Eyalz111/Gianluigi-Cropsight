@@ -80,3 +80,39 @@ class TestTaskSort:
                          status="done", deadline="2026-01-01")
         active = _row(task="ac", category="X", priority="L", urgency="L", status="pending")
         assert [r[COL_INDEX["task"]] for r in _order([done_past, active])] == ["ac", "dp"]
+
+
+class TestStatusBands:
+    """New primary order (2026-07-24): OVERDUE -> IN PROGRESS -> PENDING -> DONE,
+    each grouped by Area internally. The band cuts ACROSS areas."""
+
+    def test_band_order_across_areas(self):
+        # Every task in a DIFFERENT area, deliberately chosen so area-primary
+        # would give a different answer — the band must win.
+        overdue = _row(task="ov", category="ZEBRA AREA", priority="L", urgency="L",
+                       status="pending", deadline="2026-01-01")           # band 0
+        inprog = _row(task="ip", category="APPLE AREA", priority="L", urgency="L",
+                      status="in_progress")                                # band 1
+        pending = _row(task="pe", category="MANGO AREA", priority="H", urgency="H",
+                       status="pending")                                   # band 2
+        done = _row(task="dn", category="APPLE AREA", priority="H", urgency="H",
+                    status="done")                                         # band 3
+        out = [r[COL_INDEX["task"]] for r in _order([done, pending, inprog, overdue])]
+        assert out == ["ov", "ip", "pe", "dn"]
+
+    def test_overdue_beats_higher_priority_pending_in_earlier_area(self):
+        # overdue in a late-alphabet area still outranks an on-time H/H pending
+        # in an early-alphabet area — because overdue is the top band.
+        overdue = _row(task="ov", category="ZZZ", priority="L", urgency="L",
+                       status="pending", deadline="2026-01-01")
+        pending = _row(task="pe", category="AAA", priority="H", urgency="H",
+                       status="pending")
+        assert [r[COL_INDEX["task"]] for r in _order([pending, overdue])] == ["ov", "pe"]
+
+    def test_within_band_area_then_pressure(self):
+        # two pending tasks: earlier area first; within an area, higher pri+urg.
+        a_lo = _row(task="alo", category="AAA", priority="L", urgency="L", status="pending")
+        a_hi = _row(task="ahi", category="AAA", priority="H", urgency="H", status="pending")
+        b_hi = _row(task="bhi", category="BBB", priority="H", urgency="H", status="pending")
+        out = [r[COL_INDEX["task"]] for r in _order([b_hi, a_lo, a_hi])]
+        assert out == ["ahi", "alo", "bhi"]

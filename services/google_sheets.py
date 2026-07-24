@@ -458,7 +458,13 @@ MEETINGS_ARCHIVE_HEADERS = MEETING_TRACKER_HEADERS + ["Moved", "Outcome"]
 # Monotonic, like decision statuses: a stale Sheet cell must never un-schedule
 # a meeting that already happened.
 MEETING_STATUSES = ("not_scheduled", "scheduled", "held", "dropped")
+# PROGRESSION order — used by the monotonic status guard (a meeting can only move
+# forward: not_scheduled -> scheduled -> held/dropped). Do NOT reorder these.
 MEETING_STATUS_ORDER = {"not_scheduled": 0, "scheduled": 1, "held": 2, "dropped": 3}
+# DISPLAY order on the Meetings tab (Eyal's call, 2026-07-24): show the booked
+# ones first, then what still needs booking, then history. SEPARATE from the
+# progression order above so the sort can differ from the state machine.
+MEETING_DISPLAY_ORDER = {"scheduled": 0, "not_scheduled": 1, "held": 2, "dropped": 3}
 
 # ---------------------------------------------------------------------------
 # Read-only reference tabs (2026-07).
@@ -514,40 +520,52 @@ def _fmt_day(value) -> str:
 _PRI_SCORE = {"H": 3, "M": 2, "L": 1}
 
 
-def _task_sort_key(row: list, col_index: dict, today_iso: str):
-    """Order the Tasks tab: Area primary, then within an area active-before-done,
-    then combined priority+urgency (overdue boosted), then soonest deadline.
+def _task_status_band(status: str, deadline_iso: str | None, today_iso: str) -> int:
+    """Primary Tasks-tab band (Eyal's call, 2026-07-24): OVERDUE first, then
+    IN PROGRESS, then PENDING, then DONE — each grouped by Area internally.
 
-    Eyal's call (2026-07-23): review area-by-area, most-pressing first inside
-    each. 'General'/blank (the triage bucket) sinks to the bottom.
+    Overdue (a past deadline on a still-open task) OUTRANKS its own status band,
+    so a pending-but-late task rises above on-time in-progress work. Done/archived
+    can never be overdue. Returns 0..3 (lower = higher on the tab).
+    """
+    st = (status or "").lower()
+    if st in ("done", "archived"):
+        return 3
+    overdue = bool(deadline_iso and deadline_iso < today_iso) or st == "overdue"
+    if overdue:
+        return 0
+    if st == "in_progress":
+        return 1
+    return 2  # pending (and any other non-terminal, non-overdue status)
+
+
+def _task_sort_key(row: list, col_index: dict, today_iso: str):
+    """Order the Tasks tab: status-band primary (overdue -> in-progress ->
+    pending -> done), then Area within a band, then combined priority+urgency,
+    then soonest deadline. 'General'/blank (the triage bucket) sinks last.
     """
     def _cell(k):
         i = col_index.get(k)
         return (row[i].strip() if i is not None and i < len(row) else "")
 
     area = _cell("category").lower()
-    # Real areas sort alphabetically; General/blank goes last.
+    # Real areas sort alphabetically; General/blank goes last within each band.
     area_key = ("zzzz_general" if area in ("", "general", "non-area") else area)
-    status = _cell("status").lower()
-    done_band = 1 if status in ("done", "archived") else 0
+    d = parse_human_date(_cell("deadline"))
+    band = _task_status_band(_cell("status"), d or None, today_iso)
     pri = _PRI_SCORE.get(_cell("priority").upper(), 2)
     urg = _PRI_SCORE.get(_cell("urgency").upper(), 2) if "urgency" in col_index else 2
-    d = parse_human_date(_cell("deadline"))
-    overdue = bool(d and d < today_iso and not done_band)
-    score = pri + urg + (3 if overdue else 0)
-    return (area_key, done_band, -score, d or "9999-99-99", _cell("task").lower())
+    return (band, area_key, -(pri + urg), d or "9999-99-99", _cell("task").lower())
 
 
 def _sorted_meetings(meetings: list[dict]) -> list[dict]:
-    """Order the Meetings tab so it sorts itself into a worklist.
-
-    `not_scheduled` first — that IS the queue — then by proposed date, oldest
-    first, so the most overdue booking is the top row. Held/dropped sink to the
-    bottom as history.
+    """Order the Meetings tab: scheduled first, then not-scheduled (the booking
+    queue), then held, then dropped (history) — each by proposed date, oldest
+    first. Uses MEETING_DISPLAY_ORDER, not the progression order. [2026-07-24]
     """
     def _key(m: dict):
-        order = MEETING_STATUS_ORDER.get(
-            (m.get("status") or "not_scheduled").strip().lower(), 0
+        order = MEETING_DISPLAY_ORDER.get(
+            (m.get("status") or "not_scheduled").strip().lower(), 1
         )
         return (order, str(m.get("proposed_date") or "9999"), m.get("title") or "")
     return sorted(meetings, key=_key)
@@ -1325,13 +1343,14 @@ class GoogleSheetsService:
         )
 
     async def sort_meetings_tab(self) -> int:
-        """Daily default order for the Meetings tab (to-schedule → by date)."""
+        """Daily default order for the Meetings tab: scheduled → not-scheduled →
+        held → dropped, then by proposed date. [2026-07-24]"""
         def _key(row):
             def _c(k):
                 i = MEETING_COL_INDEX.get(k)
                 return (row[i].strip() if i is not None and i < len(row) else "")
             st = _c("status").lower()
-            rank = {"not_scheduled": 0, "scheduled": 1}.get(st, 2)
+            rank = MEETING_DISPLAY_ORDER.get(st, 1)
             d = parse_human_date(_c("proposed_date"))
             return (rank, 0 if d else 1, d or "9999-99-99", _c("title").lower())
         return await self._resort_tab(MEETING_TAB_NAME, MEETING_TRACKER_HEADERS, _key)
@@ -1390,22 +1409,20 @@ class GoogleSheetsService:
                 t for t in tasks_from_db if (t.get("status") or "") != "archived"
             ]
 
-            # Same order as the daily _resort_tab: Area primary, then within an
-            # area active-before-done, then combined priority+urgency (overdue
-            # boosted), then soonest deadline. Keeps a rebuild and the nightly
-            # reorder consistent. [2026-07-23]
+            # Same order as the daily _resort_tab: status-band primary (overdue
+            # -> in-progress -> pending -> done), Area within a band, then
+            # combined priority+urgency, then soonest deadline. Keeps a rebuild
+            # and the nightly reorder consistent. [2026-07-24]
             _today = datetime.now().strftime("%Y-%m-%d")
 
             def sort_key(t):
                 area = (t.get("category") or "").strip().lower()
                 area_key = "zzzz_general" if area in ("", "general", "non-area") else area
-                status = (t.get("status") or "pending").lower()
-                done_band = 1 if status in ("done", "archived") else 0
+                dl = str(t.get("deadline") or "")[:10]
+                band = _task_status_band(t.get("status") or "pending", dl or None, _today)
                 pri = _PRI_SCORE.get((t.get("priority") or "M").upper(), 2)
                 urg = _PRI_SCORE.get((t.get("urgency") or "M").upper(), 2)
-                dl = str(t.get("deadline") or "")[:10]
-                overdue = bool(dl and dl < _today and not done_band)
-                return (area_key, done_band, -(pri + urg + (3 if overdue else 0)),
+                return (band, area_key, -(pri + urg),
                         dl or "9999-99-99", (t.get("title") or "").lower())
 
             sorted_tasks = sorted(tasks_from_db, key=sort_key)

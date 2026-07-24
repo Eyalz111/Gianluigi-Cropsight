@@ -371,6 +371,17 @@ async def start_services() -> None:
     )
     tasks.append(cleanup_task)
 
+    # Start task-archival scheduler (self-gates on TASK_ARCHIVAL_ENABLED). Flips
+    # done tasks untouched > TASK_ARCHIVAL_DAYS to 'archived' in the DB; the
+    # reconcile then moves the rows to the Archive tab. [2026-07-24]
+    from schedulers.task_sync_scheduler import task_sync_scheduler
+    logger.info("  Starting task-archival scheduler...")
+    archival_task = asyncio.create_task(
+        task_sync_scheduler.start(),
+        name="task_sync_scheduler"
+    )
+    tasks.append(archival_task)
+
     # Start email watcher (only if Gmail is available)
     if init_status.get("gmail"):
         from schedulers.email_watcher import email_watcher
