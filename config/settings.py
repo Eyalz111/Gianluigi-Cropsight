@@ -329,6 +329,12 @@ class Settings(BaseSettings):
     ORPHAN_CLEANUP_INTERVAL: int = Field(
         default=86400, description="Orphan cleanup scheduler interval (seconds)"
     )
+    ORPHAN_CLEANUP_NOTIFY_ENABLED: bool = Field(
+        default=False,
+        description="DM Eyal the daily orphan-cleanup report. Off by default — the "
+                    "cleanup still runs silently; anything actionable (stuck approvals, "
+                    "overdue work) already surfaces via approval reminders + the morning brief."
+    )
 
     # ==========================================================================
     # v1.0 — Debrief

@@ -263,9 +263,29 @@ class TestOrphanCleanupFullRun:
             assert results["stale_approvals"] == 0
             assert results["orphan_embeddings_deleted"] == 0
             assert results["stale_tasks"] == 0
-            assert results["failed_auto_publishes"] == 0
+            # failed-auto-publish detector was removed (auto-publish is gone)
+            assert "failed_auto_publishes" not in results
             # No notifications sent
             mock_tg.send_to_eyal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_notify_stays_silent_when_flag_off(self):
+        """Even with stale items, the DM is suppressed unless the notify flag is on
+        (default). The cleanup still runs; the report just doesn't ping Eyal."""
+        from config.settings import settings
+        stale = MagicMock(); stale.data = []
+        with patch("schedulers.orphan_cleanup_scheduler.supabase_client") as mock_db, \
+             patch("schedulers.orphan_cleanup_scheduler.comms_spine") as mock_tg, \
+             patch.object(settings, "ORPHAN_CLEANUP_NOTIFY_ENABLED", False):
+            mock_db.get_stale_pending_approvals.return_value = [
+                {"content_type": "meeting", "approval_id": "a1"}]
+            mock_db.get_orphan_embedding_ids.return_value = []
+            mock_db.client.table.return_value.select.return_value \
+                .eq.return_value.is_.return_value.lt.return_value \
+                .execute.return_value = stale
+            from schedulers.orphan_cleanup_scheduler import OrphanCleanupScheduler
+            await OrphanCleanupScheduler()._run_cleanup()
+            mock_tg.send_to_eyal.assert_not_called()  # stale found, but silent
 
     def test_scheduler_start_stop_lifecycle(self):
         """Scheduler should track running state."""

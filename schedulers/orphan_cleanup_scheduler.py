@@ -143,13 +143,16 @@ class OrphanCleanupScheduler:
         results["stale_tasks"] = len(stale_tasks)
         notifications.extend(stale_tasks)
 
-        # 4. Failed auto-publishes
-        failed = self._check_failed_auto_publishes()
-        results["failed_auto_publishes"] = len(failed)
-        notifications.extend(failed)
+        # (The old "failed auto-publish" detector was removed — auto-publish was
+        # structurally deleted in PR #69, so it could only ever fire false
+        # positives on legacy rows. [2026-07-24])
 
-        # Send consolidated notification if anything found
-        if notifications:
+        # Notify only when explicitly enabled. Off by default: this daily report
+        # was pure backlog noise in Eyal's DM — stuck approvals already re-ping via
+        # the approval reminders, and overdue/stale work is in the morning brief.
+        # The cleanup work above (expiring approvals/sessions, deleting orphan
+        # embeddings) still runs every day, silently. [2026-07-24]
+        if notifications and getattr(settings, "ORPHAN_CLEANUP_NOTIFY_ENABLED", False):
             message = self._format_notification(notifications)
             await comms_spine.send_to_eyal(message)
 
