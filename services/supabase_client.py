@@ -3985,6 +3985,49 @@ class SupabaseClient:
         result = query.execute()
         return result.data or []
 
+    # --- Email-thread ingestion [2026-07-25] ---------------------------------
+    def get_email_thread(self, thread_key: str) -> dict | None:
+        """The email_threads row for a Gmail thread (its source meeting_id + the
+        Message-IDs already extracted from), or None if this thread is new."""
+        if not thread_key:
+            return None
+        r = (self.client.table("email_threads").select("*")
+             .eq("thread_key", thread_key).limit(1).execute().data)
+        return r[0] if r else None
+
+    def upsert_email_thread(self, thread_key: str, meeting_id: str | None = None,
+                            subject: str | None = None) -> dict:
+        """Create or update the thread->source mapping. Idempotent on thread_key."""
+        now = datetime.now(timezone.utc).isoformat()
+        existing = self.get_email_thread(thread_key)
+        if existing:
+            upd: dict = {"updated_at": now}
+            if meeting_id:
+                upd["meeting_id"] = meeting_id
+            if subject:
+                upd["subject"] = subject
+            self.client.table("email_threads").update(upd).eq("thread_key", thread_key).execute()
+            return {**existing, **upd}
+        row = {"thread_key": thread_key, "meeting_id": meeting_id,
+               "subject": subject, "processed_message_ids": []}
+        result = self.client.table("email_threads").insert(row).execute()
+        return result.data[0] if result.data else row
+
+    def mark_message_processed(self, thread_key: str, message_id: str) -> None:
+        """Append a Message-ID to the thread's processed set (idempotent) — this
+        is what makes a re-CC / re-delivery of the same message a no-op."""
+        if not (thread_key and message_id):
+            return
+        t = self.get_email_thread(thread_key)
+        if not t:
+            return
+        ids = list(t.get("processed_message_ids") or [])
+        if message_id not in ids:
+            ids.append(message_id)
+            self.client.table("email_threads").update(
+                {"processed_message_ids": ids, "updated_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("thread_key", thread_key).execute()
+
     def get_unapproved_email_scans(
         self,
         scan_type: str | None = None,

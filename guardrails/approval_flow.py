@@ -1117,8 +1117,11 @@ async def process_response(
         else:
             content_type = "meeting_summary"
 
-        # Update approval status in DB (skip for non-meeting content like digests)
-        if content_type == "meeting_summary":
+        # Update approval status in DB (skip for non-meeting content like digests).
+        # email_thread shares this block: it's a real meetings row with children,
+        # so it gets the same promote + topic/decision/semantic indexing — only
+        # the team DISTRIBUTION differs (handled file-only below). [2026-07-25]
+        if content_type in ("meeting_summary", "email_thread"):
             await update_approval_status(meeting_id, ApprovalStatus.APPROVED)
             # Tier 3.1: promote child rows (tasks/decisions/open_questions/
             # follow_up_meetings) from 'pending' to 'approved' so default
@@ -1320,6 +1323,25 @@ async def process_response(
                 "edits": None,
                 "next_step": "Weekly review distributed",
                 "distribution": distribution_result,
+            }
+
+        elif content_type == "email_thread":
+            # FILE-ONLY. Children were promoted to 'approved' above and reach the
+            # Tasks / Meetings / Decisions tabs on the next reconcile (<=30 min).
+            # We deliberately do NOT distribute a team summary — an email thread
+            # is an input source, not a meeting to broadcast. This return skips
+            # the meeting_summary fall-through (distribute_approved_content).
+            # [2026-07-25 email ingestion]
+            supabase_client.log_action(
+                action="email_thread_filed",
+                details={"meeting_id": meeting_id},
+                triggered_by="eyal",
+            )
+            return {
+                "action": "approved",
+                "edits": None,
+                "next_step": "Filed from email — tasks/decisions/meetings will appear on the sheet shortly. No team summary sent.",
+                "distribution": {"filed_only": True},
             }
 
         # Default: meeting_summary — ALWAYS read from pending_approvals.

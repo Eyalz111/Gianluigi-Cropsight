@@ -347,6 +347,13 @@ class Settings(BaseSettings):
                     "auto-answer can bounce back and self-loop (guarded, but this lets "
                     "you kill the whole channel without a deploy)."
     )
+    EMAIL_INGEST_ENABLED: bool = Field(
+        default=False,
+        description="Email-as-input-stream: a thread CC'd/BCC'd to Gianluigi is "
+                    "extracted (tasks/decisions/questions/follow-ups) and filed via the "
+                    "same approval pipeline as a transcript. Dark by default until "
+                    "verified; when on, it replaces the loop-prone Q&A auto-answer."
+    )
 
     # ==========================================================================
     # v1.0 — Debrief

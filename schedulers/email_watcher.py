@@ -196,7 +196,12 @@ class EmailWatcher:
                 # Check if it has attachments
                 elif attachments:
                     await self._handle_attachments(msg_id, msg, member_name)
-                # Otherwise treat as a question
+                # Otherwise: ingest the thread as an input source (the new model),
+                # or fall back to the legacy Q&A auto-answer while ingestion is
+                # dark. Phase 4 retires the Q&A branch entirely. [2026-07-25]
+                elif getattr(settings, "EMAIL_INGEST_ENABLED", False):
+                    from processors.email_ingest import ingest_email_thread
+                    await ingest_email_thread(msg)
                 else:
                     await self._handle_question(
                         msg_id, subject, body, sender_email, member_name,
