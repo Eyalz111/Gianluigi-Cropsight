@@ -888,6 +888,23 @@ class QAScheduler:
                     break
 
                 report = run_qa_check()
+
+                # Meeting-chain sweep (async, so it runs here rather than inside
+                # the sync run_qa_check): verify recently-approved meetings'
+                # DB<->Sheet consistency and fold any issues into the report so
+                # they ride the same only-DM-on-new dedup. [2026-07-24]
+                from config.settings import settings as _s
+                if getattr(_s, "MEETING_QA_ENABLED", False):
+                    try:
+                        from processors.meeting_qa import verify_recent_meetings
+                        mqa = await verify_recent_meetings(hours=48)
+                        report.setdefault("checks", {})["meeting_chain"] = {
+                            "checked": mqa["checked"], "failing": len(mqa["failing"])}
+                        report.setdefault("issues", []).extend(
+                            f"meeting-chain — {ln}" for ln in mqa["issue_lines"][:15])
+                    except Exception as _me:
+                        logger.warning(f"meeting-chain sweep failed (non-fatal): {_me}")
+
                 self._last_report = report
                 formatted = format_qa_report(report)
 

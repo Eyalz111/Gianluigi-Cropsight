@@ -2694,6 +2694,30 @@ async def distribute_approved_content(
     )
 
     logger.info(f"Distribution complete for {meeting_id}: {results}")
+
+    # 11. Post-distribution QA: verify the just-distributed meeting's children
+    # actually reached the Sheet consistently (present, no duplicates, no title
+    # drift). Catches an edit that didn't propagate on the spot rather than days
+    # later. Non-fatal — never let a QA read failure look like a distribution
+    # failure. [2026-07-24]
+    if getattr(settings, "MEETING_QA_ENABLED", False):
+        try:
+            from processors.meeting_qa import verify_meeting_chain
+            qa = await verify_meeting_chain(meeting_id)
+            results["qa_ok"] = qa["ok"]
+            if not qa["ok"]:
+                results["qa_issues"] = qa["issues"]
+                logger.warning(f"[meeting-qa] {meeting_id} distributed with issues: {qa['issues']}")
+                try:
+                    from services.orchestrator.spine import comms_spine
+                    lines = [f"⚠️ <b>Distribution check</b> — “{qa['title'][:50]}” landed with {len(qa['issues'])} issue(s):"]
+                    lines += [f"  • {i}" for i in qa["issues"][:6]]
+                    await comms_spine.send_to_eyal("\n".join(lines), parse_mode="HTML")
+                except Exception as _ne:
+                    logger.warning(f"[meeting-qa] alert send failed: {_ne}")
+        except Exception as qe:
+            logger.warning(f"[meeting-qa] post-distribution verify skipped: {qe}")
+
     return results
 
 

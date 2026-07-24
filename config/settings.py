@@ -335,6 +335,11 @@ class Settings(BaseSettings):
                     "cleanup still runs silently; anything actionable (stuck approvals, "
                     "overdue work) already surfaces via approval reminders + the morning brief."
     )
+    MEETING_QA_ENABLED: bool = Field(
+        default=True,
+        description="Verify the DB<->Sheet<->distribution chain after every meeting "
+                    "distribution and in the daily QA sweep; alert Eyal on inconsistency."
+    )
 
     # ==========================================================================
     # v1.0 — Debrief
