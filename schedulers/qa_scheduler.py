@@ -866,6 +866,10 @@ class QAScheduler:
     def __init__(self):
         self._running = False
         self._last_report: dict | None = None
+        # Signature of the issue set we last DM'd, so we don't re-ping Eyal every
+        # single day with the SAME issues. Reset when issues clear, so a genuine
+        # re-occurrence is news again. In-memory: a restart may re-send once. [2026-07-24]
+        self._last_sent_sig: tuple | None = None
 
     @property
     def last_report(self) -> dict | None:
@@ -887,14 +891,24 @@ class QAScheduler:
                 self._last_report = report
                 formatted = format_qa_report(report)
 
-                # Only send standalone Telegram message if there are issues
-                if report.get("issues"):
-                    try:
-                        from services.orchestrator.spine import comms_spine
-                        await comms_spine.send_to_eyal(formatted)
-                        logger.info("QA report sent to Eyal (issues found)")
-                    except Exception as e:
-                        logger.error(f"Failed to send QA report: {e}")
+                # DM Eyal ONLY when the issue set is new or changed since the last
+                # report — the same recurring issues every morning were pure noise.
+                # A cleared-then-reappearing issue re-sends (sig resets on 0 issues).
+                issues = report.get("issues") or []
+                if issues:
+                    sig = tuple(sorted(str(i) for i in issues))
+                    if sig != self._last_sent_sig:
+                        try:
+                            from services.orchestrator.spine import comms_spine
+                            await comms_spine.send_to_eyal(formatted)
+                            self._last_sent_sig = sig
+                            logger.info("QA report sent to Eyal (new/changed issues)")
+                        except Exception as e:
+                            logger.error(f"Failed to send QA report: {e}")
+                    else:
+                        logger.info("QA issues unchanged since last report — DM suppressed")
+                else:
+                    self._last_sent_sig = None  # clean slate — next issue is news
 
                 # Log the report
                 supabase_client.log_action(
