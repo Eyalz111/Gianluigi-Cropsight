@@ -335,3 +335,77 @@ class TestTerminalArchive:
         assert res.get("archived", 0) == 0
         assert len(calls["snapshot"]) == 1
         assert calls["archive"] == []
+
+
+class TestAddMeetingsIdempotency:
+    """add_meetings_batch_to_sheet must be idempotent by col-J UUID — a second
+    write for the same follow-up (re-distribution, or the reconcile re-add racing
+    the distribution write) must NOT append a duplicate row. This is the
+    2026-07-24 weekly-meeting bug: 10 rows for 7 follow-ups."""
+
+    async def test_skips_follow_ups_already_on_the_tab(self, monkeypatch):
+        import services.google_sheets as gs
+        svc = MagicMock()
+        vals = svc.spreadsheets.return_value.values.return_value
+        vals.get.return_value.execute.return_value = {"values": [["m1"]]}  # m1 present
+        captured = {}
+
+        def _append(**kw):
+            captured["rows"] = kw["body"]["values"]
+            r = MagicMock(); r.execute.return_value = {}
+            return r
+        vals.append.side_effect = _append
+
+        monkeypatch.setattr(gs.sheets_service, "_service", svc)
+        monkeypatch.setattr(gs.sheets_service, "ensure_meetings_tab", AsyncMock(return_value=0))
+        monkeypatch.setattr(gs.settings, "TASK_TRACKER_SHEET_ID", "sheet123")
+
+        ok = await gs.sheets_service.add_meetings_batch_to_sheet(
+            meetings=[{"id": "m1", "title": "Already there"},
+                      {"id": "m2", "title": "New one"}])
+        assert ok is True
+        assert len(captured["rows"]) == 1, "only the not-yet-present follow-up is appended"
+        assert captured["rows"][0][gs.MEETING_COL_INDEX["id"]] == "m2"
+
+    async def test_all_present_is_a_noop(self, monkeypatch):
+        import services.google_sheets as gs
+        svc = MagicMock()
+        vals = svc.spreadsheets.return_value.values.return_value
+        vals.get.return_value.execute.return_value = {"values": [["m1"], ["m2"]]}
+        vals.append.side_effect = AssertionError("append must not be called when all present")
+        monkeypatch.setattr(gs.sheets_service, "_service", svc)
+        monkeypatch.setattr(gs.sheets_service, "ensure_meetings_tab", AsyncMock(return_value=0))
+        monkeypatch.setattr(gs.settings, "TASK_TRACKER_SHEET_ID", "sheet123")
+        ok = await gs.sheets_service.add_meetings_batch_to_sheet(
+            meetings=[{"id": "m1", "title": "A"}, {"id": "m2", "title": "B"}])
+        assert ok is True  # nothing to add, but not a failure
+
+
+class TestFollowUpRenameThroughEdit:
+    """When Eyal renames a follow-up in the summary edit, it must update the DB
+    row IN PLACE (keep the UUID) — not create a new row + orphan the old one."""
+
+    def test_rename_with_index_updates_in_place(self):
+        from guardrails.edit_reconcile import reconcile_children
+        old = [{"id": "X", "title": "To Seed VC", "led_by": "Eyal"}]
+        edited = [{"index": 1, "title": "2SID VC", "led_by": "Eyal"}]
+        plan = reconcile_children(
+            old, edited, text_of=lambda f: f.get("title", ""),
+            secondary_of=lambda f: f.get("led_by", ""))
+        assert plan["updates"] == [("X", edited[0])]
+        assert plan["creates"] == [] and plan["deletes"] == []
+
+    def test_rename_without_index_loses_identity_known_limitation(self):
+        # KNOWN LIMITATION pinned as a test: if the edit LLM DROPS the index on a
+        # renamed follow-up whose content words changed ("To Seed"->"2SID"), the
+        # record-linkage can't tie it back — the old row is deleted and a new one
+        # created (new UUID). The apply_edits prompt instructs the LLM to keep the
+        # index precisely to avoid this; this documents the fallback.
+        from guardrails.edit_reconcile import reconcile_children
+        old = [{"id": "X", "title": "To Seed VC", "led_by": "Eyal"}]
+        edited = [{"title": "2SID VC", "led_by": "Eyal"}]  # no index
+        plan = reconcile_children(
+            old, edited, text_of=lambda f: f.get("title", ""),
+            secondary_of=lambda f: f.get("led_by", ""))
+        assert plan["deletes"] == ["X"]
+        assert [i["title"] for i in plan["creates"]] == ["2SID VC"]

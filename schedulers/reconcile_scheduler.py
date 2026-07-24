@@ -230,6 +230,12 @@ class ReconcileScheduler:
                 if name == "prenightly" and getattr(settings, "WORKSPACE_SORT_ENABLED", False):
                     try:
                         from services.google_sheets import sheets_service
+                        # Duplicates-only self-heal (safe unattended: never drops a
+                        # UUID entirely) before the reorder, so any stray
+                        # blind-append dup is gone by morning. [2026-07-24]
+                        dd = await sheets_service.dedupe_meetings_tab(remove_orphans=False)
+                        if dd.get("duplicates_removed"):
+                            logger.info(f"Nightly Meetings dedupe: removed {dd['duplicates_removed']} dup row(s)")
                         nt = await sheets_service.sort_tasks_tab()
                         nm = await sheets_service.sort_meetings_tab()
                         logger.info(f"Daily reorder: {nt} tasks, {nm} meetings")

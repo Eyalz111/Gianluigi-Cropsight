@@ -2541,6 +2541,70 @@ class GoogleSheetsService:
             m.get("id") or "",
         ]
 
+    async def dedupe_meetings_tab(self, remove_orphans: bool = True) -> dict:
+        """Remove duplicate-UUID rows from the Meetings tab (and, when
+        remove_orphans, rows whose UUID no longer exists in the DB — ghosts left
+        by a delete/rename).
+
+        Keeps, for each UUID, the row whose title matches the DB (else the first).
+        One-time cleanup for the blind-append duplicates + an ongoing self-heal.
+        ABORTS if the DB follow-up read comes back empty, so a transient Supabase
+        failure can never be read as 'every row is an orphan' and wipe the tab.
+        The automated nightly pass calls this with remove_orphans=False — removing
+        duplicates only never drops a UUID entirely, so it is safe to run unattended;
+        orphan removal is reserved for the on-demand cleanup.
+        Returns {'duplicates_removed', 'orphans_removed', 'details'}.
+        """
+        if not settings.TASK_TRACKER_SHEET_ID:
+            return {"duplicates_removed": 0, "orphans_removed": 0, "details": []}
+        rows = await self.get_all_meetings()
+        from services.supabase_client import supabase_client
+        db_rows = supabase_client.list_follow_up_meetings(limit=2000, include_pending=True) or []
+        if not db_rows:
+            logger.warning("[meetings-dedupe] DB returned no follow-ups — aborting (guard)")
+            return {"duplicates_removed": 0, "orphans_removed": 0, "details": [], "aborted": True}
+        db_title = {r["id"]: (r.get("title") or "") for r in db_rows if r.get("id")}
+
+        by_id: dict[str, list] = {}
+        for r in rows:
+            uid = (r.get("id") or "").strip()
+            if uid:
+                by_id.setdefault(uid, []).append(r)
+
+        to_delete: list[int] = []          # row_numbers
+        details: list[dict] = []
+        dups = orphans = 0
+        for uid, group in by_id.items():
+            if uid not in db_title:
+                # orphan(s): UUID has no DB row anymore — remove every copy
+                if remove_orphans:
+                    for g in group:
+                        to_delete.append(g["row_number"]); orphans += 1
+                        details.append({"kind": "orphan", "id": uid[:8], "title": (g.get("title") or "")[:40]})
+                continue
+            if len(group) < 2:
+                continue
+            want = db_title[uid].strip()
+            keep = next((g for g in group if (g.get("title") or "").strip() == want), group[0])
+            for g in group:
+                if g is not keep:
+                    to_delete.append(g["row_number"]); dups += 1
+                    details.append({"kind": "dup", "id": uid[:8], "title": (g.get("title") or "")[:40]})
+
+        if not to_delete:
+            return {"duplicates_removed": 0, "orphans_removed": 0, "details": []}
+        sid = self._get_sheet_id_by_name(settings.TASK_TRACKER_SHEET_ID, MEETING_TAB_NAME)
+        # Delete bottom-up (highest row first) so earlier row numbers stay valid.
+        reqs = [{"deleteDimension": {"range": {"sheetId": sid, "dimension": "ROWS",
+                 "startIndex": rn - 1, "endIndex": rn}}}
+                for rn in sorted(set(to_delete), reverse=True)]
+        self._execute_with_retry(
+            lambda: self.service.spreadsheets().batchUpdate(
+                spreadsheetId=settings.TASK_TRACKER_SHEET_ID, body={"requests": reqs})
+        )
+        logger.info(f"Deduped {MEETING_TAB_NAME}: removed {dups} duplicate + {orphans} orphan row(s)")
+        return {"duplicates_removed": dups, "orphans_removed": orphans, "details": details}
+
     async def get_all_meetings(self) -> list[dict]:
         """Read the Meetings tab, one dict per row with row_number + id."""
         if not settings.TASK_TRACKER_SHEET_ID:
@@ -2589,7 +2653,32 @@ class GoogleSheetsService:
             return False
         try:
             await self.ensure_meetings_tab()
-            values = [self._meeting_row(m, source_meeting) for m in meetings]
+            # IDEMPOTENCY by col-J UUID: skip follow-ups already on the tab. This
+            # is a plain `append`, so without the guard a SECOND write for the same
+            # meeting (a re-distribution, or the reconcile re-add racing this write)
+            # blind-appended duplicate rows — 10 rows for 7 follow-ups on the
+            # 2026-07-24 weekly. archive_meeting_rows already dedupes the same way.
+            # [2026-07-24]
+            existing: set[str] = set()
+            try:
+                id_col = MEETING_COLUMNS["id"]
+                resp = self._execute_with_retry(
+                    lambda: self.service.spreadsheets().values().get(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=f"'{MEETING_TAB_NAME}'!{id_col}2:{id_col}",
+                    )
+                )
+                existing = {(r[0] or "").strip() for r in (resp.get("values", []) or [])
+                            if r and (r[0] or "").strip()}
+            except Exception as e:
+                logger.warning(f"[meetings] could not read existing ids (appending all): {e}")
+            fresh = [m for m in meetings if (m.get("id") or "").strip() not in existing]
+            skipped = len(meetings) - len(fresh)
+            if skipped:
+                logger.info(f"{MEETING_TAB_NAME}: skipped {skipped} follow-up(s) already present")
+            if not fresh:
+                return True
+            values = [self._meeting_row(m, source_meeting) for m in fresh]
             end_col = max(MEETING_COLUMNS.values())
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().append(
