@@ -131,6 +131,54 @@ class TestDebriefPendingPreps:
 
 
 # =============================================================================
+# Test expire_past_prep_approvals — the meeting-time sweep (supabase method)
+# =============================================================================
+
+class TestExpirePastPrepApprovals:
+
+    def _mock_client(self, monkeypatch, rows):
+        from services.supabase_client import supabase_client as sc
+        table = MagicMock()
+        # SELECT chain -> the pending prep rows
+        (table.select.return_value.eq.return_value
+              .in_.return_value.execute.return_value.data) = rows
+        # UPDATE chain -> echo a row back so it counts as expired
+        (table.update.return_value.eq.return_value
+              .eq.return_value.execute.return_value.data) = [{"ok": True}]
+        client = MagicMock()
+        client.table.return_value = table
+        monkeypatch.setattr(sc, "_client", client)
+        return sc, table
+
+    def test_past_meeting_prep_is_expired(self, monkeypatch):
+        past = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        sc, table = self._mock_client(monkeypatch, [
+            {"approval_id": "prep-past", "content": {"start_time": past}},
+        ])
+        expired = sc.expire_past_prep_approvals()
+        assert len(expired) == 1
+        table.update.assert_called_once()   # the past card was updated to expired
+
+    def test_future_meeting_prep_is_kept(self, monkeypatch):
+        future = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
+        sc, table = self._mock_client(monkeypatch, [
+            {"approval_id": "prep-future", "content": {"start_time": future}},
+        ])
+        expired = sc.expire_past_prep_approvals()
+        assert expired == []
+        table.update.assert_not_called()    # a still-useful prep is never swept
+
+    def test_unparseable_start_is_kept(self, monkeypatch):
+        sc, table = self._mock_client(monkeypatch, [
+            {"approval_id": "prep-bad", "content": {"start_time": "not-a-date"}},
+            {"approval_id": "prep-none", "content": {}},
+        ])
+        expired = sc.expire_past_prep_approvals()
+        assert expired == []                 # no meeting time -> never wrongly expire
+        table.update.assert_not_called()
+
+
+# =============================================================================
 # Test expire_stale_approvals with prep_outline
 # =============================================================================
 
@@ -199,6 +247,33 @@ class TestExpirePrepOutline:
             assert len(result) == 1
             # Should NOT have tried to auto-generate
             mock_db.update_pending_approval.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_past_meeting_prep_card_is_swept(self):
+        """A meeting_prep card whose meeting has passed (no expires_at) must be
+        expired by the prep sweep and flow through the same cancel/notify loop.
+        [2026-07-25 audit — the 5 stale prep cards for already-held meetings]"""
+        with patch("guardrails.approval_flow.supabase_client") as mock_db, \
+             patch("guardrails.approval_flow.comms_spine") as mock_tg, \
+             patch("guardrails.approval_flow.settings") as mock_settings, \
+             patch("guardrails.approval_flow.cancel_approval_reminders") as mock_cancel:
+
+            mock_db.expire_pending_approvals.return_value = []
+            mock_db.expire_past_prep_approvals.return_value = [{
+                "approval_id": "prep-evt-past",
+                "content_type": "meeting_prep",
+                "content": {"title": "Held Meeting"},
+            }]
+            mock_db.get_pending_prep_outlines.return_value = []
+            mock_tg.send_to_eyal = AsyncMock(return_value=True)
+            mock_settings.MEETING_PREP_FOCUS_TIMEOUT_MINUTES = 30
+
+            from guardrails.approval_flow import expire_stale_approvals
+
+            result = await expire_stale_approvals()
+
+            assert any(r["approval_id"] == "prep-evt-past" for r in result)
+            mock_cancel.assert_any_call("prep-evt-past")   # reminders cancelled
 
     @pytest.mark.asyncio
     async def test_stale_focus_active_cleared(self):

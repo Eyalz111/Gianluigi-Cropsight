@@ -107,10 +107,20 @@ class TestRunGeneration:
 
     @pytest.mark.asyncio
     async def test_handles_generation_error(self, scheduler):
+        # The error path writes an 'error' heartbeat via the REAL supabase_client
+        # (conftest deliberately does not block Supabase) and calls check_and_alert.
+        # Without these patches this unit test injected a phantom
+        # intelligence_signal status=error / "Pipeline crashed" heartbeat into the
+        # PRODUCTION scheduler_heartbeats table on every suite run — the exact
+        # test->prod leak class conftest guards against. [2026-07-25 audit]
         with patch(
             "processors.intelligence_signal_agent.generate_intelligence_signal",
             new_callable=AsyncMock,
-        ) as mock_gen:
+        ) as mock_gen, patch(
+            "services.supabase_client.supabase_client"
+        ), patch(
+            "core.health_monitor.check_and_alert", new_callable=AsyncMock
+        ):
             mock_gen.side_effect = Exception("Pipeline crashed")
 
             # Should not raise

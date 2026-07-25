@@ -689,6 +689,44 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     # re-query for every task that carries a Category edit/create.
     _areas_cache = supabase_client.get_areas()
 
+    # Assignee shorthand ("Nechama") and its canonical form ("Nechama Tik") name
+    # the SAME owner, but comparing raw strings made the reconcile see a phantom
+    # divergence every cycle: sheet "Nechama" != db "Nechama Tik" tripped the
+    # manual-override rail, so Nechama's tasks were reported held on every 30-min
+    # tick forever. Canonicalize both sides before comparing so equivalent
+    # spellings are equal. The roster is loaded LAZILY and only when two raw
+    # values actually differ — so the common case (sheet==db) never queries, and
+    # the whole 145-task pass costs at most one roster read. [2026-07-25 audit]
+    _roster_box: dict = {"loaded": False, "roster": None}
+    _assignee_canon: dict[str, str] = {}
+
+    def _canon_assignee(v) -> str:
+        key = v.strip() if isinstance(v, str) else (str(v).strip() if v else "")
+        if key not in _assignee_canon:
+            if not _roster_box["loaded"]:
+                try:
+                    _roster_box["roster"] = supabase_client.list_team_members()
+                except Exception as _re:
+                    logger.warning(f"[reconcile] roster load failed (assignee compare falls back to raw): {_re}")
+                    _roster_box["roster"] = None
+                _roster_box["loaded"] = True
+            try:
+                _assignee_canon[key] = supabase_client.resolve_assignee(key, roster=_roster_box["roster"])
+            except Exception:
+                _assignee_canon[key] = key
+        return _assignee_canon[key]
+
+    def _field_eq(field: str, a, b) -> bool:
+        """Field-aware equality. Fast path: a plain normalized compare. Only when
+        the assignee field's two raw values DIFFER do we canonicalize both and
+        re-compare, so a recognised shorthand ("Nechama") equals its full name
+        ("Nechama Tik") without a phantom divergence."""
+        if _normalize(a) == _normalize(b):
+            return True
+        if field == "assignee":
+            return _normalize(_canon_assignee(a)) == _normalize(_canon_assignee(b))
+        return False
+
     # GUARD [2026-07-10 incident]: a transient Google Sheets read can return an
     # EMPTY sheet WITHOUT raising. Reconcile would then see every DB task as
     # "missing" and re-add them all — DUPLICATING the whole sheet (the 293-row /
@@ -783,13 +821,13 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 deadline_unparseable = True
                 final[field] = db_val
                 continue
-            if _normalize(sheet_val) != _normalize(snap_val):
+            if not _field_eq(field, sheet_val, snap_val):
                 upd[field] = sheet_val or None          # Eyal edited (Rule 1)
                 manual_marks.append((sid, field))
                 summary["pulled"] += 1
                 final[field] = sheet_val
                 _record_override(field, sheet_val)
-            elif _normalize(db_val) != _normalize(sheet_val):
+            elif not _field_eq(field, db_val, sheet_val):
                 if dt.get(f"manual_{field}"):
                     # Rule 2 rail: never clobber a manually-set field. Until
                     # 2026-07-22 the manual_* flags were write-only (one reader in

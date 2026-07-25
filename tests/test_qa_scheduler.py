@@ -16,6 +16,8 @@ import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch, AsyncMock
 
+from config.settings import settings
+
 
 # =========================================================================
 # run_qa_check: basic structure
@@ -92,6 +94,28 @@ class TestExtractionQuality:
         eq = report["checks"]["extraction_quality"]
         assert eq["empty_extractions"] == 0
 
+    @patch("schedulers.qa_scheduler.supabase_client")
+    def test_rejected_meeting_not_flagged_as_empty(self, mock_sc):
+        # A rejected meeting is a tombstone: reject cascade-deletes its children,
+        # so 0 tasks/decisions is CORRECT, not an empty-extraction fault. It must
+        # be excluded (else every reject fires a daily false alarm). [2026-07-25]
+        mock_sc.list_meetings.return_value = [
+            {"id": "m1", "title": "Rejected Meeting", "date": "2026-04-01",
+             "approval_status": "rejected"},
+        ]
+        mock_sc.list_decisions.return_value = []
+        mock_sc.get_tasks.return_value = []
+        mock_sc.get_pending_approvals_by_status.return_value = []
+        mock_sc.get_scheduler_heartbeats.return_value = []
+
+        from schedulers.qa_scheduler import run_qa_check
+
+        report = run_qa_check()
+        eq = report["checks"]["extraction_quality"]
+        assert eq["empty_extractions"] == 0
+        assert eq["meetings_checked"] == 0        # rejected tombstone filtered out
+        assert not any("Empty extraction" in i for i in report["issues"])
+
 
 # =========================================================================
 # Scheduler health
@@ -101,20 +125,23 @@ class TestSchedulerHealth:
 
     @patch("schedulers.qa_scheduler.supabase_client")
     def test_stale_heartbeat_flagged(self, mock_sc):
+        # orphan_cleanup is always-expected (not flag-gated) with a 24h interval,
+        # so a 72h-old heartbeat exceeds 2x and is stale. Reads last_run_at — the
+        # column the heartbeat upsert actually writes. [2026-07-25 audit fault #2]
         old = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
         mock_sc.list_meetings.return_value = []
         mock_sc.get_pending_approvals_by_status.return_value = []
         mock_sc.get_tasks.return_value = []
         mock_sc.get_scheduler_heartbeats.return_value = [
-            {"scheduler_name": "email_watcher", "last_heartbeat": old},
+            {"scheduler_name": "orphan_cleanup", "last_run_at": old},
         ]
 
         from schedulers.qa_scheduler import run_qa_check
 
         report = run_qa_check()
         sh = report["checks"]["scheduler_health"]
-        assert "email_watcher" in sh["stale"]
-        assert any("email_watcher" in i for i in report["issues"])
+        assert "orphan_cleanup" in sh["stale"]
+        assert any("orphan_cleanup" in i for i in report["issues"])
 
     @patch("schedulers.qa_scheduler.supabase_client")
     def test_fresh_heartbeat_ok(self, mock_sc):
@@ -123,7 +150,7 @@ class TestSchedulerHealth:
         mock_sc.get_pending_approvals_by_status.return_value = []
         mock_sc.get_tasks.return_value = []
         mock_sc.get_scheduler_heartbeats.return_value = [
-            {"scheduler_name": "email_watcher", "last_heartbeat": fresh},
+            {"scheduler_name": "orphan_cleanup", "last_run_at": fresh},
         ]
 
         from schedulers.qa_scheduler import run_qa_check
@@ -138,7 +165,7 @@ class TestSchedulerHealth:
         mock_sc.get_pending_approvals_by_status.return_value = []
         mock_sc.get_tasks.return_value = []
         mock_sc.get_scheduler_heartbeats.return_value = [
-            {"scheduler_name": "ghost_scheduler", "last_heartbeat": None},
+            {"scheduler_name": "ghost_scheduler", "last_run_at": None},
         ]
 
         from schedulers.qa_scheduler import run_qa_check
@@ -146,6 +173,50 @@ class TestSchedulerHealth:
         report = run_qa_check()
         sh = report["checks"]["scheduler_health"]
         assert "ghost_scheduler" in sh["missing"]
+
+    @patch("schedulers.qa_scheduler.supabase_client")
+    def test_disabled_scheduler_skipped(self, mock_sc):
+        # A scheduler whose enable-flag is OFF is intentionally not running: a
+        # long-old heartbeat must be SKIPPED, not reported stale/missing — else the
+        # QA score sticks at 'critical' forever and buries real issues. This is the
+        # core of the fault-#2 fix. [2026-07-25 audit]
+        old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+        mock_sc.list_meetings.return_value = []
+        mock_sc.get_pending_approvals_by_status.return_value = []
+        mock_sc.get_tasks.return_value = []
+        mock_sc.get_scheduler_heartbeats.return_value = [
+            {"scheduler_name": "alert_scheduler", "last_run_at": old},
+        ]
+
+        from schedulers.qa_scheduler import run_qa_check
+
+        with patch.object(settings, "ALERT_SCHEDULER_ENABLED", False):
+            report = run_qa_check()
+        sh = report["checks"]["scheduler_health"]
+        assert "alert_scheduler" in sh["skipped_disabled"]
+        assert "alert_scheduler" not in sh["stale"]
+        assert "alert_scheduler" not in sh["missing"]
+
+    @patch("schedulers.qa_scheduler.supabase_client")
+    def test_weekly_scheduler_not_falsely_stale(self, mock_sc):
+        # A weekly scheduler that last ran 6 days ago is within 2x its 7-day
+        # expected interval — the old flat 48h threshold false-flagged it. Delegates
+        # to health_monitor's per-scheduler interval map. [2026-07-25 audit]
+        six_days = (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()
+        mock_sc.list_meetings.return_value = []
+        mock_sc.get_pending_approvals_by_status.return_value = []
+        mock_sc.get_tasks.return_value = []
+        mock_sc.get_scheduler_heartbeats.return_value = [
+            {"scheduler_name": "knowledge_weekly", "last_run_at": six_days},
+        ]
+
+        from schedulers.qa_scheduler import run_qa_check
+
+        with patch.object(settings, "KNOWLEDGE_WEEKLY_ENABLED", True):
+            report = run_qa_check()
+        sh = report["checks"]["scheduler_health"]
+        assert sh["stale"] == []
+        assert "knowledge_weekly" not in sh["missing"]
 
 
 # =========================================================================
@@ -278,7 +349,7 @@ class TestScoreCalculation:
         mock_sc.get_tasks.return_value = []
         mock_sc.get_pending_approvals_by_status.return_value = []
         mock_sc.get_scheduler_heartbeats.return_value = [
-            {"scheduler_name": "s1", "last_heartbeat": old},
+            {"scheduler_name": "s1", "last_run_at": old},
         ]
         mock_sc.get_meeting.return_value = {"id": "m1"}
         mock_sc.client.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(data=[])

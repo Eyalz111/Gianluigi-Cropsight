@@ -3017,6 +3017,73 @@ class SupabaseClient:
             logger.error(f"Error expiring pending approvals: {e}")
             return []
 
+    def expire_past_prep_approvals(self, grace_hours: int = 6) -> list[dict]:
+        """Expire pending meeting-prep approvals whose meeting time has passed.
+
+        Prep cards are created with NO expires_at — a prep is only useful before
+        its meeting — so expire_pending_approvals (which requires expires_at) never
+        touches them and they pile up in the queue forever (the 5 stale prep cards
+        for already-held meetings the 2026-07-25 audit found). Once the meeting
+        started (+ a grace window), the card is no longer actionable, so expire it.
+        The meeting time lives in the content JSONB as start_time / event_start_time.
+        A row with no parseable meeting time is LEFT pending (never wrongly expired).
+        [2026-07-25 audit]
+        """
+        try:
+            rows = (
+                self.client.table("pending_approvals")
+                .select("*")
+                .eq("status", "pending")
+                .in_("content_type", ["meeting_prep", "prep_outline", "prep_ping"])
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.error(f"Error reading prep approvals for expiry: {e}")
+            return []
+
+        now = datetime.now(timezone.utc)
+        grace = timedelta(hours=grace_hours)
+        stale_ids = []
+        for r in rows:
+            content = r.get("content") or {}
+            if not isinstance(content, dict):
+                continue
+            start_raw = (
+                content.get("start_time")
+                or content.get("event_start_time")
+                or ""
+            )
+            if not start_raw:
+                continue
+            try:
+                start_dt = datetime.fromisoformat(str(start_raw).replace("Z", "+00:00"))
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue  # unparseable -> leave pending, never wrongly expire
+            if start_dt + grace < now:
+                stale_ids.append(r["approval_id"])
+
+        expired = []
+        for aid in stale_ids:
+            try:
+                res = (
+                    self.client.table("pending_approvals")
+                    .update({"status": "expired"})
+                    .eq("approval_id", aid)
+                    .eq("status", "pending")
+                    .execute()
+                )
+                if res.data:
+                    expired.extend(res.data)
+            except Exception as e:
+                logger.warning(f"Prep-approval expiry failed for {aid}: {e}")
+        if expired:
+            logger.info(f"Expired {len(expired)} past-meeting prep approval(s)")
+        return expired
+
     def get_pending_approval_summary(self) -> list[dict]:
         """
         Get a summary of all pending approvals for /status display.

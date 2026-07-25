@@ -29,6 +29,7 @@ except Exception as e:  # pragma: no cover
 
 
 _AREAS = [{"name": "PRODUCT & TECHNOLOGY"}, {"name": "SALES & BUSINESS DEVELOPMENT"}]
+_ROSTER = [{"name": "Eyal Zror"}, {"name": "Roye Tadmor"}, {"name": "Nechama Tik"}]
 
 
 def _sheet_row(**kw):
@@ -54,6 +55,9 @@ def _setup(monkeypatch, sheet, db, snap):
     monkeypatch.setattr(sc, "get_tasks", lambda **k: db)
     monkeypatch.setattr(sc, "get_sheet_snapshots", lambda *a, **k: snap)
     monkeypatch.setattr(sc, "get_areas", lambda *a, **k: _AREAS)
+    # Roster for the lazy assignee-canonicalization compare (keeps the test
+    # hermetic — reconcile only loads this when two raw assignee values differ).
+    monkeypatch.setattr(sc, "list_team_members", lambda *a, **k: _ROSTER)
     monkeypatch.setattr(sc, "update_task", lambda tid, **u: calls["update"].append((tid, u)) or {"id": tid})
     monkeypatch.setattr(sc, "mark_task_field_manual",
                         lambda tid, f, src: calls["manual"].append((tid, f, src)) or True)
@@ -140,6 +144,27 @@ class TestManualRailTasks:
         assert res["manual_held"] == 1
         assert [["Product V1"]] not in _pushed_values(fake)
         assert calls["snapshot"][0][7] == "Moldova Pilot"   # label slot
+
+    async def test_assignee_shorthand_does_not_churn(self, monkeypatch):
+        # The Nechama churn: the sheet shows the shorthand "Nechama" while the DB
+        # holds the canonical "Nechama Tik" (update_task canonicalizes). They are
+        # the SAME owner, so this must be a NO-OP — not pulled, not pushed, and NOT
+        # held as a manual override every 30-min tick. [2026-07-25 audit]
+        sheet = [_sheet_row(id="t1", task="A", assignee="Nechama")]
+        db = [{"id": "t1", "title": "A", "status": "pending", "deadline": None,
+               "priority": "M", "assignee": "Nechama Tik", "manual_assignee": True}]
+        snap = {"t1": {"status": "pending", "deadline": None,
+                       "priority": "M", "assignee": "Nechama"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_tasks(shadow=False)
+
+        assert res["manual_held"] == 0     # no phantom divergence
+        assert res["pulled"] == 0
+        assert res["pushed"] == 0
+        assert calls["update"] == []       # nothing written to the DB
+        # the assignee cell is left as the human's shorthand — never fought
+        assert [["Nechama Tik"]] not in _pushed_values(fake)
 
     async def test_genuine_new_edit_still_pulls_even_when_sticky(self, monkeypatch):
         # The rail guards Rule 4 only. If Eyal edits the cell AGAIN (sheet !=

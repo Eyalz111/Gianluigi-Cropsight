@@ -26,8 +26,41 @@ logger = logging.getLogger(__name__)
 
 # Thresholds for quality checks
 _MIN_ITEMS_PER_MEETING = 1  # At least 1 decision or task expected
-_MAX_HEARTBEAT_AGE_HOURS = 48  # Schedulers should heartbeat within 48h
 _DISTRIBUTION_WINDOW_DAYS = 7  # Check last 7 days of approvals
+
+# Scheduler heartbeat name -> the settings flag that gates it in main.py. A
+# scheduler whose flag is OFF is intentionally not running, so a missing/old
+# heartbeat is expected, not a fault — skip it rather than force a permanent
+# 'critical' QA score. Anything NOT listed is treated as always-expected
+# (unknown-scheduler-safe: a newly-added loop surfaces rather than hides). The
+# XOR/OR-gated pairs (meeting_prep vs prep_ping; reconcile) list only the gated
+# counterpart, since the other side is effectively always-on. [2026-07-25 audit]
+_SCHEDULER_ENABLE_FLAG = {
+    "transcript_watcher": "TRANSCRIPT_WATCHER_ENABLED",
+    "task_reminder": "TASK_REMINDER_ENABLED",
+    "prep_ping": "PREP_PING_ENABLED",
+    "weekly_review": "WEEKLY_REVIEW_ENABLED",
+    "weekly_digest": "WEEKLY_DIGEST_ENABLED",
+    "weekly_pulse": "WEEKLY_PULSE_ENABLED",
+    "cost_report": "COST_REPORT_ENABLED",
+    "rollout": "ROLLOUT_SCHEDULER_ENABLED",
+    "alert_scheduler": "ALERT_SCHEDULER_ENABLED",
+    "email_watcher": "EMAIL_WATCHER_ENABLED",
+    "morning_brief": "MORNING_BRIEF_ENABLED",
+    "debrief_prompt": "DEBRIEF_EVENING_PROMPT_ENABLED",
+    "intelligence_signal": "INTELLIGENCE_SIGNAL_ENABLED",
+    "knowledge_nightly": "KNOWLEDGE_NIGHTLY_ENABLED",
+    "knowledge_weekly": "KNOWLEDGE_WEEKLY_ENABLED",
+}
+
+
+def _scheduler_expected(name: str) -> bool:
+    """True if this scheduler is enabled in the current deployment. Unknown
+    schedulers default to expected so a new loop is never silently ignored."""
+    flag = _SCHEDULER_ENABLE_FLAG.get(name)
+    if not flag:
+        return True
+    return bool(getattr(settings, flag, True))
 
 
 def run_qa_check() -> dict:
@@ -95,6 +128,13 @@ def _check_extraction_quality(issues: list[str]) -> dict:
         # Get meetings from last 14 days
         cutoff = datetime.now(timezone.utc) - timedelta(days=14)
         meetings = supabase_client.list_meetings(date_from=cutoff, limit=20)
+        # Rejected meetings are tombstones — reject cascade-deletes their children,
+        # so they legitimately have 0 tasks/decisions. Counting them produced a
+        # daily false "Empty extraction" alert per rejected meeting (all 5 flagged
+        # on 2026-07-25 were rejected). Genuine reject-orphans are the dedicated
+        # _check_rejected_meetings' job, not this one. [2026-07-25 audit]
+        meetings = [m for m in meetings
+                    if (m.get("approval_status") or "").lower() != "rejected"]
         result["meetings_checked"] = len(meetings)
 
         for meeting in meetings:
@@ -188,38 +228,45 @@ def _check_distribution_completeness(issues: list[str]) -> dict:
 
 
 def _check_scheduler_health(issues: list[str]) -> dict:
-    """Check that all schedulers have recent heartbeats."""
-    result = {"schedulers_checked": 0, "stale": [], "missing": []}
+    """Check that all ENABLED schedulers have recent heartbeats.
+
+    Reads `last_run_at` — the column upsert_scheduler_heartbeat actually writes.
+    The previous code read `last_heartbeat`, a key that never existed, so EVERY
+    scheduler was reported 'missing', the real staleness branch was unreachable
+    dead code, and the QA score was forced to 'critical' on every run — burying
+    the genuine issues. Staleness now delegates to core.health_monitor's
+    per-scheduler expected-interval map (the single source of truth); a flat 48h
+    threshold false-flagged the legitimately-weekly schedulers. Intentionally
+    disabled schedulers are skipped so they don't alarm forever. [2026-07-25 audit]
+    """
+    from core.health_monitor import _heartbeat_stale
+
+    result = {"schedulers_checked": 0, "stale": [], "missing": [], "skipped_disabled": []}
 
     try:
         heartbeats = supabase_client.get_scheduler_heartbeats()
-        result["schedulers_checked"] = len(heartbeats)
-
         now = datetime.now(timezone.utc)
 
         for hb in heartbeats:
             name = hb.get("scheduler_name", "?")
-            last_beat = hb.get("last_heartbeat")
+            if not _scheduler_expected(name):
+                result["skipped_disabled"].append(name)
+                continue
 
-            if not last_beat:
+            result["schedulers_checked"] += 1
+            last_run = hb.get("last_run_at")
+
+            if not last_run:
                 result["missing"].append(name)
                 issues.append(f"Scheduler '{name}' has never sent a heartbeat")
                 continue
 
-            try:
-                beat_time = datetime.fromisoformat(
-                    str(last_beat).replace("Z", "+00:00")
+            if _heartbeat_stale(str(last_run), name, now):
+                result["stale"].append(name)
+                issues.append(
+                    f"Scheduler '{name}' heartbeat is stale (last run "
+                    f"{str(last_run)[:19]}, exceeds 2x its expected interval)"
                 )
-                age_hours = (now - beat_time).total_seconds() / 3600
-
-                if age_hours > _MAX_HEARTBEAT_AGE_HOURS:
-                    result["stale"].append(name)
-                    issues.append(
-                        f"Scheduler '{name}' heartbeat is {int(age_hours)}h old "
-                        f"(threshold: {_MAX_HEARTBEAT_AGE_HOURS}h)"
-                    )
-            except (ValueError, TypeError):
-                result["missing"].append(name)
 
     except Exception as e:
         logger.warning(f"Scheduler health check failed: {e}")
@@ -261,6 +308,11 @@ def _check_data_integrity(issues: list[str]) -> dict:
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(days=14)
             meetings = supabase_client.list_meetings(date_from=cutoff, limit=20)
+            # Skip rejected tombstones — the reject cascade deletes their
+            # embeddings on purpose (they must NOT be searchable), so counting
+            # them here falsely reported "N meetings have no embeddings". [2026-07-25]
+            meetings = [m for m in meetings
+                        if (m.get("approval_status") or "").lower() != "rejected"]
 
             for m in meetings:
                 mid = m.get("id")

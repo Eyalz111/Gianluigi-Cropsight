@@ -259,6 +259,16 @@ async def expire_stale_approvals() -> list[dict]:
         List of expired approval records.
     """
     expired = supabase_client.expire_pending_approvals()
+    # Prep cards carry no expires_at (a prep is only useful before its meeting),
+    # so the expires_at-based sweep above never reaps them and they accumulate in
+    # the queue forever. Also expire any whose meeting time has passed. Merged into
+    # `expired` so the loop below cancels their reminders/timers + notifies. [2026-07-25]
+    try:
+        _prep_expired = supabase_client.expire_past_prep_approvals()
+        if isinstance(_prep_expired, list) and _prep_expired:
+            expired = list(expired) + _prep_expired
+    except Exception as e:
+        logger.error(f"Error expiring past-meeting prep approvals: {e}")
     if expired:
         lines = ["Expired approvals (no longer actionable):"]
         auto_generated = []
