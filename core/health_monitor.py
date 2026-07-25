@@ -28,7 +28,9 @@ _EXPECTED_INTERVALS = {
     "transcript_watcher": 300,      # 5 min
     "document_watcher": 300,        # 5 min
     "email_watcher": 300,           # 5 min
-    "task_sync": 3600,              # ~1 hour
+    "task_sync": 86400,             # daily — task_sync_scheduler.check_interval=86400
+                                    # (was 3600: a daily scheduler judged against a
+                                    # 2h threshold false-flagged ~22h/day). [2026-07-26]
     "meeting_prep": 14400,          # 4 hours
     "prep_ping": 3600,              # 1 hour check
     "weekly_digest": 3600,          # 1 hour check
