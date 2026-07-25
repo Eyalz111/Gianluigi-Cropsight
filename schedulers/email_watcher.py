@@ -26,7 +26,6 @@ from config.settings import settings
 from config.team import is_team_email, get_team_member_by_email
 from services.gmail import gmail_service
 from services.supabase_client import supabase_client
-from services.conversation_memory import conversation_memory
 
 logger = logging.getLogger(__name__)
 
@@ -196,18 +195,14 @@ class EmailWatcher:
                 # Check if it has attachments
                 elif attachments:
                     await self._handle_attachments(msg_id, msg, member_name)
-                # Otherwise: ingest the thread as an input source (the new model),
-                # or fall back to the legacy Q&A auto-answer while ingestion is
-                # dark. Phase 4 retires the Q&A branch entirely. [2026-07-25]
+                # Ingest the thread as an input source. The legacy Q&A auto-answer
+                # was RETIRED here (2026-07-25): the bot read AND sent from the same
+                # Gmail, so an auto-reply bounced back and self-looped (the 07-24
+                # incident). Ingestion files silently instead. When ingestion is off,
+                # a plain email is just marked read (no auto-reply) below.
                 elif getattr(settings, "EMAIL_INGEST_ENABLED", False):
                     from processors.email_ingest import ingest_email_thread
                     await ingest_email_thread(msg)
-                else:
-                    await self._handle_question(
-                        msg_id, subject, body, sender_email, member_name,
-                        thread_id=msg.get("threadId"),
-                        message_id=msg.get("message_id"),
-                    )
 
                 # Phase 4: After existing routing, extract and log for morning brief
                 await self._extract_and_log(
@@ -545,86 +540,10 @@ class EmailWatcher:
             except Exception as e:
                 logger.error(f"Error ingesting attachment {filename}: {e}")
 
-    async def _handle_question(
-        self,
-        msg_id: str,
-        subject: str,
-        body: str,
-        sender_email: str,
-        member_name: str,
-        thread_id: str | None = None,
-        message_id: str | None = None,
-    ) -> None:
-        """Handle a question email -- process with Claude and reply in-thread."""
-        from core.agent import gianluigi_agent
-
-        # Build the question from subject and body
-        question = body.strip() or subject
-
-        logger.info(f"Processing question from {member_name}: {question[:100]}...")
-
-        # Get team member ID
-        member_id = member_name.lower().split()[0]  # "Eyal Zror" -> "eyal"
-
-        # Only Eyal gets write-capable + full-clearance answers by email; any other
-        # team member is read-only and TEAM-capped (audit AC-01, email sibling).
-        is_eyal = member_id == "eyal"
-
-        # Get conversation history keyed by sender email
-        history = conversation_memory.get_history(sender_email)
-
-        try:
-            result = await gianluigi_agent.process_message(
-                user_message=question,
-                user_id=member_id,
-                conversation_history=history,
-                allow_writes=is_eyal,
-                max_sensitivity_level=4 if is_eyal else 2,
-            )
-
-            response_text = result.get("response", "I couldn't process your request.")
-
-            # Outbound sanitization
-            try:
-                from guardrails.inbound_filter import sanitize_outbound_message
-                response_text = sanitize_outbound_message(
-                    response_text,
-                    {"channel": "email", "recipient": sender_email},
-                )
-            except ImportError:
-                pass
-            except Exception as e:
-                logger.warning(f"Outbound sanitization error (continuing): {e}")
-
-            # Store conversation turn in memory
-            conversation_memory.add_message(sender_email, "user", question)
-            conversation_memory.add_message(sender_email, "assistant", response_text)
-
-            # Reply via email (in the same thread as the original)
-            await gmail_service.send_email(
-                to=[sender_email],
-                subject=f"Re: {subject}",
-                body=(
-                    f"Hi {member_name.split()[0]},\n\n"
-                    f"{response_text}\n\n"
-                    f"---\nGianluigi, CropSight AI Assistant"
-                ),
-                thread_id=thread_id,
-                in_reply_to=message_id,
-            )
-
-            # Log (supabase_client is SYNC)
-            supabase_client.log_action(
-                action="email_question_answered",
-                details={
-                    "from": member_name,
-                    "question_preview": question[:200],
-                },
-                triggered_by=member_id,
-            )
-
-        except Exception as e:
-            logger.error(f"Error answering question from {member_name}: {e}")
+    # _handle_question (the Q&A email auto-answer) was RETIRED 2026-07-25: the bot
+    # read AND sent from the same Gmail, so an auto-reply bounced back and
+    # self-looped (07-24 incident). Email is now an INPUT stream
+    # (processors.email_ingest.ingest_email_thread), not a Q&A channel.
 
     def _extract_reply_text(self, body: str) -> str:
         """Extract just the reply portion of an email (before quoted text)."""

@@ -452,6 +452,11 @@ EXTRACTION INSTRUCTIONS:
    - Include relevant context
 
 2. Extract all ACTION ITEMS / TASKS
+   - A request to HOLD or SCHEDULE a meeting or call with someone — "meet with X",
+     "set up / schedule / book a call with X", "sync with the team", "set meeting
+     with X" — is a FOLLOW-UP MEETING (section 3), NOT a task. Do not emit it here.
+     Only make it a task when the action is clearly something OTHER than the
+     meeting itself (e.g. "prepare the deck FOR the meeting", "send X the agenda").
    - Identify the assignee (who is responsible)
    - Note any deadline mentioned (explicit or implied)
    - For each task with a deadline, classify deadline_confidence:
@@ -478,6 +483,10 @@ EXTRACTION INSTRUCTIONS:
    - Cite the timestamp
 
 3. Identify FOLLOW-UP MEETINGS proposed or scheduled
+   - ANY meeting or call to be HELD with someone belongs here — including terse
+     asks like "set/schedule a meeting with X", "call X", "sync with the team",
+     "book a call with the investor". Capture the meeting itself here; do NOT
+     also emit it as a task in section 2.
    - Note the proposed date/time if mentioned
    - Identify who will lead the meeting
    - List expected participants

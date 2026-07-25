@@ -185,46 +185,9 @@ class TestExtractReplyText:
 class TestCheckInbox:
     """Tests for inbox checking and message routing."""
 
-    @pytest.mark.asyncio
-    async def test_routes_team_question_email(self, mock_settings_for_email_watcher):
-        """Should route a question email from a team member through the agent."""
-        from schedulers.email_watcher import EmailWatcher
-
-        watcher = EmailWatcher()
-
-        mock_messages = [
-            {
-                "id": "msg-001",
-                "from": "Eyal Zror <eyal@cropsight.io>",
-                "subject": "What was our latest revenue?",
-                "body": "Can you look up our latest revenue numbers?",
-                "attachments": [],
-            }
-        ]
-
-        with patch("schedulers.email_watcher.gmail_service") as mock_gmail, \
-             patch("schedulers.email_watcher.supabase_client") as mock_supa, \
-             patch("schedulers.email_watcher.is_team_email", return_value=True), \
-             patch("schedulers.email_watcher.get_team_member_by_email",
-                   return_value={"name": "Eyal Zror", "role": "CEO"}):
-            mock_gmail.get_unread_messages = AsyncMock(return_value=mock_messages)
-            mock_gmail.mark_as_read = AsyncMock(return_value=True)
-            mock_gmail.send_email = AsyncMock(return_value=True)
-
-            # Mock the agent import inside _handle_question
-            mock_agent = AsyncMock()
-            mock_agent.process_message = AsyncMock(
-                return_value={"response": "Revenue is $1M."}
-            )
-            with patch(
-                "core.agent.gianluigi_agent", mock_agent
-            ):
-                await watcher._check_inbox()
-
-            # Should have marked as read
-            mock_gmail.mark_as_read.assert_called_once_with("msg-001")
-            # Should be in processed IDs
-            assert "msg-001" in watcher._processed_ids
+    # test_routes_team_question_email removed 2026-07-25 — the Q&A auto-answer it
+    # exercised was retired; a team email is now INGESTED, covered by
+    # tests/test_email_ingest.py.
 
     @pytest.mark.asyncio
     async def test_skips_non_team_email(self, mock_settings_for_email_watcher):
@@ -507,96 +470,9 @@ class TestCheckInbox:
             # Second message should have been processed
             assert "msg-good" in watcher._processed_ids
 
-    @pytest.mark.asyncio
-    async def test_question_triggers_agent_and_reply(
-        self, mock_settings_for_email_watcher
-    ):
-        """Question email should process with agent and send reply."""
-        from schedulers.email_watcher import EmailWatcher
-
-        watcher = EmailWatcher()
-
-        mock_agent = AsyncMock()
-        mock_agent.process_message = AsyncMock(
-            return_value={"response": "Here is your answer."}
-        )
-
-        from services.conversation_memory import ConversationMemory
-
-        with patch("schedulers.email_watcher.gmail_service") as mock_gmail, \
-             patch("schedulers.email_watcher.supabase_client") as mock_supa, \
-             patch("schedulers.email_watcher.conversation_memory", ConversationMemory()):
-            mock_gmail.send_email = AsyncMock(return_value=True)
-
-            with patch("core.agent.gianluigi_agent", mock_agent):
-                await watcher._handle_question(
-                    msg_id="msg-q1",
-                    subject="Budget question",
-                    body="What is our Q1 budget?",
-                    sender_email="eyal@cropsight.io",
-                    member_name="Eyal Zror",
-                )
-
-            # Should have called the agent with conversation history + privilege
-            # (member "eyal" -> writes + full clearance; audit AC-01 email sibling)
-            mock_agent.process_message.assert_called_once_with(
-                user_message="What is our Q1 budget?",
-                user_id="eyal",
-                conversation_history=[],
-                allow_writes=True,
-                max_sensitivity_level=4,
-            )
-
-            # Should have sent reply email
-            mock_gmail.send_email.assert_called_once()
-            send_call = mock_gmail.send_email.call_args
-            assert send_call[1]["to"] == ["eyal@cropsight.io"]
-            assert send_call[1]["subject"] == "Re: Budget question"
-            assert "Here is your answer." in send_call[1]["body"]
-
-            # Should have logged the action (sync)
-            mock_supa.log_action.assert_called_once()
-            log_call = mock_supa.log_action.call_args
-            assert log_call[1]["action"] == "email_question_answered"
-
-    @pytest.mark.asyncio
-    async def test_question_uses_subject_when_body_empty(
-        self, mock_settings_for_email_watcher
-    ):
-        """Should use subject as question when body is empty."""
-        from schedulers.email_watcher import EmailWatcher
-
-        watcher = EmailWatcher()
-
-        mock_agent = AsyncMock()
-        mock_agent.process_message = AsyncMock(
-            return_value={"response": "OK"}
-        )
-
-        from services.conversation_memory import ConversationMemory
-
-        with patch("schedulers.email_watcher.gmail_service") as mock_gmail, \
-             patch("schedulers.email_watcher.supabase_client"), \
-             patch("schedulers.email_watcher.conversation_memory", ConversationMemory()):
-            mock_gmail.send_email = AsyncMock(return_value=True)
-
-            with patch("core.agent.gianluigi_agent", mock_agent):
-                await watcher._handle_question(
-                    msg_id="msg-q2",
-                    subject="What is our runway?",
-                    body="",
-                    sender_email="eyal@cropsight.io",
-                    member_name="Eyal Zror",
-                )
-
-            # Agent should receive the subject as the question
-            mock_agent.process_message.assert_called_once_with(
-                user_message="What is our runway?",
-                user_id="eyal",
-                conversation_history=[],
-                allow_writes=True,
-                max_sensitivity_level=4,
-            )
+    # test_question_triggers_agent_and_reply + test_question_uses_subject_when_body_empty
+    # removed 2026-07-25 — _handle_question (the Q&A email auto-answer) was retired.
+    # Email intake is now covered by tests/test_email_ingest.py.
 
     @pytest.mark.asyncio
     async def test_attachment_with_no_id_skipped(
