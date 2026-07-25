@@ -32,17 +32,16 @@ _MSGID_RE = re.compile(r"<[^>]+>")
 
 
 def _participants(msg: dict) -> list[str]:
+    # email.utils.getaddresses correctly splits address lists WITHOUT breaking a
+    # display name that contains a comma ('"Weiss, Yoram" <y@x>'). A naive
+    # split(",") turned that one recipient into two bogus participants. [review #13]
+    from email.utils import getaddresses
     people: list[str] = []
-    for field in (msg.get("from", ""), msg.get("to", ""), msg.get("cc", "")):
-        for chunk in (field or "").split(","):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            name = re.sub(r"<[^>]+>", "", chunk).strip().strip('"').strip()
-            m = _EMAIL_RE.search(chunk)
-            label = name or (m.group(0) if m else "")
-            if label and label not in people:
-                people.append(label)
+    fields = [msg.get("from", ""), msg.get("to", ""), msg.get("cc", "")]
+    for name, addr in getaddresses([f or "" for f in fields]):
+        label = (name or "").strip().strip('"').strip() or (addr or "").strip()
+        if label and label not in people:
+            people.append(label)
     return people
 
 
@@ -91,6 +90,11 @@ async def _extract_and_store_delta(meeting_id: str, delta_text: str, subject: st
         if level_for_sensitivity(delta_tier) > level_for_sensitivity(sensitivity):
             sensitivity = delta_tier
             supabase_client.update_meeting(meeting_id, sensitivity=sensitivity)
+            # Cascade to EVERY existing child, not just the delta's new ones —
+            # update_meeting alone leaves earlier tasks/decisions at the old lower
+            # tier, readable to lower-tier consumers (sensitivity-follows-data). [review #9]
+            from guardrails.sensitivity_classifier import propagate_meeting_sensitivity
+            propagate_meeting_sensitivity(meeting_id, sensitivity)
             logger.info(f"[email-ingest] delta upgraded thread {meeting_id} sensitivity -> {sensitivity}")
     except Exception as e:
         logger.warning(f"[email-ingest] delta sensitivity re-check failed (non-fatal): {e}")
@@ -101,8 +105,10 @@ async def _extract_and_store_delta(meeting_id: str, delta_text: str, subject: st
         sensitivity=sensitivity,
     )
 
-    # Dedup TASKS + DECISIONS against the source's existing rows (a re-stated ask
-    # in a later reply must not create a second task).
+    # Dedup TASKS against the source's existing rows via cross-reference (a
+    # re-stated ask in a later reply must not create a second task). NOTE:
+    # run_cross_reference only dedups TASKS — its decisions result is unused, so
+    # decisions are guarded separately against the DB below. [review #11]
     cross = await run_cross_reference(
         meeting_id=meeting_id, transcript=delta_text,
         new_tasks=extracted.get("tasks", []), new_decisions=extracted.get("decisions", []),
@@ -122,12 +128,17 @@ async def _extract_and_store_delta(meeting_id: str, delta_text: str, subject: st
         tasks_to_store, lambda t: t.get("title", ""),
         secondary_of=lambda t: t.get("assignee", ""), char_threshold=ct, token_threshold=tt)
 
-    # Follow-ups + questions have no cross-reference deduper — guard them by title
-    # against what this source already holds.
+    # Decisions, follow-ups + questions have no cross-reference deduper — guard
+    # them by normalized text against what this source already holds, so a later
+    # reply restating an earlier decision/meeting/question is not stored twice.
+    # [review #11]
+    existing_dec = {normalize(d.get("description", "")) for d in
+                    supabase_client.list_decisions(meeting_id=meeting_id, include_pending=True)}
     existing_fu = {normalize(f.get("title", "")) for f in
                    supabase_client.list_follow_up_meetings(source_meeting_id=meeting_id, include_pending=True, limit=200)}
     existing_q = {normalize(q.get("question", "")) for q in
                   supabase_client.get_open_questions(meeting_id=meeting_id, include_pending=True)}
+    decisions_to_store = [d for d in decisions_to_store if normalize(d.get("description", "")) not in existing_dec]
     follow_ups = [f for f in extracted.get("follow_ups", []) if normalize(f.get("title", "")) not in existing_fu]
     questions = [q for q in extracted.get("open_questions", []) if normalize(q.get("question", "")) not in existing_q]
 
@@ -163,6 +174,19 @@ async def ingest_email_thread(msg: dict) -> dict:
         if message_id in processed:
             return {"skipped": "already_processed", "thread_key": thread_key}
 
+        # Crash-safety: process_transcript creates the source meeting BEFORE
+        # upsert_email_thread records the mapping. If a prior attempt died in that
+        # window, the meeting exists but no email_threads row does — adopt that
+        # orphan (by source_file_path) instead of creating a duplicate. [review #2]
+        if not (thread and thread.get("meeting_id")):
+            _orphan = (supabase_client.client.table("meetings").select("id")
+                       .eq("source_file_path", f"email:{thread_key}")
+                       .eq("meeting_type", "email_thread").limit(1).execute().data)
+            if _orphan:
+                _mid = _orphan[0]["id"]
+                supabase_client.upsert_email_thread(thread_key, meeting_id=_mid, subject=subject)
+                thread = {"meeting_id": _mid, "processed_message_ids": list(processed)}
+
         # Whole in-mailbox thread → process EVERY unprocessed message in order
         # (grown thread + out-of-order + BCC all collapse to "process the delta").
         thread_msgs = await gmail_service.get_thread(thread_key) or [msg]
@@ -186,12 +210,14 @@ async def ingest_email_thread(msg: dict) -> dict:
             clean = strip_quoted_text(m.get("body", "")) or (m.get("body", "") or "").strip()
             if clean:
                 parts.append(f"From {m.get('from', '')} ({m.get('date', '')}):\n{clean}")
+        gap_recovered = False
         if gap:
             quoted = extract_quoted_text(newest.get("body", ""))
             if quoted:
                 parts.append(
                     f"[Earlier messages Gianluigi was not on the thread for, "
                     f"recovered from quoted history]:\n{quoted}")
+                gap_recovered = True
         delta_text = "\n\n---\n\n".join(parts).strip()
         if not delta_text:
             return {"skipped": "empty_body", "thread_key": thread_key}
@@ -214,14 +240,18 @@ async def ingest_email_thread(msg: dict) -> dict:
             supabase_client.upsert_email_thread(thread_key, meeting_id=meeting_id, subject=subject)
             first = True
 
-        # Mark everything consumed as processed (incl. gap ids, so a later message
-        # that also quotes them doesn't re-backfill).
+        # Mark the messages we actually consumed as processed.
         for m in unprocessed:
             mid = (m.get("message_id") or "").strip()
             if mid:
                 supabase_client.mark_message_processed(thread_key, mid)
-        for r in gap:
-            supabase_client.mark_message_processed(thread_key, r)
+        # Mark gap ids ONLY when their content was truly recovered from quoted
+        # history. If we couldn't recover them, leave them unprocessed so a later
+        # real delivery of those messages is still ingested (not falsely skipped
+        # as 'already_processed'). [review #8]
+        if gap_recovered:
+            for r in gap:
+                supabase_client.mark_message_processed(thread_key, r)
 
         # The card always reflects EVERYTHING still pending for the thread — so a
         # delta that accumulates onto an un-approved batch shows the full set, and

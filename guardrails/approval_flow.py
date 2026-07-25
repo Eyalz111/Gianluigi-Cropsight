@@ -1086,7 +1086,15 @@ async def process_response(
         # (below) and deletes the pending row, so a re-entry with the meeting
         # already 'approved' means distribution already happened. Refuse it.
         # [robustness #1 — defense-in-depth below the Telegram stale-card guard]
-        if not is_non_meeting and (meeting.get("approval_status") or "") == "approved":
+        # Email-thread sources are EXEMPT from this guard: a thread's meeting is
+        # approved after the first batch, but later replies add NEW pending
+        # children that must still be promotable. The promote is idempotent
+        # (already-approved children are unaffected), and the file-only branch
+        # never distributes, so re-entry is safe. Without this exemption every
+        # delta approval returned 'already approved' and the new children stayed
+        # pending forever. [review #1]
+        _is_email_thread = bool(pending_info) and pending_info.get("type") == "email_thread"
+        if not is_non_meeting and not _is_email_thread and (meeting.get("approval_status") or "") == "approved":
             logger.warning(
                 f"process_response(approve) re-entered for already-approved "
                 f"meeting {meeting_id} — skipping re-distribution (idempotent)."

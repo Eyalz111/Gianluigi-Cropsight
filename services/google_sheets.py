@@ -1310,6 +1310,7 @@ class GoogleSheetsService:
                 sheet_id=settings.TASK_TRACKER_SHEET_ID,
                 range_name=f"'{tab_name}'!A2:{end_col}",
             )
+            raw_count = len(raw or [])
             data = [r for r in (raw or []) if any((c or "").strip() for c in r)]
             if len(data) < 2:
                 return 0
@@ -1327,6 +1328,17 @@ class GoogleSheetsService:
                     valueInputOption="RAW", body={"values": ordered},
                 )
             )
+            # If blank rows were dropped, we wrote FEWER rows than were read —
+            # the physical tail rows keep their old content and appear as phantom
+            # duplicates of rows now sorted higher. Clear that tail. [review #6]
+            if raw_count > len(ordered):
+                self._execute_with_retry(
+                    lambda: self.service.spreadsheets().values().clear(
+                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        range=f"'{tab_name}'!A{len(ordered) + 2}:{end_col}{raw_count + 1}",
+                        body={},
+                    )
+                )
             logger.info(f"Reordered {tab_name}: {len(ordered)} rows")
             return len(ordered)
         except Exception as e:
@@ -2523,11 +2535,15 @@ class GoogleSheetsService:
     def _meeting_row(m: dict, source_meeting: str = "") -> list:
         """Build one Meetings-tab row from a follow_up_meetings record."""
         parts = m.get("participants") or []
-        agenda = m.get("agenda_items") or []
+        # Accept BOTH shapes: a DB follow_up_meetings row (agenda_items / joined
+        # meetings.title) AND a Meetings-tab sheet-row dict (agenda / source_meeting).
+        # archive_meeting_rows passes the latter, so reading only the DB keys wrote
+        # blank Agenda + Source Meeting cells into Past Meetings. [review #10]
+        agenda = m.get("agenda_items") or m.get("agenda") or []
         src = source_meeting
         if not src:
             mi = m.get("meetings") if isinstance(m.get("meetings"), dict) else {}
-            src = (mi or {}).get("title", "") or ""
+            src = (mi or {}).get("title", "") or m.get("source_meeting", "") or ""
         return [
             m.get("title") or "",
             m.get("label") or "",

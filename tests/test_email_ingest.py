@@ -59,7 +59,12 @@ def _patch(monkeypatch, thread, thread_msgs, pending_tasks=None):
     monkeypatch.setattr(sc, "get_email_thread", lambda tk: thread)
     monkeypatch.setattr(sc, "upsert_email_thread", lambda tk, **k: calls["upsert"].append((tk, k)) or {"thread_key": tk})
     monkeypatch.setattr(sc, "mark_message_processed", lambda tk, mid: calls["processed"].append(mid))
-    monkeypatch.setattr(sc, "_client", MagicMock())
+    # The orphan-recovery probe (review #2) runs .table().select().eq().eq().limit()
+    # .execute().data — default it to [] so a NEW thread (no email_threads row) takes
+    # the process_transcript branch rather than adopting a phantom MagicMock orphan.
+    _client = MagicMock()
+    _client.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = []
+    monkeypatch.setattr(sc, "_client", _client)
     monkeypatch.setattr(sc, "get_meeting", lambda mid: {"sensitivity": "founders"})
     monkeypatch.setattr(sc, "get_tasks", lambda **k: pending_tasks or [])
     monkeypatch.setattr(sc, "list_decisions", lambda **k: [])

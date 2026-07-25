@@ -91,7 +91,13 @@ class ReconcileScheduler:
             return
 
         def _g(d, *keys):
-            return sum(int((d or {}).get(k, 0) or 0) for k in keys) if isinstance(d, dict) else 0
+            # A summary that ran in shadow mode increments its counts BEFORE the
+            # write guard, so it reports non-zero while writing nothing. Never
+            # announce those as applied — it would tell the team an edit landed
+            # when it didn't. [review #12]
+            if not isinstance(d, dict) or d.get("shadow"):
+                return 0
+            return sum(int(d.get(k, 0) or 0) for k in keys)
 
         t = _g(tasks, "pulled", "created")
         t_arch = _g(tasks, "archived")

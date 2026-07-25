@@ -1350,7 +1350,12 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         # the archival window, then moves to 'Past Meetings'. Everything else
         # (scheduled / not_scheduled / held / recent-dropped) snapshots + stays
         # on the working tab. [2026-07-24]
-        if _normalize(final.get("status")) == "dropped" and _aged_out(dm.get("updated_at")):
+        # Only age-out a meeting that was ALREADY 'dropped' in the DB before this
+        # sync: the drop edit is itself a "touch", so a just-dropped meeting gets
+        # the full window, not immediate archival on the same reconcile. [review #14]
+        if (_normalize(final.get("status")) == "dropped"
+                and _normalize(dm.get("status")) == "dropped"
+                and _aged_out(dm.get("updated_at"))):
             archive_moves.append({**sm, "status": final.get("status")})
             summary["archived"] = summary.get("archived", 0) + 1
         else:
@@ -1422,11 +1427,18 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                 logger.error(f"[meeting-reconcile] create failed for row {sm.get('row_number')}: {e}")
 
     # --- DB-only meetings -> re-add to the Sheet (never treated as deletes) ---
-    # Terminal statuses (held/dropped) are NOT re-added — they live on the Past
-    # Meetings tab now, so a DB row in that state is expected to be absent here.
-    missing = [m for m in db_rows
-               if m.get("id") and m["id"] not in sheet_by_id
-               and (m.get("status") or "not_scheduled") not in _TERMINAL]
+    # Only AGED-OUT DROPPED meetings legitimately live on Past Meetings, so only
+    # they are expected to be absent here. HELD (which must stay on the tab as
+    # history) and recent-dropped belong on the working tab and are re-added if
+    # absent — the old `not in _TERMINAL` filter also excluded held, so a held
+    # meeting that lost its row silently vanished from the whole workspace. [review #3]
+    def _readd_ok(m: dict) -> bool:
+        if not m.get("id") or m["id"] in sheet_by_id:
+            return False
+        if (m.get("status") or "").strip().lower() == "dropped" and _aged_out(m.get("updated_at")):
+            return False
+        return True
+    missing = [m for m in db_rows if _readd_ok(m)]
     _readd_cap = max(30, len(sheet_by_id))
     if len(missing) > _readd_cap:
         logger.error(
@@ -1575,15 +1587,21 @@ async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) 
                     name=name, description=sr.get("description", ""),
                     aliases=_parse_aliases(sr.get("aliases", "")), area_id=area_id,
                 )
-                if created and created.get("id") and sr.get("row_number"):
-                    try:
-                        await sheets_service._update_cell(
-                            sheet_id=settings.TASK_TRACKER_SHEET_ID,
-                            range_name=f"'{PROJECTS_TAB_NAME}'!{PROJECTS_COLUMNS['id']}{sr['row_number']}",
-                            value=created["id"],
-                        )
-                    except Exception as we:
-                        logger.warning(f"[project-reconcile] id writeback failed row {sr['row_number']}: {we}")
+                if created and created.get("id"):
+                    # add_canonical_project is idempotent-by-name: a blank row that
+                    # names an EXISTING project resolves to that project's id. Mark
+                    # it seen so the missing-re-add pass below doesn't append a
+                    # SECOND row for the same project. [review #11]
+                    seen_ids.add(created["id"])
+                    if sr.get("row_number"):
+                        try:
+                            await sheets_service._update_cell(
+                                sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                                range_name=f"'{PROJECTS_TAB_NAME}'!{PROJECTS_COLUMNS['id']}{sr['row_number']}",
+                                value=created["id"],
+                            )
+                        except Exception as we:
+                            logger.warning(f"[project-reconcile] id writeback failed row {sr['row_number']}: {we}")
             continue
 
         seen_ids.add(pid)
@@ -1593,7 +1611,8 @@ async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) 
         summary["matched"] += 1
 
         # RENAME — the load-bearing case.
-        if name and _normalize(name) != _normalize(dbp.get("name")):
+        renamed_this_pass = bool(name) and _normalize(name) != _normalize(dbp.get("name"))
+        if renamed_this_pass:
             summary["renamed"] += 1
             summary["renames"].append({"from": dbp.get("name"), "to": name})
             if write_allowed:
@@ -1602,12 +1621,15 @@ async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) 
                 except Exception as e:
                     logger.error(f"[project-reconcile] rename failed for {pid}: {e}")
 
-        # Aliases / area / description — plain updates (applied even alongside a
-        # rename; rename_canonical_project only touches name+aliases-with-old).
+        # Aliases / area / description — plain updates.
         updates = {}
         sheet_aliases = sorted(set(_parse_aliases(sr.get("aliases", ""))))
-        # After a rename the old name is folded into aliases by the rename call,
-        # so re-read below on the next cycle; here just honour explicit edits.
+        # rename_canonical_project just folded the OLD name into aliases; this
+        # same-pass update compares against the STALE pre-rename aliases, so
+        # without merging the old name back in it would OVERWRITE the alias the
+        # rename added — breaking canonicalization of the old name. [review #5]
+        if renamed_this_pass and dbp.get("name"):
+            sheet_aliases = sorted(set(sheet_aliases) | {dbp.get("name")})
         db_aliases = sorted(set(dbp.get("aliases") or []))
         if sheet_aliases and sheet_aliases != db_aliases:
             updates["aliases"] = sheet_aliases

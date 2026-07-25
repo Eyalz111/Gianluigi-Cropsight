@@ -212,11 +212,22 @@ class TestReadd:
         assert res["readded"] == 1
         fake.add_meetings_batch_to_sheet.assert_awaited_once()
 
-    async def test_dropped_meetings_are_not_readded(self, monkeypatch):
+    async def test_aged_dropped_meeting_not_readded(self, monkeypatch):
+        # An AGED-OUT dropped meeting lives on Past Meetings — not re-added. [review #3]
         calls, fake = _setup(
-            monkeypatch, [], [_dbrow(id="m9", title="Gone", status="dropped")], {})
+            monkeypatch, [],
+            [_dbrow(id="m9", title="Gone", status="dropped", updated_at="2020-01-01T00:00:00+00:00")], {})
         res = await ss.reconcile_meetings()
         assert res["readded"] == 0
+
+    async def test_recent_dropped_meeting_is_readded(self, monkeypatch):
+        # A RECENT dropped meeting stays on the working tab (greyed) until it ages
+        # out, so an absent one is re-added. [review #3]
+        calls, fake = _setup(
+            monkeypatch, [],
+            [_dbrow(id="m9", title="Recent", status="dropped", updated_at="2099-01-01T00:00:00+00:00")], {})
+        res = await ss.reconcile_meetings()
+        assert res["readded"] == 1
 
     async def test_shadow_mode_writes_nothing(self, monkeypatch):
         sheet = [_srow(id="m1", title="Edited")]
@@ -305,7 +316,23 @@ class TestTerminalArchive:
         assert calls["archive"] == []
 
     async def test_aged_dropped_meeting_archives(self, monkeypatch):
-        # Dropped and untouched well beyond the window -> ages out to Past Meetings.
+        # ALREADY dropped in the DB (not just this cycle) and untouched well beyond
+        # the window -> ages out to Past Meetings. A meeting dropped *this* sync gets
+        # the full window first (the drop edit is itself a touch). [review #14]
+        sheet = [_srow(id="m1", title="X", status="dropped")]
+        db = [_dbrow(id="m1", title="X", status="dropped",
+                     updated_at="2020-01-01T00:00:00+00:00")]
+        snap = {"m1": {"title": "X", "status": "dropped"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+        assert res.get("archived") == 1
+        assert calls["archive"][0]["id"] == "m1"
+
+    async def test_freshly_dropped_meeting_not_archived_same_sync(self, monkeypatch):
+        # DB still holds the pre-drop status (not_scheduled) with an OLD timestamp;
+        # the sheet cell was just set to 'dropped'. The drop is a fresh edit, so it
+        # gets the full window — NOT archived on the same reconcile. [review #14]
         sheet = [_srow(id="m1", title="X", status="dropped")]
         db = [_dbrow(id="m1", title="X", status="not_scheduled",
                      updated_at="2020-01-01T00:00:00+00:00")]
@@ -313,17 +340,18 @@ class TestTerminalArchive:
         calls, _ = _setup(monkeypatch, sheet, db, snap)
 
         res = await ss.reconcile_meetings()
-        assert res.get("archived") == 1
-        assert calls["archive"][0]["id"] == "m1"
+        assert res.get("archived", 0) == 0
+        assert calls["archive"] == []
 
-    async def test_terminal_db_meeting_is_not_readded(self, monkeypatch):
-        """A held/dropped meeting absent from the sheet lives on Past Meetings —
-        it must NOT be re-added to the working tab."""
+    async def test_held_db_meeting_is_readded(self, monkeypatch):
+        """A HELD meeting must stay on the working tab as history — if its row is
+        absent it is RE-ADDED. The old `not in _TERMINAL` filter silently vanished
+        held meetings from the whole workspace. [review #3]"""
         calls, fake = _setup(
-            monkeypatch, [], [_dbrow(id="m9", title="Gone", status="held")], {})
+            monkeypatch, [], [_dbrow(id="m9", title="Kept", status="held")], {})
         res = await ss.reconcile_meetings()
-        assert res["readded"] == 0
-        fake.add_meetings_batch_to_sheet.assert_not_called()
+        assert res["readded"] == 1
+        fake.add_meetings_batch_to_sheet.assert_called()
 
     async def test_active_meeting_stays_and_gets_a_snapshot(self, monkeypatch):
         sheet = [_srow(id="m1", title="Soon", status="scheduled")]

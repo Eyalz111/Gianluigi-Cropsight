@@ -265,18 +265,19 @@ class EmailWatcher:
         return "[approval needed]" in s and not s.startswith("re:")
 
     def _is_own_outbound_message(self, body: str) -> bool:
-        """True when an inbound email is really the bot's OWN prior Q&A reply
-        bouncing back. Because the bot reads AND sends from the same Gmail, every
-        answer it sends lands back in the inbox looking 'from Eyal' — so without
-        this guard the watcher answered its own answer, forever (2026-07-24
-        self-reply loop). Discriminator: our replies sign off as 'Gianluigi,
-        CropSight AI Assistant' (and a bare 'Gianluigi' sign-off). A human email
-        that merely quotes an old reply is a rare, cheap false-skip — far cheaper
-        than an infinite loop."""
-        b = body or ""
-        if "CropSight AI Assistant" in b:
-            return True
-        return bool(re.search(r"(?mi)^-{2,}\s*\n\s*gianluigi\b", b))
+        """True when an inbound email is really the bot's OWN prior reply bouncing
+        back (same-Gmail read+send). Discriminator: our own reply SIGNS OFF with
+        the signature at the very END of its new content. Matching the substring
+        ANYWHERE wrongly dropped a legitimate email that merely forwards/quotes an
+        old Gianluigi message (signature buried in the quote). So test only the
+        tail of the quote-stripped NEW content. [review: own-outbound over-broad]"""
+        from services.gmail import strip_quoted_text
+        new = strip_quoted_text(body or "").strip()
+        if not new:
+            return False
+        tail = new[-120:]
+        return ("CropSight AI Assistant" in tail
+                or bool(re.search(r"(?mi)-{2,}\s*\n\s*gianluigi\b\s*$", new)))
 
     async def _extract_and_log(
         self,

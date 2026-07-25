@@ -55,7 +55,12 @@ from core.retry import retry
 # lxml/scipy/scikit-learn, too heavy for the Cloud Run image, and this covers
 # Gmail — our only client.
 _QUOTE_CUT_PATTERNS = [
-    r"\nOn .{0,300}? wrote:",                    # Gmail / Apple Mail "On <date>, <x> wrote:"
+    # Gmail / Apple Mail "On <date>, <name> <email> wrote:". Constrained to a
+    # SINGLE line ([^\n]) and required to contain an email-in-brackets OR a
+    # 4-digit year before "wrote:" — otherwise plain prose like
+    # "On Tuesday, Paolo wrote: send the SOW" matched and truncated real content
+    # (review: strip_quoted over-cut). Real quote headers always carry one.
+    r"\nOn [^\n]{0,400}?(?:<[^>\n]+@[^>\n]+>|20\d\d)[^\n]*? wrote:",
     r"\n-{2,}\s*Original Message\s*-{2,}",        # Outlook "-----Original Message-----"
     r"\n_{5,}",                                    # Outlook divider ______
     r"\nFrom: .{0,300}?\nSent: ",                  # Outlook forwarded header block
