@@ -1337,11 +1337,16 @@ async def process_response(
                 details={"meeting_id": meeting_id},
                 triggered_by="eyal",
             )
+            # distribution MUST be empty here: the Telegram approve-handler treats a
+            # non-empty `distribution` with no recognized success channel
+            # (drive_saved/sheets_updated/telegram_sent/email_sent) as "FAILED on
+            # all channels". File-only has no channels by design, so we return an
+            # empty dist -> the handler shows `next_step` instead. [2026-07-25]
             return {
                 "action": "approved",
                 "edits": None,
-                "next_step": "Filed from email — tasks/decisions/meetings will appear on the sheet shortly. No team summary sent.",
-                "distribution": {"filed_only": True},
+                "next_step": "✅ Filed from email — the tasks/decisions/meetings will appear on the sheet at the next sync. No team summary sent.",
+                "distribution": {},
             }
 
         # Default: meeting_summary — ALWAYS read from pending_approvals.
