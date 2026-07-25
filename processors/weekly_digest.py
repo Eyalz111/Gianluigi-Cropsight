@@ -155,6 +155,10 @@ async def get_meetings_for_week(
             date_from=week_start,
             date_to=week_end,
         )
+        # Exclude email-thread SOURCES — they're an ingestion channel, not meetings
+        # that were held, so they must not inflate the weekly "Meetings" count or
+        # appear in the digest's meeting list. [review #3, 2026-07-25]
+        meetings = [m for m in meetings if (m.get("meeting_type") or "") != "email_thread"]
         logger.info(f"Found {len(meetings)} meetings for week")
         return meetings
     except Exception as e:

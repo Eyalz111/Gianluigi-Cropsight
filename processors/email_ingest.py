@@ -31,16 +31,6 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _MSGID_RE = re.compile(r"<[^>]+>")
 
 
-def _addresses(*fields: str) -> list[str]:
-    seen: list[str] = []
-    for f in fields:
-        for a in _EMAIL_RE.findall(f or ""):
-            al = a.lower()
-            if al not in seen:
-                seen.append(al)
-    return seen
-
-
 def _participants(msg: dict) -> list[str]:
     people: list[str] = []
     for field in (msg.get("from", ""), msg.get("to", ""), msg.get("cc", "")):
@@ -91,6 +81,19 @@ async def _extract_and_store_delta(meeting_id: str, delta_text: str, subject: st
     from config.settings import settings
 
     sensitivity = (supabase_client.get_meeting(meeting_id) or {}).get("sensitivity") or "founders"
+    # A later reply can introduce higher-tier content than the thread started with
+    # — re-classify the delta and upgrade the source MONOTONICALLY (never down).
+    # [review #1, 2026-07-25]
+    try:
+        from guardrails.sensitivity_classifier import classify_sensitivity_from_content
+        from guardrails.distribution import level_for_sensitivity
+        delta_tier = classify_sensitivity_from_content(delta_text)
+        if level_for_sensitivity(delta_tier) > level_for_sensitivity(sensitivity):
+            sensitivity = delta_tier
+            supabase_client.update_meeting(meeting_id, sensitivity=sensitivity)
+            logger.info(f"[email-ingest] delta upgraded thread {meeting_id} sensitivity -> {sensitivity}")
+    except Exception as e:
+        logger.warning(f"[email-ingest] delta sensitivity re-check failed (non-fatal): {e}")
 
     extracted = await _extract_with_readback(
         transcript=delta_text, meeting_title=subject, participants=[],

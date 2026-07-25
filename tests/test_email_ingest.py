@@ -41,9 +41,6 @@ class TestHelpers:
         people = ei._participants(msg)
         assert "Paolo Vailetti" in people and "Eyal" in people
 
-    def test_addresses_deduped(self):
-        assert ei._addresses("a@x.com, B@x.com", "a@x.com") == ["a@x.com", "b@x.com"]
-
     def test_parse_references(self):
         assert ei._parse_references("<a@x> <b@y>  <c@z>") == ["<a@x>", "<b@y>", "<c@z>"]
         assert ei._parse_references("") == []
