@@ -4108,27 +4108,37 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 )
                 logger.info(f"Meeting {meeting_id} approved and distributed: {result}")
 
-                # Notify Eyal of distribution result
+                # Notify Eyal of the result. An email_thread (and any file-only
+                # content) returns an EMPTY distribution dict — it was filed, not
+                # distributed — so show its next_step ("✅ Filed from email")
+                # instead of a phantom "Distribution FAILED on all channels". The
+                # review-flow approval already guards with `and dist`; THIS standard
+                # approve callback did not, so a file-only approve always alarmed.
+                # [2026-07-27]
                 dist = result.get("distribution", {})
-                status_lines = ["Distribution complete:"]
-                if dist.get("drive_saved"):
-                    status_lines.append("  - Saved to Google Drive")
-                if dist.get("sheets_updated"):
-                    status_lines.append(f"  - {dist.get('tasks_added', 0)} tasks added to tracker")
-                if dist.get("stakeholders_updated"):
-                    status_lines.append(f"  - {dist.get('stakeholders_added', 0)} stakeholders updated")
-                if dist.get("telegram_sent"):
-                    status_lines.append("  - Team notified via Telegram")
-                if dist.get("email_sent"):
-                    status_lines.append("  - Email sent to team")
+                if dist:
+                    status_lines = ["Distribution complete:"]
+                    if dist.get("drive_saved"):
+                        status_lines.append("  - Saved to Google Drive")
+                    if dist.get("sheets_updated"):
+                        status_lines.append(f"  - {dist.get('tasks_added', 0)} tasks added to tracker")
+                    if dist.get("stakeholders_updated"):
+                        status_lines.append(f"  - {dist.get('stakeholders_added', 0)} stakeholders updated")
+                    if dist.get("telegram_sent"):
+                        status_lines.append("  - Team notified via Telegram")
+                    if dist.get("email_sent"):
+                        status_lines.append("  - Email sent to team")
 
-                if len(status_lines) == 1:
-                    # No channel succeeded — don't imply success (audit AD-03).
-                    status_lines = [
-                        "⚠️ Distribution FAILED on all channels — nothing went out. "
-                        "It's approved in the DB; please retry or check the logs."
-                    ]
-                await self.send_to_eyal("\n".join(status_lines), parse_mode=None)
+                    if len(status_lines) == 1:
+                        # No channel succeeded — don't imply success (audit AD-03).
+                        status_lines = [
+                            "⚠️ Distribution FAILED on all channels — nothing went out. "
+                            "It's approved in the DB; please retry or check the logs."
+                        ]
+                    await self.send_to_eyal("\n".join(status_lines), parse_mode=None)
+                else:
+                    # File-only (email_thread): show what actually happened.
+                    await self.send_to_eyal(result.get("next_step", "Done."), parse_mode=None)
 
             except Exception as e:
                 logger.error(f"Error distributing meeting {meeting_id}: {e}")
