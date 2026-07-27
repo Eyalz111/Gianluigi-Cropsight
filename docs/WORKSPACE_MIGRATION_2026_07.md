@@ -113,21 +113,43 @@ impersonation of `gianluigi@cropsight.io` instead of a refresh token.
 - [ ] ✅ Personal Gmail disconnected from ingestion **and** sending; self-loop class gone.
 
 ### Phase 2 — Drive + Sheets
-- [ ] [C] Ship **Shared Drive support** in `services/google_drive.py`: `supportsAllDrives=True`
-      on get/create/update/copy/delete, `includeItemsFromAllDrives=True` + `supportsAllDrives=True`
-      + `corpora`/`driveId` on list. Deploy — **inert** while folders are still in My Drive.
-- [ ] [E] Add `eyalz111@gmail.com` to `CropSight Ops` as **Content Manager** (temporary).
-- [ ] [B] **DRY RUN**: move ONE low-value Gianluigi folder into `CropSight Ops`. [C] verify
-      listing + create still work; capture its (possibly new) folder ID.
-- [ ] [E] Move the rest into `CropSight Ops` via the **web UI**:
-      Gianluigi's folders + heavy CropSight data + **Nechama's legal files → a non-watched
-      subfolder** (e.g. `CropSight Ops/Legal`). Move the **3 Sheets** in too.
-- [ ] [C] Run a re-capture script: list the `CropSight Ops` tree, map folder **name → new ID**,
-      output the env-var updates; **update the ~14 folder-ID env vars**. Confirm the 3 sheet
-      IDs are **unchanged**.
-- [ ] [C] Flip the main Drive+Sheets auth to `gianluigi@cropsight.io` (DWD). Deploy; verify
-      the drive watcher lists transcripts and the reconcile still syncs Sheets↔DB.
-- [ ] [E] Remove `eyalz111` from `CropSight Ops`; re-tighten the external-member setting.
+
+> ### ⚠️ 2026-07-27 CORRECTION — "MOVE the folders" is IMPOSSIBLE (external-owned content)
+> Verified live: **UI drag AND `files().update(addParents=…)` both 403.** Google's rule:
+> *"You can't move folders or files EXTERNAL users own"* into an org shared drive — even when
+> that external user is a Content Manager member. Everything is owned by the external
+> `eyalz111@gmail.com` (the bot's Drive token), so the move path is dead. No admin toggle fixes
+> external-OWNED content. (`gianluigi@` seat = Business Standard, live 0AIZ… drive verified.)
+>
+> **KEY ENABLER:** the bot (eyalz111, Content Manager) **CAN create NEW content in the shared
+> drive** (verified — it made a folder + doc there → org-owned). So the migration is
+> **CREATE fresh + COPY historical**, not move:
+>
+> 1. **Operational (bot going forward) — CREATE fresh in `CropSight Ops`:** the bot creates new
+>    Raw Transcripts / Meeting Summaries / Meeting Prep / Weekly Digests / Documents folders in
+>    the shared drive; re-point the ~14 folder-ID env vars to the new IDs. New summaries/preps →
+>    org-owned immediately. **Tactiq must be re-pointed** to the new Raw Transcripts folder
+>    (external dependency). Sheets: recreate the 3 in the shared drive (bot creates them) →
+>    re-point sheet-ID env vars → the reconcile **repopulates from the DB** (source of truth);
+>    or keep sheets in My Drive short-term (lower-priority disconnection gap).
+> 2. **Historical files + heavy data — COPY in** (can't move): Google Takeout export → re-upload
+>    by an internal account, or a migration tool (CloudM/BitTitan). New IDs (fine for archives).
+> 3. **Identity switch (final hardening):** flip the Drive/Sheets token from eyalz111 →
+>    `gianluigi@` (add Drive scope + a gianluigi@ token or DWD) once operational content lives in
+>    the shared drive. Optional to test first: Admin "editors can move files into shared drives"
+>    (Migration settings) + share a folder to eyal.zror@ as Editor + try a move — but Google says
+>    external-owned still can't move, so expect failure.
+>
+> The steps below are the SUPERSEDED "move" plan, kept for context.
+
+- [x] [C] Ship **Shared Drive support** in `services/google_drive.py` (DONE — `_list_scope()`,
+      supportsAllDrives everywhere; verified live that the two flags list shared-drive folders).
+- [ ] ~~[E] Move folders/Sheets into `CropSight Ops` via UI~~ — **BLOCKED** (external-owned; see above).
+- [ ] [C] Create fresh operational folders in the shared drive; re-capture + set the ~14 env vars.
+- [ ] [E] Re-point Tactiq to the new Raw Transcripts folder.
+- [ ] [C] Recreate the 3 sheets in the shared drive; re-point; let reconcile repopulate.
+- [ ] [E/tool] Copy historical files + heavy data into the shared drive (Takeout / CloudM).
+- [ ] [C] Flip Drive/Sheets token to `gianluigi@` (final disconnection).
 - [ ] ✅ Personal Drive disconnected; all content org-owned.
 
 ### Phase 3 — Calendar
