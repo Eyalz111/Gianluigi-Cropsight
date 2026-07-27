@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Google Drive Folder IDs
     # ==========================================================================
+    # Shared Drive id of "CropSight Ops" once the workspace migration moves the
+    # folders there. EMPTY = folders still in My Drive (default corpora); when set,
+    # Drive listings scope to that shared drive (corpora=drive + driveId). Drive API
+    # calls always pass supportsAllDrives=True, which is a no-op for My Drive.
+    # [2026-07-27 workspace migration P2]
+    SHARED_DRIVE_ID: str = Field(default="", description="CropSight Ops Shared Drive id (empty until the migration moves folders in)")
     CROPSIGHT_OPS_FOLDER_ID: str = Field(default="", description="Root CropSight Ops folder ID")
     RAW_TRANSCRIPTS_FOLDER_ID: str = Field(default="", description="Raw Transcripts folder ID")
     MEETING_SUMMARIES_FOLDER_ID: str = Field(default="", description="Meeting Summaries folder ID")

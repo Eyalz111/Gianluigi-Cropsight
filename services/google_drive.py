@@ -90,7 +90,7 @@ class GoogleDriveService:
         stale sockets in the connection pool; this pattern heals them.
 
         Caller passes a ZERO-ARG callable that constructs and returns the
-        API request (e.g. `lambda: self.service.files().list(...)`) so
+        API request (e.g. `lambda: self.service.files().list(**self._list_scope(), ...)`) so
         the request is rebuilt against the fresh service after rebuild.
 
         Retries on: ConnectionError, TimeoutError, OSError (incl.
@@ -130,6 +130,24 @@ class GoogleDriveService:
                         raise
                 else:
                     raise  # Non-transient (4xx, auth, etc.) — don't retry
+
+    @staticmethod
+    def _list_scope() -> dict:
+        """Extra files().list() kwargs so listings see Shared Drive contents.
+
+        supportsAllDrives + includeItemsFromAllDrives are always safe (no-op for
+        My Drive). When SHARED_DRIVE_ID is configured (post-migration), scope the
+        search to that drive via corpora=drive + driveId — the documented, reliable
+        way to list a shared drive's contents (and it avoids the orderBy limits
+        that corpora=allDrives imposes). Until then, default corpora (My Drive).
+        [2026-07-27 workspace migration P2 — inert while folders are in My Drive]
+        """
+        scope = {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
+        sd = getattr(settings, "SHARED_DRIVE_ID", "") or ""
+        if sd:
+            scope["corpora"] = "drive"
+            scope["driveId"] = sd
+        return scope
 
     def _build_service(self):
         """Build the Google Drive API service with OAuth2 credentials."""
@@ -211,7 +229,7 @@ class GoogleDriveService:
             query = " and ".join(query_parts)
 
             results = self._execute_with_retry(
-                lambda: self.service.files().list(
+                lambda: self.service.files().list(**self._list_scope(), 
                     q=query,
                     spaces="drive",
                     fields="files(id, name, createdTime, mimeType, webViewLink)",
@@ -264,7 +282,7 @@ class GoogleDriveService:
             query = " and ".join(query_parts)
 
             results = self._execute_with_retry(
-                lambda: self.service.files().list(
+                lambda: self.service.files().list(**self._list_scope(), 
                     q=query,
                     spaces="drive",
                     fields="files(id, name, createdTime, mimeType, webViewLink, size)",
@@ -324,7 +342,7 @@ class GoogleDriveService:
         last_exc: Exception | None = None
         for attempt in range(max_attempts):
             try:
-                request = self.service.files().get_media(fileId=file_id)
+                request = self.service.files().get_media(supportsAllDrives=True, fileId=file_id)
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, request)
                 done = False
@@ -409,7 +427,7 @@ class GoogleDriveService:
                     )
                 else:
                     # Regular file - download content
-                    request = self.service.files().get_media(fileId=file_id)
+                    request = self.service.files().get_media(supportsAllDrives=True, fileId=file_id)
 
                 # Download content
                 fh = io.BytesIO()
@@ -451,7 +469,7 @@ class GoogleDriveService:
         """
         try:
             file = self._execute_with_retry(
-                lambda: self.service.files().get(
+                lambda: self.service.files().get(supportsAllDrives=True, 
                     fileId=file_id,
                     fields="id, name, mimeType, createdTime, modifiedTime, webViewLink, size, videoMediaMetadata",
                 )
@@ -582,7 +600,7 @@ class GoogleDriveService:
             )
 
             file = self._execute_with_retry(
-                lambda: self.service.files().create(
+                lambda: self.service.files().create(supportsAllDrives=True, 
                     body=file_metadata,
                     media_body=media,
                     fields="id, name, webViewLink, createdTime"
@@ -622,7 +640,7 @@ class GoogleDriveService:
             )
 
             file = self._execute_with_retry(
-                lambda: self.service.files().create(
+                lambda: self.service.files().create(supportsAllDrives=True, 
                     body=file_metadata,
                     media_body=media,
                     fields="id, name, webViewLink, createdTime",
@@ -668,7 +686,7 @@ class GoogleDriveService:
             )
 
             file = self._execute_with_retry(
-                lambda: self.service.files().create(
+                lambda: self.service.files().create(supportsAllDrives=True, 
                     body=file_metadata,
                     media_body=media,
                     fields="id, name, webViewLink, createdTime",
@@ -701,7 +719,7 @@ class GoogleDriveService:
             if folder:
                 body["parents"] = [folder]
             doc = self._execute_with_retry(
-                lambda: self.service.files().create(body=body, media_body=media, fields="id")
+                lambda: self.service.files().create(supportsAllDrives=True, body=body, media_body=media, fields="id")
             )
             doc_id = doc.get("id")
             if not doc_id:
@@ -716,7 +734,7 @@ class GoogleDriveService:
         finally:
             if doc_id:
                 try:
-                    self._execute_with_retry(lambda: self.service.files().delete(fileId=doc_id))
+                    self._execute_with_retry(lambda: self.service.files().delete(supportsAllDrives=True, fileId=doc_id))
                 except Exception:
                     pass
 
@@ -784,7 +802,7 @@ class GoogleDriveService:
             )
 
             file = self._execute_with_retry(
-                lambda: self.service.files().update(
+                lambda: self.service.files().update(supportsAllDrives=True, 
                     fileId=file_id,
                     media_body=media,
                     fields="id, name, webViewLink, modifiedTime"
@@ -821,7 +839,7 @@ class GoogleDriveService:
             query = f"'{folder_id}' in parents and trashed = false"
 
             results = self._execute_with_retry(
-                lambda: self.service.files().list(
+                lambda: self.service.files().list(**self._list_scope(), 
                     q=query,
                     spaces="drive",
                     fields="files(id, name, mimeType, createdTime, modifiedTime, webViewLink)",
@@ -875,7 +893,7 @@ class GoogleDriveService:
                 "mimeType": "application/vnd.google-apps.folder",
             }
             folder = self._execute_with_retry(
-                lambda: self.service.files().create(
+                lambda: self.service.files().create(supportsAllDrives=True, 
                     body=folder_metadata,
                     fields="id, name, webViewLink",
                 )
@@ -1036,7 +1054,7 @@ class GoogleDriveService:
                 f"and trashed = false"
             )
             result = self._execute_with_retry(
-                lambda: self.service.files().list(
+                lambda: self.service.files().list(**self._list_scope(), 
                     q=query,
                     spaces="drive",
                     fields="files(id, name)",
@@ -1056,7 +1074,7 @@ class GoogleDriveService:
                 "parents": [settings.RAW_TRANSCRIPTS_FOLDER_ID],
             }
             created = self._execute_with_retry(
-                lambda: self.service.files().create(
+                lambda: self.service.files().create(supportsAllDrives=True, 
                     body=metadata,
                     fields="id",
                 )
@@ -1106,7 +1124,7 @@ class GoogleDriveService:
                 f"and trashed = false"
             )
             search = self._execute_with_retry(
-                lambda: self.service.files().list(
+                lambda: self.service.files().list(**self._list_scope(), 
                     q=query,
                     spaces="drive",
                     fields="files(id, name, parents)",
@@ -1144,7 +1162,7 @@ class GoogleDriveService:
             # (Drive uses parents-as-list; to move we add new and remove old)
             remove_parents = ",".join(p for p in current_parents if p != rejected_folder_id)
             self._execute_with_retry(
-                lambda: self.service.files().update(
+                lambda: self.service.files().update(supportsAllDrives=True, 
                     fileId=file_id,
                     addParents=rejected_folder_id,
                     removeParents=remove_parents,

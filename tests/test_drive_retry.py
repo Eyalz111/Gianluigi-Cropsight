@@ -12,6 +12,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.google_drive import GoogleDriveService
 
 
+class TestListScope:
+    """_list_scope() supplies Shared-Drive-aware files().list kwargs. [2026-07-27]"""
+
+    def test_default_is_my_drive(self, monkeypatch):
+        from config.settings import settings
+        monkeypatch.setattr(settings, "SHARED_DRIVE_ID", "", raising=False)
+        sc = GoogleDriveService._list_scope()
+        assert sc == {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
+        assert "driveId" not in sc  # default corpora -> My Drive (inert)
+
+    def test_scopes_to_shared_drive_when_configured(self, monkeypatch):
+        from config.settings import settings
+        monkeypatch.setattr(settings, "SHARED_DRIVE_ID", "0ASharedDriveId", raising=False)
+        sc = GoogleDriveService._list_scope()
+        assert sc["corpora"] == "drive" and sc["driveId"] == "0ASharedDriveId"
+        assert sc["supportsAllDrives"] and sc["includeItemsFromAllDrives"]
+
+
 class TestDriveDownloadRetry:
     """Tests for retry logic on Drive downloads."""
 
