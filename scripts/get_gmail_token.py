@@ -28,11 +28,19 @@ Then give Eyal-side output `GMAIL_REFRESH_TOKEN=...` to whoever deploys, and set
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Google collapses gmail.send into gmail.modify (modify already grants send), so
+# the granted scope set differs from what was requested — oauthlib otherwise
+# raises a "Scope has changed" warning-as-error AFTER the token is issued, losing
+# it. Relax that check; the granted modify+readonly do everything the bot needs.
+# [2026-07-27]
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -58,16 +66,19 @@ def main() -> int:
     print("=" * 64)
     print()
     print("IMPORTANT: when the browser opens, log in as the BOT mailbox:")
-    print("    gianluigi.cropsight@gmail.com")
+    print("    gianluigi@cropsight.io")
     print("NOT your personal account. If you see 'app isn't verified',")
     print("click Advanced -> Go to ... (unsafe) to proceed.")
-    print()
-    input("Press Enter to open the browser...")
+    print(flush=True)
 
     # Always a fresh flow (no cached-token shortcut) so we can't reprint the
-    # personal-account token. Own token file, separate from token.json.
+    # personal-account token. Own token file, separate from token.json. No
+    # interactive input() — the run_local_server URL below is the only step, so
+    # this can be launched non-interactively and the URL relayed. [2026-07-27]
     flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
-    creds = flow.run_local_server(port=8080, access_type="offline", prompt="consent")
+    creds = flow.run_local_server(
+        port=8080, access_type="offline", prompt="consent", open_browser=True
+    )
 
     token_path = project_root / "token_gmail.json"
     token_path.write_text(creds.to_json())
@@ -84,8 +95,8 @@ def main() -> int:
     print()
     print("=" * 64)
     print(f"  Authorized account: {who}")
-    if who.lower() != "gianluigi.cropsight@gmail.com":
-        print("  ⚠️  This is NOT gianluigi.cropsight@gmail.com — re-run and log in")
+    if who.lower() != "gianluigi@cropsight.io":
+        print("  ⚠️  This is NOT gianluigi@cropsight.io — re-run and log in")
         print("      as the bot mailbox, or the fix will point at the wrong inbox.")
     print("=" * 64)
     print()
