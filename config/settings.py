@@ -69,7 +69,13 @@ class Settings(BaseSettings):
     # ==========================================================================
     GOOGLE_CLIENT_ID: str = Field(default="", description="Google OAuth client ID")
     GOOGLE_CLIENT_SECRET: str = Field(default="", description="Google OAuth client secret")
-    GOOGLE_REFRESH_TOKEN: str = Field(default="", description="Google OAuth refresh token")
+    GOOGLE_REFRESH_TOKEN: str = Field(default="", description="Google OAuth refresh token (Drive/Sheets/Calendar)")
+    # Dedicated Gmail token so the inbox watcher reads the BOT mailbox
+    # (gianluigi.cropsight@gmail.com) while Drive/Sheets stay on GOOGLE_REFRESH_TOKEN.
+    # Empty => Gmail falls back to GOOGLE_REFRESH_TOKEN (the historical shared token,
+    # which authenticates as Eyal's personal Gmail — so mail forwarded to the bot
+    # address was never seen). [2026-07-27 inbox-mismatch fix]
+    GMAIL_REFRESH_TOKEN: str = Field(default="", description="Dedicated Gmail OAuth refresh token for the bot mailbox; falls back to GOOGLE_REFRESH_TOKEN")
 
     # ==========================================================================
     # Telegram Bot

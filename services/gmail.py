@@ -183,16 +183,25 @@ class GmailService:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise RuntimeError("Google OAuth credentials not configured")
 
-        if not settings.GOOGLE_REFRESH_TOKEN:
+        # Gmail uses a DEDICATED refresh token when set, so the inbox watcher reads
+        # the bot mailbox (gianluigi.cropsight@gmail.com) instead of whatever account
+        # backs the shared GOOGLE_REFRESH_TOKEN (Eyal's personal Gmail). Falls back to
+        # the shared token so nothing changes until GMAIL_REFRESH_TOKEN is provided.
+        # Root cause of "forward to the bot address is never ingested". [2026-07-27]
+        gmail_refresh_token = (
+            getattr(settings, "GMAIL_REFRESH_TOKEN", "") or settings.GOOGLE_REFRESH_TOKEN
+        )
+        self._using_dedicated_token = bool(getattr(settings, "GMAIL_REFRESH_TOKEN", ""))
+        if not gmail_refresh_token:
             raise RuntimeError(
-                "Google refresh token not configured. "
-                "Run the OAuth flow to obtain a refresh token."
+                "Gmail refresh token not configured. Set GMAIL_REFRESH_TOKEN (the "
+                "bot mailbox) or GOOGLE_REFRESH_TOKEN. Run scripts/get_google_token.py."
             )
 
         # Create credentials from refresh token
         self._credentials = Credentials(
             token=None,
-            refresh_token=settings.GOOGLE_REFRESH_TOKEN,
+            refresh_token=gmail_refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,
@@ -218,8 +227,19 @@ class GmailService:
         """
         try:
             # Force service initialization to verify auth
-            _ = self.service
-            logger.info("Gmail API authentication successful")
+            svc = self.service
+            # Log WHICH mailbox we authenticated as + whether the dedicated Gmail
+            # token is in use. The inbox-mismatch bug (watcher on Eyal's personal
+            # Gmail, not the bot mailbox) was invisible precisely because nothing
+            # ever logged the address the watcher actually reads. [2026-07-27]
+            try:
+                addr = svc.users().getProfile(userId="me").execute().get("emailAddress", "?")
+                token_src = "GMAIL_REFRESH_TOKEN" if getattr(self, "_using_dedicated_token", False) else "GOOGLE_REFRESH_TOKEN"
+                expected = getattr(settings, "GIANLUIGI_EMAIL", "") or ""
+                warn = "" if (not expected or addr.lower() == expected.lower()) else f" ⚠️ EXPECTED {expected}"
+                logger.info(f"Gmail API authenticated as {addr} (via {token_src}){warn}")
+            except Exception as pe:
+                logger.info(f"Gmail API authentication successful (profile lookup skipped: {pe})")
             return True
         except Exception as e:
             logger.error(f"Gmail API authentication failed: {e}")

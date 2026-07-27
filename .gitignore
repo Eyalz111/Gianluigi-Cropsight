@@ -13,6 +13,7 @@
 *.key
 credentials.json
 token.json
+token_gmail.json
 service-account.json
 
 # =============================================================================
