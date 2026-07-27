@@ -13,21 +13,17 @@ from services.google_drive import GoogleDriveService
 
 
 class TestListScope:
-    """_list_scope() supplies Shared-Drive-aware files().list kwargs. [2026-07-27]"""
+    """_list_scope() supplies Shared-Drive-aware files().list kwargs. [2026-07-27]
 
-    def test_default_is_my_drive(self, monkeypatch):
-        from config.settings import settings
-        monkeypatch.setattr(settings, "SHARED_DRIVE_ID", "", raising=False)
+    Just the two flags — verified live that a parent-scoped query lists a Shared
+    Drive folder's children with these alone. Deliberately NO corpora/driveId: it
+    must find BOTH My-Drive and Shared-Drive folders during the migration."""
+
+    def test_two_flags_no_drive_scoping(self):
         sc = GoogleDriveService._list_scope()
         assert sc == {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
-        assert "driveId" not in sc  # default corpora -> My Drive (inert)
-
-    def test_scopes_to_shared_drive_when_configured(self, monkeypatch):
-        from config.settings import settings
-        monkeypatch.setattr(settings, "SHARED_DRIVE_ID", "0ASharedDriveId", raising=False)
-        sc = GoogleDriveService._list_scope()
-        assert sc["corpora"] == "drive" and sc["driveId"] == "0ASharedDriveId"
-        assert sc["supportsAllDrives"] and sc["includeItemsFromAllDrives"]
+        # no driveId/corpora -> won't hide My-Drive folders mid-migration
+        assert "driveId" not in sc and "corpora" not in sc
 
 
 class TestDriveDownloadRetry:

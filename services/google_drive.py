@@ -135,19 +135,16 @@ class GoogleDriveService:
     def _list_scope() -> dict:
         """Extra files().list() kwargs so listings see Shared Drive contents.
 
-        supportsAllDrives + includeItemsFromAllDrives are always safe (no-op for
-        My Drive). When SHARED_DRIVE_ID is configured (post-migration), scope the
-        search to that drive via corpora=drive + driveId — the documented, reliable
-        way to list a shared drive's contents (and it avoids the orderBy limits
-        that corpora=allDrives imposes). Until then, default corpora (My Drive).
+        supportsAllDrives + includeItemsFromAllDrives is all that's needed for our
+        PARENT-scoped queries ("'<folderId>' in parents"): verified 2026-07-27 that
+        the bot lists a Shared Drive folder's children with just these two flags —
+        no corpora/driveId. Deliberately NOT scoping to one driveId: during the
+        migration some folders are in My Drive and some in the Shared Drive at the
+        same time, and corpora=drive+driveId would hide the My-Drive ones. These
+        two flags find BOTH. No-op for My Drive today.
         [2026-07-27 workspace migration P2 — inert while folders are in My Drive]
         """
-        scope = {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
-        sd = getattr(settings, "SHARED_DRIVE_ID", "") or ""
-        if sd:
-            scope["corpora"] = "drive"
-            scope["driveId"] = sd
-        return scope
+        return {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
 
     def _build_service(self):
         """Build the Google Drive API service with OAuth2 credentials."""
