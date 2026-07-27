@@ -35,6 +35,50 @@ class TestStripQuoted:
         assert strip_quoted_text("") == "" and extract_quoted_text("") == ""
 
 
+class TestExtractBody:
+    """gmail_service._extract_body robustness across charset / HTML / multipart.
+    [2026-07-27]"""
+
+    @staticmethod
+    def _b64(text, enc="utf-8"):
+        import base64
+        return base64.urlsafe_b64encode(text.encode(enc)).decode()
+
+    def test_multipart_prefers_plain(self):
+        from services.gmail import gmail_service as g
+        p = {"mimeType": "multipart/alternative", "parts": [
+            {"mimeType": "text/plain",
+             "headers": [{"name": "Content-Type", "value": "text/plain; charset=UTF-8"}],
+             "body": {"data": self._b64("plain wins")}},
+            {"mimeType": "text/html", "body": {"data": self._b64("<p>html loses</p>")}},
+        ]}
+        assert g._extract_body(p) == "plain wins"
+
+    def test_hebrew_windows1255_not_dropped(self):
+        # The real gap: a hard utf-8 decode silently stripped Hebrew that was sent
+        # in windows-1255 (a common Hebrew charset).
+        from services.gmail import gmail_service as g
+        heb = "שלום עולם"  # "shalom olam"
+        p = {"mimeType": "text/plain",
+             "headers": [{"name": "Content-Type", "value": 'text/plain; charset="windows-1255"'}],
+             "body": {"data": self._b64(heb, "windows-1255")}}
+        assert g._extract_body(p) == heb
+
+    def test_html_only_email_is_not_empty(self):
+        # An HTML-only email used to yield an empty body (only text/plain handled).
+        from services.gmail import gmail_service as g
+        p = {"mimeType": "multipart/mixed", "parts": [
+            {"mimeType": "text/html",
+             "body": {"data": self._b64("<div>Meeting on <b>Tuesday</b> re: partnership</div>")}},
+        ]}
+        out = g._extract_body(p)
+        assert "Meeting" in out and "Tuesday" in out and "<" not in out
+
+    def test_empty_body(self):
+        from services.gmail import gmail_service as g
+        assert g._extract_body({"mimeType": "text/plain", "body": {}}) == ""
+
+
 class TestHelpers:
     def test_participants(self):
         msg = {"from": "Paolo Vailetti <paolo@x.com>", "to": "Eyal <eyal@x.com>, g@x.com", "cc": ""}

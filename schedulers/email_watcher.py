@@ -205,7 +205,15 @@ class EmailWatcher:
                     from processors.email_ingest import ingest_email_thread
                     await ingest_email_thread(msg)
                     if attachments:
-                        await self._handle_attachments(msg_id, msg, member_name)
+                        # Best-effort: the thread is already filed, so a weird/
+                        # unparseable attachment must NOT block mark-as-read or
+                        # trigger the poison-retry path. [2026-07-27]
+                        try:
+                            await self._handle_attachments(msg_id, msg, member_name)
+                        except Exception as _ae:
+                            logger.warning(
+                                f"attachment handling failed (thread already ingested): {_ae}"
+                            )
                 # Ingestion OFF: an attachment falls back to the document pipeline.
                 elif attachments:
                     await self._handle_attachments(msg_id, msg, member_name)
