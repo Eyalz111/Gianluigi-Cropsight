@@ -192,17 +192,23 @@ class EmailWatcher:
                         self._processed_ids.add(msg_id)
                         continue
                     await self._handle_approval_reply(msg_id, body, member_name, subject)
-                # Check if it has attachments
-                elif attachments:
-                    await self._handle_attachments(msg_id, msg, member_name)
-                # Ingest the thread as an input source. The legacy Q&A auto-answer
-                # was RETIRED here (2026-07-25): the bot read AND sent from the same
-                # Gmail, so an auto-reply bounced back and self-looped (the 07-24
-                # incident). Ingestion files silently instead. When ingestion is off,
-                # a plain email is just marked read (no auto-reply) below.
+                # Ingest the thread as an input source. A forwarded/CC'd business
+                # thread almost always carries an attachment (deck/PDF), so ingest
+                # the CONVERSATION even when attachments are present, THEN process
+                # the attachments too. The old `elif attachments:` ordering routed
+                # any attachment-bearing forward to document-handling and NEVER
+                # ingested the thread — so no approval card ever appeared for a
+                # real forward. [2026-07-27 forward-with-attachment gap]
+                # (The legacy Q&A auto-answer was RETIRED here 2026-07-25 — the bot
+                # read AND sent from the same Gmail, self-looping; it files silently.)
                 elif getattr(settings, "EMAIL_INGEST_ENABLED", False):
                     from processors.email_ingest import ingest_email_thread
                     await ingest_email_thread(msg)
+                    if attachments:
+                        await self._handle_attachments(msg_id, msg, member_name)
+                # Ingestion OFF: an attachment falls back to the document pipeline.
+                elif attachments:
+                    await self._handle_attachments(msg_id, msg, member_name)
 
                 # Phase 4: After existing routing, extract and log for morning brief
                 await self._extract_and_log(

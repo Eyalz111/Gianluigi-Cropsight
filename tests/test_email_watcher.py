@@ -373,6 +373,41 @@ class TestCheckInbox:
             mock_supa.store_embeddings_batch.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_forward_with_attachment_still_ingests_thread(self, mock_settings_for_email_watcher):
+        """A forwarded thread WITH an attachment must ingest the CONVERSATION when
+        ingestion is on, then ALSO process the attachment. The old `elif attachments`
+        ordering routed any attachment-bearing forward to document-handling only, so
+        no approval card ever appeared for a real forward. [2026-07-27]"""
+        mock_settings_for_email_watcher.EMAIL_INGEST_ENABLED = True
+        from schedulers.email_watcher import EmailWatcher
+
+        watcher = EmailWatcher()
+        mock_messages = [{
+            "id": "msg-fwd", "threadId": "t-fwd",
+            "from": "Eyal Zror <eyal@cropsight.io>",
+            "subject": "Fwd: Potential Partnership on Crop Yield",
+            "body": "Forwarded thread body with the conversation.",
+            "attachments": [{"filename": "deck.pdf", "mimeType": "application/pdf",
+                             "attachmentId": "att-9", "size": 2048}],
+        }]
+        with patch("schedulers.email_watcher.gmail_service") as mock_gmail, \
+             patch("schedulers.email_watcher.supabase_client"), \
+             patch("schedulers.email_watcher.is_team_email", return_value=True), \
+             patch("schedulers.email_watcher.get_team_member_by_email",
+                   return_value={"name": "Eyal Zror", "role": "CEO"}), \
+             patch("processors.email_ingest.ingest_email_thread",
+                   new_callable=AsyncMock) as mock_ingest, \
+             patch.object(watcher, "_handle_attachments", new_callable=AsyncMock) as mock_att, \
+             patch.object(watcher, "_extract_and_log", new_callable=AsyncMock):
+            mock_gmail.get_unread_messages = AsyncMock(return_value=mock_messages)
+            mock_gmail.mark_as_read = AsyncMock(return_value=True)
+
+            await watcher._check_inbox()
+
+            mock_ingest.assert_awaited_once()   # the THREAD is ingested (was the gap)
+            mock_att.assert_awaited_once()      # and the attachment is still handled
+
+    @pytest.mark.asyncio
     async def test_duplicate_prevention(self, mock_settings_for_email_watcher):
         """Should skip already-processed messages."""
         from schedulers.email_watcher import EmailWatcher
