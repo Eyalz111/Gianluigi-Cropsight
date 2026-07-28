@@ -145,9 +145,27 @@ impersonation of `gianluigi@cropsight.io` instead of a refresh token.
 - [x] [C] Ship **Shared Drive support** in `services/google_drive.py` (DONE — `_list_scope()`,
       supportsAllDrives everywhere; verified live that the two flags list shared-drive folders).
 - [ ] ~~[E] Move folders/Sheets into `CropSight Ops` via UI~~ — **BLOCKED** (external-owned; see above).
-- [ ] [C] Create fresh operational folders in the shared drive; re-capture + set the ~14 env vars.
+- [~] [C] Operational folder env vars → shared drive (re-pointed to the light-copied folders,
+      history preserved). **DONE:** MEETING_PREP, MEETING_SUMMARIES, WEEKLY_DIGESTS (prior pass);
+      INTELLIGENCE_SIGNAL, GANTT_SLIDES, GANTT_BACKUP, CROPSIGHT_OPS (→ shared-drive root),
+      COST_REPORTS (new, → `Cost Reports/`; cost_report_scheduler.py now prefers it) — 2026-07-27.
+      **Left on My Drive (reason):** DATA_PACKAGE (heavy copy in flight), DOCUMENTS + RAW_TRANSCRIPTS
+      (parked — Documents cutover + Tactiq re-point), WEEKLY_REPORTS (dead: no live code path).
+      Rollback IDs recorded in-session.
 - [ ] [E] Re-point Tactiq to the new Raw Transcripts folder.
-- [ ] [C] Recreate the 3 sheets in the shared drive; re-point; let reconcile repopulate.
+- [x] [C] **Sheets — DONE 2026-07-27 via COPY, not recreate.** A `files().copy()` of a native
+      sheet duplicates *everything* (tabs, data, formatting, protected ranges, cross-tab gids,
+      **and the col-J/H UUIDs**) into a fresh org-owned file. Reconcile keys on the row UUID
+      (`get_sheet_snapshots` is "keyed by task_id"; `edit_reconcile.py` never references a sheet
+      ID), so swapping the sheet ID is transparent — no repopulation, no dedup risk. Copied all 3
+      into `CropSight Ops/Sheets/`, re-pointed env vars (rev `gianluigi-00211-4dg`), verified
+      tab-count match + 150/150 UUIDs intact + `/ready` 200. Verified live that the bot can WRITE
+      a copied shared-drive sheet (Sheets API). New IDs:
+      - `TASK_TRACKER_SHEET_ID=1oYotDz1Tt6cLy9sLwuYapYux1QThxPyJ1_jFglerQbI` (was `1T22FZ…`)
+      - `STAKEHOLDER_TRACKER_SHEET_ID=13sT33nSM8m8Nyfi-eV0OQYdmjYi6xXegogeLM9AY0Nk` (was `1o6NEV…`)
+      - `GANTT_SHEET_ID=1RXAvu_7ecCdyD6-Sn7IoXcrFFey4i2A9gehZ4S09WJ0` (was `1lYP3a…`)
+      Old My-Drive sheets kept as rollback (revert env vars); delete after a few days.
+      A stale light-copy of the Gantt sits at the shared-drive root — trash it.
 - [ ] [E/tool] Copy historical files + heavy data into the shared drive (Takeout / CloudM).
 - [ ] [C] Flip Drive/Sheets token to `gianluigi@` (final disconnection).
 - [ ] ✅ Personal Drive disconnected; all content org-owned.

@@ -151,23 +151,40 @@ class GoogleDriveService:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise RuntimeError("Google OAuth credentials not configured")
 
-        if not settings.GOOGLE_REFRESH_TOKEN:
+        # Prefer the dedicated org token (gianluigi@cropsight.io, full drive) so the
+        # bot's Drive I/O is off Eyal's personal account. Falls back to the shared
+        # GOOGLE_REFRESH_TOKEN (eyalz111) until the dedicated token is set, so nothing
+        # changes until then. [2026-07-28 workspace migration P2]
+        drive_refresh_token = (
+            getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", "") or settings.GOOGLE_REFRESH_TOKEN
+        )
+        self._using_dedicated_token = bool(getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", ""))
+        if not drive_refresh_token:
             raise RuntimeError(
-                "Google refresh token not configured. "
-                "Run the OAuth flow to obtain a refresh token."
+                "Google refresh token not configured. Set GOOGLE_DRIVE_REFRESH_TOKEN "
+                "(the org account) or GOOGLE_REFRESH_TOKEN. Run scripts/get_drive_token.py."
             )
+
+        # The dedicated org token carries FULL drive (needed to read/write org-owned
+        # Shared-Drive content it did not itself create); the legacy personal token
+        # only has drive.file + drive.readonly.
+        scopes = (
+            ["https://www.googleapis.com/auth/drive"]
+            if self._using_dedicated_token
+            else [
+                "https://www.googleapis.com/auth/drive.file",
+                "https://www.googleapis.com/auth/drive.readonly",
+            ]
+        )
 
         # Create credentials from refresh token
         self._credentials = Credentials(
             token=None,
-            refresh_token=settings.GOOGLE_REFRESH_TOKEN,
+            refresh_token=drive_refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,
-            scopes=[
-                "https://www.googleapis.com/auth/drive.file",
-                "https://www.googleapis.com/auth/drive.readonly",
-            ],
+            scopes=scopes,
         )
 
         # Refresh the token if needed
@@ -185,8 +202,23 @@ class GoogleDriveService:
         """
         try:
             # Force service initialization to verify auth
-            _ = self.service
-            logger.info("Google Drive API authentication successful")
+            svc = self.service
+            # Log WHICH account we authenticated as — catches a wrong/stale token and
+            # confirms the P2 flip to the org account actually took. [2026-07-28]
+            who = "?"
+            try:
+                who = (
+                    svc.about().get(fields="user/emailAddress").execute()
+                    .get("user", {}).get("emailAddress", "?")
+                )
+            except Exception:
+                pass
+            src = "GOOGLE_DRIVE_REFRESH_TOKEN" if getattr(self, "_using_dedicated_token", False) else "GOOGLE_REFRESH_TOKEN"
+            logger.info(f"Google Drive API authenticated as {who} (via {src})")
+            if getattr(self, "_using_dedicated_token", False) and who.lower() != "gianluigi@cropsight.io":
+                logger.warning(
+                    f"Drive token authenticates as {who}, expected gianluigi@cropsight.io"
+                )
             return True
         except Exception as e:
             logger.error(f"Google Drive API authentication failed: {e}")

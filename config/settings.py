@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # which authenticates as Eyal's personal Gmail — so mail forwarded to the bot
     # address was never seen). [2026-07-27 inbox-mismatch fix]
     GMAIL_REFRESH_TOKEN: str = Field(default="", description="Dedicated Gmail OAuth refresh token for the bot mailbox; falls back to GOOGLE_REFRESH_TOKEN")
+    # Dedicated Drive+Sheets token so those services authenticate as the ORG account
+    # (gianluigi@cropsight.io) instead of Eyal's personal eyalz111@gmail.com. Requires
+    # FULL `drive` scope (not drive.file) so the bot can see org-owned Shared-Drive
+    # content it did not itself create. Empty => Drive/Sheets fall back to
+    # GOOGLE_REFRESH_TOKEN (personal). [2026-07-28 workspace migration P2 token flip]
+    GOOGLE_DRIVE_REFRESH_TOKEN: str = Field(default="", description="Dedicated Drive+Sheets OAuth refresh token (gianluigi@cropsight.io, full drive+spreadsheets); falls back to GOOGLE_REFRESH_TOKEN")
 
     # ==========================================================================
     # Telegram Bot
@@ -515,6 +521,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     WEEKLY_REPORTS_FOLDER_ID: str = Field(default="", description="Weekly Reports Drive folder ID")
     GANTT_SLIDES_FOLDER_ID: str = Field(default="", description="Gantt Slides Drive folder ID")
+    COST_REPORTS_FOLDER_ID: str = Field(default="", description="Cost Reports Drive folder ID (archive target; falls back to CROPSIGHT_OPS_FOLDER_ID)")
 
     # ==========================================================================
     # Approval Mode (v0.2) + Reminders (post-Phase 4)

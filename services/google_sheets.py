@@ -718,16 +718,22 @@ class GoogleSheetsService:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise RuntimeError("Google OAuth credentials not configured")
 
-        if not settings.GOOGLE_REFRESH_TOKEN:
+        # Same dedicated org token as Drive (gianluigi@cropsight.io) — one gianluigi@
+        # grant covers both drive + spreadsheets. Falls back to the shared personal
+        # token until set. [2026-07-28 workspace migration P2]
+        sheets_refresh_token = (
+            getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", "") or settings.GOOGLE_REFRESH_TOKEN
+        )
+        if not sheets_refresh_token:
             raise RuntimeError(
-                "Google refresh token not configured. "
-                "Run the OAuth flow to obtain a refresh token."
+                "Google refresh token not configured. Set GOOGLE_DRIVE_REFRESH_TOKEN "
+                "(the org account) or GOOGLE_REFRESH_TOKEN. Run scripts/get_drive_token.py."
             )
 
         # Create credentials from refresh token
         self._credentials = Credentials(
             token=None,
-            refresh_token=settings.GOOGLE_REFRESH_TOKEN,
+            refresh_token=sheets_refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,

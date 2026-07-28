@@ -14,6 +14,7 @@
 credentials.json
 token.json
 token_gmail.json
+token_drive.json
 service-account.json
 
 # =============================================================================

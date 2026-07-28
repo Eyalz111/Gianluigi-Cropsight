@@ -126,17 +126,18 @@ class CostReportScheduler:
         drive_link = ""
         try:
             from services.google_drive import drive_service
-            if settings.CROPSIGHT_OPS_FOLDER_ID:
+            archive_folder = settings.COST_REPORTS_FOLDER_ID or settings.CROPSIGHT_OPS_FOLDER_ID
+            if archive_folder:
                 today = datetime.now(_ISRAEL_TZ).strftime("%Y-%m-%d")
                 meta = await drive_service._upload_bytes_file(
                     data=report["doc"].encode("utf-8"),
                     filename=f"CropSight Cost Report - {today}.md",
-                    folder_id=settings.CROPSIGHT_OPS_FOLDER_ID,
+                    folder_id=archive_folder,
                     mime_type="text/markdown",
                 )
                 drive_link = (meta or {}).get("webViewLink", "")
             else:
-                logger.warning("CROPSIGHT_OPS_FOLDER_ID not set — skipping Drive archive")
+                logger.warning("No cost-report Drive folder set — skipping Drive archive")
         except Exception as e:
             logger.error(f"Cost report Drive archive failed (Telegram still sent): {e}")
 
