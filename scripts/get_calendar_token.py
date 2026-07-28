@@ -1,94 +1,102 @@
 """
-Get a calendar-only OAuth refresh token for a team member.
+Get a calendar-only OAuth refresh token for the account whose calendar
+Gianluigi should read.
 
-This runs a local OAuth consent flow so Gianluigi can read a user's
-calendar AS THAT USER — which means we see their event colors, declined
-status, and everything exactly as they see it.
+This runs a local OAuth consent flow so Gianluigi reads the calendar AS THAT
+USER — seeing event colors, declined status, everything as they see it.
+
+[2026-07-28] Migration: the target is now **eyal.zror@cropsight.io** (Eyal's
+Workspace account, where CropSight invites land) instead of the personal
+eyalz111@gmail.com — the final calendar disconnection from the personal account.
+Hardened to match get_drive_token.py: forces access_type=offline + prompt=consent
+(so a refresh token is actually returned), opens the browser directly (no
+copy-paste URL that gets truncated), and verifies which account was authorized.
 
 Usage:
     python scripts/get_calendar_token.py
+    # When the browser opens, LOG IN AS eyal.zror@cropsight.io
 
-    # Or specify the Google account email upfront:
-    python scripts/get_calendar_token.py --email eyalz111@gmail.com
-
-The script prints the refresh token. Copy it into .env as:
-    EYAL_CALENDAR_REFRESH_TOKEN=<token>
-
-Architecture note (Phase B / future):
-    When CropSight moves to Google Workspace with a @cropsight.com domain,
-    replace per-user OAuth tokens with a service account + domain-wide
-    delegation. That gives the same access without individual consent flows.
-    See: https://support.google.com/a/answer/162106
+Then set it (do NOT commit it):
+    gcloud run services update gianluigi --region europe-west1 \
+        --update-env-vars EYAL_CALENDAR_REFRESH_TOKEN=<the-token>
 """
 
 import argparse
+import os
 import sys
+from pathlib import Path
 
-try:
-    from google_auth_oauthlib.flow import InstalledAppFlow
-except ImportError:
-    print("Missing dependency. Run: pip install google-auth-oauthlib")
-    sys.exit(1)
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-# Calendar read-only — minimal scope for what we need
+# Avoid oauthlib's "Scope has changed" warning-as-error losing the token. [2026-07-28]
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
+from google_auth_oauthlib.flow import InstalledAppFlow
+
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+EXPECTED_ACCOUNT = "eyal.zror@cropsight.io"
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Get a Google Calendar OAuth refresh token for a team member"
-    )
-    parser.add_argument(
-        "--email",
-        help="Google account email (for display purposes only)",
-        default=None,
-    )
-    parser.add_argument(
-        "--credentials",
-        help="Path to OAuth client credentials JSON",
-        default="credentials.json",
-    )
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Get a Google Calendar OAuth refresh token")
+    parser.add_argument("--email", default=EXPECTED_ACCOUNT,
+                        help="Google account to authorize (display + verify)")
+    parser.add_argument("--credentials", default=str(project_root / "credentials.json"),
+                        help="Path to OAuth client credentials JSON")
     args = parser.parse_args()
 
-    if args.email:
-        print(f"\nGetting calendar token for: {args.email}")
-    print(f"Using credentials file: {args.credentials}")
-    print(f"Scope: {SCOPES[0]}")
-    print()
-    print("A browser window will open. Sign in with the Google account")
-    print("whose calendar Gianluigi should read, then grant calendar access.")
-    print()
+    if not Path(args.credentials).exists():
+        alt = Path(__file__).parent / "credentials.json"
+        if alt.exists():
+            args.credentials = str(alt)
+        else:
+            print(f"ERROR: {args.credentials} not found.")
+            return 1
 
+    print("=" * 64)
+    print("  Gianluigi — Calendar token")
+    print("=" * 64)
+    print()
+    print(f"IMPORTANT: when the browser opens, log in as: {args.email}")
+    print("NOT your personal account. If you see 'app isn't verified',")
+    print("click Advanced -> Go to ... (unsafe) to proceed.")
+    print(flush=True)
+
+    flow = InstalledAppFlow.from_client_secrets_file(args.credentials, SCOPES)
+    creds = flow.run_local_server(
+        port=8080, access_type="offline", prompt="consent", open_browser=True
+    )
+
+    token_path = project_root / "token_calendar.json"
+    token_path.write_text(creds.to_json())
+
+    # Verify which account we authorized (primary calendar id == the account email).
+    who = "?"
     try:
-        flow = InstalledAppFlow.from_client_secrets_file(args.credentials, SCOPES)
-        creds = flow.run_local_server(port=0)
-    except FileNotFoundError:
-        print(f"ERROR: {args.credentials} not found.")
-        print("Download it from Google Cloud Console → APIs & Services → Credentials")
-        sys.exit(1)
+        from googleapiclient.discovery import build
+        svc = build("calendar", "v3", credentials=creds)
+        who = svc.calendars().get(calendarId="primary").execute().get("id", "?")
     except Exception as e:
-        print(f"ERROR: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        print(f"(could not verify account via calendars.get: {e})")
 
     print()
-    print("=" * 60)
-    print("SUCCESS — Copy this refresh token into your .env file:")
-    print("=" * 60)
+    print("=" * 64)
+    print(f"  Authorized account: {who}")
+    if who.lower() != args.email.lower():
+        print(f"  ⚠️  This is NOT {args.email} — re-run and log in as that account,")
+        print("      or the calendar will read the wrong events.")
+    print("=" * 64)
+    print()
+    print("Set this in Cloud Run (do NOT commit it):")
     print()
     print(f"EYAL_CALENDAR_REFRESH_TOKEN={creds.refresh_token}")
     print()
-    print("(If this is for a different team member, use the appropriate")
-    print(" env var name, e.g. ROYE_CALENDAR_REFRESH_TOKEN)")
+    print("  gcloud run services update gianluigi --region europe-west1 \\")
+    print("      --update-env-vars EYAL_CALENDAR_REFRESH_TOKEN=<the-token-above>")
+    print()
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\nFATAL: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        input("\nPress Enter to exit...")
-        sys.exit(1)
+    sys.exit(main())
