@@ -4049,7 +4049,21 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         if action in ("approve", "edit", "reject", "reject_confirm") and not _non_meeting_id:
             _m = supabase_client.get_meeting(meeting_id)
             _status = (_m or {}).get("approval_status")
-            if _status != "pending":
+            # Email-thread delta exemption (mirrors the process_response guard at
+            # approval_flow.py ~1099): a thread's SOURCE meeting is 'approved' after
+            # the first batch, but a later reply posts a DELTA card carrying NEW
+            # pending children. Approving that card must reach process_response —
+            # whose email_thread branch is idempotent + file-only, so re-entry is
+            # safe — not be closed here as a stale re-tap. Without this the button
+            # tap short-circuits and the delta children stay pending forever (never
+            # promoted, never on the Sheet). Reject/edit stay guarded; only 'approve'
+            # on an already-approved email_thread is let through. [review #1 2026-07-28]
+            _email_thread_delta = (
+                action == "approve"
+                and _status == "approved"
+                and (_m or {}).get("meeting_type") == "email_thread"
+            )
+            if _status != "pending" and not _email_thread_delta:
                 _label = {
                     "approved": "already approved & sent",
                     "rejected": "already rejected",

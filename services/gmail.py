@@ -237,7 +237,14 @@ class GmailService:
                 token_src = "GMAIL_REFRESH_TOKEN" if getattr(self, "_using_dedicated_token", False) else "GOOGLE_REFRESH_TOKEN"
                 expected = getattr(settings, "GIANLUIGI_EMAIL", "") or ""
                 warn = "" if (not expected or addr.lower() == expected.lower()) else f" ⚠️ EXPECTED {expected}"
-                logger.info(f"Gmail API authenticated as {addr} (via {token_src}){warn}")
+                # Escalate a wrong-mailbox mismatch to WARNING so it survives
+                # WARNING+ log filtering — this is the exact condition the diagnostic
+                # was added to catch (mail to the bot address silently un-ingested).
+                # Matches the Drive equivalent (google_drive.py). [review #4 2026-07-28]
+                if warn:
+                    logger.warning(f"Gmail API authenticated as {addr} (via {token_src}){warn}")
+                else:
+                    logger.info(f"Gmail API authenticated as {addr} (via {token_src})")
             except Exception as pe:
                 logger.info(f"Gmail API authentication successful (profile lookup skipped: {pe})")
             return True
