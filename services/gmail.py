@@ -183,19 +183,17 @@ class GmailService:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise RuntimeError("Google OAuth credentials not configured")
 
-        # Gmail uses a DEDICATED refresh token when set, so the inbox watcher reads
-        # the bot mailbox (gianluigi.cropsight@gmail.com) instead of whatever account
-        # backs the shared GOOGLE_REFRESH_TOKEN (Eyal's personal Gmail). Falls back to
-        # the shared token so nothing changes until GMAIL_REFRESH_TOKEN is provided.
-        # Root cause of "forward to the bot address is never ingested". [2026-07-27]
-        gmail_refresh_token = (
-            getattr(settings, "GMAIL_REFRESH_TOKEN", "") or settings.GOOGLE_REFRESH_TOKEN
-        )
-        self._using_dedicated_token = bool(getattr(settings, "GMAIL_REFRESH_TOKEN", ""))
+        # Gmail uses a DEDICATED refresh token so the inbox watcher reads the bot
+        # mailbox (gianluigi@cropsight.io). REQUIRED as of 2026-08-04 — the personal
+        # GOOGLE_REFRESH_TOKEN fallback was the root cause of "forward to the bot
+        # address is never ingested" (it silently read Eyal's personal Gmail), so a
+        # missing token must fail rather than quietly watch the wrong mailbox.
+        gmail_refresh_token = getattr(settings, "GMAIL_REFRESH_TOKEN", "")
+        self._using_dedicated_token = bool(gmail_refresh_token)
         if not gmail_refresh_token:
             raise RuntimeError(
-                "Gmail refresh token not configured. Set GMAIL_REFRESH_TOKEN (the "
-                "bot mailbox) or GOOGLE_REFRESH_TOKEN. Run scripts/get_google_token.py."
+                "GMAIL_REFRESH_TOKEN not configured (bot mailbox "
+                "gianluigi@cropsight.io). Run scripts/get_google_token.py."
             )
 
         # Create credentials from refresh token

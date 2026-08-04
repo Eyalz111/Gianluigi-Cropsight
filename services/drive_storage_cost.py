@@ -5,7 +5,8 @@ weekly cost report otherwise misses (it lives on Google Workspace/Drive, NOT GCP
 so it never appears in the BigQuery billing export that gcp_billing.py reads).
 
 DARK-SAFE (mirrors gcp_billing.py): returns {available: False, ...} until BOTH:
-  1. Google OAuth is configured (GOOGLE_REFRESH_TOKEN etc — already used by google_drive.py).
+  1. GOOGLE_DRIVE_REFRESH_TOKEN is configured (the ORG account gianluigi@cropsight.io,
+     same token google_drive.py uses — NOT the personal account).
   2. WORKSPACE_STORAGE_USD_PER_GB_MONTH > 0 is set (the storage rate).
 
 Reads total Drive usage via Drive v3 about().get(storageQuota) using the existing
@@ -39,8 +40,12 @@ def get_drive_storage_cost() -> dict:
     if rate <= 0:
         out["reason"] = "WORKSPACE_STORAGE_USD_PER_GB_MONTH not set"
         return out
-    if not settings.GOOGLE_REFRESH_TOKEN:
-        out["reason"] = "Google OAuth not configured"
+    # Must be the ORG account (gianluigi@cropsight.io) — the personal fallback
+    # measured Eyal's own My-Drive quota, not the org's pooled storage, so the
+    # weekly cost report was reporting the wrong Drive entirely. [2026-08-04]
+    drive_token = getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", "")
+    if not drive_token:
+        out["reason"] = "GOOGLE_DRIVE_REFRESH_TOKEN not configured (org Drive account)"
         return out
 
     try:
@@ -50,7 +55,7 @@ def get_drive_storage_cost() -> dict:
 
         creds = Credentials(
             token=None,
-            refresh_token=settings.GOOGLE_REFRESH_TOKEN,
+            refresh_token=drive_token,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,

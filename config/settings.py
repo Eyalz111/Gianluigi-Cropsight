@@ -69,19 +69,22 @@ class Settings(BaseSettings):
     # ==========================================================================
     GOOGLE_CLIENT_ID: str = Field(default="", description="Google OAuth client ID")
     GOOGLE_CLIENT_SECRET: str = Field(default="", description="Google OAuth client secret")
-    GOOGLE_REFRESH_TOKEN: str = Field(default="", description="Google OAuth refresh token (Drive/Sheets/Calendar)")
-    # Dedicated Gmail token so the inbox watcher reads the BOT mailbox
-    # (gianluigi.cropsight@gmail.com) while Drive/Sheets stay on GOOGLE_REFRESH_TOKEN.
-    # Empty => Gmail falls back to GOOGLE_REFRESH_TOKEN (the historical shared token,
-    # which authenticates as Eyal's personal Gmail — so mail forwarded to the bot
-    # address was never seen). [2026-07-27 inbox-mismatch fix]
-    GMAIL_REFRESH_TOKEN: str = Field(default="", description="Dedicated Gmail OAuth refresh token for the bot mailbox; falls back to GOOGLE_REFRESH_TOKEN")
-    # Dedicated Drive+Sheets token so those services authenticate as the ORG account
-    # (gianluigi@cropsight.io) instead of Eyal's personal eyalz111@gmail.com. Requires
+    # DEPRECATED 2026-08-04 — the historical shared token, which authenticates as
+    # Eyal's PERSONAL account (eyalz111@gmail.com). No service reads it any more:
+    # every Google surface now requires its own dedicated org token below, so a
+    # missing token fails loudly instead of silently reverting to the personal
+    # account. Retained only so an old .env doesn't fail validation. Do not use.
+    GOOGLE_REFRESH_TOKEN: str = Field(default="", description="DEPRECATED — personal account, unused. Use the dedicated tokens below.")
+    # Gmail: the inbox watcher reads the BOT mailbox (gianluigi@cropsight.io).
+    # REQUIRED — when this was merely preferred, an empty value silently read Eyal's
+    # personal Gmail and mail forwarded to the bot address was never seen.
+    # [2026-07-27 inbox-mismatch fix; fallback removed 2026-08-04]
+    GMAIL_REFRESH_TOKEN: str = Field(default="", description="REQUIRED — Gmail OAuth refresh token for the bot mailbox (gianluigi@cropsight.io)")
+    # Drive+Sheets: authenticate as the ORG account (gianluigi@cropsight.io). Requires
     # FULL `drive` scope (not drive.file) so the bot can see org-owned Shared-Drive
-    # content it did not itself create. Empty => Drive/Sheets fall back to
-    # GOOGLE_REFRESH_TOKEN (personal). [2026-07-28 workspace migration P2 token flip]
-    GOOGLE_DRIVE_REFRESH_TOKEN: str = Field(default="", description="Dedicated Drive+Sheets OAuth refresh token (gianluigi@cropsight.io, full drive+spreadsheets); falls back to GOOGLE_REFRESH_TOKEN")
+    # content it did not itself create. REQUIRED.
+    # [2026-07-28 workspace migration P2 token flip; fallback removed 2026-08-04]
+    GOOGLE_DRIVE_REFRESH_TOKEN: str = Field(default="", description="REQUIRED — Drive+Sheets OAuth refresh token (gianluigi@cropsight.io, full drive+spreadsheets)")
 
     # ==========================================================================
     # Telegram Bot

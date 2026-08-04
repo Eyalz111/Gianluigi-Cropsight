@@ -53,10 +53,31 @@ class TestCollectHealthData:
         assert data["components"]["google_oauth"] == "configured"
 
     def test_google_oauth_not_configured(self, mock_settings, mock_supabase):
-        mock_settings.GOOGLE_REFRESH_TOKEN = ""
+        """Health reports on the three DEDICATED org tokens, not the retired
+        personal GOOGLE_REFRESH_TOKEN. [2026-08-04]"""
+        mock_settings.GOOGLE_DRIVE_REFRESH_TOKEN = ""
+        mock_settings.GMAIL_REFRESH_TOKEN = ""
+        mock_settings.EYAL_CALENDAR_REFRESH_TOKEN = ""
         from core.health_monitor import collect_health_data
         data = collect_health_data()
-        assert data["components"]["google_oauth"] == "not configured"
+        assert data["components"]["google_oauth"].startswith("not configured")
+
+    def test_google_oauth_names_the_missing_token(self, mock_settings, mock_supabase):
+        """A partial outage must say WHICH surface lost its token."""
+        mock_settings.GMAIL_REFRESH_TOKEN = ""
+        from core.health_monitor import collect_health_data
+        data = collect_health_data()
+        assert data["components"]["google_oauth"] == "not configured: gmail"
+
+    def test_personal_token_alone_is_not_configured(self, mock_settings, mock_supabase):
+        """The retired personal token must NOT make OAuth look healthy."""
+        mock_settings.GOOGLE_DRIVE_REFRESH_TOKEN = ""
+        mock_settings.GMAIL_REFRESH_TOKEN = ""
+        mock_settings.EYAL_CALENDAR_REFRESH_TOKEN = ""
+        mock_settings.GOOGLE_REFRESH_TOKEN = "personal-token-still-set"
+        from core.health_monitor import collect_health_data
+        data = collect_health_data()
+        assert data["components"]["google_oauth"].startswith("not configured")
 
     def test_telegram_configured(self, mock_settings, mock_supabase):
         from core.health_monitor import collect_health_data

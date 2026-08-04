@@ -132,23 +132,18 @@ class GoogleCalendarService:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise RuntimeError("Google OAuth credentials not configured")
 
-        # Prefer Eyal's token — sees his calendar colors
+        # Eyal's work-calendar token (eyal.zror@cropsight.io) — sees his event colors.
+        # REQUIRED as of 2026-08-04: the old fallback was the personal
+        # GOOGLE_REFRESH_TOKEN, which would silently read the WRONG calendar (and
+        # without colors) rather than failing.
         refresh_token = settings.EYAL_CALENDAR_REFRESH_TOKEN
-        if refresh_token:
-            self._using_eyal_token = True
-            logger.info("Calendar: using Eyal's OAuth token (colors visible)")
-        else:
-            refresh_token = settings.GOOGLE_REFRESH_TOKEN
-            if not refresh_token:
-                raise RuntimeError(
-                    "No calendar refresh token configured. "
-                    "Run: python scripts/get_calendar_token.py"
-                )
-            self._using_eyal_token = False
-            logger.warning(
-                "Calendar: using Gianluigi's token (colors NOT visible). "
-                "Set EYAL_CALENDAR_REFRESH_TOKEN for full access."
+        if not refresh_token:
+            raise RuntimeError(
+                "EYAL_CALENDAR_REFRESH_TOKEN not configured. "
+                "Run: python scripts/get_calendar_token.py"
             )
+        self._using_eyal_token = True
+        logger.info("Calendar: using Eyal's work-calendar OAuth token (colors visible)")
 
         self._credentials = Credentials(
             token=None,

@@ -151,18 +151,16 @@ class GoogleDriveService:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise RuntimeError("Google OAuth credentials not configured")
 
-        # Prefer the dedicated org token (gianluigi@cropsight.io, full drive) so the
-        # bot's Drive I/O is off Eyal's personal account. Falls back to the shared
-        # GOOGLE_REFRESH_TOKEN (eyalz111) until the dedicated token is set, so nothing
-        # changes until then. [2026-07-28 workspace migration P2]
-        drive_refresh_token = (
-            getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", "") or settings.GOOGLE_REFRESH_TOKEN
-        )
-        self._using_dedicated_token = bool(getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", ""))
+        # The dedicated org token (gianluigi@cropsight.io, full drive) is now REQUIRED.
+        # The personal GOOGLE_REFRESH_TOKEN fallback was removed 2026-08-04: it meant a
+        # missing/expired org token silently reverted the bot's Drive I/O to Eyal's
+        # personal account instead of failing. Fail loudly instead.
+        drive_refresh_token = getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", "")
+        self._using_dedicated_token = bool(drive_refresh_token)
         if not drive_refresh_token:
             raise RuntimeError(
-                "Google refresh token not configured. Set GOOGLE_DRIVE_REFRESH_TOKEN "
-                "(the org account) or GOOGLE_REFRESH_TOKEN. Run scripts/get_drive_token.py."
+                "GOOGLE_DRIVE_REFRESH_TOKEN not configured (org account "
+                "gianluigi@cropsight.io). Run scripts/get_drive_token.py."
             )
 
         # The dedicated org token carries FULL drive (needed to read/write org-owned

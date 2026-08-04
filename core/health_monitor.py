@@ -119,17 +119,20 @@ def collect_health_data() -> dict:
     except Exception:
         data["metrics"]["errors_24h"] = -1
 
-    # 4. Google OAuth token validity
+    # 4. Google OAuth token validity — report the three DEDICATED org tokens the
+    # services actually authenticate with. Previously this reported on the shared
+    # personal token (eyalz111), which no service uses any more. [2026-08-04]
     try:
-        from google.oauth2.credentials import Credentials
-        creds = Credentials(
-            token=None,
-            refresh_token=settings.GOOGLE_REFRESH_TOKEN,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=settings.GOOGLE_CLIENT_ID,
-            client_secret=settings.GOOGLE_CLIENT_SECRET,
+        missing = [
+            name for name, value in (
+                ("drive/sheets", getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", "")),
+                ("gmail", getattr(settings, "GMAIL_REFRESH_TOKEN", "")),
+                ("calendar", getattr(settings, "EYAL_CALENDAR_REFRESH_TOKEN", "")),
+            ) if not value
+        ]
+        data["components"]["google_oauth"] = (
+            "configured" if not missing else f"not configured: {', '.join(missing)}"
         )
-        data["components"]["google_oauth"] = "configured" if settings.GOOGLE_REFRESH_TOKEN else "not configured"
     except Exception as e:
         data["components"]["google_oauth"] = f"error: {str(e)[:100]}"
 
