@@ -294,3 +294,84 @@ class TestNonMeetingRejectNoUuidError:
         sc.get_meeting.assert_not_called()   # the bug — would 400 on a prep- id
         pr.assert_awaited_once()
         assert pr.await_args.kwargs.get("force_action") == "reject"
+
+
+class TestParseJsonArray:
+    """Edit instructions arrive fenced/prose-wrapped; a bare json.loads() blew up
+    with 'Expecting value: line 1 column 1 (char 0)' and silently fell back to a
+    blunt whole-summary rewrite. Observed live 2026-07-30 on 'CropSight R&D&Ido'.
+    """
+
+    def test_plain_array(self):
+        from guardrails.approval_flow import _parse_json_array
+        assert _parse_json_array('[{"type": "modify"}]') == [{"type": "modify"}]
+
+    def test_markdown_fenced(self):
+        from guardrails.approval_flow import _parse_json_array
+        raw = '```json\n[{"type": "modify", "section": "tasks"}]\n```'
+        assert _parse_json_array(raw) == [{"type": "modify", "section": "tasks"}]
+
+    def test_fence_without_language(self):
+        from guardrails.approval_flow import _parse_json_array
+        assert _parse_json_array('```\n[{"type": "remove"}]\n```') == [{"type": "remove"}]
+
+    def test_prose_preamble_and_trailer(self):
+        from guardrails.approval_flow import _parse_json_array
+        raw = 'Sure! Here are the edits:\n[{"type": "add"}]\nLet me know if that works.'
+        assert _parse_json_array(raw) == [{"type": "add"}]
+
+    def test_empty_array_is_not_none(self):
+        """[] means 'no edits' and must stay distinguishable from a parse failure."""
+        from guardrails.approval_flow import _parse_json_array
+        assert _parse_json_array("[]") == []
+
+    def test_unparseable_returns_none(self):
+        from guardrails.approval_flow import _parse_json_array
+        for raw in ["", "   \n ", "I could not parse that.", '{"type": "modify"}']:
+            assert _parse_json_array(raw) is None, raw
+
+    async def test_fenced_response_no_longer_hits_fallback(self, monkeypatch):
+        """End-to-end: a fenced LLM reply must parse, not degrade to the
+        whole-summary rewrite that discards structure."""
+        from guardrails import approval_flow as af
+        monkeypatch.setattr(
+            af, "call_llm",
+            lambda **kw: ('```json\n[{"type": "modify", "section": "tasks", '
+                          '"target": "task 3", "change": "owner to Roye"}]\n```', {}),
+        )
+        edits = await af.parse_edit_instructions_with_claude(
+            "task 3 should be Roye", {"summary": "..."}
+        )
+        assert edits == [{"type": "modify", "section": "tasks",
+                          "target": "task 3", "change": "owner to Roye"}]
+
+    async def test_unreadable_response_still_falls_back_safely(self, monkeypatch):
+        """The fallback must survive — the bot never goes silent on an edit."""
+        from guardrails import approval_flow as af
+        monkeypatch.setattr(af, "call_llm", lambda **kw: ("", {}))
+        edits = await af.parse_edit_instructions_with_claude("make it shorter", {"summary": "x"})
+        assert edits == [{"type": "modify", "section": "summary",
+                          "target": "full", "change": "make it shorter"}]
+
+
+class TestCommsSpineNotShadowed:
+    """A redundant function-local `from ...spine import comms_spine` made the
+    name function-local for the whole body, so the earlier module-level use
+    raised UnboundLocalError and every distribution logged
+    'Error sending Telegram: cannot access local variable comms_spine'.
+    """
+
+    def test_no_function_local_comms_spine_import(self):
+        import ast
+        import guardrails.approval_flow as af
+        tree = ast.parse(open(af.__file__, encoding="utf-8").read())
+        offenders = [
+            (fn.name, node.lineno)
+            for fn in ast.walk(tree)
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for node in ast.walk(fn)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "services.orchestrator.spine"
+            and any(a.name == "comms_spine" for a in node.names)
+        ]
+        assert not offenders, f"shadows the module-level import: {offenders}"

@@ -27,6 +27,7 @@ Usage:
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -1714,8 +1715,14 @@ Return ONLY the JSON array, no other text."""
             call_site="edit_parsing",
         )
 
-        # Parse JSON from response
-        edits = json.loads(response_text)
+        edits = _parse_json_array(response_text)
+        if edits is None:
+            # Don't silently fall through to the blunt whole-summary rewrite —
+            # that path replaces the entire summary with Eyal's raw instruction
+            # text. Make the reason explicit in the log. [2026-07-30]
+            raise ValueError(
+                f"no JSON array in edit-parse response: {response_text[:200]!r}"
+            )
         logger.info(f"Parsed {len(edits)} edit instructions")
         return edits
 
@@ -1728,6 +1735,48 @@ Return ONLY the JSON array, no other text."""
             "target": "full",
             "change": response,
         }]
+
+
+def _parse_json_array(response_text: str) -> list | None:
+    """
+    Pull a JSON array out of an LLM response, tolerating markdown fences.
+
+    Mirrors ``_parse_json_response`` in processors/cross_reference.py, but
+    matches an ARRAY rather than an object — the edit-instruction prompt asks
+    for a top-level list. Returns None when nothing parses, so the caller can
+    distinguish "model returned no edits" ([]) from "we failed to read it".
+    """
+    if not response_text or not response_text.strip():
+        return None
+
+    # Direct parse
+    try:
+        parsed = json.loads(response_text)
+        return parsed if isinstance(parsed, list) else None
+    except json.JSONDecodeError:
+        pass
+
+    # Inside a ```json ... ``` fence
+    fenced = re.search(r'```(?:json)?\s*([\s\S]*?)```', response_text)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1))
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # Bare array anywhere in the text (prose preamble, trailing commentary)
+    bare = re.search(r'\[[\s\S]*\]', response_text)
+    if bare:
+        try:
+            parsed = json.loads(bare.group(0))
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 async def apply_edits(
@@ -2754,7 +2803,6 @@ async def distribute_approved_content(
                 results["qa_issues"] = qa["issues"]
                 logger.warning(f"[meeting-qa] {meeting_id} distributed with issues: {qa['issues']}")
                 try:
-                    from services.orchestrator.spine import comms_spine
                     lines = [f"⚠️ <b>Distribution check</b> — “{qa['title'][:50]}” landed with {len(qa['issues'])} issue(s):"]
                     lines += [f"  • {i}" for i in qa["issues"][:6]]
                     await comms_spine.send_to_eyal("\n".join(lines), parse_mode="HTML")
