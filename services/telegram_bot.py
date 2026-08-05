@@ -1888,10 +1888,16 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # Find the Drive file by source_file_path
         from services.google_drive import drive_service
 
-        if source_path and settings.RAW_TRANSCRIPTS_FOLDER_ID:
-            files = await drive_service.list_files_in_folder(
-                settings.RAW_TRANSCRIPTS_FOLDER_ID,
-            )
+        # Search every watched inbox, not just the primary — a transcript may have
+        # arrived in any of them once RAW_TRANSCRIPTS_FOLDER_IDS is in play. [2026-08-05]
+        _folder_ids = drive_service.transcript_folder_ids()
+        if source_path and _folder_ids:
+            files = []
+            for _fid in _folder_ids:
+                try:
+                    files.extend(await drive_service.list_files_in_folder(_fid))
+                except Exception:
+                    continue
             # Match by filename
             source_name = source_path.split("/")[-1] if "/" in source_path else source_path
             drive_file = next(

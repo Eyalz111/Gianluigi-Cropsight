@@ -171,3 +171,44 @@ class TestTranscriptParticipantExtraction:
 
         assert len(participants) == 2
         assert "Eyal Zror" in participants or "Eyal" in participants
+
+
+class TestMultiFolderInbox:
+    """Transcripts can arrive in more than one Drive folder: Tactiq writes to a
+    folder IT picks (drive.file scope means its picker can't browse existing
+    folders) while Eyal also drops files by hand. [2026-08-05]"""
+
+    def test_primary_only_when_no_extras(self, monkeypatch):
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_ID", "primary")
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_IDS", "", raising=False)
+        assert drive_service.transcript_folder_ids() == ["primary"]
+
+    def test_extras_appended_primary_first(self, monkeypatch):
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_ID", "primary")
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_IDS", "b, c", raising=False)
+        assert drive_service.transcript_folder_ids() == ["primary", "b", "c"]
+
+    def test_dedupes_and_ignores_blanks(self, monkeypatch):
+        """A folder listed twice must not be polled twice — it would double-list
+        every file in it."""
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_ID", "primary")
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_IDS", " primary , ,b, b ", raising=False)
+        assert drive_service.transcript_folder_ids() == ["primary", "b"]
+
+    def test_unconfigured_is_empty(self, monkeypatch):
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_ID", "")
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_IDS", "", raising=False)
+        assert drive_service.transcript_folder_ids() == []
+
+    def test_rejected_subfolder_cached_per_parent(self, monkeypatch):
+        """One cached Rejected id across inboxes would quarantine a file into the
+        WRONG folder (potentially a different drive)."""
+        from services.google_drive import drive_service
+        drive_service._rejected_subfolder_cache = {"folder-a": "rej-a", "folder-b": "rej-b"}
+        assert drive_service._get_or_create_rejected_subfolder("folder-a") == "rej-a"
+        assert drive_service._get_or_create_rejected_subfolder("folder-b") == "rej-b"
+        drive_service._rejected_subfolder_cache = None

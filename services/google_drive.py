@@ -237,7 +237,8 @@ class GoogleDriveService:
         Returns:
             List of file metadata dicts (id, name, createdTime).
         """
-        if not settings.RAW_TRANSCRIPTS_FOLDER_ID:
+        folder_ids = self.transcript_folder_ids()
+        if not folder_ids:
             logger.warning("RAW_TRANSCRIPTS_FOLDER_ID not configured")
             return []
 
@@ -247,25 +248,42 @@ class GoogleDriveService:
             # the local computer time differs from Google's server time.
             # Exclude sub-folders so we don't try to "process" the Rejected
             # quarantine subfolder as a transcript file.
-            query_parts = [
-                f"'{settings.RAW_TRANSCRIPTS_FOLDER_ID}' in parents",
-                "trashed = false",
-                "mimeType != 'application/vnd.google-apps.folder'",
-            ]
+            #
+            # Queried per folder rather than with an OR-chain: one unreachable
+            # inbox (unshared, deleted) must not blank the whole poll. [2026-08-05]
+            files: list[dict] = []
+            seen_ids: set[str] = set()
+            failures = 0
+            for folder_id in folder_ids:
+                query = " and ".join([
+                    f"'{folder_id}' in parents",
+                    "trashed = false",
+                    "mimeType != 'application/vnd.google-apps.folder'",
+                ])
+                try:
+                    results = self._execute_with_retry(
+                        lambda q=query: self.service.files().list(**self._list_scope(),
+                            q=q,
+                            spaces="drive",
+                            fields="files(id, name, createdTime, mimeType, webViewLink)",
+                            orderBy="createdTime desc",
+                            pageSize=50,
+                        )
+                    )
+                except Exception as fe:
+                    failures += 1
+                    logger.error(f"Transcript poll failed for folder {folder_id}: {fe}")
+                    continue
+                for f in results.get("files", []):
+                    if f["id"] not in seen_ids:
+                        seen_ids.add(f["id"])
+                        files.append(f)
 
-            query = " and ".join(query_parts)
-
-            results = self._execute_with_retry(
-                lambda: self.service.files().list(**self._list_scope(), 
-                    q=query,
-                    spaces="drive",
-                    fields="files(id, name, createdTime, mimeType, webViewLink)",
-                    orderBy="createdTime desc",
-                    pageSize=50,
-                )
-            )
-
-            files = results.get("files", [])
+            # Only call the poll a failure if EVERY inbox failed — a partial
+            # outage shouldn't mask files we did read.
+            if failures and failures == len(folder_ids):
+                self.last_transcript_poll_failed = True
+                return []
 
             # Filter out already processed files
             new_files = [
@@ -274,7 +292,10 @@ class GoogleDriveService:
             ]
 
             self.last_transcript_poll_failed = False
-            logger.info(f"Found {len(new_files)} new transcript files")
+            logger.info(
+                f"Found {len(new_files)} new transcript files "
+                f"across {len(folder_ids)} folder(s)"
+            )
             return new_files
 
         except Exception as e:
@@ -1057,31 +1078,54 @@ class GoogleDriveService:
 
     # ── Rejected-file quarantine (T1.9) ─────────────────────────────
 
-    _rejected_subfolder_cache: str | None = None
+    _rejected_subfolder_cache: dict[str, str] | None = None
 
-    def _get_or_create_rejected_subfolder(self) -> str | None:
+    @staticmethod
+    def transcript_folder_ids() -> list[str]:
+        """Every transcript inbox to poll, primary first, de-duplicated.
+
+        Primary is RAW_TRANSCRIPTS_FOLDER_ID — quarantine and any lazy-created
+        subfolder still hang off it. RAW_TRANSCRIPTS_FOLDER_IDS adds more.
         """
-        Return the Drive folder ID of the Rejected subfolder under
-        RAW_TRANSCRIPTS_FOLDER_ID. Lazy-creates on first use. Cached per
-        instance to avoid repeated lookups.
+        ids: list[str] = []
+        primary = (settings.RAW_TRANSCRIPTS_FOLDER_ID or "").strip()
+        if primary:
+            ids.append(primary)
+        extra = (getattr(settings, "RAW_TRANSCRIPTS_FOLDER_IDS", "") or "").strip()
+        for raw in extra.split(","):
+            fid = raw.strip()
+            if fid and fid not in ids:
+                ids.append(fid)
+        return ids
+
+    def _get_or_create_rejected_subfolder(self, parent_id: str | None = None) -> str | None:
+        """
+        Return the Drive folder ID of the `Rejected` subfolder under `parent_id`
+        (defaults to the primary RAW_TRANSCRIPTS_FOLDER_ID). Lazy-creates on
+        first use, cached per parent — with several inboxes each one needs its
+        own quarantine, so a single cached ID would send files to the wrong
+        drive. [2026-08-05]
 
         Returns None if the parent folder isn't configured.
         """
-        if self._rejected_subfolder_cache:
-            return self._rejected_subfolder_cache
-        if not settings.RAW_TRANSCRIPTS_FOLDER_ID:
+        parent = (parent_id or settings.RAW_TRANSCRIPTS_FOLDER_ID or "").strip()
+        if not parent:
             return None
+        if self._rejected_subfolder_cache is None:
+            self._rejected_subfolder_cache = {}
+        if parent in self._rejected_subfolder_cache:
+            return self._rejected_subfolder_cache[parent]
 
         try:
             # Look for existing Rejected subfolder
             query = (
-                f"'{settings.RAW_TRANSCRIPTS_FOLDER_ID}' in parents "
+                f"'{parent}' in parents "
                 f"and name = 'Rejected' "
                 f"and mimeType = 'application/vnd.google-apps.folder' "
                 f"and trashed = false"
             )
             result = self._execute_with_retry(
-                lambda: self.service.files().list(**self._list_scope(), 
+                lambda: self.service.files().list(**self._list_scope(),
                     q=query,
                     spaces="drive",
                     fields="files(id, name)",
@@ -1090,7 +1134,7 @@ class GoogleDriveService:
             )
             if result.get("files"):
                 folder_id = result["files"][0]["id"]
-                self._rejected_subfolder_cache = folder_id
+                self._rejected_subfolder_cache[parent] = folder_id
                 logger.info(f"Found existing Rejected subfolder: {folder_id}")
                 return folder_id
 
@@ -1098,17 +1142,17 @@ class GoogleDriveService:
             metadata = {
                 "name": "Rejected",
                 "mimeType": "application/vnd.google-apps.folder",
-                "parents": [settings.RAW_TRANSCRIPTS_FOLDER_ID],
+                "parents": [parent],
             }
             created = self._execute_with_retry(
-                lambda: self.service.files().create(supportsAllDrives=True, 
+                lambda: self.service.files().create(supportsAllDrives=True,
                     body=metadata,
                     fields="id",
                 )
             )
             folder_id = created["id"]
-            self._rejected_subfolder_cache = folder_id
-            logger.info(f"Created Rejected subfolder in Raw Transcripts: {folder_id}")
+            self._rejected_subfolder_cache[parent] = folder_id
+            logger.info(f"Created Rejected subfolder in {parent}: {folder_id}")
             return folder_id
         except Exception as e:
             logger.warning(f"Could not get/create Rejected subfolder: {e}")
@@ -1138,42 +1182,57 @@ class GoogleDriveService:
             "rejected_folder_id": None,
         }
 
-        if not settings.RAW_TRANSCRIPTS_FOLDER_ID:
+        folder_ids = self.transcript_folder_ids()
+        if not folder_ids:
             result["error"] = "RAW_TRANSCRIPTS_FOLDER_ID not configured"
             return result
 
         try:
-            # 1. Find the file in the top-level Raw Transcripts folder (not subfolders)
+            # 1. Find the file at the top level of ANY watched inbox (not subfolders).
+            # Search each in turn and remember WHICH folder it came from, so the file
+            # is quarantined inside its own inbox rather than moved across drives.
             escaped_name = file_name.replace("'", "\\'")
-            query = (
-                f"'{settings.RAW_TRANSCRIPTS_FOLDER_ID}' in parents "
-                f"and name = '{escaped_name}' "
-                f"and trashed = false"
-            )
-            search = self._execute_with_retry(
-                lambda: self.service.files().list(**self._list_scope(), 
-                    q=query,
-                    spaces="drive",
-                    fields="files(id, name, parents)",
-                    pageSize=5,
+            files: list[dict] = []
+            source_folder = folder_ids[0]
+            for folder_id in folder_ids:
+                query = (
+                    f"'{folder_id}' in parents "
+                    f"and name = '{escaped_name}' "
+                    f"and trashed = false"
                 )
-            )
-            files = search.get("files", [])
+                try:
+                    search = self._execute_with_retry(
+                        lambda q=query: self.service.files().list(**self._list_scope(),
+                            q=q,
+                            spaces="drive",
+                            fields="files(id, name, parents)",
+                            pageSize=5,
+                        )
+                    )
+                except Exception as fe:
+                    logger.warning(f"Rejected-move lookup failed in {folder_id}: {fe}")
+                    continue
+                found = search.get("files", [])
+                if found:
+                    files = found
+                    source_folder = folder_id
+                    break
+
             if not files:
-                result["error"] = f"File '{file_name}' not found in Raw Transcripts folder"
+                result["error"] = f"File '{file_name}' not found in any transcript folder"
                 logger.warning(result["error"])
                 return result
             if len(files) > 1:
                 logger.warning(
-                    f"Multiple files match '{file_name}' in Raw Transcripts — moving the first"
+                    f"Multiple files match '{file_name}' in {source_folder} — moving the first"
                 )
 
             file_id = files[0]["id"]
             current_parents = files[0].get("parents", [])
             result["file_id"] = file_id
 
-            # 2. Ensure the Rejected subfolder exists
-            rejected_folder_id = self._get_or_create_rejected_subfolder()
+            # 2. Ensure the Rejected subfolder exists — inside the file's own inbox
+            rejected_folder_id = self._get_or_create_rejected_subfolder(source_folder)
             if not rejected_folder_id:
                 result["error"] = "Could not get/create Rejected subfolder"
                 return result

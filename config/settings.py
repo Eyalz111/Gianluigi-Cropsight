@@ -116,7 +116,15 @@ class Settings(BaseSettings):
     # Drive AND the Shared Drive); files are addressed by the folder-ID env vars
     # below, which get re-captured after the folders move in.
     CROPSIGHT_OPS_FOLDER_ID: str = Field(default="", description="Root CropSight Ops folder ID")
-    RAW_TRANSCRIPTS_FOLDER_ID: str = Field(default="", description="Raw Transcripts folder ID")
+    RAW_TRANSCRIPTS_FOLDER_ID: str = Field(default="", description="Raw Transcripts folder ID (PRIMARY — quarantine + lazy-created subfolders live here)")
+    # Additional transcript inboxes to poll, comma-separated. The transcript source
+    # is not always one folder: Tactiq's Drive integration writes to a folder IT
+    # chooses (drive.file scope means its picker can't browse existing folders), while
+    # Eyal also drops files manually. Watching several inboxes removes the need to
+    # guess which one the tool picked. Dedup is unchanged — it keys on filename vs
+    # meetings.source_file_path, so the same file in two folders still ingests once.
+    # [2026-08-05]
+    RAW_TRANSCRIPTS_FOLDER_IDS: str = Field(default="", description="Extra transcript folder IDs to watch, comma-separated (in addition to RAW_TRANSCRIPTS_FOLDER_ID)")
     MEETING_SUMMARIES_FOLDER_ID: str = Field(default="", description="Meeting Summaries folder ID")
     MEETING_PREP_FOLDER_ID: str = Field(default="", description="Meeting Prep folder ID")
     WEEKLY_DIGESTS_FOLDER_ID: str = Field(default="", description="Weekly Digests folder ID")
