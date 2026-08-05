@@ -49,45 +49,13 @@ from services.conversation_memory import conversation_memory
 logger = logging.getLogger(__name__)
 
 
-# Telegram hard-caps inline-button callback_data at 64 BYTES. Exceed it and the
-# API rejects the ENTIRE sendMessage with "Button_data_invalid" — the card never
-# arrives, so the item sits in the approval queue forever with no way to action
-# it. Hit live 2026-08-05 by `prep_generate:` + `outline-<58-char Google Calendar
-# event id>` = 80 bytes. Approval ids are deterministic and carry idempotency
-# meaning (see supabase_client `decprop-{old}-{new}`, meeting_prep_scheduler
-# `outline-{event_id}`), so they must NOT be shortened at rest — only the button
-# payload is truncated, and _expand_callback_id resolves the prefix on the way
-# back in.
-TELEGRAM_CALLBACK_MAX_BYTES = 64
-
-
-def build_callback_data(action: str, ident: str, suffix: str = "") -> str:
-    """Build `action:ident[:suffix]` callback_data that fits Telegram's 64-byte cap.
-
-    Only the identifier is truncated — the action verb is what the dispatcher
-    routes on, and `suffix` (e.g. the chosen meeting type in `prep_settype`)
-    carries the user's actual choice, so both must survive intact. Truncation is
-    byte-safe for non-ASCII ids.
-    """
-    prefix = f"{action}:"
-    tail = f":{suffix}" if suffix else ""
-    budget = TELEGRAM_CALLBACK_MAX_BYTES - len(prefix.encode()) - len(tail.encode())
-    if budget <= 0:
-        # Pathological: verb (+suffix) alone exceeds the cap. Nothing sane to send.
-        logger.error(
-            f"callback action {action!r} (+suffix {suffix!r}) alone exceeds "
-            f"{TELEGRAM_CALLBACK_MAX_BYTES}B"
-        )
-        return (prefix + tail).encode()[:TELEGRAM_CALLBACK_MAX_BYTES].decode("utf-8", "ignore")
-    raw = ident.encode()
-    if len(raw) <= budget:
-        return prefix + ident + tail
-    truncated = raw[:budget].decode("utf-8", "ignore")
-    logger.info(
-        f"callback_data for {action!r} truncated {len(raw)}B -> {len(truncated.encode())}B "
-        f"(id {ident!r}); resolved by prefix on callback"
-    )
-    return prefix + truncated + tail
+# Telegram callback_data is capped at 64 BYTES; see services/telegram_callback_ids
+# for why ids are truncated head~tail and resolved on the way back in.
+from services.telegram_callback_ids import (  # noqa: E402
+    build_callback_data,
+    expand_payload,
+    MAX_BYTES as TELEGRAM_CALLBACK_MAX_BYTES,
+)
 
 
 def _escape_html(text: str) -> str:
@@ -1932,13 +1900,19 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         # Search every watched inbox, not just the primary — a transcript may have
         # arrived in any of them once RAW_TRANSCRIPTS_FOLDER_IDS is in play. [2026-08-05]
         _folder_ids = drive_service.transcript_folder_ids()
+        # Track whether Drive actually ANSWERED. An empty result must not be read
+        # as "the file is gone" — the fall-through below cascade-deletes the
+        # meeting, so a transient Drive outage (the Cloud Run idle-wake broken
+        # pipe this repo already retries for) would destroy the data. [2026-08-06]
+        _listing_ok = True
         if source_path and _folder_ids:
             files = []
             for _fid in _folder_ids:
                 try:
-                    files.extend(await drive_service.list_files_in_folder(_fid))
-                except Exception:
-                    continue
+                    files.extend(await drive_service.list_files_in_folder_strict(_fid))
+                except Exception as _le:
+                    _listing_ok = False
+                    logger.warning(f"/reprocess: Drive listing failed for {_fid}: {_le}")
             # Match by filename
             source_name = source_path.split("/")[-1] if "/" in source_path else source_path
             drive_file = next(
@@ -1962,7 +1936,31 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 await self.send_message(update.effective_chat.id, msg)
                 return
 
-        # File not found in Drive — cascade delete and ask to re-upload
+        # Only delete when we actually searched AND Drive answered. A missing
+        # source_file_path or an unconfigured inbox list means we never looked —
+        # that is a data/config gap, not evidence the file is gone.
+        if not (source_path and _folder_ids):
+            await self.send_message(
+                update.effective_chat.id,
+                f"No source file is recorded for *{safe_title}* (or no transcript "
+                f"folder is configured), so I cannot verify it in Drive.\n"
+                f"Nothing was deleted.",
+            )
+            return
+
+        # Drive could not be read — say so and change NOTHING. Deleting here would
+        # destroy a meeting whose source file is still sitting in the folder.
+        if not _listing_ok:
+            await self.send_message(
+                update.effective_chat.id,
+                f"Could not reach Google Drive, so I have *not* touched "
+                f"*{safe_title}*.\nNothing was deleted — try /reprocess again in a "
+                f"few minutes.",
+            )
+            return
+
+        # Drive answered and the file genuinely isn't there — cascade delete and
+        # ask to re-upload.
         deleted = supabase_client.delete_meeting_cascade(meeting_id)
         await self.send_message(
             update.effective_chat.id,
@@ -3224,8 +3222,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                             f"{counts.get('follow_up_meetings', 0)} follow-ups — it cannot be undone.",
                             parse_mode=None,
                             reply_markup=InlineKeyboardMarkup([[
-                                InlineKeyboardButton("✅ Yes, reject & delete", callback_data=f"reject_confirm:{mid}"),
-                                InlineKeyboardButton("Cancel", callback_data=f"reject_cancel:{mid}"),
+                                InlineKeyboardButton("✅ Yes, reject & delete", callback_data=build_callback_data("reject_confirm", mid)),
+                                InlineKeyboardButton("Cancel", callback_data=build_callback_data("reject_cancel", mid)),
                             ]]),
                         )
                         return
@@ -3853,70 +3851,6 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         except Exception:
             pass
 
-    @staticmethod
-    def _expand_callback_id(action: str, ident: str) -> str:
-        """Resolve a (possibly truncated) callback identifier to the real approval id.
-
-        build_callback_data truncates ids that would blow Telegram's 64-byte
-        callback_data cap; the full id still lives in pending_approvals, so a
-        prefix lookup restores it.
-
-        Returns `ident` unchanged when nothing matches or the prefix is ambiguous —
-        the caller's own lookup then fails exactly as it would have before, rather
-        than us guessing and actioning the WRONG approval.
-        """
-        if not ident:
-            return ident
-
-        # Truncation only ever happens when the payload is pushed right up to the
-        # cap, so anything shorter is untouched and needs no DB round-trip. This
-        # keeps the common button press free of an extra query.
-        if len(f"{action}:{ident}".encode()) < TELEGRAM_CALLBACK_MAX_BYTES:
-            return ident
-
-        # Composite payloads (e.g. `prep_settype:<approval_id>:<key>`) keep their
-        # trailing segment; only the leading id was truncated. Approval ids never
-        # contain ':', so splitting on the first one is safe.
-        head, sep, rest = ident.partition(":")
-
-        try:
-            from services.supabase_client import supabase_client
-
-            exact = (
-                supabase_client.client.table("pending_approvals")
-                .select("approval_id")
-                .eq("approval_id", head)
-                .limit(1)
-                .execute()
-                .data
-            )
-            if exact:
-                return ident
-
-            # PostgREST `like` — escape LIKE wildcards so an id containing % or _
-            # can't match more than itself.
-            safe = head.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            rows = (
-                supabase_client.client.table("pending_approvals")
-                .select("approval_id")
-                .like("approval_id", f"{safe}%")
-                .limit(5)
-                .execute()
-                .data
-            ) or []
-            if len(rows) == 1:
-                full = rows[0]["approval_id"]
-                if full != head:
-                    logger.info(f"Expanded truncated callback id {head!r} -> {full!r}")
-                return full + sep + rest
-            if len(rows) > 1:
-                logger.warning(
-                    f"Ambiguous truncated callback id {head!r} matches {len(rows)} "
-                    f"approvals — refusing to guess"
-                )
-        except Exception as e:
-            logger.warning(f"callback id expansion failed for {ident!r} (non-fatal): {e}")
-        return ident
 
     async def _handle_callback_query(
         self,
@@ -3946,11 +3880,6 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             return
 
         action, meeting_id = data.split(":", 1)
-
-        # Restore an identifier that build_callback_data had to truncate to fit
-        # Telegram's 64-byte cap. No-op for the overwhelming majority of ids,
-        # which fit untouched. [2026-08-05]
-        meeting_id = self._expand_callback_id(action, meeting_id)
 
         # I1/I2: every inline-button action below is a CEO operation, and these
         # cards are only ever sent to Eyal's DM. A card can occasionally surface
@@ -3985,6 +3914,12 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             except Exception:
                 pass
             return
+
+        # Restore an identifier that build_callback_data had to truncate to fit
+        # Telegram's 64-byte cap. Deliberately AFTER the identity gate: expansion
+        # hits the DB, and an unauthenticated caller must not be able to make us
+        # query. No-op for ids that fit untouched. [2026-08-06]
+        meeting_id = expand_payload(action, meeting_id)
 
         # Import here to avoid circular imports
         from services.supabase_client import supabase_client
@@ -4175,8 +4110,15 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             # tap short-circuits and the delta children stay pending forever (never
             # promoted, never on the Sheet). Reject/edit stay guarded; only 'approve'
             # on an already-approved email_thread is let through. [review #1 2026-07-28]
+            # Covers approve AND reject/edit. Limiting it to 'approve' left the
+            # delta's pending children unrejectable and uneditable: the guard fired,
+            # the card closed, and those tasks/decisions stayed approval_status=
+            # 'pending' forever — invisible to the approved-only read helpers, absent
+            # from the Sheet, with an orphaned pending_approvals row. A delta card is
+            # a LIVE card whatever the parent meeting's status says.
+            # [review #1 2026-07-28; widened by code-review 2026-08-06]
             _email_thread_delta = (
-                action == "approve"
+                action in ("approve", "reject", "edit")
                 and _status == "approved"
                 and (_m or {}).get("meeting_type") == "email_thread"
             )
@@ -4311,8 +4253,8 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 "If you meant to make changes, tap Cancel and use “Request Changes” instead.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Yes, reject & delete", callback_data=f"reject_confirm:{meeting_id}"),
-                    InlineKeyboardButton("Cancel", callback_data=f"reject_cancel:{meeting_id}"),
+                    InlineKeyboardButton("✅ Yes, reject & delete", callback_data=build_callback_data("reject_confirm", meeting_id)),
+                    InlineKeyboardButton("Cancel", callback_data=build_callback_data("reject_cancel", meeting_id)),
                 ]]),
             )
 
@@ -4647,10 +4589,10 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             new_label = tier_labels.get(new_sens, tier_labels["founders"])
             new_keyboard = [
                 [
-                    InlineKeyboardButton("Approve", callback_data=f"approve:{meeting_id}"),
-                    InlineKeyboardButton("Request Changes", callback_data=f"edit:{meeting_id}"),
+                    InlineKeyboardButton("Approve", callback_data=build_callback_data("approve", meeting_id)),
+                    InlineKeyboardButton("Request Changes", callback_data=build_callback_data("edit", meeting_id)),
                 ],
-                [InlineKeyboardButton("Reject", callback_data=f"reject:{meeting_id}")],
+                [InlineKeyboardButton("Reject", callback_data=build_callback_data("reject", meeting_id))],
                 [InlineKeyboardButton(new_label, callback_data=f"sens_toggle:{meeting_id}")],
             ]
             await query.edit_message_reply_markup(
@@ -5862,17 +5804,17 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         band_row = [
             InlineKeyboardButton(
                 (f"● {name}" if band == current else name),
-                callback_data=f"sens_set:{band}:{meeting_id}",
+                callback_data=build_callback_data("sens_set", meeting_id, extra=band),
             )
             for band, name in self._BAND_PICKER
         ]
         band_row.append(InlineKeyboardButton("Custom…", callback_data=f"dcust:{meeting_id}"))
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("Approve", callback_data=f"approve:{meeting_id}"),
-                InlineKeyboardButton("Request Changes", callback_data=f"edit:{meeting_id}"),
+                InlineKeyboardButton("Approve", callback_data=build_callback_data("approve", meeting_id)),
+                InlineKeyboardButton("Request Changes", callback_data=build_callback_data("edit", meeting_id)),
             ],
-            [InlineKeyboardButton("Reject", callback_data=f"reject:{meeting_id}")],
+            [InlineKeyboardButton("Reject", callback_data=build_callback_data("reject", meeting_id))],
             band_row,
         ])
 

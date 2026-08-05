@@ -333,10 +333,28 @@ def parse_json_array(response_text: str) -> list | None:
     if not response_text or not response_text.strip():
         return None
 
-    # Direct parse
+    def _as_list(value):
+        """A list, or the first list inside a wrapper object.
+
+        Models very often answer a "return a JSON array" prompt with
+        ``{"edits": [...]}``. Rejecting that outright sends the caller down its
+        error path — which for edit parsing means overwriting the whole meeting
+        summary — even though the array we asked for is right there.
+        """
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for v in value.values():
+                if isinstance(v, list):
+                    return v
+        return None
+
+    # Direct parse. Note: must NOT return early on a non-list — a wrapper object
+    # that _as_list can't unwrap should still fall through to the scans below.
     try:
-        parsed = json.loads(response_text)
-        return parsed if isinstance(parsed, list) else None
+        found = _as_list(json.loads(response_text))
+        if found is not None:
+            return found
     except json.JSONDecodeError:
         pass
 
@@ -344,20 +362,26 @@ def parse_json_array(response_text: str) -> list | None:
     fenced = re.search(r'```(?:json)?\s*([\s\S]*?)```', response_text)
     if fenced:
         try:
-            parsed = json.loads(fenced.group(1))
-            if isinstance(parsed, list):
-                return parsed
+            found = _as_list(json.loads(fenced.group(1)))
+            if found is not None:
+                return found
         except json.JSONDecodeError:
             pass
 
-    # Bare array anywhere in the text (prose preamble, trailing commentary)
-    bare = re.search(r'\[[\s\S]*\]', response_text)
-    if bare:
-        try:
-            parsed = json.loads(bare.group(0))
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
+    # Bare array in the text (prose preamble, trailing commentary).
+    # NON-GREEDY plus a widening retry: a greedy `\[[\s\S]*\]` runs to the LAST
+    # bracket in the reply, so a trailing "item [3] was ambiguous" swallows the
+    # array and the parse fails. Try the shortest match first, then progressively
+    # longer candidates so nested brackets inside the array still parse.
+    starts = [m.start() for m in re.finditer(r'\[', response_text)]
+    ends = [m.start() for m in re.finditer(r'\]', response_text)]
+    for s in starts:
+        for e in reversed([x for x in ends if x > s]):
+            try:
+                found = _as_list(json.loads(response_text[s:e + 1]))
+                if found is not None:
+                    return found
+            except json.JSONDecodeError:
+                continue
 
     return None

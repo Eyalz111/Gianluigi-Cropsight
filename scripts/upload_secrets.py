@@ -32,7 +32,13 @@ SECRETS = [
     "EYAL_TELEGRAM_ID",
     "GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET",
-    "GOOGLE_REFRESH_TOKEN",
+    # GOOGLE_REFRESH_TOKEN retired 2026-08-04 — personal account, no service
+    # reads it. Deliberately NOT uploaded; these three replace it and are
+    # REQUIRED: with the fallback gone, a missing one boots a green container
+    # with ingestion, Sheets writes and outbound mail all silently dead.
+    "GOOGLE_DRIVE_REFRESH_TOKEN",
+    "GMAIL_REFRESH_TOKEN",
+    "EYAL_CALENDAR_REFRESH_TOKEN",
     "EYAL_EMAIL",
     "ROYE_EMAIL",
     "PAOLO_EMAIL",

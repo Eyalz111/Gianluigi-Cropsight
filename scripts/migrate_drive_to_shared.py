@@ -86,6 +86,19 @@ def _find_dst_folder(svc, parent_id, src):
             return c["id"]
     for c in cands:
         if not _marker(c):        # legacy name-only copy, no marker
+            # CLAIM it for this source. Returning it unclaimed meant the NEXT
+            # distinct same-name source folder matched the same unmarked folder
+            # and both subtrees merged into one — the exact silent merge the
+            # source-id rewrite was meant to end. [code-review 2026-08-06]
+            try:
+                svc.files().update(
+                    fileId=c["id"], supportsAllDrives=True,
+                    body={"appProperties": {MARKER: src["id"]}},
+                    fields="id",
+                ).execute()
+            except Exception as e:
+                print(f"  [WARN] could not claim legacy folder {_ascii(src['name'])}: {e}",
+                      flush=True)
             return c["id"]
     return None
 
@@ -116,8 +129,8 @@ def _warn_duplicate_siblings(kids, path, stats):
         if len(items) > 1:
             stats["dup_siblings"] += 1
             kind = "folder" if is_folder else "file"
-            print(f"  ⚠️  {len(items)} duplicate-named {kind}s in {_ascii(path) or '/'}: "
-                  f"{_ascii(name)} — copied as distinct items (kept by source id)", flush=True)
+            print(f"  [DUP] {len(items)} duplicate-named {kind}s in {_ascii(path) or '/'}: "
+                  f"{_ascii(name)} - copied as distinct items (kept by source id)", flush=True)
 
 
 def main():
@@ -134,8 +147,10 @@ def main():
 
     def walk(src_id, dst_id, path):
         kids = _children(svc, src_id)
-        if args.apply:
-            _warn_duplicate_siblings(kids, path, stats)
+        # Runs in DRY RUN too: the dry run is the operator's review step, so
+        # hiding duplicates until --apply disclosed them only after tens of GB
+        # had already started copying. [code-review 2026-08-06]
+        _warn_duplicate_siblings(kids, path, stats)
         for k in kids:
             name = k["name"]
             # top-level include/exclude filters (only applied at the root)

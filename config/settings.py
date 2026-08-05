@@ -102,9 +102,13 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Gmail
     # ==========================================================================
+    # The Workspace mailbox. The old default (gianluigi.cropsight@gmail.com) is
+    # RETIRED and SMS-2FA-locked; leaving it here made gmail.py's mailbox-mismatch
+    # check log a WARNING on every successful auth — a permanent false alarm on
+    # the one signal meant to catch a genuinely wrong mailbox. [2026-08-06]
     GIANLUIGI_EMAIL: str = Field(
-        default="gianluigi.cropsight@gmail.com",
-        description="Gianluigi's dedicated Gmail address"
+        default="gianluigi@cropsight.io",
+        description="Gianluigi's Workspace mailbox (bot account)"
     )
 
     # ==========================================================================
@@ -116,6 +120,10 @@ class Settings(BaseSettings):
     # Drive AND the Shared Drive); files are addressed by the folder-ID env vars
     # below, which get re-captured after the folders move in.
     CROPSIGHT_OPS_FOLDER_ID: str = Field(default="", description="Root CropSight Ops folder ID")
+    # Weekly project-status pack (Paolo + Nechama area-by-area review). Empty =>
+    # the workbook is created on first run and its id logged for pinning here.
+    PROJECT_STATUS_SHEET_ID: str = Field(default="", description="Project Status workbook ID (one tab per area)")
+    PROJECT_STATUS_ENABLED: bool = Field(default=False, description="Enable the weekly project-status pack refresh")
     RAW_TRANSCRIPTS_FOLDER_ID: str = Field(default="", description="Raw Transcripts folder ID (PRIMARY — quarantine + lazy-created subfolders live here)")
     # Additional transcript inboxes to poll, comma-separated. The transcript source
     # is not always one folder: Tactiq's Drive integration writes to a folder IT
@@ -124,6 +132,10 @@ class Settings(BaseSettings):
     # guess which one the tool picked. Dedup is unchanged — it keys on filename vs
     # meetings.source_file_path, so the same file in two folders still ingests once.
     # [2026-08-05]
+    # How far back a NEWLY-SEEN transcript inbox looks on its first poll. Stops a
+    # folder that already holds history from replaying months of transcripts
+    # through Opus extraction + approval cards. 0 disables the cap. [2026-08-06]
+    TRANSCRIPT_FIRST_POLL_LOOKBACK_DAYS: int = Field(default=14, description="First-poll lookback for a newly-watched transcript folder (days; 0 = no cap)")
     RAW_TRANSCRIPTS_FOLDER_IDS: str = Field(default="", description="Extra transcript folder IDs to watch, comma-separated (in addition to RAW_TRANSCRIPTS_FOLDER_ID)")
     MEETING_SUMMARIES_FOLDER_ID: str = Field(default="", description="Meeting Summaries folder ID")
     MEETING_PREP_FOLDER_ID: str = Field(default="", description="Meeting Prep folder ID")
@@ -1152,6 +1164,17 @@ class Settings(BaseSettings):
             ("GOOGLE_CLIENT_ID", self.GOOGLE_CLIENT_ID, "Google API integration"),
             ("EMBEDDING_API_KEY", self.EMBEDDING_API_KEY or self.OPENAI_API_KEY, "Semantic search"),
             ("EYAL_EMAIL", self.EYAL_EMAIL, "Team email notifications"),
+            # The three DEDICATED org tokens. Since the personal GOOGLE_REFRESH_TOKEN
+            # fallback was removed (2026-08-04), a missing one no longer degrades —
+            # the service raises, authenticate() returns False, and the container
+            # still boots green with transcript ingestion, every Drive/Sheets write
+            # and all outbound mail silently dead. Surface it at startup.
+            ("GOOGLE_DRIVE_REFRESH_TOKEN", self.GOOGLE_DRIVE_REFRESH_TOKEN,
+             "Drive + Sheets (transcript ingestion, Task/Meeting/Decision sheets)"),
+            ("GMAIL_REFRESH_TOKEN", self.GMAIL_REFRESH_TOKEN,
+             "Gmail (email ingestion + all outbound distribution)"),
+            ("EYAL_CALENDAR_REFRESH_TOKEN", self.EYAL_CALENDAR_REFRESH_TOKEN,
+             "Calendar (meeting prep, CropSight event filtering)"),
         ]
 
         for name, value, feature in optional_vars:

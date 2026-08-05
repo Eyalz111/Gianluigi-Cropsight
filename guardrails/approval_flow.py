@@ -34,6 +34,8 @@ from typing import Any
 
 from config.settings import settings
 from core.llm import call_llm
+# Telegram caps callback_data at 64 bytes; ids like `prep-{event_id}` blow it.
+from services.telegram_callback_ids import build_callback_data
 # Shared with processors/meeting_prep.py — see core.llm.parse_json_array for why
 # a bare json.loads() on a model reply keeps failing silently.
 from core.llm import parse_json_array as _parse_json_array
@@ -549,11 +551,11 @@ async def submit_for_approval(
 
         keyboard = [
             [
-                InlineKeyboardButton("Approve + send", callback_data=f"approve:{meeting_id}"),
-                InlineKeyboardButton("Edit", callback_data=f"edit:{meeting_id}"),
+                InlineKeyboardButton("Approve + send", callback_data=build_callback_data("approve", meeting_id)),
+                InlineKeyboardButton("Edit", callback_data=build_callback_data("edit", meeting_id)),
             ],
             [
-                InlineKeyboardButton("Reject", callback_data=f"reject:{meeting_id}"),
+                InlineKeyboardButton("Reject", callback_data=build_callback_data("reject", meeting_id)),
             ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1717,27 +1719,27 @@ Return ONLY the JSON array, no other text."""
             max_tokens=1024,
             call_site="edit_parsing",
         )
-
-        edits = _parse_json_array(response_text)
-        if edits is None:
-            # Don't silently fall through to the blunt whole-summary rewrite —
-            # that path replaces the entire summary with Eyal's raw instruction
-            # text. Make the reason explicit in the log. [2026-07-30]
-            raise ValueError(
-                f"no JSON array in edit-parse response: {response_text[:200]!r}"
-            )
-        logger.info(f"Parsed {len(edits)} edit instructions")
-        return edits
-
     except Exception as e:
-        logger.error(f"Error parsing edit instructions: {e}")
-        # Return a simple text-based edit as fallback
-        return [{
-            "type": "modify",
-            "section": "summary",
-            "target": "full",
-            "change": response,
-        }]
+        logger.error(f"Edit-parse LLM call failed: {e}")
+        return []
+
+    edits = _parse_json_array(response_text)
+    if edits is None:
+        # Return NO edits rather than the old fallback, which rewrote the ENTIRE
+        # meeting summary with Eyal's raw instruction text ("task 3 should be
+        # Roye") and then distributed it. Losing an approved summary because we
+        # could not parse an instruction is far worse than not applying it — the
+        # caller reports the failure and Eyal can rephrase. The previous guard
+        # raised inside this same try, so its own `except` performed the very
+        # rewrite the comment claimed to prevent. [code-review 2026-08-06]
+        logger.error(
+            f"Could not parse edit instructions; applying NO edits. "
+            f"Raw reply: {response_text[:200]!r}"
+        )
+        return []
+
+    logger.info(f"Parsed {len(edits)} edit instructions")
+    return edits
 
 
 async def apply_edits(

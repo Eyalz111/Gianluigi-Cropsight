@@ -212,3 +212,69 @@ class TestMultiFolderInbox:
         assert drive_service._get_or_create_rejected_subfolder("folder-a") == "rej-a"
         assert drive_service._get_or_create_rejected_subfolder("folder-b") == "rej-b"
         drive_service._rejected_subfolder_cache = None
+
+
+class TestFirstPollWatermark:
+    """Adding an inbox that already holds history must not replay it.
+
+    The poll has no time filter, _processed_file_ids is in-memory and empty after
+    every Cloud Run cycle, and there is no per-poll cap — so without a watermark a
+    newly-watched folder runs months of transcripts through Opus extraction and
+    posts an approval card for each, repeating on every restart. [2026-08-06]
+    """
+
+    def test_cutoff_respects_setting(self, monkeypatch):
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "TRANSCRIPT_FIRST_POLL_LOOKBACK_DAYS", 14, raising=False)
+        cutoff = drive_service._folder_watermark_cutoff()
+        assert cutoff and cutoff.endswith("Z")
+
+    def test_zero_disables_the_cap(self, monkeypatch):
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "TRANSCRIPT_FIRST_POLL_LOOKBACK_DAYS", 0, raising=False)
+        assert drive_service._folder_watermark_cutoff() == ""
+
+    async def test_first_poll_filters_then_subsequent_does_not(self, monkeypatch):
+        """First poll of a folder is date-capped; once observed it polls unfiltered."""
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_ID", "folder-new")
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_IDS", "", raising=False)
+        monkeypatch.setattr(ds, "TRANSCRIPT_FIRST_POLL_LOOKBACK_DAYS", 14, raising=False)
+        drive_service._observed_folders.discard("folder-new")
+        drive_service._processed_file_ids.clear()
+
+        seen_queries = []
+
+        def fake_exec(factory, *a, **k):
+            seen_queries.append(factory().kwargs["q"])
+            return {"files": []}
+
+        class _Req:
+            def __init__(self, **kw): self.kwargs = kw
+        monkeypatch.setattr(drive_service, "_execute_with_retry", fake_exec)
+        monkeypatch.setattr(
+            type(drive_service), "service",
+            property(lambda self: type("S", (), {
+                "files": lambda _s=None: type("F", (), {
+                    "list": staticmethod(lambda **kw: _Req(**kw))})()})()),
+        )
+
+        await drive_service.get_new_transcripts()
+        assert "createdTime >" in seen_queries[0], "first poll must be date-capped"
+
+        await drive_service.get_new_transcripts()
+        assert "createdTime >" not in seen_queries[1], "later polls must not filter"
+        drive_service._observed_folders.discard("folder-new")
+
+    async def test_failed_listing_does_not_mark_observed(self, monkeypatch):
+        """Marking on failure would drop the watermark and replay history next poll."""
+        from services.google_drive import drive_service, settings as ds
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_ID", "folder-bad")
+        monkeypatch.setattr(ds, "RAW_TRANSCRIPTS_FOLDER_IDS", "", raising=False)
+        drive_service._observed_folders.discard("folder-bad")
+
+        def boom(*a, **k):
+            raise RuntimeError("drive down")
+        monkeypatch.setattr(drive_service, "_execute_with_retry", boom)
+        await drive_service.get_new_transcripts()
+        assert "folder-bad" not in drive_service._observed_folders

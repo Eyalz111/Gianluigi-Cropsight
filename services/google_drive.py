@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleDriveService:
+    # Class-level defaults so an instance created without __init__ (tests use
+    # __new__) still has this state and get_new_transcripts doesn't AttributeError.
+    _observed_folders: set = set()
     """
     Service for Google Drive API operations.
 
@@ -61,6 +64,10 @@ class GoogleDriveService:
         self._processed_file_ids: set[str] = set()
         # Track processed document files to avoid reprocessing
         self._processed_doc_ids: set[str] = set()
+        # Transcript inboxes this process has already polled once. A folder's
+        # FIRST poll is date-capped so adding an inbox that already holds history
+        # doesn't replay it through extraction; afterwards it polls unfiltered.
+        self._observed_folders: set[str] = set()
         # True when the most recent list poll FAILED (after retries) rather than
         # genuinely returning no new files. The watchers reflect this in their
         # heartbeat so a sustained Drive outage is visible in /status instead of
@@ -226,6 +233,28 @@ class GoogleDriveService:
     # Reading Files
     # =========================================================================
 
+    def _observed_set(self) -> set:
+        """Per-instance observed-folder set, created on demand.
+
+        Instances built via __new__ skip __init__, so this must not assume the
+        attribute exists — and must not mutate the class-level default.
+        """
+        got = self.__dict__.get("_observed_folders")
+        if got is None:
+            got = set()
+            self._observed_folders = got
+        return got
+
+    def _folder_watermark_cutoff(self) -> str:
+        """RFC-3339 cutoff for a folder's first poll, or "" to disable the cap."""
+        days = int(getattr(settings, "TRANSCRIPT_FIRST_POLL_LOOKBACK_DAYS", 14) or 0)
+        if days <= 0:
+            return ""
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
     async def get_new_transcripts(self) -> list[dict]:
         """
         Check for new transcript files in the Raw Transcripts folder.
@@ -254,12 +283,28 @@ class GoogleDriveService:
             files: list[dict] = []
             seen_ids: set[str] = set()
             failures = 0
+            # First-run watermark. Pointing RAW_TRANSCRIPTS_FOLDER_IDS at a folder
+            # that already holds history would otherwise replay all of it: there is
+            # no time filter, _processed_file_ids is in-memory and empty after every
+            # Cloud Run cycle, and there is no per-poll cap — so months of
+            # transcripts would each run a full Opus extraction and post their own
+            # approval card, repeating after every restart. Cap how far back a
+            # NEWLY-SEEN folder looks; once observed, it polls unfiltered so a
+            # backdated file is never missed. [2026-08-06]
+            cutoff = self._folder_watermark_cutoff()
             for folder_id in folder_ids:
-                query = " and ".join([
+                parts = [
                     f"'{folder_id}' in parents",
                     "trashed = false",
                     "mimeType != 'application/vnd.google-apps.folder'",
-                ])
+                ]
+                if cutoff and folder_id not in self._observed_set():
+                    parts.append(f"createdTime > '{cutoff}'")
+                    logger.info(
+                        f"First poll of transcript folder {folder_id}: limiting to "
+                        f"files created after {cutoff} (history is not replayed)"
+                    )
+                query = " and ".join(parts)
                 try:
                     results = self._execute_with_retry(
                         lambda q=query: self.service.files().list(**self._list_scope(),
@@ -274,6 +319,9 @@ class GoogleDriveService:
                     failures += 1
                     logger.error(f"Transcript poll failed for folder {folder_id}: {fe}")
                     continue
+                # Only now is the folder "observed" — marking it on a FAILED
+                # listing would drop the watermark and replay history next poll.
+                self._observed_set().add(folder_id)
                 for f in results.get("files", []):
                     if f["id"] not in seen_ids:
                         seen_ids.add(f["id"])
@@ -901,6 +949,31 @@ class GoogleDriveService:
         except Exception as e:
             logger.error(f"Error listing files in folder {folder_id}: {e}")
             return []
+
+    async def list_files_in_folder_strict(
+        self,
+        folder_id: str,
+        max_results: int = 100
+    ) -> list[dict]:
+        """Same as list_files_in_folder, but RAISES instead of returning [].
+
+        list_files_in_folder swallows every error into an empty list, which makes
+        "the folder is empty" indistinguishable from "Drive did not answer". That
+        ambiguity is fine for display, but callers that DESTROY data on an empty
+        result (e.g. /reprocess cascade-deleting a meeting whose source file it
+        cannot find) must be able to tell the two apart. [2026-08-06]
+        """
+        query = f"'{folder_id}' in parents and trashed = false"
+        results = self._execute_with_retry(
+            lambda: self.service.files().list(**self._list_scope(),
+                q=query,
+                spaces="drive",
+                fields="files(id, name, mimeType, createdTime, modifiedTime, webViewLink)",
+                orderBy="modifiedTime desc",
+                pageSize=max_results,
+            )
+        )
+        return results.get("files", [])
 
     async def get_file_link(self, file_id: str) -> str:
         """

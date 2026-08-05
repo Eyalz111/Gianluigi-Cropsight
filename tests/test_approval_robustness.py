@@ -345,13 +345,49 @@ class TestParseJsonArray:
         assert edits == [{"type": "modify", "section": "tasks",
                           "target": "task 3", "change": "owner to Roye"}]
 
-    async def test_unreadable_response_still_falls_back_safely(self, monkeypatch):
-        """The fallback must survive — the bot never goes silent on an edit."""
+    async def test_unreadable_response_applies_NO_edits(self, monkeypatch):
+        """An unparseable reply must apply NOTHING.
+
+        This previously returned a 'modify summary/full' edit carrying Eyal's raw
+        chat text, which overwrote the ENTIRE approved meeting summary and then
+        distributed it. Losing the summary is far worse than not applying the
+        instruction — process_response reverts to pending and asks him to
+        clarify. [code-review 2026-08-06]
+        """
         from guardrails import approval_flow as af
-        monkeypatch.setattr(af, "call_llm", lambda **kw: ("", {}))
+        monkeypatch.setattr(af, "call_llm", lambda **kw: ("I could not parse that.", {}))
         edits = await af.parse_edit_instructions_with_claude("make it shorter", {"summary": "x"})
-        assert edits == [{"type": "modify", "section": "summary",
-                          "target": "full", "change": "make it shorter"}]
+        assert edits == []
+
+    async def test_llm_failure_applies_no_edits(self, monkeypatch):
+        from guardrails import approval_flow as af
+        def _boom(**kw):
+            raise RuntimeError("anthropic down")
+        monkeypatch.setattr(af, "call_llm", _boom)
+        assert await af.parse_edit_instructions_with_claude("x", {"summary": "y"}) == []
+
+    async def test_wrapper_object_reply_is_unwrapped(self, monkeypatch):
+        """{"edits":[...]} must parse, not fall into the no-edits path."""
+        from guardrails import approval_flow as af
+        monkeypatch.setattr(
+            af, "call_llm",
+            lambda **kw: ('{"edits": [{"type": "modify", "section": "tasks", '
+                          '"target": "task 3", "change": "owner to Roye"}]}', {}),
+        )
+        edits = await af.parse_edit_instructions_with_claude("task 3 -> Roye", {"summary": "x"})
+        assert edits == [{"type": "modify", "section": "tasks",
+                          "target": "task 3", "change": "owner to Roye"}]
+
+    async def test_trailing_bracket_commentary_still_parses(self, monkeypatch):
+        """A trailing 'item [3] was ambiguous' must not swallow the array."""
+        from guardrails import approval_flow as af
+        monkeypatch.setattr(
+            af, "call_llm",
+            lambda **kw: ('Here are the edits:\n[{"type": "modify"}]\n'
+                          'Note: item [3] was ambiguous.', {}),
+        )
+        edits = await af.parse_edit_instructions_with_claude("x", {"summary": "y"})
+        assert edits == [{"type": "modify"}]
 
 
 class TestCommsSpineNotShadowed:
@@ -380,112 +416,125 @@ class TestCommsSpineNotShadowed:
 class TestCallbackDataFitsTelegramCap:
     """Telegram rejects the WHOLE sendMessage with Button_data_invalid if any
     callback_data exceeds 64 bytes — the card never arrives and the item is
-    stuck in the queue with no way to action it. Hit live 2026-08-05 by
-    `prep_generate:` + `outline-<58-char calendar event id>` = 80 bytes.
+    stuck in the queue. Hit live 2026-08-05 by `prep_generate:` + a 58-char
+    Google Calendar event id.
     """
 
     def test_short_id_is_untouched(self):
-        from services.telegram_bot import build_callback_data
+        from services.telegram_callback_ids import build_callback_data
         assert build_callback_data("approve", "abc-123") == "approve:abc-123"
 
-    def test_the_live_failure_now_fits(self):
-        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
-        approval_id = "outline-cpi3adj3cgrjgbb1c4sjcb9k65im2bb261hm8bb36di34oj164s3cchn6g"
-        assert len(f"prep_generate:{approval_id}".encode()) == 80   # what broke
-        data = build_callback_data("prep_generate", approval_id)
-        assert len(data.encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
-        assert data.startswith("prep_generate:")
-        assert approval_id.startswith(data.split(":", 1)[1])  # a true prefix
+    def test_outline_card_fits(self):
+        from services.telegram_callback_ids import build_callback_data, MAX_BYTES
+        aid = "outline-cpi3adj3cgrjgbb1c4sjcb9k65im2bb261hm8bb36di34oj164s3cchn6g"
+        assert len(f"prep_generate:{aid}".encode()) == 80          # what broke
+        assert len(build_callback_data("prep_generate", aid).encode()) <= MAX_BYTES
 
-    def test_every_prep_verb_fits(self):
-        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
-        approval_id = "outline-" + "x" * 58
-        for verb in ("prep_generate", "prep_focus", "prep_reclassify", "prep_skip"):
-            assert len(build_callback_data(verb, approval_id).encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
+    def test_prep_approval_card_fits(self):
+        """The card ONE HOP downstream of the outline — missed by the first fix,
+        so tapping 'Generate as-is' produced a prep that could never be approved."""
+        from services.telegram_callback_ids import build_callback_data, MAX_BYTES
+        aid = "prep-cpi3adj3cgrjgbb1c4sjcb9k65im2bb261hm8bb36di34oj164s3cchn6g"
+        for verb in ("approve", "edit", "reject"):
+            assert len(build_callback_data(verb, aid).encode()) <= MAX_BYTES, verb
 
-    def test_suffix_survives_truncation(self):
-        """The suffix carries the user's actual choice — truncating it would
-        silently apply the WRONG meeting type."""
-        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
-        data = build_callback_data("prep_settype", "outline-" + "x" * 58, suffix="one_on_one")
-        assert len(data.encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
-        assert data.endswith(":one_on_one")
-        assert data.startswith("prep_settype:")
+    def test_recurring_instances_stay_distinct(self):
+        """Prefix-only truncation collapsed every instance of a recurring series
+        onto one payload, making the lookup ambiguous and bricking both cards."""
+        from services.telegram_callback_ids import build_callback_data
+        base = "outline-cpi3adj3cgrjgbb1c4sjcb9k65im2bb261hm8bb36di34oj164s3cchn6g"
+        a = build_callback_data("prep_generate", f"{base}_20260805T090000Z")
+        b = build_callback_data("prep_generate", f"{base}_20260812T090000Z")
+        assert a != b
+
+    def test_composite_extra_never_truncated(self):
+        """`extra` carries the user's choice — clipping it applies the WRONG one."""
+        from services.telegram_callback_ids import build_callback_data, split_payload, MAX_BYTES
+        aid = "outline-" + "x" * 58
+        data = build_callback_data("prep_settype", aid, extra="one_on_one")
+        assert len(data.encode()) <= MAX_BYTES
+        _, _, after = split_payload("prep_settype", data.split(":", 1)[1])
+        assert after == "one_on_one"
+
+    def test_id_last_layout_keeps_band(self):
+        from services.telegram_callback_ids import build_callback_data, split_payload, MAX_BYTES
+        data = build_callback_data("sens_set", "prep-" + "y" * 58, extra="founders")
+        assert len(data.encode()) <= MAX_BYTES
+        before, _, _ = split_payload("sens_set", data.split(":", 1)[1])
+        assert before == "founders"
 
     def test_truncation_is_byte_safe_for_non_ascii(self):
-        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
+        from services.telegram_callback_ids import build_callback_data, MAX_BYTES
         data = build_callback_data("approve", "שלום" * 40)
-        assert len(data.encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
-        data.encode().decode()  # must not be a broken surrogate
+        assert len(data.encode()) <= MAX_BYTES
+        data.encode().decode()          # must not be a broken surrogate
 
 
-class TestExpandCallbackId:
-    def _bot(self):
-        from services.telegram_bot import TelegramBot
-        return TelegramBot.__new__(TelegramBot)
+class TestCallbackPayloadSplitting:
+    def test_plain_id_containing_a_colon_is_not_split(self):
+        """approval_flow mints `stakeholder:{org_key}` — blindly partitioning on
+        ':' truncated it to 'stakeholder' and matched the wrong approval."""
+        from services.telegram_callback_ids import split_payload
+        assert split_payload("stakeholder_approve", "stakeholder:acme_corp") == \
+            ("", "stakeholder:acme_corp", "")
 
-    def test_short_id_skips_the_db_entirely(self, monkeypatch):
-        """A payload below the cap can't have been truncated — no query."""
-        called = []
+    def test_id_first_composite(self):
+        from services.telegram_callback_ids import split_payload
+        assert split_payload("prep_settype", "abc:one_on_one") == ("", "abc", "one_on_one")
+
+    def test_id_last_composite(self):
+        from services.telegram_callback_ids import split_payload
+        assert split_payload("sens_set", "founders:abc") == ("founders", "abc", "")
+
+    def test_untruncated_payload_skips_expansion(self, monkeypatch):
+        """No ellipsis => nothing was truncated => no DB round-trip."""
         def _boom(*a, **k):
-            called.append(1); raise AssertionError("must not query the DB")
+            raise AssertionError("must not query the DB")
         monkeypatch.setattr("services.supabase_client.supabase_client",
                             SimpleNamespace(client=SimpleNamespace(table=_boom)))
-        assert self._bot()._expand_callback_id("approve", "abc-123") == "abc-123"
-        assert not called
+        from services.telegram_callback_ids import expand_payload
+        assert expand_payload("approve", "abc-123") == "abc-123"
 
-    def test_truncated_id_resolves_by_prefix(self, monkeypatch):
-        from services.telegram_bot import build_callback_data
-        full = "outline-cpi3adj3cgrjgbb1c4sjcb9k65im2bb261hm8bb36di34oj164s3cchn6g"
-        truncated = build_callback_data("prep_generate", full).split(":", 1)[1]
 
+class TestExpandIdent:
+    def _stub(self, monkeypatch, rows):
         class _Q:
             def select(self, *a, **k): return self
-            def eq(self, *a, **k): self._exact = True; return self
-            def like(self, *a, **k): self._exact = False; return self
+            def like(self, *a, **k): return self
             def limit(self, *a, **k): return self
-            def execute(self):
-                return SimpleNamespace(data=([] if self._exact else [{"approval_id": full}]))
+            def execute(self): return SimpleNamespace(data=rows)
         monkeypatch.setattr("services.supabase_client.supabase_client",
-                            SimpleNamespace(client=SimpleNamespace(table=lambda *_a, **_k: _Q())))
-        assert self._bot()._expand_callback_id("prep_generate", truncated) == full
+                            SimpleNamespace(client=SimpleNamespace(table=lambda *a, **k: _Q())))
 
-    def test_ambiguous_prefix_refuses_to_guess(self, monkeypatch):
+    def test_head_tail_resolves(self, monkeypatch):
+        full = "outline-" + "z" * 58 + "_20260805T090000Z"
+        self._stub(monkeypatch, [{"approval_id": full}])
+        from services.telegram_callback_ids import build_callback_data, expand_payload
+        payload = build_callback_data("prep_generate", full).split(":", 1)[1]
+        assert expand_payload("prep_generate", payload) == full
+
+    def test_ambiguous_refuses_to_guess(self, monkeypatch):
         """Guessing would action the WRONG approval — worse than failing."""
-        truncated = "outline-" + "y" * 42
+        self._stub(monkeypatch, [{"approval_id": "a"}, {"approval_id": "b"}])
+        from services.telegram_callback_ids import expand_ident
+        ident = "outline-aaa~zzz"
+        assert expand_ident(ident) == ident
 
-        class _Q:
-            def select(self, *a, **k): return self
-            def eq(self, *a, **k): self._exact = True; return self
-            def like(self, *a, **k): self._exact = False; return self
-            def limit(self, *a, **k): return self
-            def execute(self):
-                return SimpleNamespace(data=([] if self._exact else
-                                             [{"approval_id": "a"}, {"approval_id": "b"}]))
-        monkeypatch.setattr("services.supabase_client.supabase_client",
-                            SimpleNamespace(client=SimpleNamespace(table=lambda *_a, **_k: _Q())))
-        assert self._bot()._expand_callback_id("prep_generate", truncated) == truncated
-
-    def test_composite_suffix_is_preserved(self, monkeypatch):
-        """prep_settype carries `<id>:<type>` — expansion must not eat the type."""
-        full = "outline-" + "z" * 58
-        truncated_head = ("outline-" + "z" * 58)[:40]
-
-        class _Q:
-            def select(self, *a, **k): return self
-            def eq(self, *a, **k): self._exact = True; return self
-            def like(self, *a, **k): self._exact = False; return self
-            def limit(self, *a, **k): return self
-            def execute(self):
-                return SimpleNamespace(data=([] if self._exact else [{"approval_id": full}]))
-        monkeypatch.setattr("services.supabase_client.supabase_client",
-                            SimpleNamespace(client=SimpleNamespace(table=lambda *_a, **_k: _Q())))
-        out = self._bot()._expand_callback_id("prep_settype", f"{truncated_head}:one_on_one")
-        assert out == f"{full}:one_on_one"
+    def test_no_match_returns_unchanged(self, monkeypatch):
+        self._stub(monkeypatch, [])
+        from services.telegram_callback_ids import expand_ident
+        assert expand_ident("outline-aaa~zzz") == "outline-aaa~zzz"
 
     def test_db_failure_is_non_fatal(self, monkeypatch):
         def _boom(*a, **k): raise RuntimeError("db down")
         monkeypatch.setattr("services.supabase_client.supabase_client",
                             SimpleNamespace(client=SimpleNamespace(table=_boom)))
-        ident = "outline-" + "q" * 44
-        assert self._bot()._expand_callback_id("prep_generate", ident) == ident
+        from services.telegram_callback_ids import expand_ident
+        assert expand_ident("outline-aaa~zzz") == "outline-aaa~zzz"
+
+    def test_composite_expansion_preserves_extra(self, monkeypatch):
+        full = "outline-" + "q" * 58
+        self._stub(monkeypatch, [{"approval_id": full}])
+        from services.telegram_callback_ids import build_callback_data, expand_payload
+        payload = build_callback_data("prep_settype", full, extra="one_on_one").split(":", 1)[1]
+        assert expand_payload("prep_settype", payload) == f"{full}:one_on_one"
