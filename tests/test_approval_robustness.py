@@ -375,3 +375,117 @@ class TestCommsSpineNotShadowed:
             and any(a.name == "comms_spine" for a in node.names)
         ]
         assert not offenders, f"shadows the module-level import: {offenders}"
+
+
+class TestCallbackDataFitsTelegramCap:
+    """Telegram rejects the WHOLE sendMessage with Button_data_invalid if any
+    callback_data exceeds 64 bytes — the card never arrives and the item is
+    stuck in the queue with no way to action it. Hit live 2026-08-05 by
+    `prep_generate:` + `outline-<58-char calendar event id>` = 80 bytes.
+    """
+
+    def test_short_id_is_untouched(self):
+        from services.telegram_bot import build_callback_data
+        assert build_callback_data("approve", "abc-123") == "approve:abc-123"
+
+    def test_the_live_failure_now_fits(self):
+        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
+        approval_id = "outline-cpi3adj3cgrjgbb1c4sjcb9k65im2bb261hm8bb36di34oj164s3cchn6g"
+        assert len(f"prep_generate:{approval_id}".encode()) == 80   # what broke
+        data = build_callback_data("prep_generate", approval_id)
+        assert len(data.encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
+        assert data.startswith("prep_generate:")
+        assert approval_id.startswith(data.split(":", 1)[1])  # a true prefix
+
+    def test_every_prep_verb_fits(self):
+        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
+        approval_id = "outline-" + "x" * 58
+        for verb in ("prep_generate", "prep_focus", "prep_reclassify", "prep_skip"):
+            assert len(build_callback_data(verb, approval_id).encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
+
+    def test_suffix_survives_truncation(self):
+        """The suffix carries the user's actual choice — truncating it would
+        silently apply the WRONG meeting type."""
+        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
+        data = build_callback_data("prep_settype", "outline-" + "x" * 58, suffix="one_on_one")
+        assert len(data.encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
+        assert data.endswith(":one_on_one")
+        assert data.startswith("prep_settype:")
+
+    def test_truncation_is_byte_safe_for_non_ascii(self):
+        from services.telegram_bot import build_callback_data, TELEGRAM_CALLBACK_MAX_BYTES
+        data = build_callback_data("approve", "שלום" * 40)
+        assert len(data.encode()) <= TELEGRAM_CALLBACK_MAX_BYTES
+        data.encode().decode()  # must not be a broken surrogate
+
+
+class TestExpandCallbackId:
+    def _bot(self):
+        from services.telegram_bot import TelegramBot
+        return TelegramBot.__new__(TelegramBot)
+
+    def test_short_id_skips_the_db_entirely(self, monkeypatch):
+        """A payload below the cap can't have been truncated — no query."""
+        called = []
+        def _boom(*a, **k):
+            called.append(1); raise AssertionError("must not query the DB")
+        monkeypatch.setattr("services.supabase_client.supabase_client",
+                            SimpleNamespace(client=SimpleNamespace(table=_boom)))
+        assert self._bot()._expand_callback_id("approve", "abc-123") == "abc-123"
+        assert not called
+
+    def test_truncated_id_resolves_by_prefix(self, monkeypatch):
+        from services.telegram_bot import build_callback_data
+        full = "outline-cpi3adj3cgrjgbb1c4sjcb9k65im2bb261hm8bb36di34oj164s3cchn6g"
+        truncated = build_callback_data("prep_generate", full).split(":", 1)[1]
+
+        class _Q:
+            def select(self, *a, **k): return self
+            def eq(self, *a, **k): self._exact = True; return self
+            def like(self, *a, **k): self._exact = False; return self
+            def limit(self, *a, **k): return self
+            def execute(self):
+                return SimpleNamespace(data=([] if self._exact else [{"approval_id": full}]))
+        monkeypatch.setattr("services.supabase_client.supabase_client",
+                            SimpleNamespace(client=SimpleNamespace(table=lambda *_a, **_k: _Q())))
+        assert self._bot()._expand_callback_id("prep_generate", truncated) == full
+
+    def test_ambiguous_prefix_refuses_to_guess(self, monkeypatch):
+        """Guessing would action the WRONG approval — worse than failing."""
+        truncated = "outline-" + "y" * 42
+
+        class _Q:
+            def select(self, *a, **k): return self
+            def eq(self, *a, **k): self._exact = True; return self
+            def like(self, *a, **k): self._exact = False; return self
+            def limit(self, *a, **k): return self
+            def execute(self):
+                return SimpleNamespace(data=([] if self._exact else
+                                             [{"approval_id": "a"}, {"approval_id": "b"}]))
+        monkeypatch.setattr("services.supabase_client.supabase_client",
+                            SimpleNamespace(client=SimpleNamespace(table=lambda *_a, **_k: _Q())))
+        assert self._bot()._expand_callback_id("prep_generate", truncated) == truncated
+
+    def test_composite_suffix_is_preserved(self, monkeypatch):
+        """prep_settype carries `<id>:<type>` — expansion must not eat the type."""
+        full = "outline-" + "z" * 58
+        truncated_head = ("outline-" + "z" * 58)[:40]
+
+        class _Q:
+            def select(self, *a, **k): return self
+            def eq(self, *a, **k): self._exact = True; return self
+            def like(self, *a, **k): self._exact = False; return self
+            def limit(self, *a, **k): return self
+            def execute(self):
+                return SimpleNamespace(data=([] if self._exact else [{"approval_id": full}]))
+        monkeypatch.setattr("services.supabase_client.supabase_client",
+                            SimpleNamespace(client=SimpleNamespace(table=lambda *_a, **_k: _Q())))
+        out = self._bot()._expand_callback_id("prep_settype", f"{truncated_head}:one_on_one")
+        assert out == f"{full}:one_on_one"
+
+    def test_db_failure_is_non_fatal(self, monkeypatch):
+        def _boom(*a, **k): raise RuntimeError("db down")
+        monkeypatch.setattr("services.supabase_client.supabase_client",
+                            SimpleNamespace(client=SimpleNamespace(table=_boom)))
+        ident = "outline-" + "q" * 44
+        assert self._bot()._expand_callback_id("prep_generate", ident) == ident

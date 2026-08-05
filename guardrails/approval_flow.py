@@ -34,6 +34,9 @@ from typing import Any
 
 from config.settings import settings
 from core.llm import call_llm
+# Shared with processors/meeting_prep.py — see core.llm.parse_json_array for why
+# a bare json.loads() on a model reply keeps failing silently.
+from core.llm import parse_json_array as _parse_json_array
 from config.team import TEAM_MEMBERS, get_team_member
 from services.orchestrator.spine import comms_spine
 from services.gmail import gmail_service
@@ -1735,48 +1738,6 @@ Return ONLY the JSON array, no other text."""
             "target": "full",
             "change": response,
         }]
-
-
-def _parse_json_array(response_text: str) -> list | None:
-    """
-    Pull a JSON array out of an LLM response, tolerating markdown fences.
-
-    Mirrors ``_parse_json_response`` in processors/cross_reference.py, but
-    matches an ARRAY rather than an object — the edit-instruction prompt asks
-    for a top-level list. Returns None when nothing parses, so the caller can
-    distinguish "model returned no edits" ([]) from "we failed to read it".
-    """
-    if not response_text or not response_text.strip():
-        return None
-
-    # Direct parse
-    try:
-        parsed = json.loads(response_text)
-        return parsed if isinstance(parsed, list) else None
-    except json.JSONDecodeError:
-        pass
-
-    # Inside a ```json ... ``` fence
-    fenced = re.search(r'```(?:json)?\s*([\s\S]*?)```', response_text)
-    if fenced:
-        try:
-            parsed = json.loads(fenced.group(1))
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-    # Bare array anywhere in the text (prose preamble, trailing commentary)
-    bare = re.search(r'\[[\s\S]*\]', response_text)
-    if bare:
-        try:
-            parsed = json.loads(bare.group(0))
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-    return None
 
 
 async def apply_edits(

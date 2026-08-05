@@ -49,6 +49,47 @@ from services.conversation_memory import conversation_memory
 logger = logging.getLogger(__name__)
 
 
+# Telegram hard-caps inline-button callback_data at 64 BYTES. Exceed it and the
+# API rejects the ENTIRE sendMessage with "Button_data_invalid" — the card never
+# arrives, so the item sits in the approval queue forever with no way to action
+# it. Hit live 2026-08-05 by `prep_generate:` + `outline-<58-char Google Calendar
+# event id>` = 80 bytes. Approval ids are deterministic and carry idempotency
+# meaning (see supabase_client `decprop-{old}-{new}`, meeting_prep_scheduler
+# `outline-{event_id}`), so they must NOT be shortened at rest — only the button
+# payload is truncated, and _expand_callback_id resolves the prefix on the way
+# back in.
+TELEGRAM_CALLBACK_MAX_BYTES = 64
+
+
+def build_callback_data(action: str, ident: str, suffix: str = "") -> str:
+    """Build `action:ident[:suffix]` callback_data that fits Telegram's 64-byte cap.
+
+    Only the identifier is truncated — the action verb is what the dispatcher
+    routes on, and `suffix` (e.g. the chosen meeting type in `prep_settype`)
+    carries the user's actual choice, so both must survive intact. Truncation is
+    byte-safe for non-ASCII ids.
+    """
+    prefix = f"{action}:"
+    tail = f":{suffix}" if suffix else ""
+    budget = TELEGRAM_CALLBACK_MAX_BYTES - len(prefix.encode()) - len(tail.encode())
+    if budget <= 0:
+        # Pathological: verb (+suffix) alone exceeds the cap. Nothing sane to send.
+        logger.error(
+            f"callback action {action!r} (+suffix {suffix!r}) alone exceeds "
+            f"{TELEGRAM_CALLBACK_MAX_BYTES}B"
+        )
+        return (prefix + tail).encode()[:TELEGRAM_CALLBACK_MAX_BYTES].decode("utf-8", "ignore")
+    raw = ident.encode()
+    if len(raw) <= budget:
+        return prefix + ident + tail
+    truncated = raw[:budget].decode("utf-8", "ignore")
+    logger.info(
+        f"callback_data for {action!r} truncated {len(raw)}B -> {len(truncated.encode())}B "
+        f"(id {ident!r}); resolved by prefix on callback"
+    )
+    return prefix + truncated + tail
+
+
 def _escape_html(text: str) -> str:
     """Escape HTML special characters for Telegram HTML parse mode."""
     return (
@@ -974,18 +1015,18 @@ class TelegramBot:
         # Build button rows
         buttons = [
             [
-                InlineKeyboardButton("Generate as-is", callback_data=f"prep_generate:{approval_id}"),
-                InlineKeyboardButton("Add focus", callback_data=f"prep_focus:{approval_id}"),
+                InlineKeyboardButton("Generate as-is", callback_data=build_callback_data("prep_generate", approval_id)),
+                InlineKeyboardButton("Add focus", callback_data=build_callback_data("prep_focus", approval_id)),
             ],
         ]
         if confidence == "ask":
             buttons.append([
-                InlineKeyboardButton("Wrong meeting type", callback_data=f"prep_reclassify:{approval_id}"),
-                InlineKeyboardButton("Skip this prep", callback_data=f"prep_skip:{approval_id}"),
+                InlineKeyboardButton("Wrong meeting type", callback_data=build_callback_data("prep_reclassify", approval_id)),
+                InlineKeyboardButton("Skip this prep", callback_data=build_callback_data("prep_skip", approval_id)),
             ])
         else:
             buttons.append([
-                InlineKeyboardButton("Skip this prep", callback_data=f"prep_skip:{approval_id}"),
+                InlineKeyboardButton("Skip this prep", callback_data=build_callback_data("prep_skip", approval_id)),
             ])
 
         reply_markup = InlineKeyboardMarkup(buttons)
@@ -3812,6 +3853,71 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
         except Exception:
             pass
 
+    @staticmethod
+    def _expand_callback_id(action: str, ident: str) -> str:
+        """Resolve a (possibly truncated) callback identifier to the real approval id.
+
+        build_callback_data truncates ids that would blow Telegram's 64-byte
+        callback_data cap; the full id still lives in pending_approvals, so a
+        prefix lookup restores it.
+
+        Returns `ident` unchanged when nothing matches or the prefix is ambiguous —
+        the caller's own lookup then fails exactly as it would have before, rather
+        than us guessing and actioning the WRONG approval.
+        """
+        if not ident:
+            return ident
+
+        # Truncation only ever happens when the payload is pushed right up to the
+        # cap, so anything shorter is untouched and needs no DB round-trip. This
+        # keeps the common button press free of an extra query.
+        if len(f"{action}:{ident}".encode()) < TELEGRAM_CALLBACK_MAX_BYTES:
+            return ident
+
+        # Composite payloads (e.g. `prep_settype:<approval_id>:<key>`) keep their
+        # trailing segment; only the leading id was truncated. Approval ids never
+        # contain ':', so splitting on the first one is safe.
+        head, sep, rest = ident.partition(":")
+
+        try:
+            from services.supabase_client import supabase_client
+
+            exact = (
+                supabase_client.client.table("pending_approvals")
+                .select("approval_id")
+                .eq("approval_id", head)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if exact:
+                return ident
+
+            # PostgREST `like` — escape LIKE wildcards so an id containing % or _
+            # can't match more than itself.
+            safe = head.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = (
+                supabase_client.client.table("pending_approvals")
+                .select("approval_id")
+                .like("approval_id", f"{safe}%")
+                .limit(5)
+                .execute()
+                .data
+            ) or []
+            if len(rows) == 1:
+                full = rows[0]["approval_id"]
+                if full != head:
+                    logger.info(f"Expanded truncated callback id {head!r} -> {full!r}")
+                return full + sep + rest
+            if len(rows) > 1:
+                logger.warning(
+                    f"Ambiguous truncated callback id {head!r} matches {len(rows)} "
+                    f"approvals — refusing to guess"
+                )
+        except Exception as e:
+            logger.warning(f"callback id expansion failed for {ident!r} (non-fatal): {e}")
+        return ident
+
     async def _handle_callback_query(
         self,
         update: Update,
@@ -3840,6 +3946,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             return
 
         action, meeting_id = data.split(":", 1)
+
+        # Restore an identifier that build_callback_data had to truncate to fit
+        # Telegram's 64-byte cap. No-op for the overwhelming majority of ids,
+        # which fit untouched. [2026-08-05]
+        meeting_id = self._expand_callback_id(action, meeting_id)
 
         # I1/I2: every inline-button action below is a CEO operation, and these
         # cards are only ever sent to Eyal's DM. A card can occasionally surface
@@ -5506,7 +5617,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             for key, tmpl in MEETING_PREP_TEMPLATES.items():
                 row_buttons.append(InlineKeyboardButton(
                     tmpl["display_name"],
-                    callback_data=f"prep_settype:{approval_id}:{key}",
+                    callback_data=build_callback_data("prep_settype", approval_id, suffix=key),
                 ))
                 if len(row_buttons) == 2:
                     buttons.append(row_buttons)
@@ -5635,11 +5746,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             outline = content.get("outline", {})
             buttons = [
                 [
-                    InlineKeyboardButton("Generate", callback_data=f"prep_generate:{approval_id}"),
-                    InlineKeyboardButton("Edit more", callback_data=f"prep_focus:{approval_id}"),
+                    InlineKeyboardButton("Generate", callback_data=build_callback_data("prep_generate", approval_id)),
+                    InlineKeyboardButton("Edit more", callback_data=build_callback_data("prep_focus", approval_id)),
                 ],
                 [
-                    InlineKeyboardButton("Skip", callback_data=f"prep_skip:{approval_id}"),
+                    InlineKeyboardButton("Skip", callback_data=build_callback_data("prep_skip", approval_id)),
                 ],
             ]
             reply_markup = InlineKeyboardMarkup(buttons)

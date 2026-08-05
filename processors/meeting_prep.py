@@ -911,7 +911,14 @@ Return a JSON array of strings only. No explanation.
             max_tokens=256,
             call_site="prep_agenda_generation",
         )
-        return json.loads(response_text)
+        from core.llm import parse_json_array
+
+        agenda = parse_json_array(response_text)
+        if agenda is None:
+            # Don't let a fenced/prose reply silently produce an empty agenda —
+            # say so, with the raw text, instead of swallowing it. [2026-08-05]
+            raise ValueError(f"no JSON array in agenda reply: {response_text[:200]!r}")
+        return agenda
     except Exception as e:
         logger.warning(f"Agenda generation failed (non-fatal): {e}")
         return [f"Review {s['name']}" for s in sections if s["status"] == "ok"]

@@ -306,3 +306,58 @@ def _log_usage(
         supabase_client.client.table("token_usage").insert(row).execute()
     except Exception as e:
         logger.debug(f"Token usage logging failed (non-fatal): {e}")
+
+
+def parse_json_array(response_text: str) -> list | None:
+    """Pull a JSON array out of an LLM response, tolerating markdown fences.
+
+    A bare ``json.loads()`` on a model reply is a recurring source of silent
+    failure here: asked for "a JSON array", models routinely wrap it in a
+    ```json fence or add a prose preamble, and *all three* forms — empty string,
+    fenced, prose-wrapped — raise the identical
+    ``Expecting value: line 1 column 1 (char 0)``. That error then gets swallowed
+    by a broad ``except``, so the feature degrades quietly instead of failing.
+    Seen live in edit-instruction parsing and prep agenda generation (2026-08).
+
+    Mirrors ``_parse_json_response`` in processors/cross_reference.py, but matches
+    an ARRAY rather than an object.
+
+    Returns:
+        The parsed list, or None when nothing parses — deliberately distinct from
+        ``[]`` so callers can tell "the model returned no items" from "we could
+        not read the reply".
+    """
+    import json
+    import re
+
+    if not response_text or not response_text.strip():
+        return None
+
+    # Direct parse
+    try:
+        parsed = json.loads(response_text)
+        return parsed if isinstance(parsed, list) else None
+    except json.JSONDecodeError:
+        pass
+
+    # Inside a ```json ... ``` fence
+    fenced = re.search(r'```(?:json)?\s*([\s\S]*?)```', response_text)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1))
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # Bare array anywhere in the text (prose preamble, trailing commentary)
+    bare = re.search(r'\[[\s\S]*\]', response_text)
+    if bare:
+        try:
+            parsed = json.loads(bare.group(0))
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    return None
