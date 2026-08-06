@@ -753,6 +753,32 @@ class MCPServer:
                     return _error(f"Proposal {proposal_id} not found")
                 content_type = pending.get("content_type")
 
+                # --- open-question closure proposed by the weekly re-triage ---
+                if content_type == "question_close_proposal":
+                    from processors.question_triage import apply_close_proposal
+
+                    content = pending.get("content") or {}
+                    if decision == "approve":
+                        result = apply_close_proposal(content)
+                        supabase_client.delete_pending_approval(proposal_id)
+                        supabase_client.log_action(
+                            "question_close_approved",
+                            details={"proposal_id": proposal_id, **content, "result": result},
+                            triggered_by="eyal",
+                        )
+                        mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "approve"})
+                        return _success({"decision": "approved", "result": result})
+
+                    # Rejected: drop the proposal, question STAYS open.
+                    supabase_client.delete_pending_approval(proposal_id)
+                    supabase_client.log_action(
+                        "question_close_rejected",
+                        details={"proposal_id": proposal_id, **content},
+                        triggered_by="eyal",
+                    )
+                    mcp_auth.log_call("decide_proposal", {"proposal_id": proposal_id, "type": content_type, "decision": "reject"})
+                    return _success({"decision": "rejected", "note": "question left open"})
+
                 # --- knowledge: topic merge / assignment ---
                 if content_type in ("topic_merge", "topic_assign"):
                     from processors.topic_clustering import apply_topic_proposal

@@ -125,13 +125,29 @@ class KnowledgeWeeklyScheduler:
                 except Exception as e:
                     logger.warning(f"Decision synthesis skipped (non-fatal): {e}")
 
+            # Open-questions re-triage. Question resolution otherwise runs ONLY
+            # at ingestion, against the single meeting being processed — so a
+            # question answered by a decision three meetings later stayed open
+            # forever and the backlog only grew (69 open at 2026-08-06, 9 of them
+            # already settled). PROPOSES closures; never closes anything itself.
+            if getattr(settings, "QUESTION_TRIAGE_ENABLED", False):
+                try:
+                    from processors.question_triage import (
+                        triage_open_questions, submit_close_proposals,
+                    )
+                    _props = triage_open_questions()
+                    summary["question_close_proposals"] = submit_close_proposals(_props)
+                except Exception as e:
+                    logger.warning(f"Question triage skipped (non-fatal): {e}")
+
             # Heartbeat to scheduler_heartbeats (what the health checks read),
             # not audit_log. [audit P4-01]
             from services.supabase_client import supabase_client
             supabase_client.upsert_scheduler_heartbeat(
                 "knowledge_weekly",
                 details={k: summary.get(k) for k in
-                         ("resynthesized_topics", "proposals", "decision_synthesis", "decision_proposals")},
+                         ("resynthesized_topics", "proposals", "decision_synthesis",
+                          "decision_proposals", "question_close_proposals")},
             )
             return True
         except Exception as e:

@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     # ORPHAN_CLEANUP_NOTIFY_ENABLED) so the refresh can run silently without
     # touching the schedule. [2026-08-06]
     PROJECT_STATUS_NOTIFY_ENABLED: bool = Field(default=True, description="DM Eyal the workbook link after each weekly refresh")
+    # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
+    # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
+    QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")
     RAW_TRANSCRIPTS_FOLDER_ID: str = Field(default="", description="Raw Transcripts folder ID (PRIMARY — quarantine + lazy-created subfolders live here)")
     # Additional transcript inboxes to poll, comma-separated. The transcript source
     # is not always one folder: Tactiq's Drive integration writes to a folder IT
