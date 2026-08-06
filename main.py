@@ -310,6 +310,16 @@ async def start_services() -> None:
         )
         tasks.append(pulse_task)
 
+    # Project Status pack: rewrites the per-area workbook before the weekly
+    # Paolo/Nechama review. Needs Sheets; no-ops without it.
+    if init_status.get("google_sheets") and settings.PROJECT_STATUS_ENABLED:
+        from schedulers.project_status_scheduler import project_status_scheduler
+        logger.info("  Starting project status scheduler...")
+        tasks.append(asyncio.create_task(
+            project_status_scheduler.start(),
+            name="project_status_scheduler"
+        ))
+
     # Weekly cost report: Sunday-morning Claude-spend summary to Eyal + Drive
     # archive. No LLM (reads token_usage) so it works even when credits are out.
     if settings.COST_REPORT_ENABLED:
@@ -594,6 +604,14 @@ async def stop_services() -> None:
     email_watcher.stop()
     alert_scheduler.stop()
     orphan_cleanup_scheduler.stop()
+
+    # Stop project status scheduler if started
+    if settings.PROJECT_STATUS_ENABLED:
+        try:
+            from schedulers.project_status_scheduler import project_status_scheduler
+            project_status_scheduler.stop()
+        except Exception:
+            pass
 
     # Stop weekly pulse scheduler if started
     if settings.WEEKLY_PULSE_ENABLED:

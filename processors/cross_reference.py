@@ -766,3 +766,88 @@ def _parse_json_response(response_text: str) -> dict:
 
     logger.warning(f"Could not parse JSON from response: {response_text[:200]}")
     return {}
+
+
+# ── Within-meeting decision dedup ────────────────────────────────────────────
+
+_DECISION_STOPWORDS = {
+    "a", "an", "the", "to", "of", "for", "and", "or", "in", "on", "at", "by",
+    "with", "from", "as", "that", "this", "it", "is", "are", "be", "will",
+    "we", "our", "us", "rather", "than", "instead", "into", "start", "all",
+}
+
+
+def _decision_tokens(text: str) -> set:
+    """Content words of a decision, for overlap comparison."""
+    import re
+    words = re.findall(r"[a-z0-9&/\-]+", (text or "").lower())
+    return {w for w in words if w not in _DECISION_STOPWORDS and len(w) > 2}
+
+
+def dedupe_decisions_within_meeting(decisions: list[dict], threshold: float = 0.65) -> list[dict]:
+    """Collapse near-duplicate decisions extracted from the SAME meeting.
+
+    cross_reference dedups TASKS across meetings, but nothing deduped decisions
+    within a single extraction — so when the model emitted the same decision
+    twice in different words they BOTH landed, and Eyal swept them by hand
+    (07-17, 07-26, and again on 'CropSight R&D&Ido' 07-30 where 8 decisions were
+    really 5). This closes it at the point of creation.
+
+    Compares Jaccard overlap of content words, which tolerates reordering and
+    padding ("Adopt multi-account AWS architecture separating R&D..." vs "Adopt a
+    multi-account AWS architecture from the start, separating R&D... rather than
+    running everything in a single account"). The LONGER description wins — it
+    carries more context — and its non-empty fields fill gaps in the survivor.
+
+    Returns a new list; input is not mutated.
+    """
+    kept: list[dict] = []
+    kept_tokens: list[set] = []
+    dropped = 0
+
+    # Longest first so the most informative wording becomes the survivor.
+    for d in sorted(decisions or [], key=lambda x: len(str(x.get("description") or "")), reverse=True):
+        tokens = _decision_tokens(str(d.get("description") or ""))
+        if not tokens:
+            kept.append(d)
+            kept_tokens.append(tokens)
+            continue
+        merged = False
+        for i, existing in enumerate(kept_tokens):
+            if not existing:
+                continue
+            inter = len(tokens & existing)
+            jaccard = inter / len(tokens | existing)
+            # Containment as well as Jaccard: one phrasing is often a padded
+            # superset of the other ("...to Milan for CropSight's European
+            # infrastructure" vs "...to Milan (eu-south-1) for better latency,
+            # cost, and availability"), which Jaccard scores far too low. Guarded
+            # to sets of >=4 content words so a terse decision can't be swallowed
+            # by merely appearing inside a longer, unrelated one.
+            contain = 0.0
+            if len(tokens) >= 4 and len(existing) >= 4:
+                contain = inter / min(len(tokens), len(existing))
+            overlap = max(jaccard, contain)
+            if overlap >= threshold:
+                # Fill any field the survivor lacks from the duplicate, so a
+                # shorter phrasing that carried a rationale isn't lost outright.
+                for key, value in d.items():
+                    if value and not kept[i].get(key):
+                        kept[i][key] = value
+                dropped += 1
+                merged = True
+                logger.info(
+                    f"[decision-dedup] merged duplicate (overlap {overlap:.2f}): "
+                    f"{str(d.get('description'))[:70]!r}"
+                )
+                break
+        if not merged:
+            kept.append(dict(d))
+            kept_tokens.append(tokens)
+
+    if dropped:
+        logger.info(
+            f"[decision-dedup] {len(decisions)} extracted -> {len(kept)} kept "
+            f"({dropped} duplicate(s) merged)"
+        )
+    return kept

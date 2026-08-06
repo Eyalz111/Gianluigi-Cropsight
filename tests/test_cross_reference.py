@@ -900,3 +900,73 @@ class TestWeeklyDigestCrossRef:
         )
 
         assert "Cross-Meeting Intelligence" not in doc
+
+
+class TestDecisionDedupWithinMeeting:
+    """cross_reference dedups TASKS across meetings, but nothing deduped
+    DECISIONS within one extraction — so the same decision in two phrasings both
+    persisted. Swept by hand 07-17, 07-26, and again on 'CropSight R&D&Ido'
+    (07-30) where 8 extracted decisions were really 5. [2026-08-06]
+    """
+
+    def _real_eight(self):
+        return [
+            {"description": "Adopt multi-account AWS architecture separating R&D and PoC/production into distinct AWS accounts from the start"},
+            {"description": "Adopt a multi-account AWS architecture from the start, separating R&D and PoC/production into distinct AWS accounts rather than running everything in a single account"},
+            {"description": "Switch AWS region from Frankfurt (eu-central-1) to Milan for CropSight's European infrastructure"},
+            {"description": "Defer disaster recovery and high-availability planning - it is premature for CropSight current stage"},
+            {"description": "For the upcoming PoC, prioritize feature development and ~80% reliability over infrastructure perfection - ship an imperfect but valuable product"},
+            {"description": "Defer disaster recovery and high-availability planning as premature for current stage; prioritize feature development and ~80% reliability"},
+            {"description": "Use CloudFront + S3 for static website delivery instead of traditional server-side rendering on EC2/Fargate"},
+            {"description": "Switch AWS region from Frankfurt (eu-central-1) to Milan (eu-south-1) for better latency, cost, and availability"},
+        ]
+
+    def test_real_incident_collapses_eight_to_five(self):
+        from processors.cross_reference import dedupe_decisions_within_meeting
+        assert len(dedupe_decisions_within_meeting(self._real_eight())) == 5
+
+    def test_longer_phrasing_survives(self):
+        """The more informative wording is the one that should reach the Sheet."""
+        from processors.cross_reference import dedupe_decisions_within_meeting
+        kept = dedupe_decisions_within_meeting(self._real_eight())
+        aws = [d for d in kept if "multi-account" in d["description"]]
+        assert len(aws) == 1
+        assert "rather than running everything in a single account" in aws[0]["description"]
+
+    def test_distinct_decisions_are_not_merged(self):
+        from processors.cross_reference import dedupe_decisions_within_meeting
+        distinct = [
+            {"description": "Use Aurora serverless for the production database"},
+            {"description": "Use CloudFront + S3 for the static website"},
+            {"description": "Hire an Italy-based salesperson in Q4"},
+            {"description": "Defer disaster recovery planning"},
+            {"description": "Apply for AWS Activate startup credits"},
+        ]
+        assert len(dedupe_decisions_within_meeting(distinct)) == len(distinct)
+
+    def test_short_decision_not_swallowed_by_a_longer_one(self):
+        """Containment scoring is guarded so a terse decision isn't absorbed just
+        because its words appear inside a longer, unrelated one."""
+        from processors.cross_reference import dedupe_decisions_within_meeting
+        rows = [
+            {"description": "Use Aurora"},
+            {"description": "Use Aurora serverless plus CloudFront and S3 across every "
+                            "production region for the upcoming client pilot rollout"},
+        ]
+        assert len(dedupe_decisions_within_meeting(rows)) == 2
+
+    def test_survivor_inherits_missing_fields_from_duplicate(self):
+        """A shorter phrasing that carried a rationale must not lose it."""
+        from processors.cross_reference import dedupe_decisions_within_meeting
+        rows = [
+            {"description": "Switch AWS region from Frankfurt to Milan for better latency and cost"},
+            {"description": "Switch AWS region from Frankfurt to Milan", "rationale": "cheaper, closer to Italy"},
+        ]
+        kept = dedupe_decisions_within_meeting(rows)
+        assert len(kept) == 1
+        assert kept[0]["rationale"] == "cheaper, closer to Italy"
+
+    def test_empty_and_blank_inputs_are_safe(self):
+        from processors.cross_reference import dedupe_decisions_within_meeting
+        assert dedupe_decisions_within_meeting([]) == []
+        assert len(dedupe_decisions_within_meeting([{"description": ""}, {"description": None}])) == 2

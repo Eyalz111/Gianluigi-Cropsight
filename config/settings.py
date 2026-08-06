@@ -124,6 +124,17 @@ class Settings(BaseSettings):
     # the workbook is created on first run and its id logged for pinning here.
     PROJECT_STATUS_SHEET_ID: str = Field(default="", description="Project Status workbook ID (one tab per area)")
     PROJECT_STATUS_ENABLED: bool = Field(default=False, description="Enable the weekly project-status pack refresh")
+    # Monday 07:00 IST by default — before the Paolo/Nechama review, so the sheet
+    # is current when they open it. Window loop (not sleep-until-Monday) so a
+    # mid-week restart can't lose the run.
+    PROJECT_STATUS_DAY: int = Field(default=0, description="Weekday for the project-status refresh (0=Mon)")
+    PROJECT_STATUS_HOUR: int = Field(default=7, description="Hour (IST) for the project-status refresh")
+    PROJECT_STATUS_WINDOW_HOURS: int = Field(default=3, description="Window width for the refresh")
+    PROJECT_STATUS_CHECK_INTERVAL: int = Field(default=1800, description="Project-status scheduler poll interval (s)")
+    # One DM a week with the workbook link. Separate switch (mirrors
+    # ORPHAN_CLEANUP_NOTIFY_ENABLED) so the refresh can run silently without
+    # touching the schedule. [2026-08-06]
+    PROJECT_STATUS_NOTIFY_ENABLED: bool = Field(default=True, description="DM Eyal the workbook link after each weekly refresh")
     RAW_TRANSCRIPTS_FOLDER_ID: str = Field(default="", description="Raw Transcripts folder ID (PRIMARY — quarantine + lazy-created subfolders live here)")
     # Additional transcript inboxes to poll, comma-separated. The transcript source
     # is not always one folder: Tactiq's Drive integration writes to a folder IT

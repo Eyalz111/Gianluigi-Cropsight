@@ -2301,6 +2301,23 @@ def _distribution_content_intact(meeting_id: str, content: dict) -> tuple[bool, 
     return True, ""
 
 
+# The extraction template ends every summary with "Pending Eyal's approval"
+# (config/prompts/system.yaml:287,322). That line is baked into the STORED text,
+# so once Eyal approves it and we email it to the team, the document they read
+# still claims it is awaiting his approval. Rewritten at render time rather than
+# in the template so already-stored summaries are corrected too. [2026-08-06]
+_PENDING_FOOTER = "Pending Eyal's approval"
+
+
+def _finalize_summary_footer(summary: str, approved_on: str = "") -> str:
+    """Swap the 'pending approval' footer for an approved one at send time."""
+    if not summary or _PENDING_FOOTER not in summary:
+        return summary
+    from zoneinfo import ZoneInfo
+    stamp = approved_on or datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d")
+    return summary.replace(_PENDING_FOOTER, f"Approved by Eyal {stamp}")
+
+
 async def distribute_approved_content(
     meeting_id: str,
     content: dict,
@@ -2369,7 +2386,7 @@ async def distribute_approved_content(
     }
 
     meeting_title = content.get("title", "Untitled")
-    summary = content.get("summary", "")
+    summary = _finalize_summary_footer(content.get("summary", ""))
     exec_summary = content.get("executive_summary", "") or summary.split("\n")[0][:200] if summary else ""
     meeting_date = content.get("date", datetime.now().strftime("%Y-%m-%d"))
     tasks = content.get("tasks", [])

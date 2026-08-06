@@ -611,6 +611,19 @@ class SupabaseClient:
         Returns:
             List of created decision records.
         """
+        # Collapse near-duplicates the extractor emitted for the SAME meeting
+        # before they ever land. cross_reference dedups TASKS across meetings but
+        # nothing deduped decisions within one extraction, so the same decision in
+        # two phrasings both persisted — swept by hand on 07-17, 07-26 and again
+        # on 'CropSight R&D&Ido' (8 decisions were really 5). Lazy import: this is
+        # pure logic living in processors/, and a module-level import here would
+        # be a services -> processors cycle. [2026-08-06]
+        try:
+            from processors.cross_reference import dedupe_decisions_within_meeting
+            decisions = dedupe_decisions_within_meeting(decisions)
+        except Exception as e:
+            logger.warning(f"decision dedup skipped (non-fatal): {e}")
+
         # One vocabulary fetch per batch (mirrors the areas/roster caches in
         # create_tasks_batch) so resolve_label doesn't re-query per decision.
         _dec_projects = self.get_canonical_projects(status="active")
