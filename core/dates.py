@@ -117,6 +117,43 @@ def parse_human_date(value, today: date | None = None) -> str | None:
         return None
 
 
+def edit_is_newer_than_sync(manual_set_at, snapshot_at) -> bool:
+    """THE RECENCY RULE — the tie-break that makes two editable surfaces converge.
+
+    A task field can be edited on the Tasks tab AND on the Project Status sheet.
+    "Never revert a value a human set" is right in isolation, but applied blindly
+    it makes a disagreement PERMANENT: each sheet keeps its own value, every
+    cycle reports the same hold, and the two files quietly describe different
+    truths with nobody told.
+
+    `manual_set_at` is when a human last set the field ANYWHERE; `snapshot_at`
+    is when the surface being reconciled was last in step with it. A human edit
+    that came after is the more recent decision and belongs on this surface too.
+
+    Missing or unparseable timestamps return False — HOLD. A rule that resolves
+    a conflict by guessing is worse than one that leaves it visible. Shared by
+    both reconcile engines so the two can never disagree about who wins.
+    [2026-08-08]
+    """
+    edited = _as_datetime(manual_set_at)
+    synced = _as_datetime(snapshot_at)
+    if not edited or not synced:
+        return False
+    return edited > synced
+
+
+def _as_datetime(value):
+    """Parse an ISO timestamp to datetime, or None."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 def _safe_iso(y: int, mo: int, d: int) -> str | None:
     try:
         return date(y, mo, d).isoformat()

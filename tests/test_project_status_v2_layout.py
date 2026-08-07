@@ -464,3 +464,45 @@ class TestNewRowFormatting:
         from services.project_status_sheet import new_row_format_requests
         reqs = new_row_format_requests(9, 12, KIND_ACTION, "x")
         assert all(r[next(iter(r))]["range"]["startRowIndex"] == 11 for r in reqs)
+
+
+class TestUnfiledWorkIsSurfaced:
+    """The one gap this sheet cannot show by itself.
+
+    It is project-centric, so a task with no project_id does not appear on it at
+    all — no error, no empty row, just absence. Every other gap announces
+    itself; this one is silent, and silence in a review reads as "nothing to
+    see". Tier 4 catches most of it via the area's Others bucket, but a task
+    whose category is not an area at all (e.g. "General") has no bucket to fall
+    into.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unfiled_tasks_are_counted(self):
+        from schedulers import project_status_scheduler as mod
+
+        with patch.object(mod.settings, "PROJECT_STATUS_V2_LAYOUT", True), \
+             patch.object(mod.settings, "PROJECT_STATUS_SHEET_ID", "sid"), \
+             patch("services.supabase_client.supabase_client") as sb:
+            sb.get_open_tasks_by_project.return_value = {
+                "p1": [{"id": "t1"}], None: [{"id": "t9"}, {"id": "t8"}]}
+            sb.get_canonical_projects.return_value = [
+                {"id": "p1", "name": "Live", "status": "active"}]
+            result = await mod.project_status_scheduler.refresh(notify=False)
+
+        assert result["unfiled"] == 2
+        assert result["actions"] == 1        # unfiled are NOT counted as on-sheet
+
+    @pytest.mark.asyncio
+    async def test_nothing_unfiled_reports_zero(self):
+        from schedulers import project_status_scheduler as mod
+
+        with patch.object(mod.settings, "PROJECT_STATUS_V2_LAYOUT", True), \
+             patch.object(mod.settings, "PROJECT_STATUS_SHEET_ID", "sid"), \
+             patch("services.supabase_client.supabase_client") as sb:
+            sb.get_open_tasks_by_project.return_value = {"p1": [{"id": "t1"}]}
+            sb.get_canonical_projects.return_value = [
+                {"id": "p1", "name": "Live", "status": "active"}]
+            result = await mod.project_status_scheduler.refresh(notify=False)
+
+        assert result["unfiled"] == 0

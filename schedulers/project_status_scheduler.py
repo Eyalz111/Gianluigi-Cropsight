@@ -182,16 +182,22 @@ class ProjectStatusScheduler:
         grouped = supabase_client.get_open_tasks_by_project()
         projects = [p for p in supabase_client.get_canonical_projects(status=None)
                     if (p.get("status") or "active") != "retired"]
-        actions = sum(len(v) for v in grouped.values())
+        actions = sum(len(v) for k, v in grouped.items() if k)
         idle = [p["name"] for p in projects if not grouped.get(p["id"])]
+        # UNFILED WORK IS THE ONE THING THIS FILE CANNOT SHOW. The sheet is
+        # project-centric, so a task with no project_id does not appear on it at
+        # all — no error, no empty row, just absence. Every other gap announces
+        # itself; this one is silent, and silence in a review reads as "nothing
+        # to see". Counting it here is what makes it visible. [2026-08-08]
+        unfiled = len(grouped.get(None, []) or [])
 
         result = {"spreadsheet_id": sid, "url": url, "rows": actions,
                   "tabs": [], "projects": len(projects), "actions": actions,
-                  "rebuilt": False, "error": None}
+                  "unfiled": unfiled, "rebuilt": False, "error": None}
         logger.info(
             f"[project-status] v2 review prep — {len(projects)} project(s), "
-            f"{actions} open action(s), {len(idle)} with nothing open "
-            "(sheet not modified)")
+            f"{actions} open action(s), {len(idle)} with nothing open, "
+            f"{unfiled} unfiled (sheet not modified)")
 
         if notify and getattr(settings, "PROJECT_STATUS_NOTIFY_ENABLED", True):
             # Projects with nothing open are the useful signal in a review:

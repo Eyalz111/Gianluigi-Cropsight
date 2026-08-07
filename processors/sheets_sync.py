@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from config.settings import settings
-from core.dates import parse_human_date
+from core.dates import edit_is_newer_than_sync, parse_human_date
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -828,7 +828,8 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                 final[field] = sheet_val
                 _record_override(field, sheet_val)
             elif not _field_eq(field, db_val, sheet_val):
-                if dt.get(f"manual_{field}"):
+                if dt.get(f"manual_{field}") and not edit_is_newer_than_sync(
+                        dt.get("manual_set_at"), snap.get("snapshot_at")):
                     # Rule 2 rail: never clobber a manually-set field. Until
                     # 2026-07-22 the manual_* flags were write-only (one reader in
                     # the whole codebase) and Rule 4 pushed straight over Eyal's
@@ -836,6 +837,19 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                     # write the cell as well as the DB, so a DB-only divergence on
                     # a sticky field means a system/inference path wrote it — hold
                     # the human's cell and surface it instead of reverting.
+                    #
+                    # THAT PREMISE STOPPED BEING TRUE on 2026-08-07, when the
+                    # Project Status sheet became a second HUMAN surface. It
+                    # writes the database and marks the field sticky, but it does
+                    # not write this tab's cell — so Nechama editing an owner
+                    # there looks exactly like "a machine wrote it" from here, and
+                    # was held forever. The two sheets would show different values
+                    # for the same task indefinitely, with nobody told.
+                    #
+                    # Same tie-break as the Project Status engine: if the human
+                    # edit recorded in manual_set_at came AFTER this tab was last
+                    # in step, it is the newer decision and belongs in this cell
+                    # too. Missing timestamps hold. [2026-08-08]
                     summary["manual_held"] += 1
                     manual_held.append((sid, field, db_val, sheet_val))
                     final[field] = sheet_val
