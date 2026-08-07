@@ -340,25 +340,27 @@ class TestVisualFeedbackRound2:
         assert _date_validation_requests(9, self._rows(["P", "P"])) == []
 
 
-class TestHiddenColumnsAreLocked:
-    def test_the_bot_is_the_only_editor(self):
-        """Overwrite _uid and the engine stops recognising the row: it becomes a
-        human line and the task it pointed at is suppressed out of the view.
-        warningOnly only asked politely."""
-        from services import project_status_sheet as pss
-        with patch.object(pss.settings, "GIANLUIGI_EMAIL", "gianluigi@cropsight.io"):
-            reqs = pss._v2_structure_requests(9, 7)
-        pr = next(r for r in reqs if "addProtectedRange" in r)["addProtectedRange"]["protectedRange"]
-        assert pr["editors"]["users"] == ["gianluigi@cropsight.io"]
-        assert "warningOnly" not in pr
+class TestHiddenColumnsWarnButNeverBlock:
+    """A HARD lock on the identity columns broke the file.
 
-    def test_it_falls_back_to_a_warning_when_no_bot_address_is_set(self):
-        """A lock with no editor would shut the system out of its own columns."""
+    Dragging a row and deleting a row both touch that row's hidden cells, and
+    Sheets cannot tell "typing into a protected column" apart from "moving a row
+    that contains one". Eyal hit it on checks 15 and 16: reorder and remove, the
+    two most important gestures in a review, were refused outright. A warning is
+    a seatbelt; a lock stopped the car."""
+
+    def test_protection_never_hard_blocks(self):
         from services import project_status_sheet as pss
-        with patch.object(pss.settings, "GIANLUIGI_EMAIL", ""):
-            reqs = pss._v2_structure_requests(9, 7)
+        reqs = pss._v2_structure_requests(9, 7)
         pr = next(r for r in reqs if "addProtectedRange" in r)["addProtectedRange"]["protectedRange"]
         assert pr["warningOnly"] is True
+        assert "editors" not in pr
+
+    def test_it_still_covers_only_the_hidden_columns(self):
+        from services import project_status_sheet as pss
+        reqs = pss._v2_structure_requests(9, 7)
+        rng = next(r for r in reqs if "addProtectedRange" in r)["addProtectedRange"]["protectedRange"]["range"]
+        assert rng["startColumnIndex"] == 7 and rng["endColumnIndex"] == 12
 
 
 class TestHowToTab:

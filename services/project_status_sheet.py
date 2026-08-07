@@ -214,22 +214,25 @@ def _date_validation_requests(sheet_id: int, rows: list) -> list[dict]:
 def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
     """Hide/tint/protect the system columns and attach the colour rules.
 
-    Hidden + white-on-white + PROTECTED. The protection was warningOnly, which
-    only asks politely; Eyal's review of the live file — "if writing down
-    something over there might break stuff, let's see how we lock it" — is
-    right, because those columns carry row IDENTITY. Overwrite `_uid` and the
-    engine stops recognising the row: it becomes a human line, and the task it
-    pointed at gets suppressed out of the view.
+    Hidden + white-on-white + a WARNING, deliberately not a hard lock.
 
-    So it is a real lock now, with the bot as the sole named editor. The bot
-    authenticates as GIANLUIGI_EMAIL and makes every system write, so it edits
-    freely while a human gets refused rather than warned. Falls back to
-    warningOnly if that address isn't configured — a lock with no editor would
-    shut the system out of its own columns. [2026-08-07]
+    Eyal asked to lock these columns properly — they carry row identity, and
+    overwriting `_uid` makes the engine stop recognising the row. So they were
+    locked, with the bot as sole editor. That broke the file: dragging a row and
+    deleting a row BOTH touch the row's hidden cells, and Google Sheets cannot
+    tell "typing into a protected column" apart from "moving a row that happens
+    to contain one". Eyal hit it immediately on checks 15 and 16 — the two most
+    important gestures in a review, reorder and remove, were refused outright.
+
+    So: warningOnly. A deliberate edit gets an "are you sure" it can accept, and
+    row operations keep working. The columns are hidden and white-on-white
+    anyway, so reaching them at all takes intent, and the engine defends itself
+    against the damage a broken identity could do: a uid it does not recognise
+    is a GHOST and is left alone, a duplicated one keeps the topmost row, and a
+    create re-reads its row before adopting it. Protection here is a seatbelt,
+    not a lock — the same choice already made for Tasks column J. [2026-08-07]
     """
-    bot = (getattr(settings, "GIANLUIGI_EMAIL", "") or "").strip()
-    protection = ({"warningOnly": True} if not bot
-                  else {"editors": {"users": [bot]}})
+    protection = {"warningOnly": True}
     reqs: list[dict] = [
         {"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
