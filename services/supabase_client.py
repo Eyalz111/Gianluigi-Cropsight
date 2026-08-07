@@ -1000,6 +1000,8 @@ class SupabaseClient:
         urgency: str = "M",
         label: str | None = None,
         approval_status: str | None = None,
+        project_id: str | None = None,
+        notes: str | None = None,
     ) -> dict:
         """
         Create a new task.
@@ -1041,6 +1043,23 @@ class SupabaseClient:
             "urgency": urgency,
             "label": label,
         }
+        # project_id / notes: only sent when supplied, so every existing caller
+        # keeps exactly the payload it has today. When no project is given but
+        # the resolved LABEL is itself a canonical project name, adopt it —
+        # bridges the legacy data where `label` was the only project pointer.
+        # [2026-08-07]
+        if notes is not None:
+            data["notes"] = notes
+        if project_id:
+            data["project_id"] = project_id
+        elif label:
+            try:
+                for _p in self.get_canonical_projects(status=None):
+                    if (_p.get("name") or "").strip().lower() == label.strip().lower():
+                        data["project_id"] = _p["id"]
+                        break
+            except Exception:
+                pass  # never let project inference block task creation
         # Only set approval_status when a caller is explicit. Left as None the
         # DB default ('pending') stands, preserving the extraction flow. A human
         # typing a task straight into the Sheet passes 'approved' — the same
@@ -4832,8 +4851,15 @@ class SupabaseClient:
         if not raw:
             return ""
         try:
+            # RETIRED projects must stay in the matching set. Retire-not-delete
+            # keeps the row precisely so historical labels still canonicalize; if
+            # we matched active-only, every task labelled "Moldova Pilot" would
+            # become unmatched the moment it retired, land in unmatched_labels,
+            # and project_learning.propose_new_projects would re-propose it as a
+            # brand-new project within days. status=None returns all.
+            # [2026-08-07]
             rows = projects if projects is not None else self.get_canonical_projects(
-                status="active")
+                status=None)
         except Exception as e:
             logger.warning(f"resolve_label lookup failed (keeping label): {e}")
             return raw
@@ -5262,7 +5288,14 @@ class SupabaseClient:
     # Reconcile / sheet-sync helpers (v3 outputs re-architecture)
     # =========================================================================
 
-    _MANUAL_FIELDS = ("status", "deadline", "priority", "assignee", "title", "label")
+    # project_id / notes added 2026-08-07: both are editable from the Project
+    # Status sheet (a row dragged to another block re-parents the task; the
+    # Comments cell is hers), so both need the sticky rail or a system write
+    # would silently revert her.
+    _MANUAL_FIELDS = (
+        "status", "deadline", "priority", "assignee", "title", "label",
+        "project_id", "notes",
+    )
 
     def get_sheet_snapshots(self, entity_type: str = "task") -> dict:
         """Last-synced action-field snapshot per task, keyed by task_id."""
@@ -5290,18 +5323,28 @@ class SupabaseClient:
         assignee: str | None,
         title: str | None = None,
         label: str | None = None,
+        entity_type: str = "task",
+        notes: str | None = None,
+        sheet_tab: str | None = None,
     ) -> bool:
-        """Write/refresh the current snapshot row for a task (one per task).
+        """Write/refresh the current snapshot row for a task (one per SURFACE).
 
         title/label are the content columns (Phase 1, 2026-07) — snapshotted so a
         Sheet edit to Task text/Label can be attributed to Eyal (Sheet-now !=
         snapshot). Older callers that omit them still work (kwargs default None).
+
+        `entity_type` selects the SURFACE. A task shown on both the Tasks tab and
+        the Project Status sheet needs an independent merge base for each —
+        `uq_sheet_snapshots_task` and `uq_sheet_snapshots_ps_action` are both
+        PARTIAL indexes on the same `task_id`, so the two coexist. Sharing one
+        base would make an edit on either surface read as a divergence on the
+        other. [2026-08-07]
         """
         try:
             from datetime import datetime, timezone
             data = {
                 "task_id": task_id,
-                "entity_type": "task",
+                "entity_type": entity_type,
                 "sheet_row": sheet_row,
                 # Coerce empty strings to NULL — Sheet cells come back as "" for
                 # blanks, and the DATE column (deadline) rejects "" (22007).
@@ -5313,22 +5356,29 @@ class SupabaseClient:
                 "label": (label or None),
                 "snapshot_at": datetime.now(timezone.utc).isoformat(),
             }
+            # Project Status extras — only sent for that surface so the existing
+            # task snapshots keep exactly the shape they have today.
+            if entity_type == "ps_action":
+                data["notes"] = (notes or None)
+                data["sheet_tab"] = (sheet_tab or None)
             existing = (
                 self.client.table("sheet_snapshots")
                 .select("id")
                 .eq("task_id", task_id)
-                .eq("entity_type", "task")
+                .eq("entity_type", entity_type)
                 .execute()
             )
             if existing.data:
                 self.client.table("sheet_snapshots").update(data).eq(
                     "task_id", task_id
-                ).eq("entity_type", "task").execute()
+                ).eq("entity_type", entity_type).execute()
             else:
                 self.client.table("sheet_snapshots").insert(data).execute()
             return True
         except Exception as e:
-            logger.error(f"Error upserting sheet snapshot for '{task_id}': {e}")
+            logger.error(
+                f"Error upserting {entity_type} snapshot for '{task_id}': {e}"
+            )
             return False
 
     def mark_task_field_manual(self, task_id: str, field: str, source: str) -> bool:
@@ -6237,6 +6287,215 @@ class SupabaseClient:
             .execute()
         )
         return result.data or []
+
+    # =========================================================================
+    # Project Status v2 — project-level fields + the ps_project snapshot rail
+    #
+    # Fifth/sixth surface on the reconcile engine. `ps_action` snapshots reuse
+    # upsert_sheet_snapshot(entity_type="ps_action") / get_sheet_snapshots(
+    # "ps_action") — only the PROJECT row needs its own quartet, because its
+    # fields (objective/target_date/owner/notes) live on canonical_projects.
+    # [2026-08-07]
+    # =========================================================================
+
+    _PROJECT_MANUAL_FIELDS = ("objective", "target_date", "owner", "notes")
+
+    def get_ps_project_snapshots(self) -> dict:
+        """Last-synced Project Status snapshot per project, keyed by project id."""
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", "ps_project")
+                .execute()
+                .data
+                or []
+            )
+            return {
+                r["canonical_project_id"]: r
+                for r in rows if r.get("canonical_project_id")
+            }
+        except Exception as e:
+            logger.error(f"Error reading ps_project snapshots: {e}")
+            return {}
+
+    def upsert_ps_project_snapshot(
+        self,
+        project_id: str,
+        sheet_row: int | None = None,
+        sheet_tab: str | None = None,
+        objective: str | None = None,
+        target_date: str | None = None,
+        owner: str | None = None,
+        notes: str | None = None,
+    ) -> bool:
+        """Write/refresh the Project Status snapshot row for a project."""
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "canonical_project_id": project_id,
+                "entity_type": "ps_project",
+                "sheet_row": sheet_row,
+                "sheet_tab": (sheet_tab or None),
+                # Empty cells come back as "" and the DATE column rejects it (22007).
+                "objective": (objective or None),
+                "target_date": (target_date or None),
+                "owner": (owner or None),
+                "notes": (notes or None),
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("canonical_project_id", project_id)
+                .eq("entity_type", "ps_project")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "canonical_project_id", project_id
+                ).eq("entity_type", "ps_project").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting ps_project snapshot for '{project_id}': {e}")
+            return False
+
+    def mark_project_field_manual(self, project_id: str, field: str, source: str) -> bool:
+        """Flag a project field as manually set (sticky) — Rule 2 consults this."""
+        if field not in self._PROJECT_MANUAL_FIELDS:
+            logger.warning(f"mark_project_field_manual: unknown field '{field}'")
+            return False
+        try:
+            from datetime import datetime, timezone
+            self.client.table("canonical_projects").update({
+                f"manual_{field}": True,
+                "manual_set_at": datetime.now(timezone.utc).isoformat(),
+                "manual_set_source": source,
+            }).eq("id", project_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking project field manual ({project_id}.{field}): {e}")
+            return False
+
+    def clear_project_manual_flag(self, project_id: str, field: str) -> bool:
+        """Clear a sticky project flag so the system may write the field again."""
+        if field not in self._PROJECT_MANUAL_FIELDS:
+            logger.warning(f"clear_project_manual_flag: unknown field '{field}'")
+            return False
+        try:
+            self.client.table("canonical_projects").update(
+                {f"manual_{field}": False}
+            ).eq("id", project_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing project manual flag ({project_id}.{field}): {e}")
+            return False
+
+    def update_canonical_project(self, project_id: str, **fields) -> dict:
+        """Update project fields through one choke point.
+
+        Canonicalizes `owner` via resolve_assignee so "nechama" and "Nechama Tik"
+        do not churn the cell every cycle, and always touches updated_at.
+        Unknown keys are dropped rather than sent to PostgREST as a 400.
+        """
+        allowed = {
+            "objective", "target_date", "owner", "notes", "display_order",
+            "description", "area_id", "status",
+        }
+        payload = {k: v for k, v in fields.items() if k in allowed}
+        if not payload:
+            return {}
+        if payload.get("owner"):
+            payload["owner"] = self.resolve_assignee(payload["owner"])
+        if payload.get("target_date") in ("", "None"):
+            payload["target_date"] = None
+        try:
+            from datetime import datetime, timezone
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            result = (
+                self.client.table("canonical_projects")
+                .update(payload).eq("id", project_id).execute()
+            )
+            return (result.data or [{}])[0]
+        except Exception as e:
+            logger.error(f"Error updating canonical project {project_id}: {e}")
+            return {}
+
+    def retire_canonical_project(self, project_id: str, reason: str = "") -> dict:
+        """Retire a project. NEVER deletes.
+
+        Deleting orphans the provenance of every task/decision that referenced
+        it. A retired project keeps its row AND its aliases, so resolve_label
+        still canonicalizes historical labels (see the note there) — it simply
+        stops being offered for new work.
+        """
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            result = (
+                self.client.table("canonical_projects").update({
+                    "status": "retired",
+                    "retired_at": now,
+                    "retired_reason": (reason or None),
+                    "updated_at": now,
+                }).eq("id", project_id).execute()
+            )
+            row = (result.data or [{}])[0]
+            self.log_action(
+                "project_retired",
+                details={"project_id": project_id, "name": row.get("name"),
+                         "reason": reason},
+                triggered_by="eyal",
+            )
+            return row
+        except Exception as e:
+            logger.error(f"Error retiring canonical project {project_id}: {e}")
+            return {}
+
+    def set_task_project(self, task_id: str, project_id: str | None, source: str) -> bool:
+        """Attach a task to a project and mark the field sticky.
+
+        Used when a row is dragged into another block on the Project Status
+        sheet — a deliberate re-parent, so it must survive the next system pass.
+        """
+        try:
+            self.client.table("tasks").update(
+                {"project_id": project_id}
+            ).eq("id", task_id).execute()
+            self.mark_task_field_manual(task_id, "project_id", source)
+            return True
+        except Exception as e:
+            logger.error(f"Error setting project for task {task_id}: {e}")
+            return False
+
+    def get_open_tasks_by_project(self) -> dict:
+        """{project_id: [task, ...]} of live, approved, un-suppressed open tasks.
+
+        One grouped read for the Project Status block builder. Mirrors the
+        partial index idx_tasks_ps_candidates.
+        """
+        try:
+            rows = (
+                self.client.table("tasks")
+                .select("*,meetings(title,date)")
+                .eq("approval_status", "approved")
+                .is_("valid_to", "null")
+                .eq("ps_suppressed", False)
+                .in_("status", ["pending", "in_progress", "overdue"])
+                .limit(2000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.error(f"Error reading open tasks by project: {e}")
+            return {}
+        grouped: dict = {}
+        for t in rows:
+            grouped.setdefault(t.get("project_id"), []).append(t)
+        return grouped
 
 
 # Singleton instance for easy import
