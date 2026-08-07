@@ -252,6 +252,17 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
             plan.bump("pulled")
             final[field] = sheet_cmp
             plan.overrides.append(f"{tab} r{row.row_number}: {field} <- {sheet_cmp!r}")
+            # Canonicalise the cell in the SAME cycle. Normalisation used to
+            # live only on the no-divergence path, so a freshly typed "12.9"
+            # was understood but left looking unrecognised until the following
+            # pass — the visible answer to "does it know what I meant?" arriving
+            # 30 minutes after the question. [2026-08-07]
+            if (field in _DATE_FIELDS and sheet_val
+                    and _display(field, sheet_cmp) != sheet_val):
+                plan.cell_writes.append(
+                    (tab, row.row_number, _col_index(col),
+                     _display(field, sheet_cmp)))
+                plan.bump("normalized_dates")
         elif not _eq(field, db_val, sheet_cmp, assignees):
             if db_row.get(f"manual_{field}"):
                 plan.bump("manual_held")                    # Rule 2
@@ -615,13 +626,25 @@ def _propose_people(plan: Plan, assignees: _Assignees) -> None:
     .tier drives distribution tier-capping, so auto-creating someone at founders
     tier would put a stranger on the next founders-tier email. Nothing is
     blocked meanwhile: resolve_assignee returns the name as typed, so the task
-    is created with it immediately.
+    keeps her value immediately.
+
+    Scans EDITS as well as new rows. It used to look only at `creates`, so
+    typing an unknown name onto a row that already existed — by far the more
+    common gesture in a review, and how Eyal hit it on 2026-08-07 with "Ayala" —
+    pulled the name into the database and raised nothing. The person stayed
+    unknown to the roster, silently, which is exactly the case the proposal
+    exists to catch.
     """
     names = set()
     for create in plan.creates:
         raw = str(create.get("assignee") or "").strip()
         if raw and not assignees.known(raw):
             names.add(raw)
+    for fields in list(plan.task_updates.values()) + list(plan.project_updates.values()):
+        for key in ("assignee", "owner"):
+            raw = str(fields.get(key) or "").strip()
+            if raw and not assignees.known(raw):
+                names.add(raw)
     plan.person_proposals.extend(sorted(names))
 
 
@@ -693,6 +716,37 @@ async def reconcile_project_status(dry_run: bool = False,
     except Exception:                                       # noqa: BLE001
         pass
     return summary
+
+
+def _row_still_matches(sheets_service, spreadsheet_id: str, spec: dict) -> bool:
+    """Is the row we planned to adopt still the row at that number?
+
+    Compares the text we based the decision on against the cell as it is right
+    now. Cheap (one row read per create, and creates are capped) and it makes
+    inserting rows mid-cycle safe: a shifted row is simply deferred, and the
+    next cycle re-plans it against fresh numbers with nothing lost.
+    """
+    from services.project_status_rows import ALL_HEADERS, resolve_columns
+
+    try:
+        values = sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{spec['tab']}'!A{spec['row']}:L{spec['row']}")
+        ).get("values", [[]])
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning(f"[ps-reconcile] re-read failed for {spec['tab']} "
+                       f"r{spec['row']}: {e}")
+        return False        # never adopt on an unverified row
+
+    row = (values[0] if values else []) + [""] * len(ALL_HEADERS)
+    cols = resolve_columns(ALL_HEADERS)
+    if str(row[cols["_kind"]] or "").strip():
+        return False        # something already claimed it
+
+    expected = (spec.get("title") if spec["kind"] == "task" else spec.get("name"))
+    column = "Action" if spec["kind"] == "task" else "Subject"
+    return _normalize(row[cols[column]]) == _normalize(expected)
 
 
 def _create_entity(spec: dict) -> tuple[str, str]:
@@ -966,6 +1020,18 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
         plan.creates = []
     for spec in plan.creates:
         try:
+            # RE-READ THE ROW BEFORE ADOPTING IT. Row numbers came from a read
+            # that has already happened; if a row was INSERTED above this one in
+            # the meantime — which is exactly what happens when someone adds
+            # rows while the cycle runs — the number now addresses a different
+            # line, and the uid would be stamped onto the wrong row. That row
+            # would then be treated as the task, and the line actually typed
+            # would be created again next cycle, forever. [2026-08-07]
+            if not _row_still_matches(sheets_service, spreadsheet_id, spec):
+                logger.info(
+                    f"[ps-reconcile] {spec['tab']} r{spec['row']} moved since the "
+                    "read — deferring the create to the next cycle.")
+                continue
             new_id, kind = _create_entity(spec)
             if not new_id:
                 continue

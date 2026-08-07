@@ -598,3 +598,127 @@ class TestProjectNameIsSystemOwned:
             act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
         )
         assert plan.task_updates["t1"]["label"] == "AWS Setup"
+
+
+class TestUnknownNamesOnEdits:
+    """Typing an unknown name onto a row that already exists is the COMMON
+    gesture in a review — far more common than adding a whole new row. It used
+    to pull the name into the database and raise nothing at all."""
+
+    def test_an_unknown_name_edited_onto_an_existing_row_proposes_a_person(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Ayala"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+        )
+        assert plan.task_updates["t1"]["assignee"] == "Ayala"
+        assert plan.person_proposals == ["Ayala"]
+
+    def test_an_unknown_owner_on_a_project_row_proposes_too(self):
+        plan = _plan(
+            {TAB: _grid(_prow(resp="Ayala"))},
+            tasks=[], proj_snaps={"p1": {}},
+        )
+        assert plan.person_proposals == ["Ayala"]
+
+    def test_a_known_name_edited_in_proposes_nothing(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Eyal Zror"))},
+            tasks=[_db_task(assignee="Roye Tadmor")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Roye Tadmor",
+                              "status": "pending"}},
+        )
+        assert plan.person_proposals == []
+
+    def test_the_same_unknown_name_is_proposed_once(self):
+        plan = _plan(
+            {TAB: _grid(_prow(resp="Ayala"), _arow(resp="Ayala"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+            proj_snaps={"p1": {}},
+        )
+        assert plan.person_proposals == ["Ayala"]
+
+
+class TestRowsInsertedMidCycle:
+    """Eyal asked to verify the system copes when he ADDS rows.
+
+    Row numbers come from a read that already happened. If a row is inserted
+    above one we planned to adopt, that number now addresses a different line —
+    stamping the uid there would make the wrong row become the task, and the
+    line actually typed would be re-created every cycle forever.
+    """
+
+    def _svc(self, returned_row):
+        svc = MagicMock()
+        svc._execute_with_retry.side_effect = lambda fn: {"values": [returned_row]}
+        return svc
+
+    def test_an_unshifted_row_is_adopted(self):
+        spec = {"kind": "task", "tab": TAB, "row": 5, "title": "Call the bank"}
+        svc = self._svc(["", "", "Call the bank", "", "", "", ""])
+        assert psr._row_still_matches(svc, "sid", spec) is True
+
+    def test_a_shifted_row_is_deferred_not_adopted(self):
+        """Something else is at that number now."""
+        spec = {"kind": "task", "tab": TAB, "row": 5, "title": "Call the bank"}
+        svc = self._svc(["", "", "A completely different line", "", "", "", ""])
+        assert psr._row_still_matches(svc, "sid", spec) is False
+
+    def test_a_row_that_already_has_an_identity_is_refused(self):
+        """It was claimed between the read and now — adopting it twice would
+        give two tasks the same row."""
+        spec = {"kind": "task", "tab": TAB, "row": 5, "title": "Call the bank"}
+        svc = self._svc(["", "", "Call the bank", "", "", "", "", "A", "t9", "p1"])
+        assert psr._row_still_matches(svc, "sid", spec) is False
+
+    def test_a_project_row_is_matched_on_its_subject(self):
+        spec = {"kind": "project", "tab": TAB, "row": 5, "name": "New Vertical"}
+        svc = self._svc(["", "New Vertical", "", "", "", "", ""])
+        assert psr._row_still_matches(svc, "sid", spec) is True
+
+    def test_a_failed_re_read_never_adopts(self):
+        spec = {"kind": "task", "tab": TAB, "row": 5, "title": "Call the bank"}
+        svc = MagicMock()
+        svc._execute_with_retry.side_effect = RuntimeError("transient")
+        assert psr._row_still_matches(svc, "sid", spec) is False
+
+
+class TestDateFeedbackIsImmediate:
+    def test_a_newly_typed_sloppy_date_is_canonicalised_the_same_cycle(self):
+        """Normalisation used to run only when nothing diverged, so a freshly
+        typed "12.9" was understood but left looking unrecognised until the next
+        pass — the answer to "does it know what I meant?" arriving 30 minutes
+        after the question."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date="12.9.2026"))},
+            tasks=[_db_task(deadline=None)],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": None,
+                              "status": "pending"}},
+        )
+        assert plan.task_updates["t1"]["deadline"] == "2026-09-12"
+        writes = [w for w in plan.cell_writes if w[2] == COLS["Date"]]
+        assert writes and writes[0][3] == "12/09/2026"
+        assert plan.counters["normalized_dates"] == 1
+
+    def test_an_already_canonical_date_is_not_rewritten(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date="12/09/2026"))},
+            tasks=[_db_task(deadline=None)],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": None,
+                              "status": "pending"}},
+        )
+        assert [w for w in plan.cell_writes if w[2] == COLS["Date"]] == []
+        assert plan.counters["normalized_dates"] == 0
+
+    def test_an_unreadable_date_is_still_left_exactly_as_typed(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date="dont mind"))},
+            tasks=[_db_task(deadline="2026-08-12")],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": "2026-08-12",
+                              "status": "pending"}},
+        )
+        assert [w for w in plan.cell_writes if w[2] == COLS["Date"]] == []
+        assert plan.counters["bad_dates"] == 1

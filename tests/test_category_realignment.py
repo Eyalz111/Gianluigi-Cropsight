@@ -65,10 +65,22 @@ class TestParseHumanDate:
     def test_underspecified_inputs_rejected(self):
         # dateutil would "complete" these from today's date — inventing a
         # deadline. The two-default trick must reject them.
+        #
+        # The line is "names no DAY", not "names no year". These three leave
+        # dateutil to invent the day itself, which is the actual trap.
         assert parse_human_date("2026") is None
         assert parse_human_date("30") is None
         assert parse_human_date("June") is None
-        assert parse_human_date("Jun 20") is None  # year missing
+
+    def test_a_day_and_month_without_a_year_is_honoured(self):
+        """"Jun 20" was rejected as "year missing" until 2026-08-07. But it
+        names a specific day — nothing is invented, only the year is chosen —
+        and it is how people write dates in a review. The Project Status
+        how-to promises it works. See tests/test_dates_human_forms.py for the
+        year-selection rule."""
+        from datetime import date
+        assert parse_human_date("Jun 20", today=date(2026, 6, 1)) == "2026-06-20"
+        assert parse_human_date("20 Jun", today=date(2026, 6, 1)) == "2026-06-20"
 
     def test_written_out_full_dates_accepted(self):
         assert parse_human_date("Jun 20 2026") == "2026-06-20"
