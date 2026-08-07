@@ -1135,13 +1135,46 @@ class SupabaseClient:
         _links = self.get_topic_project_links()
         _by_name = {(p.get("name") or "").strip().lower(): p["id"] for p in _projects}
 
-        def _project_for(label: str) -> str | None:
+        # Area name -> that area's "Others" bucket, the safety net below.
+        _others = {}
+        try:
+            _area_names = {a["id"]: a.get("name") for a in _areas}
+            for p in _projects:
+                if (p.get("name") or "").lower().startswith("others"):
+                    area = _area_names.get(p.get("area_id"))
+                    if area:
+                        _others[area.strip().lower()] = p["id"]
+        except Exception:                                   # noqa: BLE001
+            _others = {}
+
+        def _project_for(label: str, stated: str, category: str) -> str | None:
+            """Four tiers, most authoritative first.
+
+            1. What EXTRACTION said. The model is given the closed project list
+               and answers per task, so this is a real judgement made with the
+               transcript in front of it — not a guess from a 2-word label.
+            2. An approved topic->project link: an explicit human decision.
+            3. The label happening to BE a project name.
+            4. The area's "Others" bucket, from the task's own category.
+
+            Tier 4 exists because the alternative is invisibility. A task with
+            no project never appears on the Project Status sheet at all — no
+            error, no empty row, just absence — so an unplaced task would be
+            silently missing from the review it was created for. Landing in the
+            right area's Others bucket makes it visible and one drag away from
+            its home, and the bucket's size is itself the signal that filing is
+            falling behind. [2026-08-08]
+            """
+            if stated:
+                hit = _by_name.get(stated.strip().lower())
+                if hit:
+                    return hit
             key = (label or "").strip().lower()
-            if not key:
-                return None
-            # An approved topic->project link is an explicit human decision and
-            # outranks a name match.
-            return _links.get(key) or _by_name.get(key)
+            if key:
+                linked = _links.get(key) or _by_name.get(key)
+                if linked:
+                    return linked
+            return _others.get((category or "").strip().lower())
 
         def _row(t: dict) -> dict:
             raw_deadline = t.get("deadline")
@@ -1163,6 +1196,7 @@ class SupabaseClient:
                 t.get("label"), projects=_projects, capture=True,
                 meeting_id=meeting_id,
             )
+            category = self.resolve_category(t.get("category"), areas=_areas)
             row = {
                 "meeting_id": meeting_id,
                 "title": t.get("title"),
@@ -1171,7 +1205,7 @@ class SupabaseClient:
                 "deadline": ser_deadline,
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
-                "category": self.resolve_category(t.get("category"), areas=_areas),
+                "category": category,
                 "label": label,
                 "deadline_confidence": conf,
                 "urgency": t.get("urgency", "M"),
@@ -1180,7 +1214,7 @@ class SupabaseClient:
             # than being guessed into a project. It surfaces as a
             # topic_project_link proposal instead, which Eyal approves once and
             # every future task carrying that topic attaches by itself.
-            project_id = _project_for(label)
+            project_id = _project_for(label, t.get("project") or "", category)
             if project_id:
                 row["project_id"] = project_id
             return row

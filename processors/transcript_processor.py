@@ -752,8 +752,16 @@ async def extract_structured_data(
             alias_str = f" (aliases: {', '.join(aliases)})" if aliases else ""
             names_with_aliases.append(f'"{p["name"]}"{alias_str}')
         canonical_names = ", ".join(names_with_aliases) if names_with_aliases else '"No canonical projects defined"'
+        # The PROJECT list is the curated vocabulary the Project Status sheet is
+        # built from — a closed set, one per line so the model copies it back
+        # verbatim. Deliberately separate from canonical_names above, which is a
+        # comma-run used for LABEL normalisation. [2026-08-08]
+        project_options = "\n".join(
+            f"  - {p['name']}" for p in projects
+            if (p.get("status") or "active") != "retired") or "  (none defined)"
     except Exception:
         canonical_names = '"Moldova Pilot", "Pre-Seed Fundraising", "SatYield Accuracy Model"'
+        project_options = "  (none defined)"
 
     # v2.5 PR5: the "aim for 3-7 items" cap is the extraction "muzzle" — toggled.
     consolidation_rule = _consolidation_rule()
@@ -813,6 +821,7 @@ IMPORTANT: Your response must be valid JSON with this exact structure:
     "tasks": [
         {
             "label": "2-3 word topic label for quick scanning",
+            "project": "one of the PROJECTS listed below, or null",
             "title": "Task description — see TASK EXTRACTION RULES below",
             "assignee": "Name",
             "deadline": "YYYY-MM-DD or null",
@@ -889,6 +898,15 @@ ACTION ITEM EXTRACTION RULES:
 LABEL RULES:
 Every decision, task, follow-up meeting, and open question MUST include a "label" field — a 2-3 word topic tag for quick scanning. Use canonical project names when possible: {canonical_names}. If a topic doesn't match any canonical name, create a short descriptive label (2-4 words). Normalize variations: "Moldova PoC", "Gagauzia project", "Moldova wheat" → "Moldova Pilot".
 
+PROJECT RULES (tasks only):
+Every task ALSO gets a "project" — which PROJECT the work belongs to. This is a DIFFERENT and COARSER thing than "label":
+  - "label" is the TOPIC: specific, e.g. "AWS Credit Card", "NCPB Follow-up".
+  - "project" is the standing effort it rolls up to, chosen from this fixed list ONLY:
+{project_options}
+Copy the project name EXACTLY as written above, or use null.
+Use null when no project clearly fits — a wrong project is worse than none, and an unassigned task is reviewed rather than lost. Do NOT invent a project, and do NOT put the topic here.
+Examples: label "AWS Credit Card" -> project "Finance". label "NCPB Follow-up" -> project "Governments & WFP". label "Volcani IP Counsel" -> project "Legal", but label "Volcani Research" -> project "CropSight Accuracy Model" — the same organisation, different work.
+
 {decision_rules}
 
 DISCUSSION SUMMARY RULES:
@@ -913,7 +931,7 @@ Meetings may be in Hebrew, English, or mixed. Regardless of language:
 - Keep company/organization names as-is
 - If a Hebrew term has no clear English equivalent, transliterate and add brief explanation
 
-Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names).replace("{consolidation_rule}", consolidation_rule).replace("{decision_rules}", _decision_extraction_rules()).replace("{urgency_area_json}", urgency_area_json).replace("{urgency_area_rules}", urgency_area_rules).replace("{category_options}", category_options)
+Apply all tone guardrails: no emotional characterizations, professional language only, cite timestamps.""".replace("{canonical_names}", canonical_names).replace("{project_options}", project_options).replace("{consolidation_rule}", consolidation_rule).replace("{decision_rules}", _decision_extraction_rules()).replace("{urgency_area_json}", urgency_area_json).replace("{urgency_area_rules}", urgency_area_rules).replace("{category_options}", category_options)
 
     # Retry with exponential backoff for transient errors (529 overloaded, 500, etc.)
     max_retries = 4

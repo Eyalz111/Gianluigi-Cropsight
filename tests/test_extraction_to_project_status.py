@@ -85,3 +85,81 @@ class TestExtractedTasksReachTheSheet:
         assert rows[0]["title"] == "Ship it"
         assert rows[0]["status"] == "pending"
         assert rows[0]["meeting_id"] == "m1"
+
+
+AREAS = [{"id": "a_fin", "name": "LEGAL, CORPORATE & FINANCE"},
+         {"id": "a_prod", "name": "PRODUCT & TECHNOLOGY"}]
+PROJECTS = [{"id": "p_fin", "name": "Finance", "area_id": "a_fin"},
+            {"id": "p_cloud", "name": "Cloud Infrastructure", "area_id": "a_prod"},
+            {"id": "p_other_fin", "name": "Others — Legal", "area_id": "a_fin"}]
+
+
+def _batch2(tasks, links=None):
+    sb = SupabaseClient.__new__(SupabaseClient)
+    captured = {}
+
+    def _insert(payload):
+        captured["rows"] = payload
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(
+            data=[{**r, "id": f"id{i}"} for i, r in enumerate(payload)])
+        return chain
+
+    client = MagicMock()
+    client.table.return_value.insert.side_effect = _insert
+    with patch.object(SupabaseClient, "client", client), \
+         patch.object(sb, "get_areas", return_value=AREAS, create=True), \
+         patch.object(sb, "list_team_members", return_value=[], create=True), \
+         patch.object(sb, "get_canonical_projects", return_value=PROJECTS, create=True), \
+         patch.object(sb, "get_topic_project_links", return_value=links or {}, create=True), \
+         patch.object(sb, "resolve_assignee", side_effect=lambda v, roster=None: v, create=True), \
+         patch.object(sb, "resolve_category", side_effect=lambda v, areas=None: v, create=True), \
+         patch.object(sb, "resolve_label", side_effect=lambda v, **k: v or "", create=True):
+        sb.create_tasks_batch("m1", tasks)
+    return captured.get("rows", [])
+
+
+class TestFourTierResolution:
+    """Extraction now answers the project question directly, with the closed
+    list in front of it. "The system will learn" was too weak an answer: it
+    needed a topic to recur across two meetings before it even proposed
+    anything, so most tasks would have stayed invisible indefinitely."""
+
+    def test_tier1_what_extraction_said_wins(self):
+        rows = _batch2([{"title": "x", "label": "AWS Credit Card",
+                         "project": "Finance", "category": "LEGAL, CORPORATE & FINANCE"}])
+        assert rows[0]["project_id"] == "p_fin"
+
+    def test_tier1_beats_an_unrelated_label_match(self):
+        rows = _batch2([{"title": "x", "label": "Cloud Infrastructure",
+                         "project": "Finance", "category": "LEGAL, CORPORATE & FINANCE"}])
+        assert rows[0]["project_id"] == "p_fin"
+
+    def test_an_invented_project_name_is_ignored(self):
+        """Closed vocabulary — the model cannot mint a project."""
+        rows = _batch2([{"title": "x", "label": "topic", "project": "Made Up Thing",
+                         "category": "LEGAL, CORPORATE & FINANCE"}])
+        assert rows[0]["project_id"] == "p_other_fin"      # falls to the net
+
+    def test_tier2_an_approved_link_is_used_when_extraction_says_null(self):
+        rows = _batch2([{"title": "x", "label": "AWS Setup", "project": None,
+                         "category": "PRODUCT & TECHNOLOGY"}],
+                       links={"aws setup": "p_cloud"})
+        assert rows[0]["project_id"] == "p_cloud"
+
+    def test_tier4_falls_to_the_areas_others_bucket(self):
+        """The alternative is invisibility — no project means the task never
+        appears on the Project Status sheet at all, with no error to notice."""
+        rows = _batch2([{"title": "x", "label": "Brand New Topic", "project": None,
+                         "category": "LEGAL, CORPORATE & FINANCE"}])
+        assert rows[0]["project_id"] == "p_other_fin"
+
+    def test_an_area_with_no_others_bucket_stays_null(self):
+        rows = _batch2([{"title": "x", "label": "t", "project": None,
+                         "category": "PRODUCT & TECHNOLOGY"}])
+        assert "project_id" not in rows[0]
+
+    def test_an_unknown_category_stays_null(self):
+        rows = _batch2([{"title": "x", "label": "t", "project": None,
+                         "category": "General"}])
+        assert "project_id" not in rows[0]
