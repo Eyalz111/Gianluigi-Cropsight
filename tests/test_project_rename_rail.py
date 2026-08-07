@@ -224,3 +224,39 @@ class TestTopicLinkProposals:
     def test_a_label_seen_in_one_meeting_is_not_proposed_at_all(self):
         result, _ = self._run([{"label": "Once", "meeting_id": "m1"}], [], [])
         assert result["proposed"] == 0
+
+
+class TestProposalsAreAnnounced:
+    """A proposal nobody is told about is the same as no proposal.
+
+    propose_new_projects gained a second return key (`links`) but the QA
+    scheduler only read `labels`, so link proposals would have been created
+    silently and waited in the queue unseen.
+    """
+
+    def _issues(self, learn_result):
+        from schedulers.qa_scheduler import _run_project_learning
+
+        issues: list = []
+        with patch("processors.project_learning.propose_new_projects",
+                   return_value=learn_result):
+            _run_project_learning(issues)
+        return issues
+
+    def test_link_proposals_are_reported(self):
+        issues = self._issues(
+            {"proposed": 1, "labels": [], "links": ["AWS Setup -> Cloud Infrastructure"]})
+        assert any("AWS Setup -> Cloud Infrastructure" in i for i in issues)
+
+    def test_new_project_proposals_are_still_reported(self):
+        issues = self._issues(
+            {"proposed": 1, "labels": ["Brand New Thing"], "links": []})
+        assert any("Brand New Thing" in i for i in issues)
+
+    def test_both_kinds_are_reported_separately(self):
+        issues = self._issues(
+            {"proposed": 2, "labels": ["New Thing"], "links": ["Topic -> Project"]})
+        assert len(issues) == 2
+
+    def test_nothing_proposed_says_nothing(self):
+        assert self._issues({"proposed": 0, "labels": [], "links": []}) == []

@@ -675,10 +675,20 @@ def _run_project_learning(issues: list[str]) -> dict:
         from processors.project_learning import propose_new_projects
 
         result.update(propose_new_projects())
-        if result.get("proposed"):
+        # Two kinds now: a recurring topic whose work already sits under a
+        # project becomes a topic->project LINK, and only a genuinely new one
+        # proposes a project. Reporting `labels` alone would have created link
+        # proposals that Eyal was never told about. [2026-08-07]
+        if result.get("labels"):
             issues.append(
-                f"{result['proposed']} new project label(s) awaiting your approval: "
-                + ", ".join(result.get("labels", [])[:5])
+                f"{len(result['labels'])} new project label(s) awaiting your approval: "
+                + ", ".join(result["labels"][:5])
+            )
+        if result.get("links"):
+            issues.append(
+                f"{len(result['links'])} topic(s) to file under an existing "
+                "project, awaiting your approval: "
+                + ", ".join(result["links"][:5])
             )
     except Exception as e:
         logger.warning(f"Project learning failed: {e}")
