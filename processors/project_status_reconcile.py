@@ -853,23 +853,21 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
                       "startColumnIndex": 0, "endColumnIndex": len(ALL_HEADERS)},
             "rows": [{"values": [_cell_value(v) for v in row]} for row in rows],
             "fields": "userEnteredValue"}}))
-        # inheritFromBefore copies the PROJECT row when a block had no actions
-        # yet — that row is bold, so the first injected action would arrive
-        # looking like a heading. Reset the format explicitly in the same batch.
-        ops.append((anchor, {"repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": anchor - 1,
-                      "endRowIndex": anchor - 1 + len(rows),
-                      "startColumnIndex": 0, "endColumnIndex": 7},
-            "cell": {"userEnteredFormat": {
-                "textFormat": {"bold": False},
-                "wrapStrategy": "WRAP", "verticalAlignment": "TOP"}},
-            "fields": ("userEnteredFormat(textFormat.bold,wrapStrategy,"
-                       "verticalAlignment)")}}))
-        ops.append((anchor, {"setDataValidation": {
-            "range": {"sheetId": sheet_id, "startRowIndex": anchor - 1,
-                      "endRowIndex": anchor - 1 + len(rows),
-                      "startColumnIndex": 0, "endColumnIndex": 1},
-            "rule": {"condition": {"type": "BOOLEAN"}, "strict": False}}}))
+        # Every injected row gets the same treatment a hand-typed one does:
+        # checkbox, date validation, the bold provenance chip, and a format
+        # reset (inheritFromBefore copies the PROJECT row when a block had no
+        # actions yet, so the first injected action would arrive bold like a
+        # heading). One shared helper, so an auto row and a manual row can never
+        # end up looking different. [2026-08-07]
+        from services.project_status_sheet import new_row_format_requests
+        from services.project_status_rows import ALL_HEADERS, KIND_ACTION
+
+        act_col = ALL_HEADERS.index("Action")
+        for offset, new_row in enumerate(rows):
+            for req in new_row_format_requests(
+                    sheet_id, anchor + offset, KIND_ACTION,
+                    str(new_row[act_col] or "")):
+                ops.append((anchor, req))
         out["injected"] += len(rows)
 
     if not ops:
@@ -884,6 +882,15 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
         logger.error(f"[ps-reconcile] structural batch failed: {e}")
         return {**out, "structural_error": str(e)[:120]}
     return out
+
+
+def _sheet_ids(sheets_service, spreadsheet_id: str) -> dict:
+    """{tab title -> sheetId}. Needed by every structural/format request."""
+    meta = sheets_service._execute_with_retry(
+        lambda: sheets_service.service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id, fields="sheets.properties"))
+    return {s["properties"]["title"]: s["properties"]["sheetId"]
+            for s in meta.get("sheets", [])}
 
 
 def _cell_value(value) -> dict:
@@ -950,6 +957,7 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
     #      uid back into the row SYNCHRONOUSLY, and if the writeback fails roll
     #      the create back. A row left without its uid looks like a fresh human
     #      row next cycle and would be created again, every cycle, forever.
+    _format_rows: list = []       # (tab, row, kind, action_text) to style after
     cap = getattr(settings, "PROJECT_STATUS_MAX_CREATES_PER_CYCLE", 25)
     if len(plan.creates) > cap:
         logger.warning(
@@ -964,6 +972,11 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
             _write_identity(sheets_service, spreadsheet_id, spec["tab"],
                             spec["row"], kind, new_id, spec.get("project_id", ""))
             applied["created"] += 1
+            # Style it NOW, not at the next structural pass. A line she typed
+            # this morning has to be tickable this morning; the colour rules
+            # already cover themselves, but a checkbox does not.
+            _format_rows.append((spec["tab"], spec["row"], kind,
+                                 spec.get("title", "")))
         except Exception as e:                              # noqa: BLE001
             logger.error(f"[ps-reconcile] create at {spec['tab']} r{spec['row']} "
                          f"failed: {e}")
@@ -985,6 +998,25 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
             logger.error(f"[ps-reconcile] cell write failed, snapshots NOT "
                          f"advanced: {e}")
             return {**applied, "error": "sheet_write_failed"}
+
+    # 4.2b Style the rows we just adopted. Row numbers are unchanged here — a
+    #      create writes into a row that already physically exists, so nothing
+    #      has shifted and these are safe outside the structural slot.
+    if _format_rows:
+        from services.project_status_sheet import new_row_format_requests
+        gid = _sheet_ids(sheets_service, spreadsheet_id)
+        reqs = [r for tab, row, kind, text in _format_rows
+                if tab in gid
+                for r in new_row_format_requests(gid[tab], row, kind, text)]
+        if reqs:
+            try:
+                sheets_service._execute_with_retry(
+                    lambda: sheets_service.service.spreadsheets().batchUpdate(
+                        spreadsheetId=spreadsheet_id, body={"requests": reqs}))
+            except Exception as e:                          # noqa: BLE001
+                # Cosmetic only — the row exists and is correct in the DB. The
+                # next structural pass repaints it.
+                logger.warning(f"[ps-reconcile] styling new rows failed: {e}")
 
     # 4.3/4.4 Structural pass. Only in the allowed slots, and only after
     #         re-reading the sheet to prove nobody moved anything since we

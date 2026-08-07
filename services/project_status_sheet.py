@@ -67,16 +67,28 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
     is_action = '$H4="A"'
     not_done = "NOT($A4=TRUE)"
 
-    def rule(col_start, col_end, formula, colour, index):
+    def rule(col_start, col_end, formula, colour, index, fmt=None):
         return {"addConditionalFormatRule": {"index": index, "rule": {
             "ranges": [{"sheetId": sheet_id, "startRowIndex": 3,
                         "startColumnIndex": col_start, "endColumnIndex": col_end}],
             "booleanRule": {
                 "condition": {"type": "CUSTOM_FORMULA",
                               "values": [{"userEnteredValue": formula}]},
-                "format": {"backgroundColor": colour}}}}}
+                "format": fmt or {"backgroundColor": colour}}}}}
 
     return [
+        # THE PROJECT BAND IS A RULE, NOT PER-ROW PAINT. Eyal: "I want the new
+        # project distinctions to also work once we add manually or through
+        # meeting transcriptions — every time content is added there."
+        # A conditional rule keyed on the hidden _kind column styles ANY row
+        # that is a project, the instant it becomes one, forever — a row she
+        # types at 10am looks like a project block head immediately, with no
+        # cycle, no API call and nothing to re-apply. Per-row painting could
+        # only ever catch up later. The heavy top rule still comes from
+        # _project_row_requests, because conditional formatting cannot set
+        # borders; the band is what carries the distinction. [2026-08-07]
+        rule(0, 7, '=$H4="P"', None, 0,
+             fmt={"backgroundColor": _PROJECT_BG, "textFormat": {"bold": True}}),
         # Order matters: the first matching rule wins.
         #
         # UNREADABLE DATE GOES FIRST. A cell the system cannot parse is never
@@ -86,14 +98,14 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
         # because they IFERROR to FALSE and simply leave it uncoloured. Its own
         # colour, distinct from past-due and due-soon, is the only feedback the
         # sheet can give at the moment of typing. [2026-08-07]
-        rule(4, 5, f'=AND({is_action},$E4<>"",ISERROR({date_expr}))', _BAD_DATE, 0),
+        rule(4, 5, f'=AND({is_action},$E4<>"",ISERROR({date_expr}))', _BAD_DATE, 1),
         rule(4, 5, f'=AND({is_action},{not_done},IFERROR({date_expr}<TODAY(),FALSE))',
-             _RED, 1),
+             _RED, 2),
         rule(4, 5,
              f'=AND({is_action},{not_done},IFERROR(AND({date_expr}>=TODAY(),'
-             f'{date_expr}<=TODAY()+{due_soon_days}),FALSE))', _AMBER, 2),
-        rule(4, 5, f'=AND({is_action},$E4="")', _GREY, 3),
-        rule(5, 6, f'=AND({is_action},$F4="")', _GREY, 4),
+             f'{date_expr}<=TODAY()+{due_soon_days}),FALSE))', _AMBER, 3),
+        rule(4, 5, f'=AND({is_action},$E4="")', _GREY, 4),
+        rule(5, 6, f'=AND({is_action},$F4="")', _GREY, 5),
     ]
 
 
@@ -316,6 +328,68 @@ def _howto_format_requests(sheet_id: int) -> list[dict]:
                 "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"}})
         elif kind == "note":
             reqs.append(band(idx, _AMBER, False, 11))
+    return reqs
+
+
+def new_row_format_requests(sheet_id: int, row_number: int, kind: str,
+                            action_text: str = "") -> list[dict]:
+    """Everything a row needs the moment it becomes ours, at a known row number.
+
+    The conditional rules already handle colour and the project band without
+    being asked. What they cannot do is a checkbox, a date validation or a bold
+    provenance chip — those are per-cell and have to be applied to the specific
+    row. Called right after a create or an injection so a line typed at 10am is
+    tickable at 10:30 rather than at the next structural pass. [2026-08-07]
+    """
+    from services.project_status_rows import ALL_HEADERS, KIND_ACTION, KIND_PROJECT
+
+    r = row_number - 1
+    if kind == KIND_PROJECT:
+        return [{"updateBorders": {
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": 0, "endColumnIndex": 7},
+            "top": {"style": "SOLID_THICK",
+                    "color": {"red": 0.1, "green": 0.3, "blue": 0.5}}}}]
+    if kind != KIND_ACTION:
+        return []
+
+    date_col = ALL_HEADERS.index("Date")
+    act_col = ALL_HEADERS.index("Action")
+    reqs = [
+        {"setDataValidation": {
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": 0, "endColumnIndex": 1},
+            "rule": {"condition": {"type": "BOOLEAN"}, "strict": False}}},
+        {"setDataValidation": {
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": date_col, "endColumnIndex": date_col + 1},
+            "rule": {"condition": {"type": "DATE_IS_VALID"},
+                     "inputMessage": ("Any format works — 12/8, 12 Aug, next "
+                                      "Tuesday. It is rewritten to DD/MM/YYYY. "
+                                      "Purple means nothing could read it."),
+                     "strict": False}}},
+        # A row she typed carries the project row's band until told otherwise,
+        # because an insert inherits from above.
+        {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": 0, "endColumnIndex": 7},
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"bold": False},
+                "wrapStrategy": "WRAP", "verticalAlignment": "TOP"}},
+            "fields": ("userEnteredFormat(textFormat.bold,wrapStrategy,"
+                       "verticalAlignment)")}},
+    ]
+    start = str(action_text or "").rfind("[")
+    if start > 0:
+        reqs.append({"updateCells": {
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": act_col, "endColumnIndex": act_col + 1},
+            "rows": [{"values": [{"textFormatRuns": [
+                {"startIndex": 0, "format": {"bold": False}},
+                {"startIndex": start,
+                 "format": {"bold": True, "foregroundColor": _MARKER_GREY}},
+            ]}]}],
+            "fields": "textFormatRuns"}})
     return reqs
 
 

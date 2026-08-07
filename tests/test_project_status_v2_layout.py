@@ -190,12 +190,15 @@ class TestStructureRequests:
         prot = next(r for r in _v2_structure_requests(7, 7) if "addProtectedRange" in r)
         assert prot["addProtectedRange"]["protectedRange"]["range"]["startColumnIndex"] == 7
 
-    def test_colour_rules_are_scoped_to_action_rows(self):
+    def test_every_rule_is_scoped_by_the_kind_column(self):
+        """Rule 0 styles PROJECT rows, the rest style ACTION rows. Nothing may
+        colour a row without first asking what kind it is."""
         rules = _conditional_format_rules(7, 7)
-        for r in rules:
-            formula = (r["addConditionalFormatRule"]["rule"]["booleanRule"]
-                       ["condition"]["values"][0]["userEnteredValue"])
-            assert '$H4="A"' in formula, formula
+        formulas = [r["addConditionalFormatRule"]["rule"]["booleanRule"]
+                    ["condition"]["values"][0]["userEnteredValue"] for r in rules]
+        assert formulas[0] == '=$H4="P"'
+        for f in formulas[1:]:
+            assert '$H4="A"' in f, f
 
     def test_rule_precedence_is_bad_date_then_overdue_then_due_soon(self):
         """First match wins. An unreadable date must not be evaluated as
@@ -203,14 +206,14 @@ class TestStructureRequests:
         rules = _conditional_format_rules(7, 7)
         formulas = [r["addConditionalFormatRule"]["rule"]["booleanRule"]
                     ["condition"]["values"][0]["userEnteredValue"] for r in rules]
-        assert "ISERROR" in formulas[0]
-        assert "<TODAY()" in formulas[1]
-        assert ">=TODAY()" in formulas[2]
-        assert [r["addConditionalFormatRule"]["index"] for r in rules] == [0, 1, 2, 3, 4]
+        assert "ISERROR" in formulas[1]
+        assert "<TODAY()" in formulas[2]
+        assert ">=TODAY()" in formulas[3]
+        assert [r["addConditionalFormatRule"]["index"] for r in rules] == [0, 1, 2, 3, 4, 5]
 
     def test_due_soon_window_follows_the_setting(self):
         rules = _conditional_format_rules(7, 14)
-        formula = (rules[2]["addConditionalFormatRule"]["rule"]["booleanRule"]
+        formula = (rules[3]["addConditionalFormatRule"]["rule"]["booleanRule"]
                    ["condition"]["values"][0]["userEnteredValue"])
         assert "TODAY()+14" in formula
 
@@ -319,9 +322,9 @@ class TestVisualFeedbackRound2:
         silently ignored, which was indistinguishable from success."""
         from services.project_status_sheet import _conditional_format_rules
         rules = _conditional_format_rules(9, 7)
-        first = rules[0]["addConditionalFormatRule"]
-        formula = first["rule"]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
-        assert first["index"] == 0                     # beats past-due
+        bad = rules[1]["addConditionalFormatRule"]
+        formula = bad["rule"]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        assert bad["index"] == 1                       # beats past-due (2)
         assert "ISERROR" in formula and '$E4<>""' in formula
 
     def test_the_date_column_warns_on_an_unreadable_value(self):
@@ -383,3 +386,79 @@ class TestHowToTab:
         from services.project_status_sheet import HOWTO_TEXT
         flat = " ".join(a + " " + b for a, b in HOWTO_TEXT)
         assert "05/08 is 5 August" in flat
+
+
+class TestNewContentIsStyledAutomatically:
+    """Eyal: "I want the new project distinctions to also work once we add
+    manually or through meeting transcription summaries — every time content is
+    added there."
+
+    Per-row painting can only ever catch up on the next cycle. A conditional
+    rule keyed on the hidden _kind column styles a row the instant it becomes a
+    project, with no API call at all.
+    """
+
+    def test_the_project_band_is_a_rule_not_per_row_paint(self):
+        from services.project_status_sheet import _conditional_format_rules
+        rule = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]["rule"]
+        assert rule["booleanRule"]["condition"]["values"][0]["userEnteredValue"] == '=$H4="P"'
+        assert rule["booleanRule"]["format"]["textFormat"]["bold"] is True
+        assert rule["booleanRule"]["format"]["backgroundColor"]
+
+    def test_the_band_covers_every_visible_column(self):
+        from services.project_status_sheet import _conditional_format_rules
+        rng = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]["rule"]["ranges"][0]
+        assert rng["startColumnIndex"] == 0 and rng["endColumnIndex"] == 7
+
+    def test_the_band_range_is_open_ended_so_new_rows_inherit_it(self):
+        """A fixed endRowIndex would stop styling rows added past the bottom."""
+        from services.project_status_sheet import _conditional_format_rules
+        rng = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]["rule"]["ranges"][0]
+        assert rng["startRowIndex"] == 3 and "endRowIndex" not in rng
+
+
+class TestNewRowFormatting:
+    """A row that appears BETWEEN rebuilds must get the same treatment as one
+    written at cutover — otherwise a line typed in the morning has no checkbox
+    until 02:00, and an auto-injected row looks different from a manual one."""
+
+    def test_a_new_action_row_gets_checkbox_and_date_validation(self):
+        from services.project_status_sheet import new_row_format_requests
+        reqs = new_row_format_requests(9, 12, KIND_ACTION, "Chase it")
+        kinds = [next(iter(r)) for r in reqs]
+        assert kinds.count("setDataValidation") == 2
+        conds = [r["setDataValidation"]["rule"]["condition"]["type"]
+                 for r in reqs if "setDataValidation" in r]
+        assert set(conds) == {"BOOLEAN", "DATE_IS_VALID"}
+
+    def test_a_new_action_row_is_not_left_bold(self):
+        """insertDimension inherits from above; under an empty project block
+        that means the bold project row."""
+        from services.project_status_sheet import new_row_format_requests
+        reqs = new_row_format_requests(9, 12, KIND_ACTION, "x")
+        reset = next(r for r in reqs if "repeatCell" in r)
+        assert reset["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["bold"] is False
+
+    def test_an_injected_row_gets_its_marker_bolded_too(self):
+        from services.project_status_sheet import new_row_format_requests
+        reqs = new_row_format_requests(9, 12, KIND_ACTION, "Chase it [auto · W · 04/08]")
+        runs = next(r for r in reqs if "updateCells" in r)["updateCells"]
+        assert runs["fields"] == "textFormatRuns"
+        assert runs["rows"][0]["values"][0]["textFormatRuns"][1]["format"]["bold"] is True
+
+    def test_a_new_project_row_gets_its_fence(self):
+        """The band comes free from the conditional rule; the border cannot."""
+        from services.project_status_sheet import new_row_format_requests
+        reqs = new_row_format_requests(9, 12, KIND_PROJECT)
+        assert len(reqs) == 1 and "updateBorders" in reqs[0]
+        assert reqs[0]["updateBorders"]["top"]["style"] == "SOLID_THICK"
+
+    def test_a_new_project_row_gets_no_checkbox(self):
+        from services.project_status_sheet import new_row_format_requests
+        assert not [r for r in new_row_format_requests(9, 12, KIND_PROJECT)
+                    if "setDataValidation" in r]
+
+    def test_the_row_number_is_honoured(self):
+        from services.project_status_sheet import new_row_format_requests
+        reqs = new_row_format_requests(9, 12, KIND_ACTION, "x")
+        assert all(r[next(iter(r))]["range"]["startRowIndex"] == 11 for r in reqs)
