@@ -181,8 +181,9 @@ class TestStructureRequests:
         assert hide["updateDimensionProperties"]["range"]["startIndex"] == 7
         assert hide["updateDimensionProperties"]["range"]["endIndex"] == 12
 
-        prot = next(r for r in reqs if "addProtectedRange" in r)
-        assert prot["addProtectedRange"]["protectedRange"]["warningOnly"] is True
+        # Protection detail lives in TestHiddenColumnsAreLocked — it depends on
+        # whether a bot address is configured.
+        assert any("addProtectedRange" in r for r in reqs)
 
     def test_protection_never_covers_a_visible_column(self):
         """Locking anything in A..G would fight the person the file is for."""
@@ -196,14 +197,20 @@ class TestStructureRequests:
                        ["condition"]["values"][0]["userEnteredValue"])
             assert '$H4="A"' in formula, formula
 
-    def test_overdue_rule_outranks_due_soon(self):
+    def test_rule_precedence_is_bad_date_then_overdue_then_due_soon(self):
+        """First match wins. An unreadable date must not be evaluated as
+        overdue, and overdue must beat due-soon."""
         rules = _conditional_format_rules(7, 7)
-        assert rules[0]["addConditionalFormatRule"]["index"] == 0
-        assert rules[1]["addConditionalFormatRule"]["index"] == 1
+        formulas = [r["addConditionalFormatRule"]["rule"]["booleanRule"]
+                    ["condition"]["values"][0]["userEnteredValue"] for r in rules]
+        assert "ISERROR" in formulas[0]
+        assert "<TODAY()" in formulas[1]
+        assert ">=TODAY()" in formulas[2]
+        assert [r["addConditionalFormatRule"]["index"] for r in rules] == [0, 1, 2, 3, 4]
 
     def test_due_soon_window_follows_the_setting(self):
         rules = _conditional_format_rules(7, 14)
-        formula = (rules[1]["addConditionalFormatRule"]["rule"]["booleanRule"]
+        formula = (rules[2]["addConditionalFormatRule"]["rule"]["booleanRule"]
                    ["condition"]["values"][0]["userEnteredValue"])
         assert "TODAY()+14" in formula
 
@@ -259,3 +266,120 @@ class TestSchedulerGuard:
             await mod.project_status_scheduler.refresh(notify=False)
 
         writer.assert_called_once()
+
+
+class TestVisualFeedbackRound2:
+    """Eyal's review of the live file, 2026-08-07."""
+
+    def _rows(self, kinds, action_text=""):
+        out = []
+        for i, k in enumerate(kinds):
+            row = [""] * 7 + [k, f"u{i}", "p", "", ""]
+            row[2] = action_text
+            out.append(row)
+        return out
+
+    def test_project_rows_get_a_band_and_a_fence(self):
+        """"we don't have a clear distinction between subjects and action rows"
+        — a 28-row tab read as one flat list."""
+        from services.project_status_sheet import _project_row_requests
+        reqs = _project_row_requests(9, self._rows(["P", "A", "A", "P"]))
+        bands = [r for r in reqs if "repeatCell" in r]
+        borders = [r for r in reqs if "updateBorders" in r]
+        assert len(bands) == 2 and len(borders) == 2
+        assert bands[0]["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["bold"]
+
+    def test_action_rows_get_neither(self):
+        from services.project_status_sheet import _project_row_requests
+        assert _project_row_requests(9, self._rows(["A", "A"])) == []
+
+    def test_the_provenance_marker_is_bolded_in_place(self):
+        """Cell formatting styles the WHOLE cell — only textFormatRuns can bold
+        a range of characters inside one."""
+        from services.project_status_sheet import _marker_bold_requests
+        rows = self._rows(["A"], action_text="Chase NCPB [auto · Weekly · 04/08/2026]")
+        req = _marker_bold_requests(9, rows)[0]["updateCells"]
+        runs = req["rows"][0]["values"][0]["textFormatRuns"]
+        assert req["fields"] == "textFormatRuns"       # never touches the value
+        assert runs[0]["format"]["bold"] is False
+        assert runs[1]["startIndex"] == len("Chase NCPB ")
+        assert runs[1]["format"]["bold"] is True
+
+    def test_an_action_with_no_marker_is_skipped(self):
+        from services.project_status_sheet import _marker_bold_requests
+        assert _marker_bold_requests(9, self._rows(["A"], "Her own line")) == []
+
+    def test_a_marker_at_position_zero_is_skipped(self):
+        """Nothing to distinguish it from — bolding the whole cell is not the ask."""
+        from services.project_status_sheet import _marker_bold_requests
+        assert _marker_bold_requests(9, self._rows(["A"], "[auto]")) == []
+
+    def test_an_unreadable_date_has_its_own_colour_rule_and_wins(self):
+        """"if i insert in a wrong format it doesn't correct me" — the cell was
+        silently ignored, which was indistinguishable from success."""
+        from services.project_status_sheet import _conditional_format_rules
+        rules = _conditional_format_rules(9, 7)
+        first = rules[0]["addConditionalFormatRule"]
+        formula = first["rule"]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        assert first["index"] == 0                     # beats past-due
+        assert "ISERROR" in formula and '$E4<>""' in formula
+
+    def test_the_date_column_warns_on_an_unreadable_value(self):
+        from services.project_status_sheet import _date_validation_requests
+        reqs = _date_validation_requests(9, self._rows(["P", "A", "A"]))
+        rule = reqs[0]["setDataValidation"]["rule"]
+        assert rule["condition"]["type"] == "DATE_IS_VALID"
+        assert rule["strict"] is False                  # warns, never blocks
+        assert "12/8" in rule["inputMessage"]
+
+    def test_project_rows_get_no_date_validation(self):
+        from services.project_status_sheet import _date_validation_requests
+        assert _date_validation_requests(9, self._rows(["P", "P"])) == []
+
+
+class TestHiddenColumnsAreLocked:
+    def test_the_bot_is_the_only_editor(self):
+        """Overwrite _uid and the engine stops recognising the row: it becomes a
+        human line and the task it pointed at is suppressed out of the view.
+        warningOnly only asked politely."""
+        from services import project_status_sheet as pss
+        with patch.object(pss.settings, "GIANLUIGI_EMAIL", "gianluigi@cropsight.io"):
+            reqs = pss._v2_structure_requests(9, 7)
+        pr = next(r for r in reqs if "addProtectedRange" in r)["addProtectedRange"]["protectedRange"]
+        assert pr["editors"]["users"] == ["gianluigi@cropsight.io"]
+        assert "warningOnly" not in pr
+
+    def test_it_falls_back_to_a_warning_when_no_bot_address_is_set(self):
+        """A lock with no editor would shut the system out of its own columns."""
+        from services import project_status_sheet as pss
+        with patch.object(pss.settings, "GIANLUIGI_EMAIL", ""):
+            reqs = pss._v2_structure_requests(9, 7)
+        pr = next(r for r in reqs if "addProtectedRange" in r)["addProtectedRange"]["protectedRange"]
+        assert pr["warningOnly"] is True
+
+
+class TestHowToTab:
+    def test_every_line_has_a_known_style(self):
+        from services.project_status_sheet import HOWTO_BLOCK
+        assert {k for k, _a, _b in HOWTO_BLOCK} <= {
+            "title", "lede", "h2", "row", "note", "blank"}
+
+    def test_it_is_two_columns_not_a_wall_of_prose(self):
+        from services.project_status_sheet import HOWTO_TEXT
+        assert all(len(r) == 2 for r in HOWTO_TEXT)
+        assert any(a and b for a, b in HOWTO_TEXT)
+
+    def test_section_headers_are_banded(self):
+        from services.project_status_sheet import _howto_format_requests
+        reqs = _howto_format_requests(4)
+        assert sum(1 for r in reqs if "repeatCell" in r) > 10
+
+    def test_it_explains_the_purple_date(self):
+        from services.project_status_sheet import HOWTO_TEXT
+        flat = " ".join(a + " " + b for a, b in HOWTO_TEXT)
+        assert "Purple" in flat and "could not be read" in flat
+
+    def test_it_states_the_day_first_rule(self):
+        from services.project_status_sheet import HOWTO_TEXT
+        flat = " ".join(a + " " + b for a, b in HOWTO_TEXT)
+        assert "05/08 is 5 August" in flat

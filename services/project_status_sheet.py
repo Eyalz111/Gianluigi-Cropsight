@@ -30,6 +30,9 @@ WORKBOOK_TITLE = "CropSight — Projects Status"
 _GREY = _hex_color("#EFEFEF")        # missing date / missing owner
 _RED = _hex_color("#F4C7C3")         # past due
 _AMBER = _hex_color("#FCE8B2")       # due soon
+_BAD_DATE = _hex_color("#E5D0F0")    # typed a date nothing can read
+_PROJECT_BG = _hex_color("#EAF1F8")  # project row band
+_MARKER_GREY = _hex_color("#6B6B6B")  # the [auto · …] provenance chip
 _PROTECT_DESC = "Gianluigi system columns — do not edit"
 HOWTO_TAB = "How to use"
 
@@ -74,27 +77,147 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
                 "format": {"backgroundColor": colour}}}}}
 
     return [
-        # Order matters: the first matching rule wins, so overdue beats due-soon.
+        # Order matters: the first matching rule wins.
+        #
+        # UNREADABLE DATE GOES FIRST. A cell the system cannot parse is never
+        # pulled — which is what stops a typo nulling a real deadline — but that
+        # silence was indistinguishable from success: Eyal typed a bad date and
+        # nothing told him. It cannot be flagged by the other rules either,
+        # because they IFERROR to FALSE and simply leave it uncoloured. Its own
+        # colour, distinct from past-due and due-soon, is the only feedback the
+        # sheet can give at the moment of typing. [2026-08-07]
+        rule(4, 5, f'=AND({is_action},$E4<>"",ISERROR({date_expr}))', _BAD_DATE, 0),
         rule(4, 5, f'=AND({is_action},{not_done},IFERROR({date_expr}<TODAY(),FALSE))',
-             _RED, 0),
+             _RED, 1),
         rule(4, 5,
              f'=AND({is_action},{not_done},IFERROR(AND({date_expr}>=TODAY(),'
-             f'{date_expr}<=TODAY()+{due_soon_days}),FALSE))', _AMBER, 1),
-        rule(4, 5, f'=AND({is_action},$E4="")', _GREY, 2),
-        rule(5, 6, f'=AND({is_action},$F4="")', _GREY, 3),
+             f'{date_expr}<=TODAY()+{due_soon_days}),FALSE))', _AMBER, 2),
+        rule(4, 5, f'=AND({is_action},$E4="")', _GREY, 3),
+        rule(5, 6, f'=AND({is_action},$F4="")', _GREY, 4),
     ]
+
+
+def _project_row_requests(sheet_id: int, rows: list) -> list[dict]:
+    """Make a project row look like the head of a block, not another action.
+
+    Eyal, first look at the live file: "we don't have a clear distinction
+    between subjects and action rows". The template gives both the same
+    formatting, so a 28-row tab reads as one flat list and the block structure —
+    the whole point of v2 — is invisible.
+
+    A tinted bold band plus a heavy rule ABOVE each project row draws the fence.
+    Emitted per project row rather than as a conditional format because a border
+    is not something conditional formatting can set.
+    """
+    from services.project_status_rows import FIRST_BODY_ROW, KIND_PROJECT
+
+    reqs: list[dict] = []
+    for idx, row in enumerate(rows):
+        if (row[7] if len(row) > 7 else "") != KIND_PROJECT:
+            continue
+        r = FIRST_BODY_ROW - 1 + idx
+        rng = {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+               "startColumnIndex": 0, "endColumnIndex": 7}
+        reqs.append({"repeatCell": {
+            "range": rng,
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": _PROJECT_BG,
+                "textFormat": {"bold": True, "fontSize": 11}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+        reqs.append({"updateBorders": {
+            "range": rng,
+            "top": {"style": "SOLID_THICK",
+                    "color": {"red": 0.1, "green": 0.3, "blue": 0.5}}}})
+    return reqs
+
+
+def _marker_bold_requests(sheet_id: int, rows: list) -> list[dict]:
+    """Bold the `[auto · meeting · date]` chip inside an action's text.
+
+    Eyal asked for the provenance to stand out. It cannot be done with cell
+    formatting — that applies to the whole cell — so this uses textFormatRuns,
+    which style RANGES OF CHARACTERS within one cell.
+
+    `fields: "textFormatRuns"` means the value itself is untouched, so this can
+    run after the values pass without rewriting a single word. The marker is
+    bold AND grey: bold to find it, grey so it still reads as metadata rather
+    than shouting over the action text.
+    """
+    from services.project_status_rows import ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION
+
+    col = ALL_HEADERS.index("Action")
+    reqs: list[dict] = []
+    for idx, row in enumerate(rows):
+        if (row[7] if len(row) > 7 else "") != KIND_ACTION:
+            continue
+        text = str(row[col] or "")
+        start = text.rfind("[")
+        if start <= 0:
+            continue
+        r = FIRST_BODY_ROW - 1 + idx
+        reqs.append({"updateCells": {
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": col, "endColumnIndex": col + 1},
+            "rows": [{"values": [{"textFormatRuns": [
+                {"startIndex": 0, "format": {"bold": False}},
+                {"startIndex": start,
+                 "format": {"bold": True, "foregroundColor": _MARKER_GREY}},
+            ]}]}],
+            "fields": "textFormatRuns"}})
+    return reqs
+
+
+def _date_validation_requests(sheet_id: int, rows: list) -> list[dict]:
+    """Warn on a Date cell nothing can read, at the moment it is typed.
+
+    Colour tells you afterwards; the warning triangle tells you now. strict is
+    False throughout (house convention) so a system-written value can never hard
+    -error a cell — this warns, it does not block.
+    """
+    from services.project_status_rows import ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION
+
+    col = ALL_HEADERS.index("Date")
+    reqs, start = [], None
+    for idx, row in enumerate(rows + [[]]):
+        kind = row[7] if len(row) > 7 else ""
+        if kind == KIND_ACTION:
+            start = idx if start is None else start
+            continue
+        if start is not None:
+            reqs.append({"setDataValidation": {
+                "range": {"sheetId": sheet_id,
+                          "startRowIndex": FIRST_BODY_ROW - 1 + start,
+                          "endRowIndex": FIRST_BODY_ROW - 1 + idx,
+                          "startColumnIndex": col, "endColumnIndex": col + 1},
+                "rule": {"condition": {"type": "DATE_IS_VALID"},
+                         "inputMessage": ("Any format works — 12/8, 12 Aug, "
+                                          "next Tuesday. It is rewritten to "
+                                          "DD/MM/YYYY. Purple means nothing "
+                                          "could read it."),
+                         "strict": False}}})
+            start = None
+    return reqs
 
 
 def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
     """Hide/tint/protect the system columns and attach the colour rules.
 
-    The triple on the hidden columns (hide + white-on-white + warningOnly
-    protection) is the same one already used on Tasks column J and the Gantt's
-    tag column. Protection is warningOnly on purpose: a hard lock would also
-    block the system's own writes through a user-authorised token, and the
-    point is to make an accidental edit ANNOUNCE itself, not to be
-    unbypassable.
+    Hidden + white-on-white + PROTECTED. The protection was warningOnly, which
+    only asks politely; Eyal's review of the live file — "if writing down
+    something over there might break stuff, let's see how we lock it" — is
+    right, because those columns carry row IDENTITY. Overwrite `_uid` and the
+    engine stops recognising the row: it becomes a human line, and the task it
+    pointed at gets suppressed out of the view.
+
+    So it is a real lock now, with the bot as the sole named editor. The bot
+    authenticates as GIANLUIGI_EMAIL and makes every system write, so it edits
+    freely while a human gets refused rather than warned. Falls back to
+    warningOnly if that address isn't configured — a lock with no editor would
+    shut the system out of its own columns. [2026-08-07]
     """
+    bot = (getattr(settings, "GIANLUIGI_EMAIL", "") or "").strip()
+    protection = ({"warningOnly": True} if not bot
+                  else {"editors": {"users": [bot]}})
     reqs: list[dict] = [
         {"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
@@ -110,7 +233,7 @@ def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
         {"addProtectedRange": {"protectedRange": {
             "range": {"sheetId": sheet_id, "startColumnIndex": 7,
                       "endColumnIndex": 12},
-            "description": _PROTECT_DESC, "warningOnly": True}}},
+            "description": _PROTECT_DESC, **protection}}},
     ]
     reqs.extend(_conditional_format_rules(sheet_id, due_soon_days))
     return reqs
@@ -139,6 +262,60 @@ def _checkbox_requests(sheet_id: int, rows: list[list]) -> list[dict]:
                           "startColumnIndex": 0, "endColumnIndex": 1},
                 "rule": {"condition": {"type": "BOOLEAN"}, "strict": False}}})
             start = None
+    return reqs
+
+
+def _howto_format_requests(sheet_id: int) -> list[dict]:
+    """Make the guidance tab look like a reference card, not a text file."""
+    def band(row, colour, bold, size, col_end=2):
+        return {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": row,
+                      "endRowIndex": row + 1, "startColumnIndex": 0,
+                      "endColumnIndex": col_end},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": colour,
+                "verticalAlignment": "MIDDLE",
+                "wrapStrategy": "WRAP",
+                "textFormat": {"bold": bold, "fontSize": size,
+                               "foregroundColor": _WHITE if bold and size >= 13
+                               else {"red": 0.13, "green": 0.13, "blue": 0.13}}}},
+            "fields": ("userEnteredFormat(backgroundColor,verticalAlignment,"
+                       "wrapStrategy,textFormat)")}}
+
+    reqs = [
+        _column_width_request(sheet_id, 0, 250),
+        _column_width_request(sheet_id, 1, 620),
+        {"updateSheetProperties": {
+            "properties": {"sheetId": sheet_id,
+                           "gridProperties": {"frozenRowCount": 1}},
+            "fields": "gridProperties.frozenRowCount"}},
+    ]
+    for idx, (kind, _a, _b) in enumerate(HOWTO_BLOCK):
+        if kind == "title":
+            reqs.append(band(idx, _TITLE_BG, True, 20))
+        elif kind == "lede":
+            reqs.append(band(idx, _WHITE, False, 12))
+        elif kind == "h2":
+            reqs.append(band(idx, _HEADER_BG, True, 13))
+        elif kind == "row":
+            # Only the left column is bold — it reads as a term/definition pair.
+            reqs.append({"repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": idx,
+                          "endRowIndex": idx + 1, "startColumnIndex": 0,
+                          "endColumnIndex": 1},
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"bold": True},
+                    "verticalAlignment": "TOP"}},
+                "fields": "userEnteredFormat(textFormat,verticalAlignment)"}})
+            reqs.append({"repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": idx,
+                          "endRowIndex": idx + 1, "startColumnIndex": 1,
+                          "endColumnIndex": 2},
+                "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP",
+                                               "verticalAlignment": "TOP"}},
+                "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"}})
+        elif kind == "note":
+            reqs.append(band(idx, _AMBER, False, 11))
     return reqs
 
 
@@ -218,45 +395,75 @@ def _tab_format_requests(sheet_id: int) -> list[dict]:
     return reqs
 
 
-HOWTO_TEXT = [
-    ["How to use this file"],
-    [""],
-    ["This is the working document for the project review. Gianluigi keeps it "
-     "in step with the database; what you type here goes back INTO the database."],
-    [""],
-    ["Layout"],
-    ["Each tab is one area. Inside a tab, a PROJECT row is followed by its "
-     "ACTION rows, then the next project."],
-    ["  Subject   the project name          To do   where we want to take it"],
-    ["  Action    the nearest concrete step  Date    when that step is due"],
-    [""],
-    ["What the system will and will not touch"],
-    ["Lines it added are marked [auto · meeting · date]. Lines you type carry "
-     "no marker, and it never edits, moves or deletes them."],
-    ["It only rewrites a date you typed into the standard DD/MM/YYYY form — "
-     "never the meaning, and every change is listed in the weekly summary."],
-    [""],
-    ["Marking work done"],
-    ["Tick the box in the first column of an action row. That sets the task to "
-     "done everywhere — this file, the Tasks sheet, and anything Gianluigi says."],
-    ["DELETING a row is different: it only removes the line from THIS review. "
-     "The task stays live and still gets chased. Tick to finish it, delete to "
-     "hide it."],
-    [""],
-    ["Adding things"],
-    ["  A new action     type it on a blank row under a project"],
-    ["  A new project    type a name in Subject with the Action cell empty"],
-    ["  A topic tag      type it in Subject on an action row"],
-    ["  A new person     type the name in Resp. — Eyal is asked to confirm "
-     "them before they are added to the team"],
-    [""],
-    ["Colours"],
-    ["  red     past its date        amber   due within a week"],
-    ["  grey    no date, or nobody responsible"],
-    [""],
-    ["If something looks wrong, nothing is lost — every change is reversible. "
-     "Tell Eyal rather than trying to repair the file by hand."],
+# (kind, column A, column B). `kind` drives the formatting below:
+#   title / lede / h2 / row / note / blank
+#
+# Two columns, not one wall of prose. Eyal's review of the first version: "the
+# instructions are clear but it looks too simple — people will avoid reading it
+# properly." A page that looks like a plain-text file gets skimmed and then
+# ignored, so this is laid out as a reference table with a coloured header
+# band per section, matching the area tabs it explains. [2026-08-07]
+HOWTO_BLOCK = [
+    ("title", "How to use this file", ""),
+    ("lede", "The working document for the project review. Gianluigi keeps it in "
+             "step with the database — and what you type here goes back INTO the "
+             "database.", ""),
+    ("blank", "", ""),
+
+    ("h2", "THE LAYOUT", ""),
+    ("row", "Each tab is one area", "Inside it: a PROJECT row, then its ACTION "
+                                    "rows, then the next project."),
+    ("row", "Subject", "The project name. On an action row it is the topic."),
+    ("row", "Action", "The nearest concrete step."),
+    ("row", "To do", "Where we want to take this project — the eventual aim."),
+    ("row", "Date · Resp.", "When that step is due, and who owns it."),
+    ("blank", "", ""),
+
+    ("h2", "WHAT THE SYSTEM WILL AND WILL NOT TOUCH", ""),
+    ("row", "Lines it added", "Marked [auto · meeting · date] in bold."),
+    ("row", "Lines you typed", "No marker. It never edits, moves or deletes them."),
+    ("row", "The one exception", "It rewrites a date you typed into DD/MM/YYYY. "
+                                 "The format only, never the meaning — and every "
+                                 "one is listed in the weekly summary."),
+    ("blank", "", ""),
+
+    ("h2", "FINISHING WORK  vs  HIDING IT", ""),
+    ("row", "Tick the box", "Marks the task done EVERYWHERE — here, the Tasks "
+                            "sheet, and anything Gianluigi tells you."),
+    ("row", "Delete the row", "Removes the line from THIS review only. The task "
+                              "stays live and still gets chased."),
+    ("note", "Two different intentions, two different gestures. Deleting is never "
+             "how you finish something.", ""),
+    ("blank", "", ""),
+
+    ("h2", "ADDING THINGS", ""),
+    ("row", "A new action", "Type it on a blank row under a project."),
+    ("row", "A new project", "Type a name in Subject, leave Action empty."),
+    ("row", "A topic tag", "Type it in Subject on an action row."),
+    ("row", "A new person", "Type the name in Resp. Eyal is asked to confirm them "
+                            "before they join the team."),
+    ("blank", "", ""),
+
+    ("h2", "THE COLOURS", ""),
+    ("row", "Red", "Past its date."),
+    ("row", "Amber", "Due within a week."),
+    ("row", "Grey", "No date, or nobody responsible."),
+    ("row", "Purple", "The date could not be read — retype it."),
+    ("blank", "", ""),
+
+    ("h2", "DATES", ""),
+    ("row", "Type them any way", "12/8 · 12 Aug · next Tuesday · 2026-08-12. All "
+                                 "are understood and rewritten to DD/MM/YYYY."),
+    ("row", "05/08 is 5 August", "Day first, not month. The whole file is "
+                                 "day-first."),
+    ("blank", "", ""),
+
+    ("note", "Nothing here is ever lost — every change is reversible, and the "
+             "system keeps its own copy. If something looks wrong, tell Eyal "
+             "rather than repairing the file by hand.", ""),
 ]
+
+HOWTO_TEXT = [[a, b] for _kind, a, b in HOWTO_BLOCK]
 
 
 async def write_project_status_blocks(pack: dict, title_blocks: dict,
@@ -354,6 +561,12 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
             struct.extend(_v2_structure_requests(sheet_id, due_soon_days))
             struct.extend(_checkbox_requests(sheet_id, rows))
             struct.extend(_header_note_requests(sheet_id))
+            # AFTER the base formatting: the project band and the bold marker
+            # both override what _tab_format_requests paints across the body,
+            # and requests apply in order.
+            struct.extend(_project_row_requests(sheet_id, rows))
+            struct.extend(_marker_bold_requests(sheet_id, rows))
+            struct.extend(_date_validation_requests(sheet_id, rows))
             result["tabs"].append(tab)
             result["rows"] += len(rows)
             result["projects"] += sum(1 for r in rows if len(r) > 7 and r[7] == "P")
@@ -365,7 +578,7 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
                 lambda: svc.service.spreadsheets().values().clear(
                     spreadsheetId=ssid, range=HOWTO_TAB, body={}))
             data.append({"range": f"'{HOWTO_TAB}'!A1", "values": HOWTO_TEXT})
-            struct.append(_column_width_request(howto_id, 0, 760))
+            struct.extend(_howto_format_requests(howto_id))
             struct.append({"updateSheetProperties": {
                 "properties": {"sheetId": howto_id, "index": 0},
                 "fields": "index"}})
