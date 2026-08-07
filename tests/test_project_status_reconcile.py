@@ -1,0 +1,436 @@
+"""The Project Status reconcile engine.
+
+Two groups here carry most of the weight:
+
+`TestNeverTouchesHerRows` is the mechanical form of the whole design promise —
+the system only ever writes into lines it authored. If that ever breaks, the
+file stops being safe to work in, whatever else passes.
+
+`TestDestructiveInput` encodes "a mistake in the sheet cannot destroy data": a
+bad read, a bulk delete, a 200-row paste. Those are the cases where a merge
+engine does real damage, and they are the ones nobody exercises by hand.
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from processors import project_status_reconcile as psr
+from services.project_status_rows import (
+    ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION, KIND_PROJECT,
+)
+
+TAB = "PRODUCT & TECHNOLOGY"
+COLS = {name: i for i, name in enumerate(ALL_HEADERS)}
+
+
+def _grid(*body):
+    return [["Area", "", "", "Confidential"], ["Distribution:", "", "", ""],
+            list(ALL_HEADERS), *body]
+
+
+def _prow(uid="p1", name="Product V1", num=10, todo="", date="", resp="", notes=""):
+    return [num, name, "", todo, date, resp, notes, KIND_PROJECT, uid, uid, "", ""]
+
+
+def _arow(uid="t1", parent="p1", action="Ship the API", subject="", date="",
+          resp="", notes="", checked=False):
+    return [checked, subject, action, "", date, resp, notes, KIND_ACTION, uid,
+            parent, "auto", ""]
+
+
+def _human(action="Call the bank", subject="", date="", resp="", notes=""):
+    return ["", subject, action, "", date, resp, notes]
+
+
+def _db_task(tid="t1", **kw):
+    row = {"id": tid, "title": "Ship the API", "status": "pending",
+           "deadline": None, "assignee": "", "notes": None, "label": None,
+           "project_id": "p1", "ps_suppressed": False}
+    row.update(kw)
+    return row
+
+
+def _db_project(pid="p1", **kw):
+    row = {"id": pid, "name": "Product V1", "objective": None,
+           "target_date": None, "owner": None, "notes": None, "status": "active"}
+    row.update(kw)
+    return row
+
+
+def _plan(grids, tasks=None, projects=None, act_snaps=None, proj_snaps=None,
+          roster=None):
+    """Build a plan against a mocked database."""
+    sb = MagicMock()
+    sb.get_canonical_projects.return_value = projects if projects is not None else [_db_project()]
+    sb.get_ps_tasks.return_value = tasks if tasks is not None else [_db_task()]
+    sb.get_ps_project_snapshots.return_value = proj_snaps or {}
+    sb.get_sheet_snapshots.return_value = act_snaps or {}
+    sb.list_team_members.return_value = roster or [{"name": "Eyal Zror"}]
+    sb.resolve_assignee.side_effect = lambda v, roster=None: (
+        "Eyal Zror" if str(v).strip().lower() in ("eyal", "eyal zror") else v)
+    with patch.object(psr, "supabase_client", sb):
+        return psr.build_plan(grids)
+
+
+class TestIdleCycle:
+    def test_untouched_sheet_changes_nothing(self):
+        """The property the whole design rests on: at rest, do nothing."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Eyal Zror"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+            proj_snaps={"p1": {}},
+        )
+        assert plan.cell_writes == [] and plan.task_updates == {}
+        assert plan.project_updates == {} and plan.creates == []
+        assert plan.suppress == []
+
+    def test_assignee_shorthand_is_not_a_divergence(self):
+        """'Eyal' and 'Eyal Zror' are one person — comparing raw strings made
+        the Tasks reconcile report a phantom hold every 30 minutes forever."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Eyal"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal",
+                              "status": "pending"}},
+        )
+        assert plan.cell_writes == [] and plan.counters["pulled"] == 0
+
+
+class TestMergeRules:
+    def test_rule1_edit_is_pulled_and_marked_sticky(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Roye Tadmor"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+        )
+        assert plan.task_updates["t1"]["assignee"] == "Roye Tadmor"
+        assert ("task", "t1", "assignee") in plan.manual_marks
+        assert plan.counters["pulled"] == 1
+
+    def test_rule2_sticky_field_is_held_not_reverted(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Roye Tadmor"))},
+            tasks=[_db_task(assignee="Eyal Zror", manual_assignee=True)],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Roye Tadmor",
+                              "status": "pending"}},
+        )
+        assert plan.cell_writes == []
+        assert plan.counters["manual_held"] == 1
+
+    def test_rule4_db_advance_refreshes_the_cell(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Eyal Zror"))},
+            tasks=[_db_task(assignee="Roye Tadmor")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+        )
+        assert plan.counters["pushed"] == 1
+        tab, row, col, value = plan.cell_writes[0]
+        assert col == COLS["Resp."] and value == "Roye Tadmor"
+
+    def test_project_objective_is_pulled(self):
+        plan = _plan(
+            {TAB: _grid(_prow(todo="Win Lombardy"))},
+            tasks=[], proj_snaps={"p1": {"objective": None}},
+        )
+        assert plan.project_updates["p1"]["objective"] == "Win Lombardy"
+        assert ("project", "p1", "objective") in plan.manual_marks
+
+
+class TestDates:
+    def test_unparseable_date_is_never_pulled(self):
+        """A typo must not be able to null a real deadline."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date="whenever"))},
+            tasks=[_db_task(deadline="2026-08-12")],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": "2026-08-12",
+                              "status": "pending"}},
+        )
+        assert "deadline" not in plan.task_updates.get("t1", {})
+        assert plan.counters["bad_dates"] == 1
+
+    def test_unparseable_date_cell_is_left_verbatim(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date="whenever"))},
+            tasks=[_db_task(deadline="2026-08-12")],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": "2026-08-12",
+                              "status": "pending"}},
+        )
+        assert not [w for w in plan.cell_writes if w[2] == COLS["Date"]]
+
+    def test_equivalent_date_spellings_are_equal(self):
+        """12/08/2026 in the cell, 2026-08-12 in the DB — the same day."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date="12/08/2026"))},
+            tasks=[_db_task(deadline="2026-08-12")],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": "2026-08-12",
+                              "status": "pending"}},
+        )
+        assert plan.cell_writes == [] and plan.counters["pulled"] == 0
+
+    def test_sloppy_date_is_rewritten_to_the_canonical_form(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date="12/8/2026"))},
+            tasks=[_db_task(deadline="2026-08-12")],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": "2026-08-12",
+                              "status": "pending"}},
+        )
+        assert plan.counters["normalized_dates"] == 1
+        assert plan.cell_writes[0][3] == "12/08/2026"
+        assert plan.overrides                     # always reported
+
+
+class TestBlanks:
+    def test_a_cleared_title_never_nulls_the_task(self):
+        """Clearing a cell is how a human tidies a view, not an instruction to
+        erase the task's text."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(action=""))},
+            tasks=[_db_task(title="Ship the API")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert "title" not in plan.task_updates.get("t1", {})
+
+    def test_a_cleared_label_never_nulls_it(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(subject=""))},
+            tasks=[_db_task(label="AWS Setup")],
+            act_snaps={"t1": {"title": "Ship the API", "label": "AWS Setup",
+                              "status": "pending"}},
+        )
+        assert "label" not in plan.task_updates.get("t1", {})
+
+
+class TestCheckbox:
+    def test_tick_marks_the_task_done_and_sticky(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.task_updates["t1"]["status"] == "done"
+        assert ("task", "t1", "status") in plan.manual_marks
+        assert plan.counters["ticked"] == 1
+
+    def test_untick_returns_it_to_pending(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=False))},
+            tasks=[_db_task(status="done")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done"}},
+        )
+        assert plan.task_updates["t1"]["status"] == "pending"
+        assert plan.counters["unticked"] == 1
+
+    def test_an_already_done_row_is_not_re_ticked_every_cycle(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="done")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done"}},
+        )
+        assert "status" not in plan.task_updates.get("t1", {})
+
+
+class TestReparent:
+    def test_dragging_a_row_into_another_block_repoints_it(self):
+        plan = _plan(
+            {TAB: _grid(_prow(uid="p1"), _prow(uid="p2", name="Cloud", num=20),
+                        _arow(uid="t1", parent="p1"))},
+            projects=[_db_project("p1"), _db_project("p2", name="Cloud")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.task_updates["t1"]["project_id"] == "p2"
+        assert plan.counters["reparented"] == 1
+
+    def test_a_row_in_its_own_block_is_not_reparented(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.counters["reparented"] == 0
+
+
+class TestCreates:
+    def test_a_typed_action_becomes_a_task_under_its_project(self):
+        plan = _plan({TAB: _grid(_prow(), _human(action="Call the bank",
+                                                 resp="Paolo", date="12/08/2026"))},
+                     tasks=[])
+        create = plan.creates[0]
+        assert create["kind"] == "task" and create["project_id"] == "p1"
+        assert create["title"] == "Call the bank"
+        assert create["deadline"] == "2026-08-12"
+
+    def test_a_subject_with_no_action_becomes_a_project(self):
+        plan = _plan({TAB: _grid(["", "New Vertical", "", "Break in", "", "", ""])},
+                     tasks=[])
+        assert plan.creates[0]["kind"] == "project"
+        assert plan.creates[0]["name"] == "New Vertical"
+
+    def test_an_incomplete_row_is_counted_never_written(self):
+        """Date and owner but no Action — a task with no title is worse than none."""
+        plan = _plan({TAB: _grid(_prow(), _human(action="", resp="Paolo",
+                                                 date="12/08/2026"))}, tasks=[])
+        assert plan.creates == [] and plan.counters["incomplete"] == 1
+
+    def test_an_orphan_action_is_surfaced_not_dropped(self):
+        """Typed above the first project row. Losing a line she typed because it
+        sat in the wrong place would be the worst possible behaviour."""
+        plan = _plan({TAB: _grid(_human(action="Stray"), _prow())}, tasks=[])
+        assert plan.counters["orphans"] == 1
+        assert [c["title"] for c in plan.creates] == ["Stray"]
+
+    def test_an_unknown_name_raises_a_proposal_and_still_creates(self):
+        plan = _plan({TAB: _grid(_prow(), _human(action="Call", resp="Dana Levi"))},
+                     tasks=[])
+        assert plan.person_proposals == ["Dana Levi"]
+        assert plan.creates[0]["assignee"] == "Dana Levi"
+
+    def test_a_known_name_raises_no_proposal(self):
+        plan = _plan({TAB: _grid(_prow(), _human(action="Call", resp="Eyal"))},
+                     tasks=[])
+        assert plan.person_proposals == []
+
+
+class TestSuppression:
+    def test_a_deleted_row_suppresses_the_view_not_the_task(self):
+        plan = _plan(
+            {TAB: _grid(_prow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.suppress == ["t1"]
+        assert plan.task_updates == {}          # the task itself is untouched
+
+    def test_a_row_still_present_is_not_suppressed(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.suppress == []
+
+
+class TestDestructiveInput:
+    def test_an_empty_tab_with_snapshots_is_skipped_entirely(self):
+        """A transient Sheets read returns an empty tab WITHOUT raising.
+        Treating that as 'everything was deleted' would empty the review."""
+        plan = _plan({TAB: []}, act_snaps={"t1": {"status": "pending"}},
+                     proj_snaps={"p1": {"sheet_tab": TAB}})
+        assert plan.skipped_tabs == [TAB]
+        assert plan.suppress == [] and plan.task_updates == {}
+
+    def test_a_genuinely_new_empty_tab_is_not_an_abort(self):
+        plan = _plan({TAB: []}, tasks=[], proj_snaps={})
+        assert plan.skipped_tabs == []
+
+    def test_bulk_delete_trips_the_cap_and_suppresses_nothing(self):
+        snaps = {f"t{i}": {"status": "pending"} for i in range(30)}
+        tasks = [_db_task(f"t{i}") for i in range(30)]
+        plan = _plan({TAB: _grid(_prow())}, tasks=tasks, act_snaps=snaps)
+        assert plan.suppress == []
+
+    def test_a_pasted_block_leaves_the_duplicates_alone(self):
+        """A pasted row carries its source's uid. The topmost keeps the
+        identity; acting on both would apply one row's edits to the other."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(uid="t1", resp="Roye Tadmor"),
+                        _arow(uid="t1", resp="Someone Else"))},
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+        )
+        assert plan.counters["dup_uids"] == 1
+        assert plan.task_updates["t1"]["assignee"] == "Roye Tadmor"
+
+    def test_a_uid_unknown_to_the_database_is_left_alone(self):
+        plan = _plan({TAB: _grid(_prow(), _arow(uid="ghost"))},
+                     act_snaps={})
+        assert plan.counters["ghosts"] == 1
+        assert plan.task_updates == {} and plan.cell_writes == []
+
+
+class TestNeverTouchesHerRows:
+    """The mechanical form of "the system only writes lines it authored"."""
+
+    def test_no_write_lands_on_a_human_row(self):
+        grid = _grid(
+            _prow(),
+            _arow(uid="t1", resp="Eyal Zror"),
+            _human(action="Her own line", resp="Paolo", notes="hers"),
+            _human(action="Another", date="12/08/2026"),
+        )
+        plan = _plan({TAB: grid}, tasks=[_db_task(assignee="Roye Tadmor")],
+                     act_snaps={"t1": {"title": "Ship the API",
+                                       "assignee": "Eyal Zror",
+                                       "status": "pending"}})
+        human_rows = {FIRST_BODY_ROW + 2, FIRST_BODY_ROW + 3}
+        touched = {row for _, row, _, _ in plan.cell_writes}
+        assert not (touched & human_rows), f"wrote into {touched & human_rows}"
+
+    def test_her_rows_are_never_updated_only_created_from(self):
+        plan = _plan({TAB: _grid(_prow(), _human(action="Hers"))}, tasks=[])
+        assert plan.task_updates == {} and plan.project_updates == {}
+        assert len(plan.creates) == 1
+
+    def test_a_human_row_next_to_a_system_row_does_not_borrow_its_identity(self):
+        plan = _plan({TAB: _grid(_prow(), _arow(uid="t1"), _human(action="Hers"))},
+                     act_snaps={"t1": {"title": "Ship the API",
+                                       "status": "pending"}})
+        assert plan.creates[0]["title"] == "Hers"
+        assert plan.suppress == []
+
+
+class TestShadow:
+    @pytest.mark.asyncio
+    async def test_shadow_writes_nothing(self):
+        with patch.object(psr, "_read_tabs",
+                          return_value={TAB: _grid(_prow(), _arow(resp="X"))}), \
+             patch.object(psr, "_apply") as apply_fn, \
+             patch.object(psr, "supabase_client") as sb, \
+             patch.object(psr.settings, "PROJECT_STATUS_SHEET_ID", "sid"):
+            sb.get_canonical_projects.return_value = [_db_project()]
+            sb.get_ps_tasks.return_value = [_db_task()]
+            sb.get_ps_project_snapshots.return_value = {}
+            sb.get_sheet_snapshots.return_value = {}
+            sb.list_team_members.return_value = []
+            sb.resolve_assignee.side_effect = lambda v, roster=None: v
+            result = await psr.reconcile_project_status(shadow=True)
+
+        apply_fn.assert_not_called()
+        assert result["shadow"] is True
+
+    @pytest.mark.asyncio
+    async def test_missing_sheet_id_is_an_error_not_a_crash(self):
+        with patch.object(psr.settings, "PROJECT_STATUS_SHEET_ID", ""):
+            result = await psr.reconcile_project_status(shadow=True)
+        assert result["error"]
+
+
+class TestSkippedTabIsolation:
+    """A bad read on one tab must protect that tab without freezing the others."""
+
+    OTHER = "SALES & BUSINESS DEVELOPMENT"
+
+    def test_a_skipped_tabs_rows_are_never_suppressed(self):
+        """Without this the guard announces it protected the tab and then lets
+        the damage through the back door — suppression runs over ALL snapshots."""
+        plan = _plan(
+            {TAB: [], self.OTHER: _grid(_prow(uid="p2", name="Italy"))},
+            projects=[_db_project("p1"), _db_project("p2", name="Italy")],
+            tasks=[_db_task("t1"), _db_task("t2", project_id="p2")],
+            act_snaps={"t1": {"status": "pending", "sheet_tab": TAB},
+                       "t2": {"status": "pending", "sheet_tab": self.OTHER}},
+            proj_snaps={"p1": {"sheet_tab": TAB}, "p2": {"sheet_tab": self.OTHER}},
+        )
+        assert plan.skipped_tabs == [TAB]
+        assert "t1" not in plan.suppress          # protected
+        assert "t2" in plan.suppress              # the readable tab still works
+
+    def test_unknown_provenance_is_protected_while_anything_is_skipped(self):
+        plan = _plan(
+            {TAB: [], self.OTHER: _grid(_prow(uid="p2", name="Italy"))},
+            projects=[_db_project("p1"), _db_project("p2", name="Italy")],
+            tasks=[_db_task("t3")],
+            act_snaps={"t3": {"status": "pending"}},   # no sheet_tab recorded
+            proj_snaps={"p1": {"sheet_tab": TAB}},
+        )
+        assert plan.suppress == []

@@ -401,7 +401,12 @@ def build_status_blocks() -> dict[str, list[list]]:
                 # not "FALSE": the cell carries BOOLEAN validation so Sheets
                 # renders a tick box, and reconcile reads a clean bool back.
                 False,
-                "",                               # Subject is the topic, hers to set
+                # Subject on an action row is the TOPIC (tasks.label). Seeded
+                # from the DB rather than left blank: leaving it empty while the
+                # DB holds a label made the reconcile want to push it every
+                # cycle — 37 phantom cell writes on a sheet nobody had touched.
+                # Builder and merge have to agree on what a column means.
+                _effective(t, "label"),
                 f"{title} {marker}".strip(),
                 "",                               # To do belongs to the project row
                 _fmt_date(_effective(t, "deadline")),

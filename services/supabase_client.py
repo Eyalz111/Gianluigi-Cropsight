@@ -6497,6 +6497,33 @@ class SupabaseClient:
             grouped.setdefault(t.get("project_id"), []).append(t)
         return grouped
 
+    def get_ps_tasks(self) -> list[dict]:
+        """Every live approved task the Project Status sheet could be showing.
+
+        Deliberately NOT filtered to open: a row Nechama just ticked is `done`
+        in the DB but still physically on the sheet, and the reconcile has to
+        recognise it. Filtering to open would make that row a GHOST — unknown
+        to the DB — and the engine would leave it alone forever, so an untick
+        could never take effect.
+
+        Also unfiltered on ps_suppressed, so a suppressed task still resolves
+        if its row is somehow present rather than being treated as unknown.
+        """
+        try:
+            return (
+                self.client.table("tasks")
+                .select("*")
+                .eq("approval_status", "approved")
+                .is_("valid_to", "null")
+                .limit(3000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.error(f"Error reading Project Status tasks: {e}")
+            return []
+
 
 # Singleton instance for easy import
 db = SupabaseClient()

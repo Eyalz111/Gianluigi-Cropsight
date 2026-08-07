@@ -206,6 +206,19 @@ class ReconcileScheduler:
                 dec_summary = await reconcile_decisions()
                 meet_summary = await reconcile_meetings()
                 proj_summary = await reconcile_projects()
+                # Project Status sheet. Runs AFTER reconcile_projects so a
+                # project renamed on the Projects tab is already settled before
+                # its blocks are merged. Self-guards on its own flag and ships
+                # shadow-on. [2026-08-07]
+                ps_summary = None
+                if getattr(settings, "PROJECT_STATUS_RECONCILE_ENABLED", False):
+                    try:
+                        from processors.project_status_reconcile import (
+                            reconcile_project_status,
+                        )
+                        ps_summary = await reconcile_project_status()
+                    except Exception as pe:
+                        logger.error(f"Project Status reconcile failed: {pe}")
                 # Generated views LAST — they read the state the reconcile just
                 # settled, so running them first would render stale counts.
                 views = None
@@ -222,6 +235,7 @@ class ReconcileScheduler:
                              "decisions": dec_summary if isinstance(dec_summary, dict) else None,
                              "meetings": meet_summary if isinstance(meet_summary, dict) else None,
                              "projects": proj_summary if isinstance(proj_summary, dict) else None,
+                             "project_status": ps_summary,
                              "views": views},
                 )
                 # Close the human->machine loop: after an auto-sync that actually

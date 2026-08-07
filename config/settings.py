@@ -143,6 +143,15 @@ class Settings(BaseSettings):
     PROJECT_STATUS_V2_LAYOUT: bool = Field(default=False, description="Project Status sheet uses the v2 project-centric block layout")
     # Amber band on an action row's Date. Past due is red regardless.
     PROJECT_STATUS_DUE_SOON_DAYS: int = Field(default=7, description="Days ahead of a deadline that count as due-soon on the Project Status sheet")
+    # Bidirectional reconcile for the Project Status sheet. Ships SHADOW-ON: it
+    # computes the full would-do diff and writes nothing, so a review cycle can
+    # be watched before it is trusted with Nechama's file. [2026-08-07]
+    PROJECT_STATUS_RECONCILE_ENABLED: bool = Field(default=False, description="Reconcile the Project Status sheet with the DB")
+    PROJECT_STATUS_RECONCILE_SHADOW_MODE: bool = Field(default=True, description="Compute the Project Status reconcile diff without writing")
+    # A 200-row paste must not silently mint 200 tasks, and a bulk delete must
+    # not suppress the review out of existence. Both caps log loudly when hit.
+    PROJECT_STATUS_MAX_CREATES_PER_CYCLE: int = Field(default=25, description="Max rows turned into tasks/projects per reconcile cycle")
+    PROJECT_STATUS_MAX_SUPPRESS_PER_CYCLE: int = Field(default=5, description="Max deleted rows honoured as suppressions per cycle")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")
