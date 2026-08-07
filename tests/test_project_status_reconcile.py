@@ -859,3 +859,47 @@ class TestPastedProjectRowResolves:
             {TAB: _grid(["", "Brand New Area", "", "", "", "", ""])}, tasks=[])
         assert [c["name"] for c in plan.creates] == ["Brand New Area"]
         assert plan.counters["matched_existing_project"] == 0
+
+
+class TestRecencyRule:
+    """Two surfaces can edit the same field. Rule 2 alone makes a disagreement
+    PERMANENT — the sheet keeps its value, the database keeps its own, and every
+    cycle reports the same hold while nobody is told. The tie-break is time."""
+
+    def _run(self, manual_set_at, snapshot_at):
+        return _plan(
+            {TAB: _grid(_prow(), _arow(resp="Nechama Tik"))},
+            tasks=[_db_task(assignee="Roye Tadmor", manual_assignee=True,
+                            manual_set_at=manual_set_at)],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Nechama Tik",
+                              "status": "pending", "snapshot_at": snapshot_at}},
+        )
+
+    def test_a_newer_db_edit_wins_and_refreshes_the_cell(self):
+        """Edited on the Tasks tab AFTER this sheet last synced — that is the
+        more recent human decision and belongs here too."""
+        plan = self._run("2026-08-08T12:00:00Z", "2026-08-08T10:00:00Z")
+        assert plan.counters["manual_held"] == 0
+        writes = [w for w in plan.cell_writes if w[2] == COLS["Resp."]]
+        assert writes and writes[0][3] == "Roye Tadmor"
+
+    def test_an_older_db_edit_is_held(self):
+        """This sheet's value is the newer one — Rule 2 stands."""
+        plan = self._run("2026-08-08T09:00:00Z", "2026-08-08T10:00:00Z")
+        assert plan.counters["manual_held"] == 1
+        assert [w for w in plan.cell_writes if w[2] == COLS["Resp."]] == []
+
+    def test_a_missing_timestamp_holds(self):
+        """Resolving a conflict by guessing is worse than leaving it visible."""
+        assert self._run(None, "2026-08-08T10:00:00Z").counters["manual_held"] == 1
+        assert self._run("2026-08-08T12:00:00Z", None).counters["manual_held"] == 1
+
+    def test_a_non_sticky_field_is_unaffected(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Nechama Tik"))},
+            tasks=[_db_task(assignee="Roye Tadmor")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Nechama Tik",
+                              "status": "pending"}},
+        )
+        assert plan.counters["manual_held"] == 0
+        assert plan.counters["pushed"] == 1

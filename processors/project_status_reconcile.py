@@ -102,6 +102,41 @@ def _normalize(value) -> str:
     return str(value if value is not None else "").strip().lower()
 
 
+def _as_dt(value):
+    """Parse an ISO timestamp, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _db_edit_is_newer(db_row: dict, snap: dict) -> bool:
+    """THE RECENCY RULE — the thing that makes two surfaces converge.
+
+    A field can be edited on the Tasks tab AND here. Rule 2 says never revert a
+    value a human set, which is right — but applied blindly it means that once
+    the two surfaces disagree they disagree FOREVER: the sheet keeps its value,
+    the database keeps its own, and every cycle reports the same hold. Nobody is
+    told, nothing resolves, and the two files quietly describe different truths.
+
+    The tie-break is time. `manual_set_at` records when a human last set the
+    field anywhere; `snapshot_at` records when this sheet was last in step with
+    it. If the human edit came AFTER, it is the more recent decision and belongs
+    in this cell too. If it came before, this sheet's value is the newer one and
+    the hold stands.
+
+    Missing timestamps mean HOLD. A rule that resolves a conflict by guessing is
+    worse than one that leaves it visible. [2026-08-08]
+    """
+    edited = _as_dt(db_row.get("manual_set_at"))
+    synced = _as_dt(snap.get("snapshot_at"))
+    if not edited or not synced:
+        return False
+    return edited > synced
+
+
 class _Assignees:
     """Lazy roster canonicaliser — 'Nechama' and 'Nechama Tik' are one person.
 
@@ -283,7 +318,7 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
                      _display(field, sheet_cmp)))
                 plan.bump("normalized_dates")
         elif not _eq(field, db_val, sheet_cmp, assignees):
-            if db_row.get(f"manual_{field}"):
+            if db_row.get(f"manual_{field}") and not _db_edit_is_newer(db_row, snap):
                 plan.bump("manual_held")                    # Rule 2
                 final[field] = sheet_cmp
             else:
