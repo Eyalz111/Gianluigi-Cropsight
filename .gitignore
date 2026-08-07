@@ -165,3 +165,16 @@ scripts/_backfill_snapshots/
 # Rollback snapshots written by the one-off migration scripts
 scripts/_projects_snapshot_*.json
 scripts/_task_projects_snapshot_*.json
+
+# Local scratch: a 22MB Italian-translation working tree with its own build
+# output and __pycache__. Working material, not source.
+docs/_it_work/
+
+# Business documents (PDF/DOCX). They live in Drive, which is where they get
+# edited and shared; a binary in git only ever goes stale and bloats clones.
+docs/*.pdf
+docs/*.docx
+
+# Settings backups made before a restore
+.claude/settings.local.json.pre-restore
+*.pre-restore
