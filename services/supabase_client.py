@@ -1124,6 +1124,24 @@ class SupabaseClient:
         # on here: an unrecognised label is recorded for the auto-learn loop.
         _roster = self.list_team_members()
         _projects = self.get_canonical_projects(status="active")
+        # THE LINK THAT MAKES EXTRACTED WORK REACH THE PROJECT STATUS SHEET.
+        # That sheet is project-centric, and its auto-injection requires
+        # project_id. This path — the one every transcript goes through — set
+        # `label` and nothing else, so every task a meeting produced landed with
+        # project_id NULL and could never appear there. Auto-injection would
+        # have run forever and injected nothing. create_task already resolved
+        # it; the batch path, which is the one that actually matters, did not.
+        # [2026-08-07]
+        _links = self.get_topic_project_links()
+        _by_name = {(p.get("name") or "").strip().lower(): p["id"] for p in _projects}
+
+        def _project_for(label: str) -> str | None:
+            key = (label or "").strip().lower()
+            if not key:
+                return None
+            # An approved topic->project link is an explicit human decision and
+            # outranks a name match.
+            return _links.get(key) or _by_name.get(key)
 
         def _row(t: dict) -> dict:
             raw_deadline = t.get("deadline")
@@ -1141,7 +1159,11 @@ class SupabaseClient:
                     f"(meeting {meeting_id}) — flagged for QA gap-fill"
                 )
                 conf = "NONE"
-            return {
+            label = self.resolve_label(
+                t.get("label"), projects=_projects, capture=True,
+                meeting_id=meeting_id,
+            )
+            row = {
                 "meeting_id": meeting_id,
                 "title": t.get("title"),
                 "assignee": self.resolve_assignee(t.get("assignee", ""), roster=_roster),
@@ -1150,13 +1172,18 @@ class SupabaseClient:
                 "transcript_timestamp": t.get("transcript_timestamp"),
                 "status": "pending",
                 "category": self.resolve_category(t.get("category"), areas=_areas),
-                "label": self.resolve_label(
-                    t.get("label"), projects=_projects, capture=True,
-                    meeting_id=meeting_id,
-                ),
+                "label": label,
                 "deadline_confidence": conf,
                 "urgency": t.get("urgency", "M"),
             }
+            # Only sent when resolved — an unmatched topic stays NULL rather
+            # than being guessed into a project. It surfaces as a
+            # topic_project_link proposal instead, which Eyal approves once and
+            # every future task carrying that topic attaches by itself.
+            project_id = _project_for(label)
+            if project_id:
+                row["project_id"] = project_id
+            return row
 
         data = [_row(t) for t in valid_tasks]
 
