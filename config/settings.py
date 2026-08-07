@@ -152,6 +152,13 @@ class Settings(BaseSettings):
     # not suppress the review out of existence. Both caps log loudly when hit.
     PROJECT_STATUS_MAX_CREATES_PER_CYCLE: int = Field(default=25, description="Max rows turned into tasks/projects per reconcile cycle")
     PROJECT_STATUS_MAX_SUPPRESS_PER_CYCLE: int = Field(default=5, description="Max deleted rows honoured as suppressions per cycle")
+    # Structural work — inserting and deleting ROWS — only in these slots. The
+    # 30-minute interval stays value-only so the system never shifts rows under
+    # a live editor mid-meeting. Empty string disables structural entirely.
+    PROJECT_STATUS_STRUCTURAL_SLOTS: str = Field(default="prenightly,predigest", description="Reconcile slots allowed to insert/delete Project Status rows")
+    PROJECT_STATUS_AUTO_INJECT_ENABLED: bool = Field(default=False, description="Append newly-extracted tasks to their project block")
+    PROJECT_STATUS_MAX_AUTO_PER_PROJECT: int = Field(default=5, description="Max auto-injected actions per project per cycle")
+    PROJECT_STATUS_MAX_ACTIONS_PER_PROJECT: int = Field(default=25, description="Max action rows a project block may hold")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")

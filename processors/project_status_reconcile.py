@@ -42,9 +42,13 @@ WHAT IS DIFFERENT HERE, AND WHY IT NEEDED ITS OWN ENGINE
 SHADOW MODE IS THE DEFAULT. The engine computes the entire diff and writes
 nothing, so a real review cycle can be watched first.
 
-Structural work (inserting rows, deleting closed ones) and auto-injection of
-new tasks are deliberately NOT here — they are P5. This module only pulls,
-pushes, creates from rows that already exist, and suppresses.
+STRUCTURAL WORK IS CONFINED TO THE QUIET SLOTS. Inserting and deleting ROWS
+only happens in PROJECT_STATUS_STRUCTURAL_SLOTS (02:00 and the weekly
+pre-digest), never on the 30-minute interval: shifting rows under somebody who
+is typing in the middle of a review is the one thing a working document must
+not do. And because every row number in the plan comes from a read that already
+happened, the structural pass re-reads the uid column first and skips any tab
+whose sequence moved.
 """
 
 import logging
@@ -55,7 +59,7 @@ from core.dates import parse_human_date
 from services.project_status_rows import (
     COL_ACTION, COL_COMMENTS, COL_DATE, COL_RESP, COL_SUBJECT, COL_TODO,
     HUMAN_ACTION, HUMAN_PROJECT, INCOMPLETE, SYSTEM_ACTION, SYSTEM_PROJECT,
-    find_duplicate_uids, parse_tab, strip_provenance,
+    find_duplicate_uids, parse_tab, strip_provenance, tab_fingerprint,
 )
 from services.supabase_client import supabase_client
 
@@ -77,6 +81,8 @@ _DATE_FIELDS = {"deadline", "target_date"}
 # Fields that must never be pulled BLANK. Clearing a cell is how a human tidies
 # a view; it is not an instruction to erase the task's text.
 _NEVER_BLANK = {"title", "label"}
+# Statuses that mean the work is finished, for the closed-row pass.
+_CLOSED = {"done", "cancelled", "archived"}
 
 
 def _normalize(value) -> str:
@@ -162,6 +168,13 @@ class Plan:
         }
         self.overrides: list = []             # human-readable "what changed"
         self.skipped_tabs: list = []
+        # P5 structural work. Row numbers here are computed from THIS read, so
+        # they go stale the moment a human re-orders a tab — which is why the
+        # structural pass re-checks the fingerprint before applying anything.
+        self.injects: list = []               # (tab, anchor_row, [row values])
+        self.row_deletes: list = []           # (tab, row_number, task_id)
+        self.strikes: list = []               # (tab, row_number, task_id)
+        self.fingerprints: dict = {}          # tab -> uid-sequence hash
 
     def bump(self, key: str, n: int = 1) -> None:
         self.counters[key] = self.counters.get(key, 0) + n
@@ -175,6 +188,9 @@ class Plan:
             "creates": len(self.creates),
             "suppress": len(self.suppress),
             "person_proposals": len(self.person_proposals),
+            "injects": sum(len(rows) for _, _, rows in self.injects),
+            "row_deletes": len(self.row_deletes),
+            "strikes": len(self.strikes),
             "skipped_tabs": self.skipped_tabs,
         }
 
@@ -302,9 +318,11 @@ def build_plan(grids: dict) -> Plan:
 
     seen_tasks: set = set()
     seen_projects: set = set()
+    parsed: dict = {}
 
     for tab, grid in grids.items():
         blocks, orphans, _ = parse_tab(grid)
+        plan.fingerprints[tab] = tab_fingerprint(blocks, orphans)
 
         # GUARD: a transient Sheets read can return an EMPTY tab without
         # raising. Treating that as "everything was deleted" would suppress the
@@ -321,6 +339,7 @@ def build_plan(grids: dict) -> Plan:
                 plan.skipped_tabs.append(tab)
             continue
 
+        parsed[tab] = blocks
         dups = find_duplicate_uids(blocks, orphans)
         if dups:
             plan.bump("dup_uids", len(dups))
@@ -372,7 +391,113 @@ def build_plan(grids: dict) -> Plan:
 
     _detect_suppressions(act_snaps, seen_tasks, db_tasks, plan)
     _propose_people(plan, assignees)
+    _plan_closed_rows(parsed, db_tasks, plan)
+    if getattr(settings, "PROJECT_STATUS_AUTO_INJECT_ENABLED", False):
+        _plan_injections(parsed, db_tasks, act_snaps, seen_tasks, plan)
     return plan
+
+
+def _annotated(row, db_task: dict) -> bool:
+    """Has a human left anything of their own on this auto row?
+
+    Comments is hers by definition, `auto_edited` records a previous cycle's
+    finding, and any manual_* flag means somebody set a field by hand on some
+    surface. Any of those makes the row worth keeping when the work closes —
+    deleting it would throw away a note nobody else has a copy of.
+    """
+    if str(row.values.get(COL_COMMENTS) or "").strip():
+        return True
+    if row.origin == "auto_edited":
+        return True
+    return any(k.startswith("manual_") and v for k, v in (db_task or {}).items())
+
+
+def _plan_closed_rows(parsed: dict, db_tasks: dict, plan: Plan) -> None:
+    """Rows whose task is finished: remove the plain ones, keep the annotated.
+
+    Only for tasks ALREADY closed in the database. A row ticked during this very
+    cycle is deliberately left alone — she would watch the line vanish under the
+    cursor a second after clicking it. It goes on the next structural pass.
+    """
+    ticking_now = {tid for tid, fields in plan.task_updates.items()
+                   if "status" in fields}
+    for tab, blocks in parsed.items():
+        if tab in plan.skipped_tabs:
+            continue
+        for block in blocks:
+            for row in block.actions:
+                if row.kind != SYSTEM_ACTION or not row.uid:
+                    continue
+                if row.uid in ticking_now:
+                    continue
+                task = db_tasks.get(row.uid)
+                if not task or _normalize(task.get("status")) not in _CLOSED:
+                    continue
+                if _annotated(row, task):
+                    plan.strikes.append((tab, row.row_number, row.uid))
+                else:
+                    plan.row_deletes.append((tab, row.row_number, row.uid))
+
+
+def _plan_injections(parsed: dict, db_tasks: dict, act_snaps: dict,
+                     seen: set, plan: Plan) -> None:
+    """Append newly-extracted tasks under their project block.
+
+    A task qualifies when it is open, approved, attached to a project, not
+    suppressed, and has never had a row here (no ps_action snapshot). Source is
+    therefore extraction — this never re-adds something she deleted, because
+    deletion sets ps_suppressed and the snapshot survives.
+
+    Two caps: per project per cycle, so a busy meeting can't dump twenty lines
+    into one block overnight, and a total per block, so a project nobody prunes
+    doesn't grow without limit. Both are reported.
+    """
+    from services.project_status_rows import KIND_ACTION, ORIGIN_AUTO, format_provenance
+
+    per_cycle = getattr(settings, "PROJECT_STATUS_MAX_AUTO_PER_PROJECT", 5)
+    per_block = getattr(settings, "PROJECT_STATUS_MAX_ACTIONS_PER_PROJECT", 25)
+
+    candidates: dict = {}
+    for task in db_tasks.values():
+        pid = task.get("project_id")
+        if (not pid or task.get("ps_suppressed")
+                or _normalize(task.get("status")) in _CLOSED
+                or task["id"] in act_snaps or task["id"] in seen):
+            continue
+        candidates.setdefault(pid, []).append(task)
+
+    if not candidates:
+        return
+
+    for tab, blocks in parsed.items():
+        if tab in plan.skipped_tabs:
+            continue
+        for block in blocks:
+            pid = block.project_uid
+            queue = candidates.get(pid)
+            if not queue:
+                continue
+            room = max(0, per_block - len(block.actions))
+            take = min(len(queue), per_cycle, room)
+            if take < len(queue):
+                logger.info(
+                    f"[ps-reconcile] {tab}: {len(queue)} new task(s) for this "
+                    f"project, injecting {take} (per-cycle {per_cycle}, "
+                    f"block room {room}).")
+            if not take:
+                continue
+            rows = []
+            for task in queue[:take]:
+                rows.append([
+                    False, task.get("label") or "",
+                    f"{task.get('title') or ''} "
+                    f"{format_provenance(ORIGIN_AUTO, '', '')}".strip(),
+                    "", _display("deadline", task.get("deadline")),
+                    task.get("assignee") or "", task.get("notes") or "",
+                    KIND_ACTION, task["id"], pid, ORIGIN_AUTO,
+                    task.get("meeting_id") or "",
+                ])
+            plan.injects.append((tab, block.end_row, rows))
 
 
 def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
@@ -485,8 +610,26 @@ def _propose_people(plan: Plan, assignees: _Assignees) -> None:
     plan.person_proposals.extend(sorted(names))
 
 
+def structural_allowed(slot: str | None) -> bool:
+    """Is this reconcile slot permitted to insert or delete ROWS?
+
+    The 30-minute interval never is. Shifting rows under someone who is typing
+    in the middle of a review is the one thing a working document must not do,
+    so structural work is confined to the quiet slots (02:00 and the weekly
+    pre-digest). An empty setting disables it entirely.
+    """
+    allowed = [s.strip().lower() for s in
+               str(getattr(settings, "PROJECT_STATUS_STRUCTURAL_SLOTS", "") or "").split(",")
+               if s.strip()]
+    if not allowed or not slot:
+        return False
+    # Slots arrive as "2026-08-07:prenightly" or "2026-08-07-1748:interval".
+    return slot.rsplit(":", 1)[-1].strip().lower() in allowed
+
+
 async def reconcile_project_status(dry_run: bool = False,
-                                   shadow: bool | None = None) -> dict:
+                                   shadow: bool | None = None,
+                                   slot: str | None = None) -> dict:
     """Run one reconcile cycle. Shadow by default.
 
     Returns the summary dict; in shadow it is the full would-do diff and
@@ -495,6 +638,7 @@ async def reconcile_project_status(dry_run: bool = False,
     if shadow is None:
         shadow = getattr(settings, "PROJECT_STATUS_RECONCILE_SHADOW_MODE", True)
     write_allowed = not (dry_run or shadow)
+    structural = write_allowed and structural_allowed(slot)
 
     sid = settings.PROJECT_STATUS_SHEET_ID
     if not sid:
@@ -511,7 +655,7 @@ async def reconcile_project_status(dry_run: bool = False,
 
     plan = build_plan(grids)
     summary = {**plan.summary(), "shadow": shadow, "dry_run": dry_run,
-               "tabs": len(grids)}
+               "tabs": len(grids), "structural": structural, "slot": slot}
 
     if not write_allowed:
         logger.info(f"[ps-reconcile][{'shadow' if shadow else 'dry-run'}] {summary}")
@@ -526,7 +670,7 @@ async def reconcile_project_status(dry_run: bool = False,
             pass
         return summary
 
-    summary.update(await _apply(plan, sid))
+    summary.update(await _apply(plan, sid, structural=structural))
     logger.info(f"[ps-reconcile] {summary}")
     try:
         supabase_client.log_action("ps_reconcile", details=summary,
@@ -603,7 +747,141 @@ def _write_identity(sheets_service, spreadsheet_id: str, tab: str, row: int,
         raise
 
 
-async def _apply(plan: Plan, spreadsheet_id: str) -> dict:
+async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
+    """Insert new rows, remove closed ones, strike the annotated ones.
+
+    THE FINGERPRINT RE-CHECK IS THE WHOLE POINT. Every row number in the plan
+    was computed from a read that happened seconds-to-minutes ago. If a human
+    inserted, deleted or dragged a row since, those numbers now address
+    DIFFERENT rows — and a structural edit applied at the wrong offset deletes
+    somebody's work. So the uid column is re-read and any tab whose sequence
+    moved is skipped entirely. A skipped tab loses nothing: the same work is
+    re-planned against fresh numbers on the next structural slot.
+
+    Requests are emitted DESCENDING by row so that earlier edits don't shift
+    the targets of later ones within the same batch.
+    """
+    from services.google_sheets import sheets_service
+    from services.project_status_rows import ALL_HEADERS, parse_tab
+
+    out = {"injected": 0, "rows_deleted": 0, "struck": 0, "stale_tabs": []}
+
+    tabs = {t for t, _, _ in plan.injects} | {t for t, _, _ in plan.row_deletes} \
+        | {t for t, _, _ in plan.strikes}
+    if not tabs:
+        return out
+
+    fresh = sheets_service._execute_with_retry(
+        lambda: sheets_service.service.spreadsheets().values().batchGet(
+            spreadsheetId=spreadsheet_id,
+            ranges=[f"'{t}'!{READ_RANGE}" for t in sorted(tabs)]))
+    now_fp = {}
+    for tab, vr in zip(sorted(tabs), fresh.get("valueRanges", [])):
+        blocks, orphans, _ = parse_tab(vr.get("values") or [])
+        now_fp[tab] = tab_fingerprint(blocks, orphans)
+
+    stale = {t for t in tabs if now_fp.get(t) != plan.fingerprints.get(t)}
+    if stale:
+        out["stale_tabs"] = sorted(stale)
+        logger.warning(
+            f"[ps-reconcile] structural SKIPPED for {sorted(stale)} — the tab "
+            "changed since it was read; row numbers are stale. Re-planned next "
+            "structural slot.")
+
+    meta = sheets_service._execute_with_retry(
+        lambda: sheets_service.service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id, fields="sheets.properties"))
+    gid = {s["properties"]["title"]: s["properties"]["sheetId"]
+           for s in meta.get("sheets", [])}
+
+    # (row, request) pairs, applied strictly bottom-to-top.
+    ops: list = []
+    for tab, row, _tid in plan.row_deletes:
+        if tab in stale or tab not in gid:
+            continue
+        ops.append((row, {"deleteDimension": {"range": {
+            "sheetId": gid[tab], "dimension": "ROWS",
+            "startIndex": row - 1, "endIndex": row}}}))
+        out["rows_deleted"] += 1
+
+    for tab, row, _tid in plan.strikes:
+        if tab in stale or tab not in gid:
+            continue
+        ops.append((row, {"repeatCell": {
+            "range": {"sheetId": gid[tab], "startRowIndex": row - 1,
+                      "endRowIndex": row, "startColumnIndex": 0,
+                      "endColumnIndex": 7},
+            "cell": {"userEnteredFormat": {"textFormat": {"strikethrough": True}}},
+            "fields": "userEnteredFormat.textFormat.strikethrough"}}))
+        ops.append((row, {"updateCells": {
+            "range": {"sheetId": gid[tab], "startRowIndex": row - 1,
+                      "endRowIndex": row, "startColumnIndex": 10,
+                      "endColumnIndex": 11},
+            "rows": [{"values": [{"userEnteredValue":
+                                  {"stringValue": "auto_edited"}}]}],
+            "fields": "userEnteredValue"}}))
+        out["struck"] += 1
+
+    for tab, anchor, rows in plan.injects:
+        if tab in stale or tab not in gid:
+            continue
+        sheet_id = gid[tab]
+        ops.append((anchor, {"insertDimension": {
+            "range": {"sheetId": sheet_id, "dimension": "ROWS",
+                      "startIndex": anchor - 1, "endIndex": anchor - 1 + len(rows)},
+            # Inherit the row ABOVE so an inserted action row picks up the body
+            # formatting of the block it joins.
+            "inheritFromBefore": True}}))
+        ops.append((anchor, {"updateCells": {
+            "range": {"sheetId": sheet_id, "startRowIndex": anchor - 1,
+                      "endRowIndex": anchor - 1 + len(rows),
+                      "startColumnIndex": 0, "endColumnIndex": len(ALL_HEADERS)},
+            "rows": [{"values": [_cell_value(v) for v in row]} for row in rows],
+            "fields": "userEnteredValue"}}))
+        # inheritFromBefore copies the PROJECT row when a block had no actions
+        # yet — that row is bold, so the first injected action would arrive
+        # looking like a heading. Reset the format explicitly in the same batch.
+        ops.append((anchor, {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": anchor - 1,
+                      "endRowIndex": anchor - 1 + len(rows),
+                      "startColumnIndex": 0, "endColumnIndex": 7},
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"bold": False},
+                "wrapStrategy": "WRAP", "verticalAlignment": "TOP"}},
+            "fields": ("userEnteredFormat(textFormat.bold,wrapStrategy,"
+                       "verticalAlignment)")}}))
+        ops.append((anchor, {"setDataValidation": {
+            "range": {"sheetId": sheet_id, "startRowIndex": anchor - 1,
+                      "endRowIndex": anchor - 1 + len(rows),
+                      "startColumnIndex": 0, "endColumnIndex": 1},
+            "rule": {"condition": {"type": "BOOLEAN"}, "strict": False}}}))
+        out["injected"] += len(rows)
+
+    if not ops:
+        return out
+    ops.sort(key=lambda pair: pair[0], reverse=True)
+    try:
+        sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [req for _, req in ops]}))
+    except Exception as e:                                  # noqa: BLE001
+        logger.error(f"[ps-reconcile] structural batch failed: {e}")
+        return {**out, "structural_error": str(e)[:120]}
+    return out
+
+
+def _cell_value(value) -> dict:
+    """A python value as a Sheets userEnteredValue."""
+    if isinstance(value, bool):
+        return {"userEnteredValue": {"boolValue": value}}
+    if isinstance(value, (int, float)):
+        return {"userEnteredValue": {"numberValue": value}}
+    text = "" if value is None else str(value)
+    return {"userEnteredValue": {"stringValue": text}}
+
+
+async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> dict:
     """Phase 4: DB writes, then cell writes, then snapshots. Order is load-bearing.
 
     No structural work here — inserting and deleting rows is P5, and it is
@@ -692,6 +970,12 @@ async def _apply(plan: Plan, spreadsheet_id: str) -> dict:
             logger.error(f"[ps-reconcile] cell write failed, snapshots NOT "
                          f"advanced: {e}")
             return {**applied, "error": "sheet_write_failed"}
+
+    # 4.3/4.4 Structural pass. Only in the allowed slots, and only after
+    #         re-reading the sheet to prove nobody moved anything since we
+    #         computed these row numbers.
+    if structural and (plan.injects or plan.row_deletes or plan.strikes):
+        applied.update(await _apply_structural(plan, spreadsheet_id))
 
     # 4.5 Snapshots LAST, and only for rows that survived 4.1.
     for kind, row_id, tab, row_number, values in plan.snapshots:

@@ -434,3 +434,127 @@ class TestSkippedTabIsolation:
             proj_snaps={"p1": {"sheet_tab": TAB}},
         )
         assert plan.suppress == []
+
+
+class TestSlotGate:
+    """Rows must never shift under a live editor."""
+
+    def test_the_interval_tick_is_never_structural(self):
+        with patch.object(psr.settings, "PROJECT_STATUS_STRUCTURAL_SLOTS",
+                          "prenightly,predigest"):
+            assert psr.structural_allowed("2026-08-07-1748:interval") is False
+
+    def test_the_quiet_slots_are(self):
+        with patch.object(psr.settings, "PROJECT_STATUS_STRUCTURAL_SLOTS",
+                          "prenightly,predigest"):
+            assert psr.structural_allowed("2026-08-07:prenightly") is True
+            assert psr.structural_allowed("2026-08-07:predigest") is True
+
+    def test_empty_setting_disables_structural_entirely(self):
+        with patch.object(psr.settings, "PROJECT_STATUS_STRUCTURAL_SLOTS", ""):
+            assert psr.structural_allowed("2026-08-07:prenightly") is False
+
+    def test_no_slot_is_not_structural(self):
+        with patch.object(psr.settings, "PROJECT_STATUS_STRUCTURAL_SLOTS",
+                          "prenightly"):
+            assert psr.structural_allowed(None) is False
+
+
+class TestClosedRows:
+    def test_a_plain_finished_row_is_removed(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="done")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done"}},
+        )
+        assert [r[2] for r in plan.row_deletes] == ["t1"]
+        assert plan.strikes == []
+
+    def test_an_annotated_finished_row_is_kept_and_struck(self):
+        """Her note is the only copy — deleting the row would throw it away."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True, notes="waiting on the bank"))},
+            tasks=[_db_task(status="done", notes="waiting on the bank")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "notes": "waiting on the bank"}},
+        )
+        assert [r[2] for r in plan.strikes] == ["t1"]
+        assert plan.row_deletes == []
+
+    def test_a_row_ticked_this_very_cycle_is_left_alone(self):
+        """She would watch the line vanish a second after clicking it."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="pending")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.task_updates["t1"]["status"] == "done"
+        assert plan.row_deletes == [] and plan.strikes == []
+
+    def test_an_open_row_is_never_removed(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.row_deletes == [] and plan.strikes == []
+
+
+class TestAutoInject:
+    def _inject(self, tasks, blocks_grid, act_snaps=None, **flags):
+        settings_patches = {"PROJECT_STATUS_AUTO_INJECT_ENABLED": True, **flags}
+        ctx = [patch.object(psr.settings, k, v) for k, v in settings_patches.items()]
+        for c in ctx:
+            c.start()
+        try:
+            return _plan({TAB: blocks_grid}, tasks=tasks, act_snaps=act_snaps or {})
+        finally:
+            for c in ctx:
+                c.stop()
+
+    def test_a_new_task_is_appended_to_its_project_block(self):
+        plan = self._inject([_db_task("t9", title="Brand new")], _grid(_prow()))
+        assert len(plan.injects) == 1
+        tab, anchor, rows = plan.injects[0]
+        assert anchor == FIRST_BODY_ROW + 1          # just after the project row
+        assert rows[0][8] == "t9" and rows[0][9] == "p1"
+        assert rows[0][0] is False                   # a real checkbox
+
+    def test_a_task_already_on_the_sheet_is_not_re_injected(self):
+        plan = self._inject([_db_task("t1")], _grid(_prow(), _arow(uid="t1")),
+                            act_snaps={"t1": {"status": "pending"}})
+        assert plan.injects == []
+
+    def test_a_suppressed_task_is_never_re_injected(self):
+        """Otherwise deleting a row puts her in a resurrection loop."""
+        plan = self._inject([_db_task("t9", ps_suppressed=True)], _grid(_prow()))
+        assert plan.injects == []
+
+    def test_a_closed_task_is_not_injected(self):
+        plan = self._inject([_db_task("t9", status="done")], _grid(_prow()))
+        assert plan.injects == []
+
+    def test_a_task_with_no_project_is_not_injected(self):
+        plan = self._inject([_db_task("t9", project_id=None)], _grid(_prow()))
+        assert plan.injects == []
+
+    def test_the_per_cycle_cap_holds(self):
+        tasks = [_db_task(f"t{i}", title=f"New {i}") for i in range(20)]
+        plan = self._inject(tasks, _grid(_prow()),
+                            PROJECT_STATUS_MAX_AUTO_PER_PROJECT=3)
+        assert sum(len(r) for _, _, r in plan.injects) == 3
+
+    def test_a_full_block_takes_nothing_more(self):
+        rows = [_arow(uid=f"t{i}") for i in range(6)]
+        snaps = {f"t{i}": {"status": "pending"} for i in range(6)}
+        plan = self._inject([_db_task(f"t{i}") for i in range(6)] + [_db_task("t99")],
+                            _grid(_prow(), *rows), act_snaps=snaps,
+                            PROJECT_STATUS_MAX_ACTIONS_PER_PROJECT=6)
+        assert plan.injects == []
+
+    def test_injection_is_off_by_default(self):
+        plan = _plan({TAB: _grid(_prow())}, tasks=[_db_task("t9")])
+        assert plan.injects == []
+
+    def test_a_skipped_tab_gets_no_injections(self):
+        plan = self._inject([_db_task("t9")], [], act_snaps={"t1": {}})
+        assert plan.injects == []

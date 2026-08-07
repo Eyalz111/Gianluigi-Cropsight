@@ -704,7 +704,7 @@ class MCPServer:
                 if type == "knowledge":
                     types = ("topic_merge", "topic_assign")
                 elif type == "project":
-                    types = ("project_new",)
+                    types = ("project_new", "topic_project_link")
                 elif type == "question":
                     types = ("question_resolved",)
                 elif type == "task":
@@ -806,9 +806,16 @@ class MCPServer:
                     return _success({"decision": "rejected"})
 
                 # --- new canonical project (auto-learn) / question closure ---
-                if content_type in ("project_new", "question_resolved"):
+                if content_type in ("project_new", "topic_project_link",
+                                    "question_resolved"):
                     if content_type == "project_new":
                         from processors.project_learning import apply_project_proposal as _apply
+                    elif content_type == "topic_project_link":
+                        # A recurring TOPIC filed under the project its work
+                        # already sits in — not a new entry in the vocabulary.
+                        from processors.project_learning import (
+                            apply_topic_link_proposal as _apply,
+                        )
                     else:
                         from processors.question_lifecycle import apply_question_resolution as _apply
 

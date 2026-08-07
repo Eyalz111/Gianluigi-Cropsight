@@ -199,7 +199,8 @@ async def process_transcript(
     logger.info(f"Created meeting record: {meeting_id}")
 
     # Step 7b: Extract task match annotations (Phase 12 A2)
-    task_match_annotations = extract_task_match_annotations(extracted.get("tasks", []))
+    task_match_annotations = extract_task_match_annotations(
+        extracted.get("tasks", []), extracted.pop("_existing_tasks", None))
     if task_match_annotations:
         logger.info(f"Found {len(task_match_annotations)} existing_task_match annotations")
 
@@ -934,6 +935,11 @@ Apply all tone guardrails: no emotional characterizations, professional language
             logger.info(f"Extracted: {len(extracted.get('decisions', []))} decisions, "
                         f"{len(extracted.get('tasks', []))} tasks")
 
+            # Carry the EXACT list the prompt numbered, so [T1]..[Tn] resolve
+            # against the same rows in the same order. Recomputing it at the
+            # call site would risk a different sort and map every reference to
+            # the wrong task. Popped before storage, never persisted.
+            extracted["_existing_tasks"] = existing_tasks or []
             return extracted
 
         except APIStatusError as e:
@@ -1199,7 +1205,9 @@ def _link_decision_chains(meeting_id: str, supersessions: list[dict]) -> None:
                     logger.debug(f"Failed to link decision chain: {e}")
 
 
-def extract_task_match_annotations(tasks: list[dict]) -> list[dict]:
+def extract_task_match_annotations(tasks: list[dict],
+                                   existing_tasks: list[dict] | None = None
+                                   ) -> list[dict]:
     """
     Extract existing_task_match annotations from LLM-extracted tasks (Phase 12 A2).
 
@@ -1214,24 +1222,51 @@ def extract_task_match_annotations(tasks: list[dict]) -> list[dict]:
         List of annotation dicts: [{task_index, task_id, confidence, evolution, title}]
         Only includes tasks where existing_task_match is non-null with a task_id.
     """
+    # The prompt shows open tasks as [T1]..[Tn] and never their real ids, so the
+    # model's task_id is a REFERENCE that has to be mapped back here. Anything
+    # that isn't a resolvable ref (or an id already in the list) is dropped with
+    # a warning rather than passed to the DB, where it would fail the FK check
+    # and vanish into a log line. [2026-08-07]
+    ref_map: dict = {}
+    for i, t in enumerate(list(existing_tasks or [])[:30], 1):
+        tid = t.get("id")
+        if tid:
+            ref_map[f"t{i}"] = tid
+            ref_map[str(tid).lower()] = tid
+
     annotations = []
+    unresolved = []
     for i, task in enumerate(tasks):
         match = task.get("existing_task_match")
         if not match or not isinstance(match, dict):
             continue
 
-        task_id = match.get("task_id")
-        if not task_id:
+        raw = str(match.get("task_id") or "").strip()
+        if not raw:
             continue
+
+        resolved = ref_map.get(raw.lower().lstrip("[").rstrip("]"))
+        if not resolved:
+            if ref_map:
+                unresolved.append(raw)
+                continue
+            # No list was supplied (older callers/tests): pass the value
+            # through unchanged rather than silently dropping the annotation.
+            resolved = raw
 
         annotations.append({
             "task_index": i,
-            "task_id": task_id,
+            "task_id": resolved,
             "confidence": match.get("confidence", "low"),
             "evolution": match.get("evolution"),
             "title": task.get("title", ""),
         })
 
+    if unresolved:
+        logger.warning(
+            f"Dropped {len(unresolved)} task match annotation(s) with an "
+            f"unresolvable reference: {unresolved[:5]}"
+        )
     return annotations
 
 

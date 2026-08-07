@@ -216,7 +216,9 @@ class ReconcileScheduler:
                         from processors.project_status_reconcile import (
                             reconcile_project_status,
                         )
-                        ps_summary = await reconcile_project_status()
+                        # The slot decides whether structural row work is
+                        # allowed — the interval tick is value-only.
+                        ps_summary = await reconcile_project_status(slot=slot)
                     except Exception as pe:
                         logger.error(f"Project Status reconcile failed: {pe}")
                 # Generated views LAST — they read the state the reconcile just

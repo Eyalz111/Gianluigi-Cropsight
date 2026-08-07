@@ -1599,6 +1599,7 @@ async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) 
 
     db = supabase_client.get_canonical_projects(status="active")
     db_by_id = {p["id"]: p for p in db if p.get("id")}
+    proj_snapshots = supabase_client.get_project_snapshots()
     areas = supabase_client.get_areas()
     area_id_by_name = {(a.get("name") or "").strip().lower(): a["id"] for a in areas}
 
@@ -1648,9 +1649,31 @@ async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) 
             continue  # sheet id the DB doesn't know — leave it
         summary["matched"] += 1
 
-        # RENAME — the load-bearing case.
-        renamed_this_pass = bool(name) and _normalize(name) != _normalize(dbp.get("name"))
-        if renamed_this_pass:
+        # RENAME — the load-bearing case, and until 2026-08-07 a live
+        # data-corrupting loop. It compared the sheet cell straight against the
+        # DB, so it could not tell "a human edited the SHEET" from "the DB moved
+        # on and this cell is stale". Every rename made anywhere else (MCP,
+        # Telegram, a migration script) was REVERTED on the next 30-minute tick
+        # — and rename_canonical_project backfills `label` across five tables, so
+        # the revert propagated through all of them.
+        #
+        # Now a three-way merge like every other editable surface:
+        #   sheet != snapshot AND sheet != db  -> a human renamed it here (Rule 1)
+        #   sheet == snapshot AND db != sheet  -> the DB advanced (Rule 4): push
+        #                                         the new name into the cell
+        # NO SNAPSHOT means no evidence. A rename mutates five tables, so it is
+        # never performed on incomplete evidence — the snapshot is seeded from
+        # the current cell and the next pass decides. At worst one cycle late.
+        snap_name = (proj_snapshots.get(pid) or {}).get("title")
+        has_snap = pid in proj_snapshots
+        sheet_edited = (bool(name) and has_snap
+                        and _normalize(name) != _normalize(snap_name)
+                        and _normalize(name) != _normalize(dbp.get("name")))
+        db_advanced = (bool(dbp.get("name")) and has_snap and not sheet_edited
+                       and _normalize(dbp.get("name")) != _normalize(name))
+
+        renamed_this_pass = sheet_edited
+        if sheet_edited:
             summary["renamed"] += 1
             summary["renames"].append({"from": dbp.get("name"), "to": name})
             if write_allowed:
@@ -1658,6 +1681,35 @@ async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) 
                     supabase_client.rename_canonical_project(pid, name)
                 except Exception as e:
                     logger.error(f"[project-reconcile] rename failed for {pid}: {e}")
+        elif db_advanced:
+            # The cell is stale. Refresh it instead of reverting the database.
+            summary["name_refreshed"] = summary.get("name_refreshed", 0) + 1
+            if write_allowed:
+                try:
+                    await sheets_service._update_cell(
+                        sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                        range_name=(f"'{PROJECTS_TAB_NAME}'!"
+                                    f"{PROJECTS_COLUMNS['name']}{sr['row_number']}"),
+                        value=dbp.get("name"),
+                    )
+                except Exception as e:
+                    logger.error(f"[project-reconcile] name refresh failed for {pid}: {e}")
+        elif not has_snap and bool(name) and _normalize(name) != _normalize(dbp.get("name")):
+            # Divergence with no merge base — report it, change nothing.
+            summary["unbased_divergence"] = summary.get("unbased_divergence", 0) + 1
+            logger.warning(
+                f"[project-reconcile] {pid}: sheet {name!r} != db "
+                f"{dbp.get('name')!r} but no snapshot exists — refusing to "
+                "rename on incomplete evidence. Seeding the base; next pass decides.")
+
+        # Snapshot the name LAST, and only for a row we did not just fail on.
+        if write_allowed:
+            settled = name if sheet_edited else (dbp.get("name") if db_advanced else name)
+            try:
+                supabase_client.upsert_project_snapshot(
+                    pid, settled, sr.get("row_number"))
+            except Exception as e:
+                logger.warning(f"[project-reconcile] snapshot failed for {pid}: {e}")
 
         # Aliases / area / description — plain updates.
         updates = {}

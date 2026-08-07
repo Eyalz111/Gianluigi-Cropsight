@@ -774,3 +774,65 @@ class TestExtractionResponseParsing:
         parsed = _parse_extraction_response(simulated_response)
         annotations = extract_task_match_annotations(parsed["tasks"])
         assert len(annotations) == 0
+
+
+class TestTaskMatchReferences:
+    """The prompt shows [T1]..[Tn], never real ids — so the model's task_id is a
+    REFERENCE that has to be mapped back.
+
+    Before 2026-08-07 the list carried no identifier at all while the
+    instructions asked for "the existing task's ID", so the model returned a
+    list number, a letter or an invented UUID. Every one failed the FK check and
+    was dropped with a warning: the whole task_mentions pathway was inert.
+    """
+
+    def _tasks(self, ref):
+        return [{"title": "Chase the bank",
+                 "existing_task_match": {"task_id": ref, "confidence": "high",
+                                         "evolution": "completion"}}]
+
+    def _open(self):
+        return [{"id": "uuid-aaa", "title": "A"}, {"id": "uuid-bbb", "title": "B"}]
+
+    def test_a_t_reference_resolves_to_the_real_uuid(self):
+        from processors.transcript_processor import extract_task_match_annotations
+        anns = extract_task_match_annotations(self._tasks("T2"), self._open())
+        assert [a["task_id"] for a in anns] == ["uuid-bbb"]
+
+    def test_the_bracketed_form_also_resolves(self):
+        from processors.transcript_processor import extract_task_match_annotations
+        anns = extract_task_match_annotations(self._tasks("[T1]"), self._open())
+        assert [a["task_id"] for a in anns] == ["uuid-aaa"]
+
+    def test_a_real_uuid_is_accepted_unchanged(self):
+        from processors.transcript_processor import extract_task_match_annotations
+        anns = extract_task_match_annotations(self._tasks("uuid-aaa"), self._open())
+        assert [a["task_id"] for a in anns] == ["uuid-aaa"]
+
+    def test_a_letter_reference_is_dropped_not_sent_to_the_database(self):
+        """'C' was the reported symptom. It must not reach an FK check."""
+        from processors.transcript_processor import extract_task_match_annotations
+        assert extract_task_match_annotations(self._tasks("C"), self._open()) == []
+
+    def test_an_invented_uuid_is_dropped(self):
+        from processors.transcript_processor import extract_task_match_annotations
+        assert extract_task_match_annotations(
+            self._tasks("uuid-does-not-exist"), self._open()) == []
+
+    def test_without_a_list_the_value_passes_through(self):
+        """Older callers supply no list; dropping their annotations silently
+        would be a regression."""
+        from processors.transcript_processor import extract_task_match_annotations
+        anns = extract_task_match_annotations(self._tasks("uuid-aaa"))
+        assert [a["task_id"] for a in anns] == ["uuid-aaa"]
+
+    def test_the_prompt_shows_the_reference(self):
+        from core.system_prompt import get_summary_extraction_prompt
+        prompt = get_summary_extraction_prompt(
+            transcript="x", meeting_title="m", meeting_date="2026-08-07",
+            participants=["Eyal Zror"], duration_minutes=30,
+            existing_tasks=[{"id": "uuid-aaa", "title": "Chase the bank",
+                             "assignee": "Eyal Zror", "status": "pending"}],
+        )
+        assert "[T1]" in prompt
+        assert "uuid-aaa" not in prompt       # real ids never enter the prompt

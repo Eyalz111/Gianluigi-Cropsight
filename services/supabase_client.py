@@ -1054,10 +1054,18 @@ class SupabaseClient:
             data["project_id"] = project_id
         elif label:
             try:
-                for _p in self.get_canonical_projects(status=None):
-                    if (_p.get("name") or "").strip().lower() == label.strip().lower():
-                        data["project_id"] = _p["id"]
-                        break
+                key = label.strip().lower()
+                # An approved topic->project link wins: it is an explicit human
+                # decision about where this topic belongs, and it is the whole
+                # reason a topic no longer has to become a project to be filed.
+                linked = self.get_topic_project_links().get(key)
+                if linked:
+                    data["project_id"] = linked
+                else:
+                    for _p in self.get_canonical_projects(status=None):
+                        if (_p.get("name") or "").strip().lower() == key:
+                            data["project_id"] = _p["id"]
+                            break
             except Exception:
                 pass  # never let project inference block task creation
         # Only set approval_status when a caller is explicit. Left as None the
@@ -6496,6 +6504,191 @@ class SupabaseClient:
         for t in rows:
             grouped.setdefault(t.get("project_id"), []).append(t)
         return grouped
+
+    def get_topic_project_links(self) -> dict:
+        """{topic (lowercased) -> project_id}. Empty if the table is absent."""
+        try:
+            rows = (self.client.table("topic_project_links")
+                    .select("topic,project_id").limit(2000).execute().data or [])
+        except Exception as e:
+            logger.debug(f"topic_project_links unavailable: {e}")
+            return {}
+        return {(r.get("topic") or "").strip().lower(): r["project_id"]
+                for r in rows if r.get("topic") and r.get("project_id")}
+
+    def link_topic_to_project(self, topic: str, project_id: str,
+                              source: str = "proposal") -> dict:
+        """Record topic -> project and attach every task already carrying it.
+
+        Backfilling here is the point: the topic recurred because work under it
+        kept arriving, so the link is only useful if it also settles the rows
+        that produced the proposal.
+
+        Tasks with a manually-set project_id are skipped — a human already made
+        that call on the Project Status sheet and it outranks a bulk rule.
+        """
+        topic = (topic or "").strip()
+        if not topic or not project_id:
+            return {"ok": False, "error": "topic and project_id are required"}
+        try:
+            self.client.table("topic_project_links").upsert(
+                {"topic": topic, "project_id": project_id, "source": source},
+                on_conflict="topic").execute()
+        except Exception as e:
+            logger.error(f"link_topic_to_project failed for {topic!r}: {e}")
+            return {"ok": False, "error": str(e)}
+
+        attached = 0
+        try:
+            rows = (self.client.table("tasks")
+                    .select("id,manual_project_id")
+                    .eq("label", topic).is_("valid_to", "null")
+                    .is_("project_id", "null").execute().data or [])
+            for row in rows:
+                if row.get("manual_project_id"):
+                    continue
+                self.client.table("tasks").update(
+                    {"project_id": project_id}).eq("id", row["id"]).execute()
+                attached += 1
+        except Exception as e:
+            logger.warning(f"link_topic_to_project backfill failed: {e}")
+        return {"ok": True, "topic": topic, "project_id": project_id,
+                "tasks_attached": attached}
+
+    def get_project_snapshots(self) -> dict:
+        """Merge base for the Projects TAB, keyed by canonical_projects.id.
+
+        Distinct from get_ps_project_snapshots (the Project Status workbook) —
+        two editable surfaces, two independent bases, or an edit on one reads
+        as a divergence on the other.
+        """
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", "project")
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.error(f"Error reading project snapshots: {e}")
+            return {}
+        return {r["canonical_project_id"]: r
+                for r in rows if r.get("canonical_project_id")}
+
+    def upsert_project_snapshot(self, project_id: str, name: str,
+                                sheet_row: int | None = None) -> bool:
+        """Record what the Projects tab's name cell said, so the next pass can
+        tell a human's rename from a stale cell."""
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "canonical_project_id": project_id,
+                "entity_type": "project",
+                "title": name or None,
+                "sheet_row": sheet_row,
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("canonical_project_id", project_id)
+                .eq("entity_type", "project")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "canonical_project_id", project_id
+                ).eq("entity_type", "project").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting project snapshot for {project_id}: {e}")
+            return False
+
+    def merge_canonical_projects(self, source_id: str, target_id: str,
+                                 dry_run: bool = True) -> dict:
+        """Fold one project into another, keeping every reference intact.
+
+        The primitive rename_canonical_project cannot provide: it REFUSES a name
+        clash, so two projects that turn out to be the same thing ("Pre-Seed
+        Fundraising" and "Fundraising & Investors") had no supported path to
+        become one. The seed script could only print them for Eyal to resolve.
+
+        Retire-not-delete applies to the source: it keeps its row, gains the
+        target's alias set, and is marked retired with a reason. Deleting it
+        would orphan the provenance of everything that ever referenced it, and
+        resolve_label matches retired names precisely so historical labels still
+        canonicalize.
+
+        dry_run=True by default — this rewrites references across five tables.
+        """
+        try:
+            src = (self.client.table("canonical_projects").select("*")
+                   .eq("id", source_id).execute().data or [None])[0]
+            tgt = (self.client.table("canonical_projects").select("*")
+                   .eq("id", target_id).execute().data or [None])[0]
+        except Exception as e:
+            logger.error(f"merge_canonical_projects lookup failed: {e}")
+            return {"error": str(e)}
+        if not src or not tgt:
+            return {"error": "source or target not found"}
+        if source_id == target_id:
+            return {"error": "source and target are the same project"}
+
+        src_name, tgt_name = src.get("name"), tgt.get("name")
+        plan = {"source": src_name, "target": tgt_name, "dry_run": dry_run,
+                "relabelled": {}, "tasks_repointed": 0}
+
+        # Every table that carries the project NAME as a free-text label.
+        for table in ("tasks", "decisions", "open_questions", "meetings"):
+            try:
+                rows = (self.client.table(table).select("id")
+                        .eq("label", src_name).execute().data or [])
+            except Exception:
+                rows = []
+            plan["relabelled"][table] = len(rows)
+            if rows and not dry_run:
+                try:
+                    self.client.table(table).update({"label": tgt_name}).eq(
+                        "label", src_name).execute()
+                except Exception as e:
+                    logger.error(f"merge: relabel {table} failed: {e}")
+
+        try:
+            linked = (self.client.table("tasks").select("id")
+                      .eq("project_id", source_id).execute().data or [])
+        except Exception:
+            linked = []
+        plan["tasks_repointed"] = len(linked)
+        if linked and not dry_run:
+            try:
+                self.client.table("tasks").update(
+                    {"project_id": target_id}).eq("project_id", source_id).execute()
+            except Exception as e:
+                logger.error(f"merge: repoint tasks failed: {e}")
+
+        if not dry_run:
+            from datetime import datetime, timezone
+            merged_aliases = sorted({
+                *(tgt.get("aliases") or []), *(src.get("aliases") or []),
+                *( [src_name] if src_name else [] ),
+            })
+            try:
+                self.client.table("canonical_projects").update(
+                    {"aliases": merged_aliases}).eq("id", target_id).execute()
+                self.client.table("canonical_projects").update({
+                    "status": "retired",
+                    "retired_at": datetime.now(timezone.utc).isoformat(),
+                    "retired_reason": f"merged into {tgt_name}",
+                }).eq("id", source_id).execute()
+            except Exception as e:
+                logger.error(f"merge: finalize failed: {e}")
+                return {**plan, "error": str(e)}
+            plan["aliases"] = merged_aliases
+        return plan
 
     def get_ps_tasks(self) -> list[dict]:
         """Every live approved task the Project Status sheet could be showing.

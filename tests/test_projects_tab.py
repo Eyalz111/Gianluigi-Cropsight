@@ -137,6 +137,16 @@ class TestReconcile:
 
         sc = ss.supabase_client
         calls = {"rename": [], "create": [], "update": []}
+        # Merge base for the name column. Defaults to the steady state — the
+        # sheet and DB agreed as of last cycle — so a differing cell reads as a
+        # human edit. Without a snapshot the engine deliberately refuses to
+        # rename at all: a rename backfills `label` across five tables and is
+        # never done on incomplete evidence. [2026-08-07 rename rail]
+        monkeypatch.setattr(
+            sc, "get_project_snapshots",
+            lambda *a, **k: {p["id"]: {"title": p.get("name")}
+                             for p in db_projects if p.get("id")})
+        monkeypatch.setattr(sc, "upsert_project_snapshot", lambda *a, **k: True)
         monkeypatch.setattr(sc, "get_canonical_projects", lambda *a, **k: db_projects)
         monkeypatch.setattr(sc, "get_areas", lambda *a, **k: areas or [])
         monkeypatch.setattr(sc, "rename_canonical_project",

@@ -102,6 +102,16 @@ A question is NOT answered merely because it was discussed, or because a related
 task exists. It must be genuinely settled, and your evidence must address the
 question actually asked — not a neighbouring topic.
 
+COMPLETED WORK IS NOT AUTOMATICALLY AN ANSWER. Ask what the question wants:
+- "Did we do X?" / "Has X been sent?"  -> a completed task DOES answer it.
+- "What are the terms?" / "Is there a risk?" / "How much?" -> the answer is a
+  FACT, and a completed task only proves somebody went looking. If the fact is
+  not stated in the evidence you can quote, the verdict is "open".
+This is a real miss, not a hypothetical: "Are there hidden penalties or IP
+restrictions in the Polish grant?" was closed on a done task called "verify the
+Polish grant terms". Nobody ever recorded what the terms turned out to be, so
+the question was marked resolved while the answer existed nowhere.
+
 {context}
 
 QUESTIONS TO TRIAGE:

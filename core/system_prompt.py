@@ -401,17 +401,31 @@ Use these roles to correctly assign tasks. If assignee is unclear, set to "" (em
 
     tasks_section = ""
     if existing_tasks:
+        # Each line carries a short REFERENCE (T1, T2, …). The instructions ask
+        # for `existing_task_match.task_id`, but until 2026-08-07 this list
+        # showed no identifier of any kind — so the model returned a list
+        # number, a letter, or an invented UUID, every one of which failed the
+        # FK check and was dropped with a warning. The whole task_mentions
+        # pathway was silently inert.
+        #
+        # A short ref rather than the real UUID: 30 UUIDs cost ~1k tokens every
+        # extraction, and a model cannot accidentally produce a valid-but-wrong
+        # T-ref the way it can a plausible UUID. transcript_processor maps them
+        # back, so real ids stay out of the prompt entirely.
         task_lines = []
         for i, t in enumerate(existing_tasks[:30], 1):
             assignee = t.get("assignee", "")
             status = t.get("status", "pending")
             title = t.get("title", "")[:80]
-            task_lines.append(f"  {i}. \"{title}\" ({assignee}, {status})")
+            task_lines.append(f"  [T{i}] \"{title}\" ({assignee}, {status})")
         tasks_section = f"""
 EXISTING OPEN TASKS (for reference — do NOT duplicate these):
 {chr(10).join(task_lines)}
 If a task from this list is discussed, note the update (e.g., "UPDATE: [title] — now completed")
 rather than creating a new entry. Only create genuinely new tasks.
+When linking via "existing_task_match", set "task_id" to the bracketed
+reference EXACTLY as shown (e.g. "T3"). Never invent an id, and never use the
+task's title or a bare number.
 """
 
     # Meeting-to-meeting continuity context (Phase 9B)
