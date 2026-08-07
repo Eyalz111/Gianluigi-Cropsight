@@ -134,7 +134,8 @@ def seed_snapshots(sid: str) -> dict:
     # seeded while the table held 36, and the written-vs-read-back check
     # compared that inflated number against itself and passed.
     out = {"projects": 0, "actions": 0, "skipped": 0, "failed": 0,
-           "tabs": len(tabs)}
+           "stale_cleared": 0, "tabs": len(tabs)}
+    rendered: set = set()
     for tab in tabs:
         grid = sheets_service._execute_with_retry(
             lambda t=tab: sheets_service.service.spreadsheets().values().get(
@@ -179,7 +180,24 @@ def seed_snapshots(sid: str) -> dict:
                     sheet_tab=tab,
                 )
                 out["actions" if ok else "failed"] += 1
+                rendered.add(row.uid)
         out["skipped"] += len(orphans)
+
+    # A snapshot for a row the rebuild no longer renders is stale — the task
+    # closed, so it left the view. Leaving it behind makes the written-vs-table
+    # check disagree for a reason that is not a fault, which would train us to
+    # ignore the one guard that catches real ones.
+    try:
+        existing = (supabase_client.client.table("sheet_snapshots")
+                    .select("id,task_id").eq("entity_type", "ps_action")
+                    .execute().data or [])
+        for row in existing:
+            if row.get("task_id") and row["task_id"] not in rendered:
+                supabase_client.client.table("sheet_snapshots").delete().eq(
+                    "id", row["id"]).execute()
+                out["stale_cleared"] += 1
+    except Exception as e:                                  # noqa: BLE001
+        print(f"      !! could not clear stale snapshots: {e}")
     return out
 
 
@@ -244,7 +262,8 @@ async def run(apply_it: bool, skip_backup: bool = False) -> int:
     seeded = seed_snapshots(sid)
     print(f"      {seeded['projects']} ps_project, {seeded['actions']} ps_action "
           f"across {seeded['tabs']} tabs   "
-          f"(skipped {seeded['skipped']}, failed {seeded['failed']})")
+          f"(skipped {seeded['skipped']}, failed {seeded['failed']}, "
+          f"stale cleared {seeded['stale_cleared']})")
 
     # Counted from the TABLE, not from the loop above. A helper that logs and
     # returns False on error makes an in-process counter a statement of intent;

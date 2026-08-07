@@ -678,8 +678,13 @@ def _detect_suppressions(act_snaps: dict, seen: set, db_tasks: dict,
         tab = (act_snaps.get(tid) or {}).get("sheet_tab")
         return bool(tab) and tab not in skipped
 
+    # A CLOSED task leaving the sheet is expected, not a deletion. The view
+    # renders open work only, so a task ticked done vanishes on the next
+    # rebuild — suppressing it would record a decision nobody made, and its
+    # snapshot lingering is what made the cutover's own count disagree.
     gone = [tid for tid in act_snaps
             if tid not in seen and tid in db_tasks
+            and _normalize(db_tasks[tid].get("status")) not in _CLOSED
             and not db_tasks[tid].get("ps_suppressed")
             and readable(tid)]
     cap = getattr(settings, "PROJECT_STATUS_MAX_SUPPRESS_PER_CYCLE", 5)
@@ -832,9 +837,24 @@ def _create_entity(spec: dict) -> tuple[str, str]:
         name = (spec.get("name") or "").strip()
         if not name:
             return "", ""
+        # THE TAB IS THE AREA. A project typed into "LEGAL, CORPORATE & FINANCE"
+        # belongs to that area — creating it without one leaves it homeless, and
+        # the next rebuild invents a "General" tab to put it in, which is not a
+        # real area and immediately disagrees with the curated list. Eyal's new
+        # project landed there on 2026-08-07. [2026-08-07]
+        area_id = None
+        try:
+            for row in (supabase_client.client.table("areas")
+                        .select("id,name").execute().data or []):
+                if _normalize(row.get("name")) == _normalize(spec.get("tab")):
+                    area_id = row["id"]
+                    break
+        except Exception as e:                              # noqa: BLE001
+            logger.warning(f"[ps-reconcile] area lookup failed for "
+                           f"{spec.get('tab')!r}: {e}")
         # add_canonical_project is idempotent by name, so a name matching a
         # RETIRED project reactivates it instead of creating a duplicate.
-        row = supabase_client.add_canonical_project(name=name)
+        row = supabase_client.add_canonical_project(name=name, area_id=area_id)
         pid = (row or {}).get("id", "")
         if pid and (spec.get("objective") or spec.get("owner")):
             supabase_client.update_canonical_project(
