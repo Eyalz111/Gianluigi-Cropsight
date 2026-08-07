@@ -78,9 +78,22 @@ _PROJECT_FIELDS = {COL_TODO: "objective", COL_DATE: "target_date",
 # Fields whose value is a DATE column: a cell that doesn't parse is NEVER
 # pulled, or a typo would null a real deadline.
 _DATE_FIELDS = {"deadline", "target_date"}
-# Fields that must never be pulled BLANK. Clearing a cell is how a human tidies
-# a view; it is not an instruction to erase the task's text.
-_NEVER_BLANK = {"title", "label"}
+# NO FIELD IS EVER PULLED BLANK. An empty cell is refreshed from the database,
+# never written into it.
+#
+# This used to cover only title/label, on the reasoning that clearing those
+# would erase a task's text while clearing a date might genuinely mean "no
+# deadline". Eyal's check #20 — select ten rows, delete — proved that wrong in
+# the most direct way available: the hidden identity columns survived, so the
+# rows were still recognised, and the reconcile proposed pulling every blank in.
+# That single gesture would have erased 8 real deadlines and 10 real assignees.
+#
+# The asymmetry decides it. An accidental clear is common, silent, and
+# destroys data; a deliberate clear is rare and has other routes (Telegram, the
+# Tasks tab, saying so in the review). Refusing to pull a blank costs a
+# sentence; honouring one costs the data. [2026-08-07]
+_NEVER_BLANK = {"title", "label", "deadline", "assignee", "notes",
+                "objective", "target_date", "owner"}
 # Statuses that mean the work is finished, for the closed-row pass.
 _CLOSED = {"done", "cancelled", "archived"}
 
@@ -165,7 +178,8 @@ class Plan:
             "pulled": 0, "pushed": 0, "manual_held": 0, "bad_dates": 0,
             "reparented": 0, "ticked": 0, "unticked": 0, "incomplete": 0,
             "ghosts": 0, "dup_uids": 0, "normalized_dates": 0, "orphans": 0,
-            "names_refreshed": 0,
+            "names_refreshed": 0, "paste_duplicates": 0, "blanks_refused": 0,
+            "matched_existing_project": 0,
         }
         self.overrides: list = []             # human-readable "what changed"
         self.skipped_tabs: list = []
@@ -244,6 +258,11 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
         edited = (not _eq(field, sheet_cmp, snap_val, assignees)
                   and not _eq(field, sheet_cmp, db_val, assignees))
         if field in _NEVER_BLANK and not str(sheet_cmp).strip():
+            if edited:
+                # It looked like an edit and is being refused. Count it: ten of
+                # these at once is somebody clearing rows, and the summary
+                # should say so rather than reporting a quiet no-op.
+                plan.bump("blanks_refused")
             edited = False
 
         if edited:
@@ -394,11 +413,29 @@ def build_plan(grids: dict) -> Plan:
                             (tab, proj.row_number, _col_index(COL_SUBJECT), db_name))
                         plan.bump("names_refreshed")
             elif proj is not None and proj.kind == HUMAN_PROJECT:
-                plan.creates.append({"kind": "project", "tab": tab,
-                                     "row": proj.row_number,
-                                     "name": proj.values.get(COL_SUBJECT, ""),
-                                     "objective": proj.values.get(COL_TODO, ""),
-                                     "owner": proj.values.get(COL_RESP, "")})
+                # A typed project name that ALREADY EXISTS is that project, not
+                # a second one — add_canonical_project is idempotent by name, so
+                # creating it would return the same row anyway. Resolving it
+                # here instead matters for what comes next: the action rows
+                # beneath inherit a real parent, so they can be checked against
+                # the work already filed under it. Without this a pasted block
+                # whose project row was also pasted gave its actions no parent
+                # at all, and every one was recreated as a duplicate with no
+                # project — which is exactly what Eyal's check #19 produced.
+                # [2026-08-07]
+                typed = proj.values.get(COL_SUBJECT, "")
+                existing = next(
+                    (p for p in db_projects.values()
+                     if _normalize(p.get("name")) == _normalize(typed)), None)
+                if existing:
+                    parent_uid = existing["id"]
+                    plan.bump("matched_existing_project")
+                else:
+                    plan.creates.append({"kind": "project", "tab": tab,
+                                         "row": proj.row_number,
+                                         "name": typed,
+                                         "objective": proj.values.get(COL_TODO, ""),
+                                         "owner": proj.values.get(COL_RESP, "")})
 
             for row in block.actions:
                 if id(row) in pasted:
@@ -536,9 +573,25 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
         return
 
     if row.kind == HUMAN_ACTION:
+        title = row.values.get(COL_ACTION, "")
+        # A PASTED BLOCK ARRIVES WITHOUT IDENTITY. Copying rows in Sheets does
+        # not reliably bring the hidden columns — if the selection was the
+        # visible range, or the columns were hidden at copy time, the pasted
+        # rows have no _uid at all. They then look exactly like lines somebody
+        # typed, and every one becomes a NEW task duplicating the original.
+        # Eyal's check #19 did precisely this. The duplicate-uid path cannot
+        # help, because there is no uid to duplicate — so match on the text
+        # instead: an identical open title under the same project is a copy,
+        # not a new commitment. [2026-08-07]
+        if _looks_like_a_copy(title, parent_uid, db_tasks):
+            plan.bump("paste_duplicates")
+            plan.overrides.append(
+                f"{tab} r{row.row_number}: ignored — same text as an existing "
+                f"action under this project (looks pasted)")
+            return
         plan.creates.append({
             "kind": "task", "tab": tab, "row": row.row_number,
-            "title": row.values.get(COL_ACTION, ""),
+            "title": title,
             "project_id": parent_uid,
             "deadline": parse_human_date(row.values.get(COL_DATE)),
             "assignee": row.values.get(COL_RESP, ""),
@@ -578,6 +631,25 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
                        assignees)
     final["status"] = "done" if row.checked else "pending"
     plan.snapshots.append(("task", row.uid, tab, row.row_number, final))
+
+
+def _looks_like_a_copy(title: str, project_id: str, db_tasks: dict) -> bool:
+    """Does an open task with this exact text already sit under this project?
+
+    Exact text match on purpose. Two people writing the same sentence
+    independently is vanishingly rare; a paste reproduces it character for
+    character. Anything fuzzier would start swallowing real follow-up work
+    ("Call the bank" twice, a fortnight apart, is two genuine calls).
+    """
+    key = _normalize(strip_provenance(title))
+    if not key or not project_id:
+        return False
+    for task in db_tasks.values():
+        if (task.get("project_id") == project_id
+                and _normalize(task.get("status")) not in _CLOSED
+                and _normalize(task.get("title")) == key):
+            return True
+    return False
 
 
 def _detect_suppressions(act_snaps: dict, seen: set, db_tasks: dict,

@@ -722,3 +722,140 @@ class TestDateFeedbackIsImmediate:
         )
         assert [w for w in plan.cell_writes if w[2] == COLS["Date"]] == []
         assert plan.counters["bad_dates"] == 1
+
+
+class TestClearedCellsNeverErase:
+    """Eyal's check #20: select ten rows, delete.
+
+    The hidden identity columns survive that gesture, so the rows are still
+    recognised — and the engine proposed pulling every blank into the database.
+    One keystroke would have erased 8 real deadlines and 10 real assignees.
+    """
+
+    def test_a_cleared_date_never_nulls_the_deadline(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(date=""))},
+            tasks=[_db_task(deadline="2026-08-12")],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": "2026-08-12",
+                              "status": "pending"}},
+        )
+        assert "deadline" not in plan.task_updates.get("t1", {})
+
+    def test_a_cleared_owner_never_nulls_the_assignee(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp=""))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+        )
+        assert "assignee" not in plan.task_updates.get("t1", {})
+
+    def test_a_cleared_project_objective_is_not_erased(self):
+        plan = _plan(
+            {TAB: _grid(_prow(todo=""))},
+            tasks=[], projects=[_db_project(objective="Win Lombardy")],
+            proj_snaps={"p1": {"objective": "Win Lombardy"}},
+        )
+        assert "objective" not in plan.project_updates.get("p1", {})
+
+    def test_the_cleared_cell_is_refreshed_from_the_database(self):
+        """Refused is not enough — the value has to come back."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp=""))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending"}},
+        )
+        writes = [w for w in plan.cell_writes if w[2] == COLS["Resp."]]
+        assert writes and writes[0][3] == "Eyal Zror"
+
+    def test_mass_clearing_is_counted_not_silent(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(uid="t1", date="", resp=""))},
+            tasks=[_db_task("t1", deadline="2026-08-12", assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "deadline": "2026-08-12",
+                              "assignee": "Eyal Zror", "status": "pending"}},
+        )
+        assert plan.counters["blanks_refused"] == 2
+
+
+class TestPastedBlocksDoNotDuplicate:
+    """Eyal's check #19: copy a whole block, paste it lower down.
+
+    Copying rows does not reliably bring the hidden columns, so the pasted rows
+    arrive with NO uid — they look exactly like lines somebody typed, and each
+    became a new task duplicating the original. The duplicate-uid path cannot
+    help because there is no uid to duplicate.
+    """
+
+    def test_a_pasted_action_is_not_recreated(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(uid="t1"),
+                        _human(action="Ship the API"))},   # pasted, no identity
+            tasks=[_db_task("t1", title="Ship the API")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.creates == []
+        assert plan.counters["paste_duplicates"] == 1
+
+    def test_genuinely_new_text_is_still_created(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(uid="t1"),
+                        _human(action="Something completely different"))},
+            tasks=[_db_task("t1", title="Ship the API")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert [c["title"] for c in plan.creates] == ["Something completely different"]
+
+    def test_the_same_text_under_a_DIFFERENT_project_is_still_created(self):
+        """"Call the bank" can legitimately exist under two projects."""
+        plan = _plan(
+            {TAB: _grid(_prow(uid="p1"), _prow(uid="p2", name="Other", num=20),
+                        _human(action="Ship the API"))},
+            projects=[_db_project("p1"), _db_project("p2", name="Other")],
+            tasks=[_db_task("t1", title="Ship the API", project_id="p1")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert len(plan.creates) == 1
+
+    def test_a_closed_task_does_not_block_re_adding_the_work(self):
+        """Finished once, needed again — that is a real new commitment."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _human(action="Ship the API"))},
+            tasks=[_db_task("t1", title="Ship the API", status="done")],
+            act_snaps={},
+        )
+        assert len(plan.creates) == 1
+
+
+class TestPastedProjectRowResolves:
+    def test_a_typed_name_matching_an_existing_project_is_that_project(self):
+        """add_canonical_project is idempotent by name, so creating it returns
+        the same row anyway. Resolving it HERE is what gives the action rows
+        beneath a real parent."""
+        plan = _plan(
+            {TAB: _grid(["", "Product V1", "", "", "", "", ""])},
+            tasks=[],
+        )
+        assert plan.creates == []
+        assert plan.counters["matched_existing_project"] == 1
+
+    def test_a_pasted_block_creates_neither_project_nor_duplicate_actions(self):
+        """Check #19 end to end: project row and its actions all pasted without
+        identity. Nothing should be created."""
+        plan = _plan(
+            {TAB: _grid(_prow(uid="p1"), _arow(uid="t1"),
+                        ["", "Product V1", "", "", "", "", ""],
+                        _human(action="Ship the API"))},
+            tasks=[_db_task("t1", title="Ship the API", project_id="p1")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.creates == []
+        assert plan.counters["paste_duplicates"] == 1
+        assert plan.counters["matched_existing_project"] == 1
+
+    def test_a_genuinely_new_project_name_is_still_created(self):
+        plan = _plan(
+            {TAB: _grid(["", "Brand New Area", "", "", "", "", ""])}, tasks=[])
+        assert [c["name"] for c in plan.creates] == ["Brand New Area"]
+        assert plan.counters["matched_existing_project"] == 0

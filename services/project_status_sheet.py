@@ -98,7 +98,17 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
         # because they IFERROR to FALSE and simply leave it uncoloured. Its own
         # colour, distinct from past-due and due-soon, is the only feedback the
         # sheet can give at the moment of typing. [2026-08-07]
-        rule(4, 5, f'=AND({is_action},$E4<>"",ISERROR({date_expr}))', _BAD_DATE, 1),
+        # Purple = "nothing could read this". It must agree with what the SYSTEM
+        # can read, or it lies. The explicit DD/MM/YYYY slice only understands
+        # the canonical form, so "12 Aug" — which the parser now accepts — was
+        # being painted as unreadable until the next cycle canonicalised it.
+        # Telling someone their correct input is wrong, then silently fixing it,
+        # is worse than saying nothing. DATEVALUE covers everything Sheets
+        # itself understands in en_GB (12 Aug, 12 August, 12/8), so a cell is
+        # only flagged when BOTH fail. [2026-08-07]
+        rule(4, 5,
+             f'=AND({is_action},$E4<>"",ISERROR({date_expr}),'
+             f'ISERROR(DATEVALUE($E4)))', _BAD_DATE, 1),
         rule(4, 5, f'=AND({is_action},{not_done},IFERROR({date_expr}<TODAY(),FALSE))',
              _RED, 2),
         rule(4, 5,
