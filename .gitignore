@@ -161,3 +161,7 @@ site/
 # Backfill rollback snapshots — operational artifacts containing live task/
 # assignee data. Kept on disk for --rollback, never committed.
 scripts/_backfill_snapshots/
+
+# Rollback snapshots written by the one-off migration scripts
+scripts/_projects_snapshot_*.json
+scripts/_task_projects_snapshot_*.json

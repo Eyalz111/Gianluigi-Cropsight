@@ -77,6 +77,24 @@ def _block_live_external_services(monkeypatch):
     monkeypatch.setattr(_tg.TelegramBot, "app", property(_blocked_app))
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_ambient_transcript_inboxes(monkeypatch):
+    """Pin the EXTRA transcript inboxes to none for every test.
+
+    RAW_TRANSCRIPTS_FOLDER_IDS is read straight off settings, so a developer
+    whose .env matches production silently makes the watcher poll two folders
+    inside unit tests. That is how test_drive_retry's broken-pipe test started
+    counting three API executions instead of two: it patched the PRIMARY folder
+    but inherited the extras from the environment, and the assertion moved with
+    the machine rather than with the code. [2026-08-07]
+
+    Tests that genuinely exercise multi-inbox behaviour monkeypatch the value
+    themselves, which still wins — this only removes the ambient default.
+    """
+    from config.settings import settings as _s
+    monkeypatch.setattr(_s, "RAW_TRANSCRIPTS_FOLDER_IDS", "", raising=False)
+
+
 # =============================================================================
 # Mock Settings
 # =============================================================================
