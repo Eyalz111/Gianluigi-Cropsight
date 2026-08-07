@@ -558,3 +558,43 @@ class TestAutoInject:
     def test_a_skipped_tab_gets_no_injections(self):
         plan = self._inject([_db_task("t9")], [], act_snaps={"t1": {}})
         assert plan.injects == []
+
+
+class TestProjectNameIsSystemOwned:
+    """Renaming belongs on the Projects tab, which has its own snapshot rail and
+    backfills `label` across five tables. Letting the Project Status sheet rename
+    too would give a consequential operation two masters.
+
+    Before this the Subject cell on a project row was neither pulled nor pushed,
+    so a stray edit diverged from the database silently and forever.
+    """
+
+    def test_a_renamed_project_cell_is_refreshed_from_the_database(self):
+        plan = _plan(
+            {TAB: _grid(_prow(name="Prodct V1"))},          # typo in the sheet
+            tasks=[], proj_snaps={"p1": {}},
+        )
+        writes = [w for w in plan.cell_writes if w[2] == COLS["Subject"]]
+        assert writes and writes[0][3] == "Product V1"
+        assert plan.counters["names_refreshed"] == 1
+
+    def test_the_name_is_never_pulled_into_the_database(self):
+        plan = _plan(
+            {TAB: _grid(_prow(name="Something Else"))},
+            tasks=[], proj_snaps={"p1": {}},
+        )
+        assert "name" not in plan.project_updates.get("p1", {})
+
+    def test_a_matching_name_is_left_alone(self):
+        plan = _plan({TAB: _grid(_prow())}, tasks=[], proj_snaps={"p1": {}})
+        assert [w for w in plan.cell_writes if w[2] == COLS["Subject"]] == []
+        assert plan.counters["names_refreshed"] == 0
+
+    def test_an_action_rows_subject_is_still_the_topic_and_still_pulled(self):
+        """Only the PROJECT row's Subject is system-owned; on an action row it
+        is the topic and remains hers to set."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(subject="AWS Setup"))},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+        assert plan.task_updates["t1"]["label"] == "AWS Setup"

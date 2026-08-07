@@ -165,6 +165,7 @@ class Plan:
             "pulled": 0, "pushed": 0, "manual_held": 0, "bad_dates": 0,
             "reparented": 0, "ticked": 0, "unticked": 0, "incomplete": 0,
             "ghosts": 0, "dup_uids": 0, "normalized_dates": 0, "orphans": 0,
+            "names_refreshed": 0,
         }
         self.overrides: list = []             # human-readable "what changed"
         self.skipped_tabs: list = []
@@ -367,6 +368,20 @@ def build_plan(grids: dict) -> Plan:
                                        _PROJECT_FIELDS, tab, plan, assignees)
                     plan.snapshots.append(("project", proj.uid, tab,
                                            proj.row_number, final))
+
+                    # The project NAME is system-owned here: refreshed from the
+                    # DB, never pulled. Renaming belongs on the Projects tab,
+                    # which has its own snapshot rail and backfills `label`
+                    # across five tables — doing it from two surfaces would give
+                    # a consequential operation two masters. Without this the
+                    # cell was neither pulled nor pushed, so a stray edit to a
+                    # project name sat there diverging from the database
+                    # silently and forever. [2026-08-07]
+                    db_name = db_proj.get("name") or ""
+                    if _normalize(proj.values.get(COL_SUBJECT)) != _normalize(db_name):
+                        plan.cell_writes.append(
+                            (tab, proj.row_number, _col_index(COL_SUBJECT), db_name))
+                        plan.bump("names_refreshed")
             elif proj is not None and proj.kind == HUMAN_PROJECT:
                 plan.creates.append({"kind": "project", "tab": tab,
                                      "row": proj.row_number,
