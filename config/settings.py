@@ -135,6 +135,14 @@ class Settings(BaseSettings):
     # ORPHAN_CLEANUP_NOTIFY_ENABLED) so the refresh can run silently without
     # touching the schedule. [2026-08-06]
     PROJECT_STATUS_NOTIFY_ENABLED: bool = Field(default=True, description="DM Eyal the workbook link after each weekly refresh")
+    # v2 BLOCK layout: a project row followed by its action rows, with the system
+    # columns hidden past G. v1 was task-centric and CLEARED each tab on every
+    # run, which destroys Nechama's edits the moment she owns the file. Default
+    # off so the flag can be flipped by the rollout script, not by a deploy.
+    # [2026-08-07]
+    PROJECT_STATUS_V2_LAYOUT: bool = Field(default=False, description="Project Status sheet uses the v2 project-centric block layout")
+    # Amber band on an action row's Date. Past due is red regardless.
+    PROJECT_STATUS_DUE_SOON_DAYS: int = Field(default=7, description="Days ahead of a deadline that count as due-soon on the Project Status sheet")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")

@@ -134,7 +134,18 @@ class ProjectStatusScheduler:
         return True
 
     async def refresh(self, notify: bool = False) -> dict:
-        """Rebuild the workbook. Also the entry point for a manual/MCP trigger."""
+        """Rebuild the workbook (v1). Also the entry point for a manual/MCP trigger.
+
+        Under PROJECT_STATUS_V2_LAYOUT this does NOT touch the sheet. v1's
+        refresh CLEARS every tab and rewrites it, which is precisely what v2
+        exists to stop: from cutover the file is Nechama's working document, and
+        a Monday 07:00 rebuild would delete a week of her edits. Until the
+        reconcile engine lands (P3) the weekly slot is review-prep only — the
+        link and a count, no writes.
+        """
+        if getattr(settings, "PROJECT_STATUS_V2_LAYOUT", False):
+            return await self._review_prep(notify)
+
         from processors.project_status import build_status_pack, title_block
         from services.project_status_sheet import write_project_status
 
@@ -156,6 +167,41 @@ class ProjectStatusScheduler:
                 await comms_spine.send_to_eyal(
                     f"<b>Projects Status refreshed</b> — {result['rows']} open item(s)\n"
                     f"{counts}\n\n{result.get('url', '')}",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(f"project status notify failed: {e}")
+        return result
+
+    async def _review_prep(self, notify: bool) -> dict:
+        """v2 weekly slot: summarise the file, never write to it."""
+        from services.supabase_client import supabase_client
+
+        sid = settings.PROJECT_STATUS_SHEET_ID
+        url = f"https://docs.google.com/spreadsheets/d/{sid}/edit" if sid else ""
+        grouped = supabase_client.get_open_tasks_by_project()
+        projects = [p for p in supabase_client.get_canonical_projects(status=None)
+                    if (p.get("status") or "active") != "retired"]
+        actions = sum(len(v) for v in grouped.values())
+        idle = [p["name"] for p in projects if not grouped.get(p["id"])]
+
+        result = {"spreadsheet_id": sid, "url": url, "rows": actions,
+                  "tabs": [], "projects": len(projects), "actions": actions,
+                  "rebuilt": False, "error": None}
+        logger.info(
+            f"[project-status] v2 review prep — {len(projects)} project(s), "
+            f"{actions} open action(s), {len(idle)} with nothing open "
+            "(sheet not modified)")
+
+        if notify and getattr(settings, "PROJECT_STATUS_NOTIFY_ENABLED", True):
+            # Projects with nothing open are the useful signal in a review:
+            # each is either finished or stalled, and both need a decision.
+            tail = (f"\n\nNothing open on {len(idle)}: "
+                    + ", ".join(sorted(idle)[:8])) if idle else ""
+            try:
+                await comms_spine.send_to_eyal(
+                    f"<b>Projects Status — ready for review</b>\n"
+                    f"{len(projects)} projects · {actions} open actions{tail}\n\n{url}",
                     parse_mode="HTML",
                 )
             except Exception as e:

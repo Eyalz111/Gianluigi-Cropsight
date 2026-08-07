@@ -12,16 +12,28 @@ and `Resp.` are pre-filled from the DB so nobody retypes them; `Action` and
 `Comments` are left EMPTY for the meeting to fill in live. That is what the
 template's blank columns are for.
 
-Grouping is by AREA (`tasks.category`, 6 areas + General), not by
-`canonical_projects`. That is a data reality, not a preference: the 10 rows in
-`canonical_projects` have no link to tasks — no `project_id` column exists, and
-`tasks.label` is ~66% NULL — so a per-project grouping cannot be assembled from
-what is stored today. Tagging tasks to projects is the follow-up that would let
-this switch over; see AREA_ORDER / `build_status_pack(group_by=...)`.
-
 Scope is OPEN ITEMS ONLY (pending / in_progress / overdue tasks, plus unresolved
 open questions). Done and archived work is excluded so the review stays on what
 still needs a decision.
+
+TWO LAYOUTS LIVE HERE
+---------------------
+
+`build_status_pack` (v1) is TASK-CENTRIC: one row per task, grouped by AREA
+(`tasks.category`), because when it shipped a per-project grouping could not be
+assembled — `canonical_projects` had no link to tasks at all.
+
+`build_status_blocks` (v2, behind PROJECT_STATUS_V2_LAYOUT) is PROJECT-CENTRIC:
+a project row followed by its action rows. It became possible on 2026-08-07 when
+migrate_project_status_v2.sql added `tasks.project_id` and the backfill attached
+every open task to one of the 22 curated projects.
+
+v2 also reads the template's columns the way Eyal actually means them, which v1
+had backwards: **Action is the nearest concrete step, To do is the eventual
+objective**. That is what makes the file project-centric — the objective belongs
+to the project row, the steps are the rows beneath it.
+
+v1 stays until the v2 rollout is verified, then the flag becomes the only path.
 """
 
 import logging
@@ -317,6 +329,92 @@ def build_status_pack(include_questions: bool = True) -> dict[str, list[list]]:
     logger.info(
         f"[project-status] built {total} open item(s) across {len(pack)} area(s): "
         + ", ".join(f"{a}={len(pack[a])}" for a in AREA_ORDER)
+    )
+    return pack
+
+
+def _project_area_names() -> dict:
+    """{area_id -> area name}. One read, used to bucket projects into tabs."""
+    try:
+        rows = supabase_client.client.table("areas").select("id,name").execute().data or []
+    except Exception as e:                                  # noqa: BLE001
+        logger.error(f"[project-status] could not read areas: {e}")
+        return {}
+    return {r["id"]: r["name"] for r in rows}
+
+
+def build_status_blocks() -> dict[str, list[list]]:
+    """{area -> rows} in the v2 BLOCK layout, including the hidden columns.
+
+    A project row, then its open action rows, then the next project. Every row
+    carries its own uid and its parent's, so the reconcile engine can identify
+    it after a drag, an insert or a re-order — identity is never positional.
+
+    RETIRED projects are omitted. Retire-not-delete keeps the row so historical
+    labels still canonicalize (see resolve_label), but the point of retiring is
+    that it stops appearing in the review.
+
+    Empty projects are KEPT. A project with no open actions is a real and
+    interesting state in a review — it means either finished or stalled, and
+    hiding it would make the file silently disagree with the project list Eyal
+    curated. It also has to exist as a block for Nechama to add the first
+    action under it.
+    """
+    from services.project_status_rows import (
+        KIND_ACTION, KIND_PROJECT, ORIGIN_AUTO, format_provenance,
+    )
+
+    area_of = _project_area_names()
+    projects = [p for p in supabase_client.get_canonical_projects(status=None)
+                if (p.get("status") or "active") != "retired"]
+    by_project = supabase_client.get_open_tasks_by_project()
+
+    pack: dict[str, list[list]] = {a: [] for a in AREA_ORDER if a != "General"}
+    for p in sorted(projects, key=lambda r: (r.get("display_order") or 999,
+                                             (r.get("name") or "").lower())):
+        area = area_of.get(p.get("area_id")) or "General"
+        if area not in pack:
+            # An area with projects but no tab would drop them silently.
+            pack[area] = []
+        pid = p["id"]
+        pack[area].append([
+            p.get("display_order") or "",
+            p.get("name") or "",
+            "",                                   # Action is blank on a project row
+            p.get("objective") or "",
+            _fmt_date(p.get("target_date")),
+            p.get("owner") or "",
+            p.get("notes") or "",
+            KIND_PROJECT, pid, pid, "", "",
+        ])
+
+        for t in sorted(by_project.get(pid, []), key=_sort_key):
+            meeting = t.get("meetings") or {}
+            marker = format_provenance(
+                ORIGIN_AUTO,
+                (meeting.get("title") or "").strip(),
+                _fmt_date(meeting.get("date")),
+            )
+            title = _effective(t, "title")
+            pack[area].append([
+                # Column A is the done CHECKBOX on an action row. A real boolean,
+                # not "FALSE": the cell carries BOOLEAN validation so Sheets
+                # renders a tick box, and reconcile reads a clean bool back.
+                False,
+                "",                               # Subject is the topic, hers to set
+                f"{title} {marker}".strip(),
+                "",                               # To do belongs to the project row
+                _fmt_date(_effective(t, "deadline")),
+                _effective(t, "assignee"),
+                t.get("notes") or "",
+                KIND_ACTION, t["id"], pid, ORIGIN_AUTO, t.get("meeting_id") or "",
+            ])
+
+    blocks = sum(1 for rows in pack.values() for r in rows if r[7] == KIND_PROJECT)
+    actions = sum(1 for rows in pack.values() for r in rows if r[7] == KIND_ACTION)
+    logger.info(
+        f"[project-status] v2 built {blocks} project block(s) and {actions} "
+        f"action(s) across {len(pack)} tab(s)"
     )
     return pack
 
