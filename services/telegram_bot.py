@@ -93,6 +93,43 @@ def _strip_for_tts(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", t).strip()
 
 
+def _strip_markup(text: str, parse_mode: str | None) -> str:
+    """Render a message readable once its markup has been rejected.
+
+    Telegram refuses the whole message when the markup is malformed, and the
+    culprit is almost always a TITLE carrying a stray `*`, `_`, backtick or
+    bracket — extraction happily produces "Send *final* deck" or
+    "Review budget_v2". The existing fallback resent the text verbatim, so the
+    recipient got a wall of visible asterisks and underscores.
+
+    Only the FORMATTING markers are removed; every character of the actual
+    words survives. Links keep their label and drop the URL wrapper, which
+    reads better than an inline parenthesised URL on a phone.
+    """
+    if not text or not parse_mode:
+        return text
+    out = text
+    if parse_mode.lower() == "html":
+        out = re.sub(r"<br\s*/?>", "\n", out, flags=re.IGNORECASE)
+        out = re.sub(r"<[^>]+>", "", out)
+        for entity, char in (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"),
+                             ("&quot;", '"'), ("&#39;", "'")):
+            out = out.replace(entity, char)
+        return out
+    # Markdown / MarkdownV2
+    out = re.sub(r"```[a-zA-Z]*\n?", "", out)
+    out = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", out)   # [label](url) -> label
+    out = re.sub(r"[*`~]", "", out)
+    # An underscore BETWEEN word characters is a filename or an identifier
+    # ("budget_v2_final", "task_id"), not italics — Telegram only reads it as a
+    # delimiter at a word boundary. Stripping all of them turned
+    # "Review budget_v2_final" into "Review budgetv2final", which is less
+    # readable than the markup we were trying to clean up.
+    out = re.sub(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])", "", out)
+    out = re.sub(r"\\([\\`*_{}\[\]()#+\-.!>|~=])", r"\1", out)  # unescape MDv2
+    return out
+
+
 def _split_message(text: str, max_len: int = 3800) -> list[str]:
     """
     Split a long message into parts that fit within Telegram's limit.
@@ -647,7 +684,18 @@ class TelegramBot:
                     logger.warning(
                         f"Telegram parse error ({parse_mode}) to {chat_id}; retrying as plain text: {e}"
                     )
-                    await _do_send(None)
+                    # Strip the markup rather than resending it raw. The message
+                    # that failed is the one whose markup is malformed — usually
+                    # a task or meeting TITLE containing a stray * _ ` or [ —
+                    # so sending it verbatim delivers a wall of visible
+                    # asterisks and underscores. Degraded should still be
+                    # readable. [2026-08-07]
+                    original, text = text, _strip_markup(text, parse_mode)
+                    try:
+                        await _do_send(None)
+                    except Exception:
+                        text = original      # never lose the message itself
+                        await _do_send(None)
                     return True
                 raise
         except Exception as e:
