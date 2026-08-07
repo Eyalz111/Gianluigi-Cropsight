@@ -49,7 +49,8 @@ _DEFAULT_A = datetime(2001, 1, 1)
 _DEFAULT_B = datetime(2002, 12, 28)
 
 
-def parse_human_date(value, today: date | None = None) -> str | None:
+def parse_human_date(value, today: date | None = None,
+                     allow_relative: bool = False) -> str | None:
     """
     Parse a human-entered date to ISO 'YYYY-MM-DD', or None if unparseable.
 
@@ -76,9 +77,18 @@ def parse_human_date(value, today: date | None = None) -> str | None:
     if not text:
         return None
 
-    relative = _parse_relative(text, today)
-    if relative:
-        return relative
+    # RELATIVE FORMS ARE OPT-IN. "tomorrow" or "next Friday" resolve against
+    # the day the code happens to run, which is only meaningful when a human is
+    # typing into a cell right now. Extraction is the opposite case: a
+    # transcript is often ingested days after the meeting, and its explicit
+    # contract is to never invent a date — deadline null, confidence NONE. Left
+    # on for every caller this silently stamped a real deadline computed from
+    # the wrong day. Only the sheet surfaces pass allow_relative=True.
+    # [2026-08-08 code review]
+    if allow_relative:
+        relative = _parse_relative(text, today)
+        if relative:
+            return relative
 
     m = _ISO.match(text)
     if m:
@@ -118,7 +128,30 @@ def parse_human_date(value, today: date | None = None) -> str | None:
 
 
 def edit_is_newer_than_sync(manual_set_at, snapshot_at) -> bool:
-    """THE RECENCY RULE — the tie-break that makes two editable surfaces converge.
+    """DISABLED 2026-08-08 — always returns False. See the note below.
+
+    THE TIMESTAMP IS PER TASK, NOT PER FIELD. `mark_task_field_manual` writes
+    one shared `tasks.manual_set_at` whenever ANY field is marked, so comparing
+    it against a snapshot answers "was something on this task edited recently",
+    never "was THIS field edited recently". Used as a tie-break it therefore
+    unlocks every sticky field on the task at once: Nechama typing a comment
+    bumps the timestamp, and the next Tasks-tab pass concludes the DB is newer
+    for the DEADLINE too and overwrites a date Eyal set by hand — silently, on a
+    field nobody touched.
+
+    That is strictly worse than the problem it was added to solve. Permanent
+    divergence is visible and non-destructive: both values survive and the hold
+    is counted every cycle. Overwriting a hand-set value destroys it.
+
+    Kept as a single choke point rather than deleted, so the rule comes back in
+    one place once `manual_<field>_at` exists per field. Until then both engines
+    fall back to the plain hold. [2026-08-08 code review]
+    """
+    return False
+
+
+def _unused_recency_rule(manual_set_at, snapshot_at) -> bool:
+    """The intended tie-break, kept for when per-field timestamps land.
 
     A task field can be edited on the Tasks tab AND on the Project Status sheet.
     "Never revert a value a human set" is right in isolation, but applied blindly

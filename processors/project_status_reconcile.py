@@ -254,7 +254,8 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
         db_val = db_row.get(field)
 
         if field in _DATE_FIELDS:
-            parsed = parse_human_date(sheet_val) if sheet_val else ""
+            parsed = (parse_human_date(sheet_val, allow_relative=True)
+                      if sheet_val else "")
             if sheet_val and not parsed:
                 # Unparseable. Never pulled, cell left exactly as typed — a
                 # typo must not be able to null a real deadline.
@@ -603,7 +604,8 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
             "kind": "task", "tab": tab, "row": row.row_number,
             "title": title,
             "project_id": parent_uid,
-            "deadline": parse_human_date(row.values.get(COL_DATE)),
+            "deadline": parse_human_date(row.values.get(COL_DATE),
+                                         allow_relative=True),
             "assignee": row.values.get(COL_RESP, ""),
             "notes": row.values.get(COL_COMMENTS, ""),
             "label": row.values.get(COL_SUBJECT, ""),

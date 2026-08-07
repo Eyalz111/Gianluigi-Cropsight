@@ -43,27 +43,51 @@ class TestYearless:
 
 
 class TestRelative:
+    """Relative forms are OPT-IN.
+
+    They resolve against the day the code happens to run, which is only
+    meaningful when a human is typing into a cell right now. Extraction is the
+    opposite case: a transcript is often ingested days after the meeting, and
+    its contract is to never invent a date. Left on for every caller this
+    silently stamped a real deadline computed from the wrong day.
+    [2026-08-08 code review]
+    """
+
     def test_today_and_tomorrow(self):
-        assert parse_human_date("today", today=MON) == "2026-08-10"
-        assert parse_human_date("tomorrow", today=MON) == "2026-08-11"
+        assert parse_human_date("today", today=MON, allow_relative=True) == "2026-08-10"
+        assert parse_human_date("tomorrow", today=MON, allow_relative=True) == "2026-08-11"
 
     def test_next_weekday(self):
-        assert parse_human_date("next Tuesday", today=MON) == "2026-08-11"
-        assert parse_human_date("next Friday", today=MON) == "2026-08-14"
+        assert parse_human_date("next Tuesday", today=MON, allow_relative=True) == "2026-08-11"
+        assert parse_human_date("next Friday", today=MON, allow_relative=True) == "2026-08-14"
 
     def test_a_bare_weekday_means_the_coming_one(self):
-        assert parse_human_date("Friday", today=MON) == "2026-08-14"
+        assert parse_human_date("Friday", today=MON, allow_relative=True) == "2026-08-14"
 
     def test_the_same_weekday_means_next_week(self):
         """Nobody sets a deadline for the meeting they are sitting in."""
-        assert parse_human_date("Monday", today=MON) == "2026-08-17"
+        assert parse_human_date("Monday", today=MON, allow_relative=True) == "2026-08-17"
 
     def test_in_n_units(self):
-        assert parse_human_date("in 3 days", today=MON) == "2026-08-13"
-        assert parse_human_date("in 2 weeks", today=MON) == "2026-08-24"
+        assert parse_human_date("in 3 days", today=MON, allow_relative=True) == "2026-08-13"
+        assert parse_human_date("in 2 weeks", today=MON, allow_relative=True) == "2026-08-24"
 
     def test_abbreviated_weekday(self):
-        assert parse_human_date("next Tue", today=MON) == "2026-08-11"
+        assert parse_human_date("next Tue", today=MON, allow_relative=True) == "2026-08-11"
+
+
+class TestRelativeIsOffByDefault:
+    """The extraction contract: never invent a date."""
+
+    @pytest.mark.parametrize("value", ["today", "tomorrow", "next Friday",
+                                       "Monday", "in 3 days"])
+    def test_rejected_for_ordinary_callers(self, value):
+        assert parse_human_date(value, today=MON) is None
+
+    def test_year_less_forms_still_work_by_default(self):
+        """The real gap was 12/8 and 12 Aug — those stay on for everyone."""
+        assert parse_human_date("12/8", today=MON) == "2026-08-12"
+        assert parse_human_date("12 Aug", today=MON) == "2026-08-12"
 
 
 class TestTheGuardStillHolds:
