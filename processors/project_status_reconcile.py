@@ -1112,7 +1112,7 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
     out = {"injected": 0, "rows_deleted": 0, "struck": 0, "stale_tabs": []}
 
     tabs = {t for t, _, _ in plan.injects} | {t for t, _, _ in plan.row_deletes} \
-        | {t for t, _, _ in plan.strikes}
+        | {t for t, _, _ in plan.strikes} | {t for t, _, _ in plan.new_blocks}
     if not tabs:
         return out
 
@@ -1189,8 +1189,13 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
         # actions yet, so the first injected action would arrive bold like a
         # heading). One shared helper, so an auto row and a manual row can never
         # end up looking different. [2026-08-07]
+        # ALL_HEADERS is already imported at the top of this function. Re-importing
+        # it here would make no difference today but is the exact shape that broke
+        # comms_spine on 2026-07-30: a redundant function-local import makes the
+        # name local for the WHOLE body, so any earlier use raises
+        # UnboundLocalError. Not worth leaving lying around.
         from services.project_status_sheet import new_row_format_requests
-        from services.project_status_rows import ALL_HEADERS, KIND_ACTION
+        from services.project_status_rows import KIND_ACTION
 
         act_col = ALL_HEADERS.index("Action")
         kind_col = ALL_HEADERS.index("_kind")

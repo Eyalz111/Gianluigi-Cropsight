@@ -1122,3 +1122,88 @@ class TestMatchedProjectRowIsAdopted:
             tasks=[])
         assert plan.project_updates["p1"]["objective"] == "Win Lombardy"
         assert ("project", "p1", "objective") in plan.manual_marks
+
+
+class TestStructuralApplyReachesTheSheet:
+    """_apply_structural, not just build_plan.
+
+    The whole test file exercised planning; nothing covered the apply path. So
+    when `tabs` was left without plan.new_blocks, the function early-returned
+    and a planned block never reached the sheet — every unit test still passed.
+    Only a live dress rehearsal against a copy caught it.
+    """
+
+    def _svc(self, grid_values, gids):
+        svc = MagicMock()
+
+        # _execute_with_retry calls request_factory().execute() — the mock must
+        # do the same or every read returns a MagicMock and each tab looks stale.
+        svc._execute_with_retry.side_effect = lambda fn: fn().execute()
+        sheets = svc.service.spreadsheets.return_value
+        sheets.values.return_value.batchGet.return_value.execute.return_value = {
+            "valueRanges": [{"values": grid_values}]}
+        sheets.get.return_value.execute.return_value = {
+            "sheets": [{"properties": {"title": t, "sheetId": g}}
+                       for t, g in gids.items()]}
+        sheets.batchUpdate.return_value.execute.return_value = {}
+        return svc, sheets
+
+    def _plan_with_block(self, fingerprint_grid):
+        plan = psr.Plan()
+        row = ["", "Brand New", "", "", "", "", "", "P", "p9", "p9", "", ""]
+        plan.new_blocks.append((TAB, 6, [row]))
+        blocks, orphans, _ = psr.parse_tab(fingerprint_grid)
+        plan.fingerprints[TAB] = psr.tab_fingerprint(blocks, orphans)
+        return plan
+
+    @pytest.mark.asyncio
+    async def test_a_planned_block_actually_reaches_the_sheet(self):
+        grid = _grid(_prow(uid="p1"))
+        plan = self._plan_with_block(grid)
+        svc, sheets = self._svc(grid, {TAB: 7})
+        with patch("services.google_sheets.sheets_service", svc):
+            out = await psr._apply_structural(plan, "sid")
+
+        assert out.get("blocks_added") == 1
+        reqs = sheets.batchUpdate.call_args.kwargs["body"]["requests"]
+        assert any("insertDimension" in r for r in reqs)
+        assert any("updateCells" in r for r in reqs)
+
+    @pytest.mark.asyncio
+    async def test_a_stale_tab_is_skipped(self):
+        grid = _grid(_prow(uid="p1"))
+        plan = self._plan_with_block(grid)
+        plan.fingerprints[TAB] = "something-else"     # tab moved since the read
+        svc, sheets = self._svc(grid, {TAB: 7})
+        with patch("services.google_sheets.sheets_service", svc):
+            out = await psr._apply_structural(plan, "sid")
+
+        assert out["stale_tabs"] == [TAB]
+        assert out.get("blocks_added", 0) == 0
+        sheets.batchUpdate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nothing_planned_means_no_call(self):
+        svc, sheets = self._svc([], {TAB: 7})
+        with patch("services.google_sheets.sheets_service", svc):
+            out = await psr._apply_structural(psr.Plan(), "sid")
+        assert out == {"injected": 0, "rows_deleted": 0, "struck": 0,
+                       "stale_tabs": []}
+        sheets.batchUpdate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deletes_are_emitted_bottom_to_top(self):
+        """Within one batch an earlier delete shifts the targets of later ones."""
+        grid = _grid(_prow(uid="p1"), _arow(uid="t1"), _arow(uid="t2"))
+        plan = psr.Plan()
+        blocks, orphans, _ = psr.parse_tab(grid)
+        plan.fingerprints[TAB] = psr.tab_fingerprint(blocks, orphans)
+        plan.row_deletes.extend([(TAB, 5, "t1"), (TAB, 6, "t2")])
+        svc, sheets = self._svc(grid, {TAB: 7})
+        with patch("services.google_sheets.sheets_service", svc):
+            await psr._apply_structural(plan, "sid")
+
+        reqs = sheets.batchUpdate.call_args.kwargs["body"]["requests"]
+        starts = [r["deleteDimension"]["range"]["startIndex"]
+                  for r in reqs if "deleteDimension" in r]
+        assert starts == sorted(starts, reverse=True)
