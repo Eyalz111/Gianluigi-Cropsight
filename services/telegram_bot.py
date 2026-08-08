@@ -299,7 +299,8 @@ def format_summary_teaser(
 
     # Top action items (max 5, H priority first)
     if tasks:
-        sorted_tasks = sorted(tasks, key=lambda t: {"H": 0, "M": 1, "L": 2}.get(t.get("priority", "M"), 1))
+        from models.schemas import priority_rank
+        sorted_tasks = sorted(tasks, key=lambda t: priority_rank(t.get("priority")))
         parts.append("")
         parts.append("<b>Top action items:</b>")
         for t in sorted_tasks[:5]:

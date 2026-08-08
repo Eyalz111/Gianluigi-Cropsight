@@ -9,16 +9,27 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from services.project_status_rows import (
-    ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION, KIND_PROJECT,
+    ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION, KIND_PROJECT, VISIBLE_HEADERS,
+    COL_ACTION, COL_DATE, COL_KIND, COL_NUM, COL_PARENT, COL_PRIORITY,
+    COL_PROJECT, COL_TODO, COL_UID,
     parse_tab, resolve_columns, strip_provenance,
 )
 from services.project_status_sheet import (
+    IDX, N_ALL, N_VISIBLE, _a1,
     _checkbox_requests, _conditional_format_rules, _ddmmyyyy,
-    _header_note_requests, _v2_structure_requests,
+    _header_note_requests, _priority_requests, _v2_structure_requests,
 )
 
 PROD = "PRODUCT & TECHNOLOGY"
 AREA_ID = "area-prod"
+
+# Every position in this file is derived. The literals it used to carry (row[7]
+# for _kind, column 7 for the first hidden column, '$H4' in a formula) all moved
+# when Project and Priority were added, and a test that hard-codes a position
+# stops testing the thing and starts testing the number.
+KIND, UID, PARENT = IDX[COL_KIND], IDX[COL_UID], IDX[COL_PARENT]
+KIND_A1 = _a1(KIND)
+DATE_A1 = _a1(IDX[COL_DATE])
 
 
 def _project(pid, name, order, **kw):
@@ -53,50 +64,54 @@ class TestBlockBuilder:
             {"p1": [_task("t1", "Ship the API"), _task("t2", "Write docs")]},
         )
         rows = pack[PROD]
-        assert [r[7] for r in rows] == [KIND_PROJECT, KIND_ACTION, KIND_ACTION]
-        assert rows[0][1] == "Product V1"
-        assert rows[1][8] == "t1" and rows[1][9] == "p1"
+        assert [r[KIND] for r in rows] == [KIND_PROJECT, KIND_ACTION, KIND_ACTION]
+        assert rows[0][IDX[COL_PROJECT]] == "Product V1"
+        assert rows[1][UID] == "t1" and rows[1][PARENT] == "p1"
 
     def test_every_row_carries_its_own_and_its_parents_identity(self):
         """Identity must never be positional — this is what survives a drag."""
         pack = _build([_project("p1", "A", 10)], {"p1": [_task("t1", "x")]})
         proj, action = pack[PROD]
-        assert proj[8] == proj[9] == "p1"
-        assert action[8] == "t1" and action[9] == "p1"
+        assert proj[UID] == proj[PARENT] == "p1"
+        assert action[UID] == "t1" and action[PARENT] == "p1"
 
     def test_retired_projects_are_omitted(self):
         pack = _build(
             [_project("p1", "Live", 10), _project("p2", "Gone", 20, status="retired")],
             {},
         )
-        assert [r[1] for r in pack[PROD]] == ["Live"]
+        assert [r[IDX[COL_PROJECT]] for r in pack[PROD]] == ["Live"]
 
     def test_empty_project_keeps_its_block(self):
         """A project with no open actions is a real review state — and she needs
         the block to exist before she can add the first action under it."""
         pack = _build([_project("p1", "Quiet", 10)], {})
-        assert len(pack[PROD]) == 1 and pack[PROD][0][7] == KIND_PROJECT
+        assert len(pack[PROD]) == 1 and pack[PROD][0][KIND] == KIND_PROJECT
 
     def test_ordered_by_display_order(self):
         pack = _build(
             [_project("p2", "Second", 20), _project("p1", "First", 10)], {})
-        assert [r[1] for r in pack[PROD]] == ["First", "Second"]
+        assert [r[IDX[COL_PROJECT]] for r in pack[PROD]] == ["First", "Second"]
 
     def test_action_row_column_a_is_a_real_boolean(self):
         """Not the string 'FALSE' — the cell carries BOOLEAN validation."""
         pack = _build([_project("p1", "A", 10)], {"p1": [_task("t1", "x")]})
         assert pack[PROD][1][0] is False
 
-    def test_project_row_column_a_is_the_number(self):
+    def test_project_row_column_a_is_left_for_the_renumbering_pass(self):
+        """`#` used to show display_order — a sort key with deliberate gaps
+        (10/20/30/90) that read as an arbitrary number to anyone using the file.
+        It is now contiguous 1,2,3… computed from where the blocks SIT, which
+        the builder cannot know."""
         pack = _build([_project("p1", "A", 10)], {})
-        assert pack[PROD][0][0] == 10
+        assert pack[PROD][0][IDX[COL_NUM]] == ""
 
     def test_objective_is_the_to_do_cell_on_the_project_row(self):
         """v1 had these backwards: To do is the eventual aim, not the step."""
         pack = _build([_project("p1", "A", 10, objective="Win Lombardy")], {})
         cols = resolve_columns(ALL_HEADERS)
-        assert pack[PROD][0][cols["To do"]] == "Win Lombardy"
-        assert pack[PROD][0][cols["Action"]] == ""
+        assert pack[PROD][0][cols[COL_TODO]] == "Win Lombardy"
+        assert pack[PROD][0][cols[COL_ACTION]] == ""
 
     def test_action_text_carries_a_provenance_marker(self):
         pack = _build(
@@ -104,7 +119,7 @@ class TestBlockBuilder:
             {"p1": [_task("t1", "Chase NCPB",
                           meetings={"title": "Weekly Sync", "date": "2026-08-04"})]},
         )
-        action = pack[PROD][1][2]
+        action = pack[PROD][1][IDX[COL_ACTION]]
         assert "[auto" in action and "Weekly Sync" in action
         assert strip_provenance(action) == "Chase NCPB"
 
@@ -117,7 +132,7 @@ class TestBlockBuilder:
         the file disagree with the curated list."""
         pack = _build([_project("p1", "Odd", 10, area_id="area-x")], {},
                       areas={"area-x": "SOMEWHERE NEW"})
-        assert [r[1] for r in pack["SOMEWHERE NEW"]] == ["Odd"]
+        assert [r[IDX[COL_PROJECT]] for r in pack["SOMEWHERE NEW"]] == ["Odd"]
 
 
 class TestRoundTrip:
@@ -136,15 +151,16 @@ class TestRoundTrip:
         assert orphans == []
         assert [b.project.uid for b in blocks] == ["p1", "p2"]
         assert [a.uid for a in blocks[0].actions] == ["t1", "t2"]
-        assert blocks[0].project.values["To do"] == "Ship"
-        assert blocks[0].project.checked is False       # '10' is not a tick
+        assert blocks[0].project.values[COL_TODO] == "Ship"
+        assert blocks[0].project.checked is False       # a numeral is not a tick
         assert all(a.checked is False for a in blocks[0].actions)
         assert blocks[0].actions[0].parent == "p1"
 
 
 class TestCheckboxRequests:
     def _rows(self, kinds):
-        return [[""] * 7 + [k, f"u{i}", "p", "", ""] for i, k in enumerate(kinds)]
+        return [[""] * N_VISIBLE + [k, f"u{i}", "p", "", ""]
+                for i, k in enumerate(kinds)]
 
     def test_one_run_per_contiguous_block_of_actions(self):
         reqs = _checkbox_requests(1, self._rows(["P", "A", "A", "P", "A"]))
@@ -173,13 +189,48 @@ class TestCheckboxRequests:
         assert _checkbox_requests(1, []) == []
 
 
+class TestPriorityColumn:
+    """Brought over from the Tasks tab — one of the two reasons that tab still
+    had a reason to exist, and the reason Eyal is retiring it."""
+
+    def _rows(self, kinds):
+        return [[""] * N_VISIBLE + [k, f"u{i}", "p", "", ""]
+                for i, k in enumerate(kinds)]
+
+    def test_the_dropdown_offers_all_four_levels(self):
+        rule = _priority_requests(1, self._rows(["A"]))[0]["setDataValidation"]["rule"]
+        assert rule["condition"]["type"] == "ONE_OF_LIST"
+        values = [v["userEnteredValue"] for v in rule["condition"]["values"]]
+        assert values == ["Urgent", "H", "M", "L"]
+
+    def test_it_warns_rather_than_refuses(self):
+        """House convention: a system-written value must never hard-error a
+        cell, and typing over a dropdown must not be blocked mid-keystroke."""
+        rule = _priority_requests(1, self._rows(["A"]))[0]["setDataValidation"]["rule"]
+        assert rule["strict"] is False
+
+    def test_project_rows_get_no_dropdown(self):
+        """A project has no priority; an empty cell under a dropdown reads as a
+        field somebody forgot to fill."""
+        assert _priority_requests(1, self._rows(["P", "P"])) == []
+
+    def test_one_run_per_contiguous_block(self):
+        reqs = _priority_requests(1, self._rows(["P", "A", "A", "P", "A"]))
+        assert len(reqs) == 2
+
+    def test_it_targets_the_priority_column(self):
+        rng = _priority_requests(1, self._rows(["A"]))[0]["setDataValidation"]["range"]
+        assert rng["startColumnIndex"] == IDX[COL_PRIORITY]
+        assert rng["endColumnIndex"] == IDX[COL_PRIORITY] + 1
+
+
 class TestStructureRequests:
     def test_hidden_columns_are_hidden_tinted_and_protected(self):
         reqs = _v2_structure_requests(7, 7)
         hide = next(r for r in reqs if "updateDimensionProperties" in r)
         assert hide["updateDimensionProperties"]["properties"]["hiddenByUser"] is True
-        assert hide["updateDimensionProperties"]["range"]["startIndex"] == 7
-        assert hide["updateDimensionProperties"]["range"]["endIndex"] == 12
+        assert hide["updateDimensionProperties"]["range"]["startIndex"] == N_VISIBLE
+        assert hide["updateDimensionProperties"]["range"]["endIndex"] == N_ALL
 
         # Protection detail lives in TestHiddenColumnsAreLocked — it depends on
         # whether a bot address is configured.
@@ -188,7 +239,8 @@ class TestStructureRequests:
     def test_protection_never_covers_a_visible_column(self):
         """Locking anything in A..G would fight the person the file is for."""
         prot = next(r for r in _v2_structure_requests(7, 7) if "addProtectedRange" in r)
-        assert prot["addProtectedRange"]["protectedRange"]["range"]["startColumnIndex"] == 7
+        assert (prot["addProtectedRange"]["protectedRange"]["range"]
+                ["startColumnIndex"] == N_VISIBLE)
 
     def test_every_rule_is_scoped_by_the_kind_column(self):
         """Rule 0 styles PROJECT rows, the rest style ACTION rows. Nothing may
@@ -196,9 +248,9 @@ class TestStructureRequests:
         rules = _conditional_format_rules(7, 7)
         formulas = [r["addConditionalFormatRule"]["rule"]["booleanRule"]
                     ["condition"]["values"][0]["userEnteredValue"] for r in rules]
-        assert formulas[0] == '=$H4="P"'
+        assert formulas[0] == f'=${KIND_A1}4="P"'
         for f in formulas[1:]:
-            assert '$H4="A"' in f, f
+            assert f'${KIND_A1}4="A"' in f, f
 
     def test_rule_precedence_is_bad_date_then_overdue_then_due_soon(self):
         """First match wins. An unreadable date must not be evaluated as
@@ -209,7 +261,8 @@ class TestStructureRequests:
         assert "ISERROR" in formulas[1]
         assert "<TODAY()" in formulas[2]
         assert ">=TODAY()" in formulas[3]
-        assert [r["addConditionalFormatRule"]["index"] for r in rules] == [0, 1, 2, 3, 4, 5]
+        assert ([r["addConditionalFormatRule"]["index"] for r in rules]
+                == list(range(len(rules))))
 
     def test_due_soon_window_follows_the_setting(self):
         rules = _conditional_format_rules(7, 14)
@@ -223,10 +276,19 @@ class TestStructureRequests:
         assert "DATEVALUE" not in expr
         assert "RIGHT($E4,4)" in expr and "LEFT($E4,2)" in expr
 
+    def test_the_date_rules_read_the_date_column_wherever_it_sits(self):
+        """These formulas hard-coded $E4 and $H4. Adding two columns moved both,
+        so every rule would have coloured the wrong cell — silently, because a
+        conditional format cannot fail loudly."""
+        rules = _conditional_format_rules(7, 7)
+        formulas = [r["addConditionalFormatRule"]["rule"]["booleanRule"]
+                    ["condition"]["values"][0]["userEnteredValue"] for r in rules]
+        assert all(f"${DATE_A1}4" in f for f in formulas[1:5]), formulas
+
     def test_a_note_on_every_visible_header(self):
         req = _header_note_requests(3)[0]["updateCells"]
         assert req["fields"] == "note"
-        assert len(req["rows"][0]["values"]) == 7
+        assert len(req["rows"][0]["values"]) == len(VISIBLE_HEADERS)
         assert all(v["note"] for v in req["rows"][0]["values"])
 
 
@@ -277,8 +339,8 @@ class TestVisualFeedbackRound2:
     def _rows(self, kinds, action_text=""):
         out = []
         for i, k in enumerate(kinds):
-            row = [""] * 7 + [k, f"u{i}", "p", "", ""]
-            row[2] = action_text
+            row = [""] * N_VISIBLE + [k, f"u{i}", "p", "", ""]
+            row[IDX[COL_ACTION]] = action_text
             out.append(row)
         return out
 
@@ -326,7 +388,7 @@ class TestVisualFeedbackRound2:
         bad = rules[1]["addConditionalFormatRule"]
         formula = bad["rule"]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
         assert bad["index"] == 1                       # beats past-due (2)
-        assert "ISERROR" in formula and '$E4<>""' in formula
+        assert "ISERROR" in formula and f'${DATE_A1}4<>""' in formula
 
     def test_the_date_column_warns_on_an_unreadable_value(self):
         from services.project_status_sheet import _date_validation_requests
@@ -361,7 +423,7 @@ class TestHiddenColumnsWarnButNeverBlock:
         from services import project_status_sheet as pss
         reqs = pss._v2_structure_requests(9, 7)
         rng = next(r for r in reqs if "addProtectedRange" in r)["addProtectedRange"]["protectedRange"]["range"]
-        assert rng["startColumnIndex"] == 7 and rng["endColumnIndex"] == 12
+        assert rng["startColumnIndex"] == N_VISIBLE and rng["endColumnIndex"] == N_ALL
 
 
 class TestHowToTab:
@@ -404,14 +466,15 @@ class TestNewContentIsStyledAutomatically:
     def test_the_project_band_is_a_rule_not_per_row_paint(self):
         from services.project_status_sheet import _conditional_format_rules
         rule = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]["rule"]
-        assert rule["booleanRule"]["condition"]["values"][0]["userEnteredValue"] == '=$H4="P"'
+        assert (rule["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+                == f'=${KIND_A1}4="P"')
         assert rule["booleanRule"]["format"]["textFormat"]["bold"] is True
         assert rule["booleanRule"]["format"]["backgroundColor"]
 
     def test_the_band_covers_every_visible_column(self):
         from services.project_status_sheet import _conditional_format_rules
         rng = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]["rule"]["ranges"][0]
-        assert rng["startColumnIndex"] == 0 and rng["endColumnIndex"] == 7
+        assert rng["startColumnIndex"] == 0 and rng["endColumnIndex"] == N_VISIBLE
 
     def test_the_band_range_is_open_ended_so_new_rows_inherit_it(self):
         """A fixed endRowIndex would stop styling rows added past the bottom."""
@@ -429,10 +492,10 @@ class TestNewRowFormatting:
         from services.project_status_sheet import new_row_format_requests
         reqs = new_row_format_requests(9, 12, KIND_ACTION, "Chase it")
         kinds = [next(iter(r)) for r in reqs]
-        assert kinds.count("setDataValidation") == 2
+        assert kinds.count("setDataValidation") == 3
         conds = [r["setDataValidation"]["rule"]["condition"]["type"]
                  for r in reqs if "setDataValidation" in r]
-        assert set(conds) == {"BOOLEAN", "DATE_IS_VALID"}
+        assert set(conds) == {"BOOLEAN", "DATE_IS_VALID", "ONE_OF_LIST"}
 
     def test_a_new_action_row_is_not_left_bold(self):
         """insertDimension inherits from above; under an empty project block
@@ -517,7 +580,8 @@ class TestNothingCanInheritTheProjectTint:
             _conditional_format_rules, _project_row_requests)
         rule = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]["rule"]
         assert rule["booleanRule"]["format"]["backgroundColor"]
-        static = _project_row_requests(9, [[""] * 7 + ["P", "u", "u", "", ""]])
+        static = _project_row_requests(
+            9, [[""] * N_VISIBLE + ["P", "u", "u", "", ""]])
         assert not any("repeatCell" in r for r in static)
 
     def test_a_new_action_row_needs_no_background_reset(self):

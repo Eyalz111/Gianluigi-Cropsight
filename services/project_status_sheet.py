@@ -14,15 +14,49 @@ import logging
 
 from config.settings import settings
 from services.google_sheets import sheets_service, _hex_color, _column_width_request
+from services.project_status_rows import (
+    ALL_HEADERS, VISIBLE_HEADERS, COL_ACTION, COL_COMMENTS, COL_DATE, COL_KIND,
+    COL_NUM, COL_PRIORITY, COL_PROJECT, COL_RESP, COL_TODO, COL_TOPIC,
+    PRIORITIES,
+)
 
 logger = logging.getLogger(__name__)
+
+# EVERY POSITION IS DERIVED FROM THE HEADER LIST. This module used to write
+# column numbers out by hand — `endColumnIndex: 7`, `$H4="A"`, `$E4` for the
+# date — which is fine until the layout gains a column. Adding `Project` and
+# `Priority` on 2026-08-09 moved five of the nine visible columns and both
+# hidden blocks, so every one of those literals would have painted, protected
+# and tested the WRONG cell, silently. Deriving them means the header list is
+# the single declaration of the layout.
+N_VISIBLE = len(VISIBLE_HEADERS)
+N_ALL = len(ALL_HEADERS)
+IDX = {name: i for i, name in enumerate(ALL_HEADERS)}
+KIND_IDX = IDX[COL_KIND]
+
+
+def _a1(col_index: int) -> str:
+    """0-based column index -> its spreadsheet letter ('A', 'J', 'AA')."""
+    letters, n = "", col_index
+    while True:
+        letters = chr(ord("A") + n % 26) + letters
+        n = n // 26 - 1
+        if n < 0:
+            return letters
+
+
+def _kind_of(row) -> str:
+    """The `_kind` cell of a built row, tolerant of a short row."""
+    return row[KIND_IDX] if len(row) > KIND_IDX else ""
 
 # Template fidelity — colours/widths read out of the supplied .xlsx.
 _HEADER_BG = _hex_color("#0070C0")   # blue band, row 3
 _TITLE_BG = _hex_color("#C00000")    # red title cell, A1
 _WHITE = _hex_color("#FFFFFF")
-# Excel char widths (4.9/28/49/48.1/13.9/10.9/30.6) -> px (px ≈ chars*7 + 5)
-_COL_PX = [39, 201, 348, 342, 102, 81, 219]
+# Excel char widths from the template (4.9/28/49/48.1/13.9/10.9/30.6) -> px
+# (px ≈ chars*7 + 5), re-apportioned for the nine-column layout. Project and
+# Topic split the old Subject width; Priority is a narrow dropdown.
+_COL_PX = [39, 190, 150, 330, 300, 102, 90, 78, 200]
 
 WORKBOOK_TITLE = "CropSight — Projects Status"
 
@@ -58,14 +92,20 @@ def _ddmmyyyy(col: str, row: int = 4) -> str:
 def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
     """Colour rules for a tab, attached once and independent of row count.
 
-    Every rule is scoped to action rows via the hidden `_kind` column ($H="A"),
-    so a project row is never coloured. Because they are sheet-level rules over
+    Every rule is scoped to action rows via the hidden `_kind` column, so a
+    project row is never coloured. Because they are sheet-level rules over
     an open-ended range they survive inserts, deletes and re-ordering — no
     per-row API calls, and nothing to re-apply when Nechama moves a line.
     """
-    date_expr = _ddmmyyyy("E")
-    is_action = '$H4="A"'
-    not_done = "NOT($A4=TRUE)"
+    # The letters come from the header list, so inserting a column re-derives
+    # them instead of silently colouring the wrong cells.
+    num_a1 = _a1(IDX[COL_NUM])
+    date_a1 = _a1(IDX[COL_DATE])
+    resp_a1 = _a1(IDX[COL_RESP])
+    kind_a1 = _a1(KIND_IDX)
+    date_expr = _ddmmyyyy(date_a1)
+    is_action = f'${kind_a1}4="A"'
+    not_done = f"NOT(${num_a1}4=TRUE)"
 
     def rule(col_start, col_end, formula, colour, index, fmt=None):
         return {"addConditionalFormatRule": {"index": index, "rule": {
@@ -87,7 +127,7 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
         # only ever catch up later. The heavy top rule still comes from
         # _project_row_requests, because conditional formatting cannot set
         # borders; the band is what carries the distinction. [2026-08-07]
-        rule(0, 7, '=$H4="P"', None, 0,
+        rule(0, N_VISIBLE, f'=${kind_a1}4="P"', None, 0,
              fmt={"backgroundColor": _PROJECT_BG, "textFormat": {"bold": True}}),
         # Order matters: the first matching rule wins.
         #
@@ -106,16 +146,24 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
         # is worse than saying nothing. DATEVALUE covers everything Sheets
         # itself understands in en_GB (12 Aug, 12 August, 12/8), so a cell is
         # only flagged when BOTH fail. [2026-08-07]
-        rule(4, 5,
-             f'=AND({is_action},$E4<>"",ISERROR({date_expr}),'
-             f'ISERROR(DATEVALUE($E4)))', _BAD_DATE, 1),
-        rule(4, 5, f'=AND({is_action},{not_done},IFERROR({date_expr}<TODAY(),FALSE))',
+        rule(IDX[COL_DATE], IDX[COL_DATE] + 1,
+             f'=AND({is_action},${date_a1}4<>"",ISERROR({date_expr}),'
+             f'ISERROR(DATEVALUE(${date_a1}4)))', _BAD_DATE, 1),
+        rule(IDX[COL_DATE], IDX[COL_DATE] + 1,
+             f'=AND({is_action},{not_done},IFERROR({date_expr}<TODAY(),FALSE))',
              _RED, 2),
-        rule(4, 5,
+        rule(IDX[COL_DATE], IDX[COL_DATE] + 1,
              f'=AND({is_action},{not_done},IFERROR(AND({date_expr}>=TODAY(),'
              f'{date_expr}<=TODAY()+{due_soon_days}),FALSE))', _AMBER, 3),
-        rule(4, 5, f'=AND({is_action},$E4="")', _GREY, 4),
-        rule(5, 6, f'=AND({is_action},$F4="")', _GREY, 5),
+        rule(IDX[COL_DATE], IDX[COL_DATE] + 1,
+             f'=AND({is_action},${date_a1}4="")', _GREY, 4),
+        rule(IDX[COL_RESP], IDX[COL_RESP] + 1,
+             f'=AND({is_action},${resp_a1}4="")', _GREY, 5),
+        # Urgent stands out on sight. Scoped to the Priority cell only, so it
+        # tints the chip rather than shouting across the whole row.
+        rule(IDX[COL_PRIORITY], IDX[COL_PRIORITY] + 1,
+             f'=AND({is_action},{not_done},'
+             f'${_a1(IDX[COL_PRIORITY])}4="Urgent")', _RED, 6),
     ]
 
 
@@ -145,12 +193,12 @@ def _project_row_requests(sheet_id: int, rows: list) -> list[dict]:
 
     reqs: list[dict] = []
     for idx, row in enumerate(rows):
-        if (row[7] if len(row) > 7 else "") != KIND_PROJECT:
+        if _kind_of(row) != KIND_PROJECT:
             continue
         r = FIRST_BODY_ROW - 1 + idx
         reqs.append({"updateBorders": {
             "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
-                      "startColumnIndex": 0, "endColumnIndex": 7},
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
             "top": {"style": "SOLID_THICK",
                     "color": {"red": 0.1, "green": 0.3, "blue": 0.5}}}})
     return reqs
@@ -168,12 +216,12 @@ def _marker_bold_requests(sheet_id: int, rows: list) -> list[dict]:
     bold AND grey: bold to find it, grey so it still reads as metadata rather
     than shouting over the action text.
     """
-    from services.project_status_rows import ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION
+    from services.project_status_rows import FIRST_BODY_ROW, KIND_ACTION
 
-    col = ALL_HEADERS.index("Action")
+    col = IDX[COL_ACTION]
     reqs: list[dict] = []
     for idx, row in enumerate(rows):
-        if (row[7] if len(row) > 7 else "") != KIND_ACTION:
+        if _kind_of(row) != KIND_ACTION:
             continue
         text = str(row[col] or "")
         start = text.rfind("[")
@@ -199,12 +247,12 @@ def _date_validation_requests(sheet_id: int, rows: list) -> list[dict]:
     False throughout (house convention) so a system-written value can never hard
     -error a cell — this warns, it does not block.
     """
-    from services.project_status_rows import ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION
+    from services.project_status_rows import FIRST_BODY_ROW, KIND_ACTION
 
-    col = ALL_HEADERS.index("Date")
+    col = IDX[COL_DATE]
     reqs, start = [], None
     for idx, row in enumerate(rows + [[]]):
-        kind = row[7] if len(row) > 7 else ""
+        kind = _kind_of(row)
         if kind == KIND_ACTION:
             start = idx if start is None else start
             continue
@@ -249,18 +297,18 @@ def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
     reqs: list[dict] = [
         {"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                      "startIndex": 7, "endIndex": 12},
+                      "startIndex": N_VISIBLE, "endIndex": N_ALL},
             "properties": {"pixelSize": _HIDDEN_PX, "hiddenByUser": True},
             "fields": "pixelSize,hiddenByUser"}},
         {"repeatCell": {   # white on white — unhiding still reveals nothing useful
             "range": {"sheetId": sheet_id, "startRowIndex": 0,
-                      "startColumnIndex": 7, "endColumnIndex": 12},
+                      "startColumnIndex": N_VISIBLE, "endColumnIndex": N_ALL},
             "cell": {"userEnteredFormat": {
                 "textFormat": {"foregroundColor": _WHITE, "fontSize": 8}}},
             "fields": "userEnteredFormat.textFormat"}},
         {"addProtectedRange": {"protectedRange": {
-            "range": {"sheetId": sheet_id, "startColumnIndex": 7,
-                      "endColumnIndex": 12},
+            "range": {"sheetId": sheet_id, "startColumnIndex": N_VISIBLE,
+                      "endColumnIndex": N_ALL},
             "description": _PROTECT_DESC, **protection}}},
     ]
     reqs.extend(_conditional_format_rules(sheet_id, due_soon_days))
@@ -278,7 +326,7 @@ def _checkbox_requests(sheet_id: int, rows: list[list]) -> list[dict]:
 
     reqs, start = [], None
     for idx, row in enumerate(rows + [[]]):          # sentinel flushes the tail
-        kind = row[7] if len(row) > 7 else ""
+        kind = _kind_of(row)
         if kind == KIND_ACTION:
             start = idx if start is None else start
             continue
@@ -289,6 +337,40 @@ def _checkbox_requests(sheet_id: int, rows: list[list]) -> list[dict]:
                           "endRowIndex": FIRST_BODY_ROW - 1 + idx,
                           "startColumnIndex": 0, "endColumnIndex": 1},
                 "rule": {"condition": {"type": "BOOLEAN"}, "strict": False}}})
+            start = None
+    return reqs
+
+
+def _priority_requests(sheet_id: int, rows: list[list]) -> list[dict]:
+    """A Priority dropdown over each contiguous run of action rows.
+
+    Same shape as the checkbox: not the whole column, because a project row has
+    no priority and an empty cell under a strict-looking dropdown reads as a
+    field somebody forgot to fill.
+
+    strict=False by house convention — this offers the four values and shows a
+    warning triangle on anything else, rather than refusing the keystroke. The
+    reconcile then declines to pull an off-vocabulary cell, so a typo cannot
+    reach the database either way.
+    """
+    from services.project_status_rows import FIRST_BODY_ROW, KIND_ACTION
+
+    col = IDX[COL_PRIORITY]
+    reqs, start = [], None
+    for idx, row in enumerate(list(rows) + [[]]):     # sentinel flushes the tail
+        if _kind_of(row) == KIND_ACTION:
+            start = idx if start is None else start
+            continue
+        if start is not None:
+            reqs.append({"setDataValidation": {
+                "range": {"sheetId": sheet_id,
+                          "startRowIndex": FIRST_BODY_ROW - 1 + start,
+                          "endRowIndex": FIRST_BODY_ROW - 1 + idx,
+                          "startColumnIndex": col, "endColumnIndex": col + 1},
+                "rule": {"condition": {
+                    "type": "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": v} for v in PRIORITIES]},
+                    "showCustomUi": True, "strict": False}}})
             start = None
     return reqs
 
@@ -357,21 +439,29 @@ def new_row_format_requests(sheet_id: int, row_number: int, kind: str,
     row. Called right after a create or an injection so a line typed at 10am is
     tickable at 10:30 rather than at the next structural pass. [2026-08-07]
     """
-    from services.project_status_rows import ALL_HEADERS, KIND_ACTION, KIND_PROJECT
+    from services.project_status_rows import KIND_ACTION, KIND_PROJECT
 
     r = row_number - 1
     if kind == KIND_PROJECT:
         return [{"updateBorders": {
             "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
-                      "startColumnIndex": 0, "endColumnIndex": 7},
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
             "top": {"style": "SOLID_THICK",
                     "color": {"red": 0.1, "green": 0.3, "blue": 0.5}}}}]
     if kind != KIND_ACTION:
         return []
 
-    date_col = ALL_HEADERS.index("Date")
-    act_col = ALL_HEADERS.index("Action")
+    date_col = IDX[COL_DATE]
+    act_col = IDX[COL_ACTION]
+    prio_col = IDX[COL_PRIORITY]
     reqs = [
+        {"setDataValidation": {
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": prio_col, "endColumnIndex": prio_col + 1},
+            "rule": {"condition": {
+                "type": "ONE_OF_LIST",
+                "values": [{"userEnteredValue": v} for v in PRIORITIES]},
+                "showCustomUi": True, "strict": False}}},
         {"setDataValidation": {
             "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
                       "startColumnIndex": 0, "endColumnIndex": 1},
@@ -388,7 +478,7 @@ def new_row_format_requests(sheet_id: int, row_number: int, kind: str,
         # because an insert inherits from above.
         {"repeatCell": {
             "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
-                      "startColumnIndex": 0, "endColumnIndex": 7},
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
             "cell": {"userEnteredFormat": {
                 "textFormat": {"bold": False},
                 "wrapStrategy": "WRAP", "verticalAlignment": "TOP"}},
@@ -410,26 +500,40 @@ def new_row_format_requests(sheet_id: int, row_number: int, kind: str,
 
 
 def _header_note_requests(sheet_id: int) -> list[dict]:
-    """Hover notes on the 7 visible headers — guidance that costs no space.
+    """Hover notes on the visible headers — guidance that costs no space.
 
     Deliberately on the header cells rather than a banner row: the working range
     stays clean, and the explanation is one hover away at the moment it is
     needed.
+
+    KEYED BY COLUMN NAME, not written out in order. A positional list would put
+    the wrong note on the wrong header the first time the layout changed, which
+    is the one thing a hover note must never do.
     """
-    notes = [
-        "Project rows are numbered. On an action row this is a TICK BOX — "
-        "tick it when the work is done.",
-        "The project name. On an action row, use this to tag the topic.",
-        "The nearest concrete step. Lines marked [auto · …] were added by "
-        "Gianluigi; yours are unmarked and are never overwritten.",
-        "Where we want to take this project — the eventual objective. "
-        "Belongs to the project row.",
-        "Target date, DD/MM/YYYY. Type it any way you like (12/8, 12 Aug, "
-        "next Tuesday) and it is rewritten to the standard form.",
-        "Who is responsible. A project row's owner is the account owner; an "
-        "action row's is whoever does that step.",
-        "Free notes. Yours — the system does not write here.",
-    ]
+    notes_by_col = {
+        COL_NUM: "Project rows are numbered 1, 2, 3… down the tab. On an ACTION "
+                 "row this is a TICK BOX — tick it when the work is done, and "
+                 "the row leaves the sheet overnight.",
+        COL_PROJECT: "Fill this in and the row IS a project. Leave it empty on "
+                     "action rows. Renaming here is undone — rename on the "
+                     "Projects tab, which updates everything else too.",
+        COL_TOPIC: "Optional tag for an action row — what this step is about "
+                   "(a client, a region, a workstream).",
+        COL_ACTION: "Fill this in and the row IS an action. The nearest "
+                    "concrete step. Lines marked [auto · …] were added by "
+                    "Gianluigi; yours are unmarked and never overwritten.",
+        COL_TODO: "Where we want to take this project — the eventual "
+                  "objective. Belongs to the project row.",
+        COL_DATE: "Target date, DD/MM/YYYY. Type it any way you like (12/8, "
+                  "12 Aug, next Tuesday) and it is rewritten to the standard "
+                  "form. Purple means nothing could read it.",
+        COL_RESP: "Who is responsible. A project row's owner owns the project; "
+                  "an action row's owner does that step.",
+        COL_PRIORITY: "Urgent · H · M · L. Pick from the list — anything else "
+                      "is left in the cell but not saved.",
+        COL_COMMENTS: "Free notes. Yours — the system does not write here.",
+    }
+    notes = [notes_by_col.get(name, "") for name in VISIBLE_HEADERS]
     return [{"updateCells": {
         "range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": 3,
                   "startColumnIndex": 0, "endColumnIndex": len(notes)},
@@ -450,7 +554,7 @@ def _tab_format_requests(sheet_id: int) -> list[dict]:
             "fields": "userEnteredFormat(backgroundColor,verticalAlignment,textFormat)"}},
         {"repeatCell": {  # row 3 header band: bold 18pt white on blue, centred
             "range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": 3,
-                      "startColumnIndex": 0, "endColumnIndex": 7},
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": _HEADER_BG,
                 "horizontalAlignment": "CENTER",
@@ -461,7 +565,7 @@ def _tab_format_requests(sheet_id: int) -> list[dict]:
                        "verticalAlignment,wrapStrategy,textFormat)")}},
         {"repeatCell": {  # body: wrap so 'To do' is readable without resizing
             "range": {"sheetId": sheet_id, "startRowIndex": 3,
-                      "startColumnIndex": 1, "endColumnIndex": 7},
+                      "startColumnIndex": 1, "endColumnIndex": N_VISIBLE},
             "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP",
                                            "verticalAlignment": "TOP"}},
             "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"}},
@@ -476,7 +580,7 @@ def _tab_format_requests(sheet_id: int) -> list[dict]:
             "fields": "gridProperties.frozenRowCount"}},
         {"updateBorders": {
             "range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": 3,
-                      "startColumnIndex": 0, "endColumnIndex": 7},
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
             "bottom": {"style": "SOLID_MEDIUM",
                        "color": {"red": 0, "green": 0, "blue": 0}}}},
     ]
@@ -503,10 +607,14 @@ HOWTO_BLOCK = [
     ("h2", "THE LAYOUT", ""),
     ("row", "Each tab is one area", "Inside it: a PROJECT row, then its ACTION "
                                     "rows, then the next project."),
-    ("row", "Subject", "The project name. On an action row it is the topic."),
-    ("row", "Action", "The nearest concrete step."),
+    ("row", "Project", "Fill it in and the row IS a project. Empty on action "
+                       "rows."),
+    ("row", "Action", "Fill it in and the row IS an action — the nearest "
+                      "concrete step. Empty on project rows."),
+    ("row", "Topic", "Optional tag on an action row: what the step is about."),
     ("row", "To do", "Where we want to take this project — the eventual aim."),
-    ("row", "Date · Resp.", "When that step is due, and who owns it."),
+    ("row", "Date · Resp. · Priority", "When that step is due, who owns it, and "
+                                       "how it ranks (Urgent · H · M · L)."),
     ("blank", "", ""),
 
     ("h2", "WHAT THE SYSTEM WILL AND WILL NOT TOUCH", ""),
@@ -528,8 +636,10 @@ HOWTO_BLOCK = [
 
     ("h2", "ADDING THINGS", ""),
     ("row", "A new action", "Type it on a blank row under a project."),
-    ("row", "A new project", "Type a name in Subject, leave Action empty."),
-    ("row", "A topic tag", "Type it in Subject on an action row."),
+    ("row", "A new project", "Type the name in the PROJECT column. That is what "
+                             "makes the row a project — nothing is guessed."),
+    ("row", "A topic tag", "Type it in TOPIC on an action row."),
+    ("row", "A priority", "Pick Urgent · H · M · L from the dropdown."),
     ("row", "A new person", "Type the name in Resp. Eyal is asked to confirm them "
                             "before they join the team."),
     ("blank", "", ""),
@@ -574,7 +684,6 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
     database and marks every field sticky.
     """
     from processors.project_status import tab_name_for
-    from services.project_status_rows import ALL_HEADERS
 
     svc = sheets_service
     ssid = spreadsheet_id or settings.PROJECT_STATUS_SHEET_ID
@@ -635,10 +744,19 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
                 logger.warning(f"[project-status] tab missing after create: {tab}")
                 continue
             b = title_blocks.get(area, {})
-            pad = [""] * (len(ALL_HEADERS) - 7)
+            # The two banner rows are as wide as the sheet; the second cell of
+            # each carries the right-hand text. Both offsets are derived so a
+            # column change cannot leave the confidentiality line hanging in the
+            # middle of the table.
+            def banner(left, right):
+                cells = [""] * len(ALL_HEADERS)
+                cells[0] = left
+                cells[IDX[COL_ACTION]] = right
+                return cells
+
             values = [
-                [b.get("title", area), "", "", b.get("confidentiality", ""), "", "", "", *pad],
-                [b.get("distribution", ""), "", "", b.get("generated", ""), "", "", "", *pad],
+                banner(b.get("title", area), b.get("confidentiality", "")),
+                banner(b.get("distribution", ""), b.get("generated", "")),
                 list(ALL_HEADERS),
                 *rows,
             ]
@@ -650,6 +768,7 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
             struct.extend(_tab_format_requests(sheet_id))
             struct.extend(_v2_structure_requests(sheet_id, due_soon_days))
             struct.extend(_checkbox_requests(sheet_id, rows))
+            struct.extend(_priority_requests(sheet_id, rows))
             struct.extend(_header_note_requests(sheet_id))
             # AFTER the base formatting: the project band and the bold marker
             # both override what _tab_format_requests paints across the body,
@@ -659,8 +778,8 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
             struct.extend(_date_validation_requests(sheet_id, rows))
             result["tabs"].append(tab)
             result["rows"] += len(rows)
-            result["projects"] += sum(1 for r in rows if len(r) > 7 and r[7] == "P")
-            result["actions"] += sum(1 for r in rows if len(r) > 7 and r[7] == "A")
+            result["projects"] += sum(1 for r in rows if _kind_of(r) == "P")
+            result["actions"] += sum(1 for r in rows if _kind_of(r) == "A")
 
         howto_id = existing.get(HOWTO_TAB)
         if howto_id is not None:

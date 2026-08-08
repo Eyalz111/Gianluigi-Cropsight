@@ -660,16 +660,18 @@ def _gather_task_urgency_items(all_tasks: list[dict], today_str: str) -> list[di
     item dicts carry no 'urgency' key so the renderer keeps the old line.
     """
     if settings.OUTPUTS_PRIORITY_URGENCY_AREA_ENABLED:
-        _rank = {"H": 0, "M": 1, "L": 2}
+        from models.schemas import priority_rank
         candidates = [
             t for t in all_tasks
             if (t.get("deadline") and t["deadline"] < today_str)  # overdue
             or t.get("urgency") == "H"                            # ASAP / time-critical
-            or t.get("priority") == "H"                           # important (legacy)
+            # 'U' is the Project Status sheet's Urgent. Matching only 'H' here
+            # would have kept an undated Urgent task out of the brief entirely.
+            or t.get("priority") in ("U", "H")                    # important (legacy)
         ]
         candidates.sort(key=lambda t: (
-            _rank.get(t.get("urgency") or "M", 1),
-            _rank.get(t.get("priority") or "M", 1),
+            priority_rank(t.get("urgency")),
+            priority_rank(t.get("priority")),
             t.get("deadline") or "9999-12-31",  # dated before undated within a tier
         ))
         return [

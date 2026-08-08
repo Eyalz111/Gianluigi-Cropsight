@@ -361,7 +361,8 @@ def build_status_blocks() -> dict[str, list[list]]:
     action under it.
     """
     from services.project_status_rows import (
-        KIND_ACTION, KIND_PROJECT, ORIGIN_AUTO, format_provenance,
+        ALL_HEADERS, COL_KIND, KIND_ACTION, KIND_PROJECT, ORIGIN_AUTO,
+        action_row_values, format_provenance, project_row_values,
     )
 
     area_of = _project_area_names()
@@ -377,16 +378,10 @@ def build_status_blocks() -> dict[str, list[list]]:
             # An area with projects but no tab would drop them silently.
             pack[area] = []
         pid = p["id"]
-        pack[area].append([
-            p.get("display_order") or "",
-            p.get("name") or "",
-            "",                                   # Action is blank on a project row
-            p.get("objective") or "",
-            _fmt_date(p.get("target_date")),
-            p.get("owner") or "",
-            p.get("notes") or "",
-            KIND_PROJECT, pid, pid, "", "",
-        ])
+        # `#` is filled by the structural pass, not here — see renumber_blocks.
+        # display_order is a sort key with deliberate gaps (10/20/30/90); showing
+        # it made the column read as meaningless to anyone using the sheet.
+        pack[area].append(project_row_values(p, fmt_date=_fmt_date))
 
         for t in sorted(by_project.get(pid, []), key=_sort_key):
             meeting = t.get("meetings") or {}
@@ -395,28 +390,25 @@ def build_status_blocks() -> dict[str, list[list]]:
                 (meeting.get("title") or "").strip(),
                 _fmt_date(meeting.get("date")),
             )
-            title = _effective(t, "title")
-            pack[area].append([
-                # Column A is the done CHECKBOX on an action row. A real boolean,
-                # not "FALSE": the cell carries BOOLEAN validation so Sheets
-                # renders a tick box, and reconcile reads a clean bool back.
-                False,
-                # Subject on an action row is the TOPIC (tasks.label). Seeded
-                # from the DB rather than left blank: leaving it empty while the
-                # DB holds a label made the reconcile want to push it every
-                # cycle — 37 phantom cell writes on a sheet nobody had touched.
-                # Builder and merge have to agree on what a column means.
-                _effective(t, "label"),
-                f"{title} {marker}".strip(),
-                "",                               # To do belongs to the project row
-                _fmt_date(_effective(t, "deadline")),
-                _effective(t, "assignee"),
-                t.get("notes") or "",
-                KIND_ACTION, t["id"], pid, ORIGIN_AUTO, t.get("meeting_id") or "",
-            ])
+            # Column A stays the done CHECKBOX on an action row — a real
+            # boolean, not "FALSE": the cell carries BOOLEAN validation so
+            # Sheets renders a tick box and reconcile reads a clean bool back.
+            # `Topic` is seeded from the DB rather than left blank; leaving it
+            # empty while the DB held a label made the reconcile want to push it
+            # every cycle — 37 phantom cell writes on a sheet nobody had
+            # touched. Builder and merge have to agree on what a column means,
+            # which is why the shape itself now lives in one place.
+            pack[area].append(action_row_values(
+                {**t,
+                 "title": _effective(t, "title"),
+                 "label": _effective(t, "label"),
+                 "deadline": _effective(t, "deadline"),
+                 "assignee": _effective(t, "assignee")},
+                parent_uid=pid, marker=marker, fmt_date=_fmt_date))
 
-    blocks = sum(1 for rows in pack.values() for r in rows if r[7] == KIND_PROJECT)
-    actions = sum(1 for rows in pack.values() for r in rows if r[7] == KIND_ACTION)
+    kind_idx = ALL_HEADERS.index(COL_KIND)
+    blocks = sum(1 for rows in pack.values() for r in rows if r[kind_idx] == KIND_PROJECT)
+    actions = sum(1 for rows in pack.values() for r in rows if r[kind_idx] == KIND_ACTION)
     logger.info(
         f"[project-status] v2 built {blocks} project block(s) and {actions} "
         f"action(s) across {len(pack)} tab(s)"

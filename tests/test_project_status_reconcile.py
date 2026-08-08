@@ -17,7 +17,9 @@ import pytest
 
 from processors import project_status_reconcile as psr
 from services.project_status_rows import (
-    ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION, KIND_PROJECT,
+    ALL_HEADERS, FIRST_BODY_ROW, KIND_ACTION, KIND_PROJECT, VISIBLE_HEADERS,
+    COL_ACTION, COL_COMMENTS, COL_DATE, COL_PRIORITY, COL_PROJECT, COL_RESP,
+    COL_TODO, COL_TOPIC, action_row_values, project_row_values,
 )
 
 TAB = "PRODUCT & TECHNOLOGY"
@@ -29,18 +31,36 @@ def _grid(*body):
             list(ALL_HEADERS), *body]
 
 
+# THE FIXTURES BUILD ROWS THROUGH THE SAME HELPERS THE ENGINE DOES. They used to
+# be hand-written positional literals, so adding Project and Priority on
+# 2026-08-09 shifted five columns and the fixtures quietly started asserting
+# against the wrong cells — a project's uid landed in Comments and the suite
+# reported a phantom pull. A test fixture that can disagree with the layout is
+# testing the fixture.
 def _prow(uid="p1", name="Product V1", num=10, todo="", date="", resp="", notes=""):
-    return [num, name, "", todo, date, resp, notes, KIND_PROJECT, uid, uid, "", ""]
+    return project_row_values(
+        {"id": uid, "name": name, "objective": todo, "target_date": date,
+         "owner": resp, "notes": notes}, num=num)
 
 
-def _arow(uid="t1", parent="p1", action="Ship the API", subject="", date="",
-          resp="", notes="", checked=False):
-    return [checked, subject, action, "", date, resp, notes, KIND_ACTION, uid,
-            parent, "auto", ""]
+def _arow(uid="t1", parent="p1", action="Ship the API", topic="", date="",
+          resp="", notes="", checked=False, priority=""):
+    return action_row_values(
+        {"id": uid, "title": action, "label": topic, "deadline": date,
+         "assignee": resp, "notes": notes, "priority": priority},
+        parent_uid=parent, checked=checked)
 
 
-def _human(action="Call the bank", subject="", date="", resp="", notes=""):
-    return ["", subject, action, "", date, resp, notes]
+def _human(action="Call the bank", topic="", date="", resp="", notes="",
+           project="", priority="", todo=""):
+    """A row somebody typed: visible cells only, no identity columns at all."""
+    row = [""] * len(VISIBLE_HEADERS)
+    for name, value in ((COL_PROJECT, project), (COL_TOPIC, topic),
+                        (COL_ACTION, action), (COL_TODO, todo),
+                        (COL_DATE, date), (COL_RESP, resp),
+                        (COL_PRIORITY, priority), (COL_COMMENTS, notes)):
+        row[COLS[name]] = value
+    return row
 
 
 def _db_task(tid="t1", **kw):
@@ -197,7 +217,7 @@ class TestBlanks:
 
     def test_a_cleared_label_never_nulls_it(self):
         plan = _plan(
-            {TAB: _grid(_prow(), _arow(subject=""))},
+            {TAB: _grid(_prow(), _arow(topic=""))},
             tasks=[_db_task(label="AWS Setup")],
             act_snaps={"t1": {"title": "Ship the API", "label": "AWS Setup",
                               "status": "pending"}},
@@ -262,11 +282,28 @@ class TestCreates:
         assert create["title"] == "Call the bank"
         assert create["deadline"] == "2026-08-12"
 
-    def test_a_subject_with_no_action_becomes_a_project(self):
-        plan = _plan({TAB: _grid(["", "New Vertical", "", "Break in", "", "", ""])},
+    def test_a_name_in_the_project_column_becomes_a_project(self):
+        plan = _plan({TAB: _grid(_human(action="", project="New Vertical",
+                                        todo="Break in"))},
                      tasks=[])
         assert plan.creates[0]["kind"] == "project"
         assert plan.creates[0]["name"] == "New Vertical"
+
+    def test_a_topic_alone_does_not_create_a_project(self):
+        """The old rule was Subject-filled-and-Action-empty, so tagging a topic
+        on a line with nothing beside it created a project. Eyal hit it: 'AWS
+        expected expenses' became a project when he meant an action."""
+        plan = _plan({TAB: _grid(_human(action="", topic="AWS expected expenses"))},
+                     tasks=[])
+        assert [c for c in plan.creates if c["kind"] == "project"] == []
+
+    def test_a_row_with_both_is_reported_never_guessed(self):
+        plan = _plan({TAB: _grid(_human(action="Chase it",
+                                        project="New Vertical"))},
+                     tasks=[])
+        assert plan.creates == []
+        assert plan.counters["ambiguous_rows"] == 1
+        assert any("both filled" in o for o in plan.overrides)
 
     def test_an_incomplete_row_is_counted_never_written(self):
         """Date and owner but no Action — a task with no title is worse than none."""
@@ -477,7 +514,7 @@ class TestAutoInject:
         assert len(plan.injects) == 1
         tab, anchor, rows = plan.injects[0]
         assert anchor == FIRST_BODY_ROW + 1          # just after the project row
-        assert rows[0][8] == "t9" and rows[0][9] == "p1"
+        assert rows[0][COLS["_uid"]] == "t9" and rows[0][COLS["_parent"]] == "p1"
         assert rows[0][0] is False                   # a real checkbox
 
     def test_a_task_already_on_the_sheet_is_not_re_injected(self):
@@ -535,7 +572,7 @@ class TestProjectNameIsSystemOwned:
             {TAB: _grid(_prow(name="Prodct V1"))},          # typo in the sheet
             tasks=[], proj_snaps={"p1": {}},
         )
-        writes = [w for w in plan.cell_writes if w[2] == COLS["Subject"]]
+        writes = [w for w in plan.cell_writes if w[2] == COLS[COL_PROJECT]]
         assert writes and writes[0][3] == "Product V1"
         assert plan.counters["names_refreshed"] == 1
 
@@ -555,7 +592,7 @@ class TestProjectNameIsSystemOwned:
         """Only the PROJECT row's Subject is system-owned; on an action row it
         is the topic and remains hers to set."""
         plan = _plan(
-            {TAB: _grid(_prow(), _arow(subject="AWS Setup"))},
+            {TAB: _grid(_prow(), _arow(topic="AWS Setup"))},
             act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
         )
         assert plan.task_updates["t1"]["label"] == "AWS Setup"
@@ -622,25 +659,25 @@ class TestRowsInsertedMidCycle:
 
     def test_an_unshifted_row_is_adopted(self):
         spec = {"kind": "task", "tab": TAB, "row": 5, "title": "Call the bank"}
-        svc = self._svc(["", "", "Call the bank", "", "", "", ""])
+        svc = self._svc(_human(action="Call the bank"))
         assert psr._row_still_matches(svc, "sid", spec) is True
 
     def test_a_shifted_row_is_deferred_not_adopted(self):
         """Something else is at that number now."""
         spec = {"kind": "task", "tab": TAB, "row": 5, "title": "Call the bank"}
-        svc = self._svc(["", "", "A completely different line", "", "", "", ""])
+        svc = self._svc(_human(action="A completely different line"))
         assert psr._row_still_matches(svc, "sid", spec) is False
 
     def test_a_row_that_already_has_an_identity_is_refused(self):
         """It was claimed between the read and now — adopting it twice would
         give two tasks the same row."""
         spec = {"kind": "task", "tab": TAB, "row": 5, "title": "Call the bank"}
-        svc = self._svc(["", "", "Call the bank", "", "", "", "", "A", "t9", "p1"])
+        svc = self._svc(_arow(uid="t9", parent="p1", action="Call the bank"))
         assert psr._row_still_matches(svc, "sid", spec) is False
 
-    def test_a_project_row_is_matched_on_its_subject(self):
+    def test_a_project_row_is_matched_on_its_name(self):
         spec = {"kind": "project", "tab": TAB, "row": 5, "name": "New Vertical"}
-        svc = self._svc(["", "New Vertical", "", "", "", "", ""])
+        svc = self._svc(_human(action="", project="New Vertical"))
         assert psr._row_still_matches(svc, "sid", spec) is True
 
     def test_a_failed_re_read_never_adopts(self):
@@ -1001,7 +1038,8 @@ class TestProjectsGetABlock:
                 tasks=[],
             )
         row = plan.new_blocks[0][2][0]
-        assert row[7] == "P" and row[8] == "p2" and row[9] == "p2"
+        assert row[COLS["_kind"]] == "P"
+        assert row[COLS["_uid"]] == "p2" and row[COLS["_parent"]] == "p2"
 
     def test_an_existing_project_is_not_re_added(self):
         plan = _plan({TAB: _grid(_prow(uid="p1"))},
@@ -1050,13 +1088,15 @@ class TestMatchedProjectRowIsAdopted:
         """Setting parent_uid alone left the row human forever: what she typed
         on that line was never persisted and re-evaluated every cycle."""
         plan = _plan(
-            {TAB: _grid(["", "Product V1", "", "Win Lombardy", "", "", ""])},
+            {TAB: _grid(_human(action="", project="Product V1",
+                               todo="Win Lombardy"))},
             tasks=[])
         assert plan.adopt_rows and plan.adopt_rows[0]["uid"] == "p1"
 
     def test_the_cells_she_typed_are_pulled(self):
         plan = _plan(
-            {TAB: _grid(["", "Product V1", "", "Win Lombardy", "", "", ""])},
+            {TAB: _grid(_human(action="", project="Product V1",
+                               todo="Win Lombardy"))},
             tasks=[])
         assert plan.project_updates["p1"]["objective"] == "Win Lombardy"
         assert ("project", "p1", "objective") in plan.manual_marks
@@ -1088,7 +1128,7 @@ class TestStructuralApplyReachesTheSheet:
 
     def _plan_with_block(self, fingerprint_grid):
         plan = psr.Plan()
-        row = ["", "Brand New", "", "", "", "", "", "P", "p9", "p9", "", ""]
+        row = project_row_values({"id": "p9", "name": "Brand New"})
         plan.new_blocks.append((TAB, 6, [row]))
         blocks, orphans, _ = psr.parse_tab(fingerprint_grid)
         plan.fingerprints[TAB] = psr.tab_fingerprint(blocks, orphans)
@@ -1253,3 +1293,210 @@ class TestEveryFinishedRowLeavesTheSheet:
         assert plan.row_deletes == [] and plan.strikes == []
 
 
+
+
+class TestPriorityRoundTrip:
+    """The Priority column exists so the Tasks tab can be retired. The sheet
+    spells it 'Urgent/H/M/L' and the database stores 'U/H/M/L', so the merge has
+    to translate on both sides — comparing the raw strings would report a
+    divergence on every row of every cycle, forever."""
+
+    def _snap(self, **kw):
+        base = {"title": "Ship the API", "status": "pending"}
+        base.update(kw)
+        return {"t1": base}
+
+    def _typed(self, text):
+        """A system row whose Priority cell holds whatever a human typed.
+
+        Built through the shared builder then overwritten, because the builder
+        sanitises — which is the point: only a HUMAN can put an off-vocabulary
+        value in that cell.
+        """
+        row = _arow()
+        row[COLS[COL_PRIORITY]] = text
+        return row
+
+    def test_the_same_priority_in_both_spellings_is_not_a_divergence(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(priority="U"))},     # renders 'Urgent'
+            tasks=[_db_task(priority="U")],
+            act_snaps=self._snap(priority="U"),
+        )
+        assert plan.cell_writes == [] and plan.task_updates == {}
+
+    def test_a_typed_priority_is_pulled_as_the_stored_letter(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(priority="U"))},
+            tasks=[_db_task(priority="M")],
+            act_snaps=self._snap(priority="M"),
+        )
+        assert plan.task_updates["t1"]["priority"] == "U"
+        assert ("task", "t1", "priority") in plan.manual_marks
+
+    def test_the_database_advancing_rewrites_the_cell_in_sheet_spelling(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(priority="M"))},
+            tasks=[_db_task(priority="U")],
+            act_snaps=self._snap(priority="M"),
+        )
+        assert plan.counters["pushed"] == 1
+        _tab, _row, col, value = plan.cell_writes[0]
+        assert col == COLS[COL_PRIORITY] and value == "Urgent"
+
+    def test_an_off_vocabulary_cell_is_never_pulled(self):
+        """Same rule as an unreadable date: a typo must not overwrite a real
+        value, and the cell is left exactly as typed."""
+        plan = _plan(
+            {TAB: _grid(_prow(), self._typed("P1"))},
+            tasks=[_db_task(priority="H")],
+            act_snaps=self._snap(priority="H"),
+        )
+        assert "priority" not in plan.task_updates.get("t1", {})
+        assert plan.cell_writes == []
+        assert plan.counters["bad_priorities"] == 1
+
+    def test_a_cleared_priority_is_refused_not_pulled(self):
+        """Select ten rows and press delete — the hidden identity columns
+        survive, so the rows are still recognised and every blank looked like a
+        deliberate clear."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(priority=""))},
+            tasks=[_db_task(priority="H")],
+            act_snaps=self._snap(priority="H"),
+        )
+        assert "priority" not in plan.task_updates.get("t1", {})
+        assert plan.counters["blanks_refused"] == 1
+
+    def test_a_long_form_spelling_is_canonicalised_in_the_same_cycle(self):
+        """Typing 'high' must be understood AND tidied now, not 30 minutes
+        later — the visible answer to 'did it understand me?'."""
+        plan = _plan(
+            {TAB: _grid(_prow(), self._typed("high"))},
+            tasks=[_db_task(priority="M")],
+            act_snaps=self._snap(priority="M"),
+        )
+        assert plan.task_updates["t1"]["priority"] == "H"
+        assert (TAB, FIRST_BODY_ROW + 1, COLS[COL_PRIORITY], "H") in plan.cell_writes
+
+    def test_a_typed_row_carries_its_priority_into_the_new_task(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _human(action="Call the bank", priority="Urgent"))},
+            tasks=[],
+        )
+        assert plan.creates[0]["priority"] == "U"
+
+
+class TestContiguousNumbering:
+    """`#` used to show display_order — 10/20/30/90, set once by the seed and
+    never maintained, which read as an arbitrary number that skipped values."""
+
+    def _svc(self, grid_values):
+        svc = MagicMock()
+        svc._execute_with_retry.side_effect = lambda fn: fn().execute()
+        sheets = svc.service.spreadsheets.return_value
+        sheets.values.return_value.batchGet.return_value.execute.return_value = {
+            "valueRanges": [{"values": grid_values}]}
+        sheets.values.return_value.batchUpdate.return_value.execute.return_value = {}
+        return svc, sheets
+
+    async def _run(self, grid):
+        svc, sheets = self._svc(grid)
+        with patch("services.google_sheets.sheets_service", svc):
+            out = await psr.renumber_blocks("sid", [TAB])
+        return out, sheets
+
+    @pytest.mark.asyncio
+    async def test_blocks_are_numbered_one_two_three(self):
+        grid = _grid(_prow(uid="p1", num=""), _arow(),
+                     _prow(uid="p2", num=""), _prow(uid="p3", num=""))
+        out, sheets = await self._run(grid)
+        assert out["renumbered"] == 3
+        data = sheets.values.return_value.batchUpdate.call_args.kwargs["body"]["data"]
+        assert [d["values"][0][0] for d in data] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_it_writes_column_a_of_the_project_rows_only(self):
+        grid = _grid(_prow(uid="p1", num=""), _arow(), _prow(uid="p2", num=""))
+        _out, sheets = await self._run(grid)
+        data = sheets.values.return_value.batchUpdate.call_args.kwargs["body"]["data"]
+        assert [d["range"] for d in data] == [
+            f"'{TAB}'!A{FIRST_BODY_ROW}", f"'{TAB}'!A{FIRST_BODY_ROW + 2}"]
+
+    @pytest.mark.asyncio
+    async def test_an_already_correct_tab_writes_nothing(self):
+        """It runs on every structural pass, so the common case must be free."""
+        grid = _grid(_prow(uid="p1", num=1), _arow(), _prow(uid="p2", num=2))
+        out, sheets = await self._run(grid)
+        assert out["renumbered"] == 0
+        sheets.values.return_value.batchUpdate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_dragged_block_renumbers(self):
+        """The number is a property of where the block SITS, which is exactly
+        why the builder cannot compute it."""
+        grid = _grid(_prow(uid="p2", num=2), _prow(uid="p1", num=1))
+        out, sheets = await self._run(grid)
+        data = sheets.values.return_value.batchUpdate.call_args.kwargs["body"]["data"]
+        assert out["renumbered"] == 2
+        assert [d["values"][0][0] for d in data] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_read_writes_nothing(self):
+        """A transient empty response must never be read as 'no projects'."""
+        out, sheets = await self._run([])
+        assert out["renumbered"] == 0
+        sheets.values.return_value.batchUpdate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_typed_project_row_is_numbered_too(self):
+        """She types a project; it gets its number on the next structural pass
+        even though it has no identity yet."""
+        grid = _grid(_prow(uid="p1", num=""), _human(action="", project="Typed"))
+        out, _sheets = await self._run(grid)
+        assert out["renumbered"] == 2
+
+
+class TestLayoutMismatchIsRefused:
+    """The deploy window of the 2026-08-09 column change, and permanently
+    anyone who renames a header.
+
+    resolve_columns falls back to the canonical position for a header it cannot
+    find. That is right for one renamed column and catastrophic for a whole
+    different layout: on the 12-column sheet `Topic` resolves onto the old
+    `Action` column and `Priority` onto `_kind`, so the engine compares an
+    action's text against a task's label and tries to pull "A" in as a priority
+    — on every row, every cycle.
+    """
+
+    OLD_HEADERS = ["#", "Subject", "Action", "To do", "Date", "Resp.",
+                   "Comments", "_kind", "_uid", "_parent", "_origin", "_src"]
+
+    def _old_grid(self):
+        return [["Area"], ["Distribution:"], list(self.OLD_HEADERS),
+                [10, "Product V1", "", "", "", "", "", "P", "p1", "p1", "", ""],
+                [False, "", "Ship the API", "", "", "", "", "A", "t1", "p1",
+                 "auto", ""]]
+
+    def test_an_old_layout_tab_is_skipped_entirely(self):
+        plan = _plan({TAB: self._old_grid()})
+        assert TAB in plan.skipped_tabs
+        assert plan.counters["layout_mismatch"] == 1
+
+    def test_nothing_is_written_to_the_sheet_or_the_database(self):
+        plan = _plan({TAB: self._old_grid()})
+        assert plan.cell_writes == [] and plan.task_updates == {}
+        assert plan.creates == [] and plan.suppress == []
+        assert plan.row_deletes == [] and plan.new_blocks == []
+
+    def test_the_current_layout_is_not_skipped(self):
+        plan = _plan({TAB: _grid(_prow(), _arow())})
+        assert plan.skipped_tabs == []
+        assert plan.counters["layout_mismatch"] == 0
+
+    def test_a_single_renamed_header_is_also_refused(self):
+        """Better to stop than to guess which column somebody meant."""
+        grid = _grid(_prow(), _arow())
+        grid[2] = ["#", "Project", "Subject matter", *ALL_HEADERS[3:]]
+        plan = _plan({TAB: grid})
+        assert TAB in plan.skipped_tabs

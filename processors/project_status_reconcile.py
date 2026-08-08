@@ -57,29 +57,39 @@ from datetime import datetime, timezone
 from config.settings import settings
 from core.dates import edit_is_newer_than_sync, parse_human_date
 from services.project_status_rows import (
-    ALL_HEADERS, FIRST_BODY_ROW, COL_ACTION, COL_COMMENTS, COL_DATE, COL_PARENT, COL_RESP,
-    COL_SUBJECT, COL_TODO,
-    HUMAN_ACTION, HUMAN_PROJECT, INCOMPLETE, SYSTEM_ACTION, SYSTEM_PROJECT,
+    ALL_HEADERS, FIRST_BODY_ROW, COL_ACTION, COL_COMMENTS, COL_DATE, COL_PARENT,
+    COL_KIND, COL_PRIORITY, COL_PROJECT, COL_RESP, COL_TODO, COL_TOPIC,
+    AMBIGUOUS, HEADER_ROW, HUMAN_ACTION, HUMAN_PROJECT, INCOMPLETE,
+    SYSTEM_ACTION, SYSTEM_PROJECT, PRIORITY_TO_DB, PRIORITY_TO_SHEET,
     find_duplicate_uids, parse_tab, resolve_columns, strip_provenance,
-    tab_fingerprint,
+    tab_fingerprint, unresolved_columns,
 )
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
 
-READ_RANGE = "A1:L2000"
+# Must span every column in ALL_HEADERS. Derived rather than written out: it
+# read "A1:L2000" for the 12-column layout, and a hand-maintained letter is
+# exactly the thing that silently truncates the hidden identity columns the
+# moment the sheet grows one.
+READ_RANGE = f"A1:{chr(ord('A') + len(ALL_HEADERS) - 1)}2000"
 HOWTO_TAB = "How to use"
 
 # Sheet column -> the DB field it maps to, per entity.
 _ACTION_FIELDS = {COL_DATE: "deadline", COL_RESP: "assignee",
                   COL_COMMENTS: "notes", COL_ACTION: "title",
-                  COL_SUBJECT: "label"}
+                  COL_TOPIC: "label", COL_PRIORITY: "priority"}
 _PROJECT_FIELDS = {COL_TODO: "objective", COL_DATE: "target_date",
                    COL_RESP: "owner", COL_COMMENTS: "notes"}
 
 # Fields whose value is a DATE column: a cell that doesn't parse is NEVER
 # pulled, or a typo would null a real deadline.
 _DATE_FIELDS = {"deadline", "target_date"}
+# The sheet spells priority 'Urgent/H/M/L'; the database stores 'U/H/M/L'. Like
+# a date, the cell is translated on the way in and rendered on the way out, so
+# the merge only ever compares canonical values — otherwise "Urgent" and "U"
+# read as a divergence and the cell would be rewritten on every single cycle.
+_VOCAB_FIELDS = {"priority"}
 # NO FIELD IS EVER PULLED BLANK. An empty cell is refreshed from the database,
 # never written into it.
 #
@@ -95,7 +105,7 @@ _DATE_FIELDS = {"deadline", "target_date"}
 # Tasks tab, saying so in the review). Refusing to pull a blank costs a
 # sentence; honouring one costs the data. [2026-08-07]
 _NEVER_BLANK = {"title", "label", "deadline", "assignee", "notes",
-                "objective", "target_date", "owner"}
+                "objective", "target_date", "owner", "priority"}
 # Statuses that mean the work is finished, for the closed-row pass.
 _CLOSED = {"done", "cancelled", "archived"}
 
@@ -166,7 +176,14 @@ def _eq(field: str, a, b, assignees: _Assignees) -> bool:
         pa, pb = parse_human_date(a), parse_human_date(b)
         if pa and pb:
             return pa == pb
+    if field in _VOCAB_FIELDS:
+        return _to_db_priority(a) == _to_db_priority(b)
     return False
+
+
+def _to_db_priority(value) -> str:
+    """'Urgent' -> 'U'. '' when the cell holds something off the vocabulary."""
+    return PRIORITY_TO_DB.get(_normalize(value), "")
 
 
 class Plan:
@@ -190,6 +207,7 @@ class Plan:
             "pulled": 0, "pushed": 0, "manual_held": 0, "bad_dates": 0,
             "reparented": 0, "ticked": 0, "unticked": 0, "incomplete": 0,
             "ghosts": 0, "dup_uids": 0, "normalized_dates": 0, "orphans": 0,
+            "bad_priorities": 0, "ambiguous_rows": 0, "layout_mismatch": 0,
             "names_refreshed": 0, "paste_duplicates": 0, "blanks_refused": 0,
             "orphaned_by_deleted_project": 0, "adopted_rows": 0,
             "blocks_added": 0, "project_without_a_tab": 0,
@@ -280,6 +298,15 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
                 final[field] = db_val
                 continue
             sheet_cmp = parsed or ""
+        elif field in _VOCAB_FIELDS:
+            mapped = _to_db_priority(sheet_val) if sheet_val else ""
+            if sheet_val and not mapped:
+                # Off-vocabulary ("urgent!!", "P1"). Treated exactly like an
+                # unparseable date: never pulled, cell left as typed, counted.
+                plan.bump("bad_priorities")
+                final[field] = db_val
+                continue
+            sheet_cmp = mapped
         else:
             sheet_cmp = sheet_val
 
@@ -312,7 +339,7 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
             # was understood but left looking unrecognised until the following
             # pass — the visible answer to "does it know what I meant?" arriving
             # 30 minutes after the question. [2026-08-07]
-            if (field in _DATE_FIELDS and sheet_val
+            if (field in (_DATE_FIELDS | _VOCAB_FIELDS) and sheet_val
                     and _display(field, sheet_cmp) != sheet_val):
                 plan.cell_writes.append(
                     (tab, row.row_number, cols[col],
@@ -366,7 +393,8 @@ def _snap_key(field: str) -> str:
     """DB field -> the snapshot column that holds it."""
     return {"assignee": "assignee", "owner": "owner", "notes": "notes",
             "title": "title", "label": "label", "deadline": "deadline",
-            "objective": "objective", "target_date": "target_date"}.get(field, field)
+            "objective": "objective", "target_date": "target_date",
+            "priority": "priority"}.get(field, field)
 
 
 def _col_index(col: str) -> int:
@@ -385,6 +413,8 @@ def _display(field: str, value) -> str:
                 str(value).replace("Z", "+00:00")).strftime("%d/%m/%Y")
         except (ValueError, TypeError):
             return str(value)
+    if field in _VOCAB_FIELDS:
+        return PRIORITY_TO_SHEET.get(str(value).strip().upper(), str(value))
     return str(value)
 
 
@@ -411,6 +441,27 @@ def build_plan(grids: dict) -> Plan:
                              if b.project and b.project.uid}
 
     for tab, grid in grids.items():
+        # LAYOUT GUARD, BEFORE ANYTHING ELSE. resolve_columns falls back to the
+        # canonical position for a header it cannot find — right for one renamed
+        # column, catastrophic for a whole different layout. A tab still on the
+        # 12-column shape resolves `Topic` onto the old `Action` column and
+        # `Priority` onto `_kind`, so the engine would compare an action's text
+        # against a task's label and try to pull "A" in as a priority, on every
+        # row of every cycle. Skip it and say so. [2026-08-09]
+        # A tab that reads back completely empty is not a layout problem — it
+        # is either genuinely new or a bad read, and the guard below owns both.
+        # Anything with content, though, has to declare its layout.
+        header = grid[HEADER_ROW - 1] if len(grid or []) >= HEADER_ROW else []
+        missing = unresolved_columns(header) if grid else []
+        if missing:
+            logger.error(
+                f"[ps-reconcile] SKIPPED tab {tab!r} — its header row does not "
+                f"declare {missing}. The tab is on an older layout; rebuild it "
+                "before the engine will touch it again.")
+            plan.skipped_tabs.append(tab)
+            plan.bump("layout_mismatch")
+            continue
+
         blocks, orphans, cols = parse_tab(grid)
         plan.fingerprints[tab] = tab_fingerprint(blocks, orphans)
         plan.columns[tab] = cols
@@ -470,9 +521,9 @@ def build_plan(grids: dict) -> Plan:
                     # project name sat there diverging from the database
                     # silently and forever. [2026-08-07]
                     db_name = db_proj.get("name") or ""
-                    if _normalize(proj.values.get(COL_SUBJECT)) != _normalize(db_name):
+                    if _normalize(proj.values.get(COL_PROJECT)) != _normalize(db_name):
                         plan.cell_writes.append(
-                            (tab, proj.row_number, cols[COL_SUBJECT], db_name))
+                            (tab, proj.row_number, cols[COL_PROJECT], db_name))
                         plan.bump("names_refreshed")
             elif proj is not None and proj.kind == HUMAN_PROJECT:
                 # A typed project name that ALREADY EXISTS is that project, not
@@ -485,7 +536,7 @@ def build_plan(grids: dict) -> Plan:
                 # at all, and every one was recreated as a duplicate with no
                 # project — which is exactly what Eyal's check #19 produced.
                 # [2026-08-07]
-                typed = proj.values.get(COL_SUBJECT, "")
+                typed = proj.values.get(COL_PROJECT, "")
                 existing = next(
                     (p for p in db_projects.values()
                      if _normalize(p.get("name")) == _normalize(typed)), None)
@@ -537,7 +588,7 @@ def build_plan(grids: dict) -> Plan:
 
         for row in orphans:
             plan.bump("orphans")
-            if row.kind in (HUMAN_ACTION, INCOMPLETE):
+            if row.kind in (HUMAN_ACTION, INCOMPLETE, AMBIGUOUS):
                 # An action typed above the first project row. Not dropped —
                 # losing a line she typed because it sat in the wrong place
                 # would be the worst possible behaviour.
@@ -561,8 +612,8 @@ def _plan_closed_rows(parsed: dict, db_tasks: dict, plan: Plan) -> None:
     a date she chose — was kept and struck through instead, on the reasoning
     that removing it would throw away the only copy. That reasoning was simply
     wrong. EVERY column on an action row persists to the database: Date ->
-    deadline, Resp. -> assignee, Comments -> notes, Action -> title, Subject ->
-    label. Nothing on the row exists only on the row, so removing it loses
+    deadline, Resp. -> assignee, Comments -> notes, Action -> title, Topic ->
+    label, Priority -> priority. Nothing on the row exists only on the row, so removing it loses
     nothing and the exception was protecting data that was never at risk.
 
     Its actual effect was the opposite of the intent. Setting a date or an owner
@@ -614,7 +665,8 @@ def _plan_injections(parsed: dict, db_tasks: dict, act_snaps: dict,
     into one block overnight, and a total per block, so a project nobody prunes
     doesn't grow without limit. Both are reported.
     """
-    from services.project_status_rows import KIND_ACTION, ORIGIN_AUTO, format_provenance
+    from services.project_status_rows import (
+        ORIGIN_AUTO, action_row_values, format_provenance)
 
     per_cycle = getattr(settings, "PROJECT_STATUS_MAX_AUTO_PER_PROJECT", 5)
     per_block = getattr(settings, "PROJECT_STATUS_MAX_ACTIONS_PER_PROJECT", 25)
@@ -648,17 +700,13 @@ def _plan_injections(parsed: dict, db_tasks: dict, act_snaps: dict,
                     f"block room {room}).")
             if not take:
                 continue
-            rows = []
-            for task in queue[:take]:
-                rows.append([
-                    False, task.get("label") or "",
-                    f"{task.get('title') or ''} "
-                    f"{format_provenance(ORIGIN_AUTO, '', '')}".strip(),
-                    "", _display("deadline", task.get("deadline")),
-                    task.get("assignee") or "", task.get("notes") or "",
-                    KIND_ACTION, task["id"], pid, ORIGIN_AUTO,
-                    task.get("meeting_id") or "",
-                ])
+            rows = [
+                action_row_values(
+                    task, parent_uid=pid,
+                    marker=format_provenance(ORIGIN_AUTO, "", ""),
+                    fmt_date=lambda v: _display("deadline", v))
+                for task in queue[:take]
+            ]
             plan.injects.append((tab, block.end_row, rows))
 
 
@@ -667,6 +715,17 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
                    seen_tasks: set, cols: dict,
                    tab_project_uids: set | None = None) -> None:
     tab_project_uids = tab_project_uids if tab_project_uids is not None else set()
+    if row.kind == AMBIGUOUS:
+        # Project AND Action both filled. The declared rule cannot settle this
+        # and guessing is precisely what the declared rule exists to remove, so
+        # the row is reported and left exactly as typed.
+        plan.bump("ambiguous_rows")
+        plan.overrides.append(
+            f"{tab} r{row.row_number}: Project and Action are both filled, so "
+            "it is unclear which this row is — left untouched. Clear one: "
+            "Project names a project, Action is a step underneath one.")
+        return
+
     if row.kind == INCOMPLETE:
         # Date or owner filled but no Action text. Counted and surfaced, never
         # written: a task with no title is worse than no task.
@@ -698,7 +757,10 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
                                          allow_relative=True),
             "assignee": row.values.get(COL_RESP, ""),
             "notes": row.values.get(COL_COMMENTS, ""),
-            "label": row.values.get(COL_SUBJECT, ""),
+            "label": row.values.get(COL_TOPIC, ""),
+            # Off-vocabulary text is dropped rather than stored; the DB default
+            # ('M') then applies and the next push writes the cell back.
+            "priority": _to_db_priority(row.values.get(COL_PRIORITY)),
         })
         return
 
@@ -794,7 +856,7 @@ def _plan_missing_blocks(parsed: dict, db_projects: dict, seen: set,
     [2026-08-08 code review]
     """
     from processors.project_status import _project_area_names, tab_name_for
-    from services.project_status_rows import KIND_PROJECT
+    from services.project_status_rows import project_row_values
 
     missing = [p for p in db_projects.values()
                if p["id"] not in seen
@@ -816,13 +878,11 @@ def _plan_missing_blocks(parsed: dict, db_projects: dict, seen: set,
             # No tab for that area on this sheet — report rather than guess.
             plan.bump("project_without_a_tab")
             continue
-        pid = project["id"]
-        row = [
-            project.get("display_order") or "", project.get("name") or "", "",
-            project.get("objective") or "", _display("target_date", project.get("target_date")),
-            project.get("owner") or "", project.get("notes") or "",
-            KIND_PROJECT, pid, pid, "", "",
-        ]
+        # `#` is left blank: the structural pass renumbers every tab
+        # contiguously right after this, so writing display_order here would
+        # only be overwritten by a different number seconds later.
+        row = project_row_values(
+            project, fmt_date=lambda v: _display("target_date", v))
         plan.new_blocks.append((tab, ends[tab], [row]))
         ends[tab] += 1
         plan.bump("blocks_added")
@@ -994,11 +1054,11 @@ def _row_still_matches(sheets_service, spreadsheet_id: str, spec: dict) -> bool:
 
     row = (values[0] if values else []) + [""] * len(ALL_HEADERS)
     cols = resolve_columns(ALL_HEADERS)
-    if str(row[cols["_kind"]] or "").strip():
+    if str(row[cols[COL_KIND]] or "").strip():
         return False        # something already claimed it
 
     expected = (spec.get("title") if spec["kind"] == "task" else spec.get("name"))
-    column = "Action" if spec["kind"] == "task" else "Subject"
+    column = COL_ACTION if spec["kind"] == "task" else COL_PROJECT
     return _normalize(row[cols[column]]) == _normalize(expected)
 
 
@@ -1123,7 +1183,8 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
     the targets of later ones within the same batch.
     """
     from services.google_sheets import sheets_service
-    from services.project_status_rows import ALL_HEADERS, parse_tab
+    from services.project_status_rows import (
+        ALL_HEADERS, COL_ORIGIN, VISIBLE_HEADERS, parse_tab)
 
     out = {"injected": 0, "rows_deleted": 0, "struck": 0, "stale_tabs": []}
 
@@ -1168,16 +1229,20 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
     for tab, row, _tid in plan.strikes:
         if tab in stale or tab not in gid:
             continue
+        # Column spans DERIVED, not written out. These read 0..7 and 10..11 for
+        # the 12-column layout; adding two columns would have struck through
+        # seven of nine visible cells and stamped 'auto_edited' into Priority.
+        origin_col = ALL_HEADERS.index(COL_ORIGIN)
         ops.append((row, {"repeatCell": {
             "range": {"sheetId": gid[tab], "startRowIndex": row - 1,
                       "endRowIndex": row, "startColumnIndex": 0,
-                      "endColumnIndex": 7},
+                      "endColumnIndex": len(VISIBLE_HEADERS)},
             "cell": {"userEnteredFormat": {"textFormat": {"strikethrough": True}}},
             "fields": "userEnteredFormat.textFormat.strikethrough"}}))
         ops.append((row, {"updateCells": {
             "range": {"sheetId": gid[tab], "startRowIndex": row - 1,
-                      "endRowIndex": row, "startColumnIndex": 10,
-                      "endColumnIndex": 11},
+                      "endRowIndex": row, "startColumnIndex": origin_col,
+                      "endColumnIndex": origin_col + 1},
             "rows": [{"values": [{"userEnteredValue":
                                   {"stringValue": "auto_edited"}}]}],
             "fields": "userEnteredValue"}}))
@@ -1213,8 +1278,8 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
         from services.project_status_sheet import new_row_format_requests
         from services.project_status_rows import KIND_ACTION
 
-        act_col = ALL_HEADERS.index("Action")
-        kind_col = ALL_HEADERS.index("_kind")
+        act_col = ALL_HEADERS.index(COL_ACTION)
+        kind_col = ALL_HEADERS.index(COL_KIND)
         for offset, new_row in enumerate(rows):
             # A project row must NOT get the action-row treatment (checkbox,
             # date validation, bold reset) — it needs its block fence instead.
@@ -1239,6 +1304,87 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
         logger.error(f"[ps-reconcile] structural batch failed: {e}")
         return {**out, "structural_error": str(e)[:120]}
     return out
+
+
+async def renumber_blocks(spreadsheet_id: str, tabs: list) -> dict:
+    """Give every project row a contiguous 1,2,3… within its own tab.
+
+    `#` used to show `canonical_projects.display_order` — a sort key with
+    deliberate gaps (10/20/30/90) written once by the seed and never maintained.
+    On the sheet it read as an arbitrary number that skipped values and did not
+    match the order of the blocks after anything moved, so it carried no
+    meaning to the person using the file.
+
+    Recomputed here rather than at build time because it is a property of where
+    the blocks SIT, and they move: drag a block, and it renumbers overnight.
+
+    Runs AFTER the structural batch, on a fresh read — inserts and deletes have
+    already changed the row numbers by this point, so planning it earlier would
+    address the wrong rows. Writes only column A of PROJECT rows, and only where
+    the value differs, so a tab that is already correct costs nothing.
+    """
+    from services.google_sheets import sheets_service
+    from services.project_status_rows import (
+        COL_NUM, SYSTEM_PROJECT, HUMAN_PROJECT, parse_tab)
+
+    tabs = sorted(set(tabs or []))
+    if not tabs:
+        return {"renumbered": 0}
+    try:
+        fresh = sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets().values().batchGet(
+                spreadsheetId=spreadsheet_id,
+                ranges=[f"'{t}'!{READ_RANGE}" for t in tabs]))
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning(f"[ps-reconcile] renumber read failed: {e}")
+        return {"renumbered": 0}
+
+    data = []
+    for tab, vr in zip(tabs, fresh.get("valueRanges", [])):
+        values = vr.get("values") or []
+        if not values:
+            # EMPTY READ ABORTS. A transient empty response would otherwise be
+            # read as "this tab has no projects", which writes nothing here but
+            # is the same reflex that has to hold everywhere.
+            continue
+        blocks, _orphans, cols = parse_tab(values)
+        col = cols.get(COL_NUM, 0)
+        n = 0
+        for block in blocks:
+            proj = block.project
+            if proj is None or proj.kind not in (SYSTEM_PROJECT, HUMAN_PROJECT):
+                continue
+            n += 1
+            if str(proj.values.get(COL_NUM, "")).strip() == str(n):
+                continue
+            data.append({
+                "range": f"'{tab}'!{_a1_cell(col, proj.row_number)}",
+                "values": [[n]],
+            })
+
+    if not data:
+        return {"renumbered": 0}
+    try:
+        sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"valueInputOption": "USER_ENTERED", "data": data}))
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning(f"[ps-reconcile] renumber write failed: {e}")
+        return {"renumbered": 0}
+    return {"renumbered": len(data)}
+
+
+def _a1_cell(col_index: int, row_number: int) -> str:
+    """0-based column index + 1-based row -> 'A4'. Two letters is plenty here."""
+    letters = ""
+    n = col_index
+    while True:
+        letters = chr(ord("A") + n % 26) + letters
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return f"{letters}{row_number}"
 
 
 def _sheet_ids(sheets_service, spreadsheet_id: str) -> dict:
@@ -1433,6 +1579,13 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
                        or plan.new_blocks):
         applied.update(await _apply_structural(plan, spreadsheet_id))
 
+    # 4.4a Renumber. Every tab we read, not only the ones with structural work —
+    #      dragging a block changes the numbering without producing a single
+    #      insert or delete, and that is the common case.
+    if structural:
+        applied.update(await renumber_blocks(spreadsheet_id,
+                                             list(plan.fingerprints)))
+
     # 4.4b Drop the snapshots of rows the structural pass removed. Only after
     #      the batch succeeded — dropping a snapshot for a row that is still
     #      there would make the next cycle treat that row as having no merge
@@ -1461,7 +1614,8 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
                     task_id=row_id, sheet_row=row_number,
                     status=values.get("status"),
                     deadline=parse_human_date(values.get("deadline")),
-                    priority=None, assignee=values.get("assignee"),
+                    priority=values.get("priority"),
+                    assignee=values.get("assignee"),
                     title=values.get("title"), label=values.get("label"),
                     entity_type="ps_action", notes=values.get("notes"),
                     sheet_tab=tab)

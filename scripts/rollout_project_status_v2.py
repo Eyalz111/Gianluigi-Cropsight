@@ -120,7 +120,8 @@ def seed_snapshots(sid: str) -> dict:
     # Comparing against the raw value skipped every action row on the first
     # cutover run — caught by the written-vs-read-back check.
     from services.project_status_rows import (
-        SYSTEM_ACTION, parse_tab, strip_provenance,
+        COL_ACTION, COL_COMMENTS, COL_DATE, COL_PRIORITY, COL_RESP, COL_TOPIC,
+        PRIORITY_TO_DB, SYSTEM_ACTION, parse_tab, strip_provenance,
     )
 
     meta = sheets_service._execute_with_retry(
@@ -170,13 +171,17 @@ def seed_snapshots(sid: str) -> dict:
                     # The checkbox, not tasks.status: the snapshot records what
                     # the CELL said, so a later tick reads as a change.
                     status="done" if row.checked else "pending",
-                    deadline=parse_human_date(row.values.get("Date")),
-                    priority=None,
-                    assignee=row.values.get("Resp."),
-                    title=strip_provenance(row.values.get("Action")),
-                    label=row.values.get("Subject"),
+                    deadline=parse_human_date(row.values.get(COL_DATE)),
+                    # The SHEET spelling maps back to the stored letter, so a
+                    # seeded snapshot compares equal on the next cycle instead
+                    # of reading as a divergence on every single row.
+                    priority=PRIORITY_TO_DB.get(
+                        str(row.values.get(COL_PRIORITY) or "").strip().lower()),
+                    assignee=row.values.get(COL_RESP),
+                    title=strip_provenance(row.values.get(COL_ACTION)),
+                    label=row.values.get(COL_TOPIC),
                     entity_type="ps_action",
-                    notes=row.values.get("Comments"),
+                    notes=row.values.get(COL_COMMENTS),
                     sheet_tab=tab,
                 )
                 out["actions" if ok else "failed"] += 1

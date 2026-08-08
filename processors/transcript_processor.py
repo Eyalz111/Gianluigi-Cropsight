@@ -711,8 +711,8 @@ async def extract_structured_data(
             is_participant = 1 if any(
                 name in assignee for name in participant_names_lower if name
             ) else 0
-            priority_rank = {"H": 0, "M": 1, "L": 2}.get(t.get("priority", "M"), 1)
-            return (-is_participant, priority_rank)
+            from models.schemas import priority_rank
+            return (-is_participant, priority_rank(t.get("priority")))
 
         all_open.sort(key=task_sort_key)
         existing_tasks = all_open[:30]

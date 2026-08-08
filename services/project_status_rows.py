@@ -7,10 +7,10 @@ Analogue of `services/gantt_rows.py`, which plays the same role for the Gantt.
 
 LAYOUT — a project row, then its action rows, then the next project:
 
-    A #  B Subject  C Action  D To do  E Date  F Resp.  G Comments │ H..L hidden
-    1    Kenya      (blank)   <objective>  12/08  Paolo   <notes>  │ P  p-a1f  p-a1f
-    [ ]             Chase NCPB…            15/08  Paolo            │ A  t-9c2  p-a1f
-    2    Italy      …                                              │ P  p-e3d  p-e3d
+    A #  B Project  C Topic  D Action  E To do  F Date  G Resp.  H Priority  I Comments │ hidden
+    1    Kenya                          <objective>  12/08  Paolo                <notes>  │ P p-a1f
+    [ ]           NCPB      Chase…                   15/08  Paolo   H                     │ A t-9c2
+    2    Italy                          …                                                 │ P p-e3d
 
 Two rules the rest of the engine leans on:
 
@@ -24,8 +24,13 @@ Two rules the rest of the engine leans on:
    Same instinct as gantt_rows.resolve_row_by_topic rescanning rather than
    trusting a stored row number.
 
+3. **The kind of a row is DECLARED.** `Project` filled -> a project. `Action`
+   filled -> an action. Both filled is AMBIGUOUS and is reported, never
+   guessed. Until 2026-08-09 this was inferred from whether the cell beside
+   `Subject` happened to be blank.
+
 Column A does double duty: the `#` for project rows, a done CHECKBOX for action
-rows. That is what keeps the sheet at the 7 visible columns of the template.
+rows.
 """
 
 import hashlib
@@ -34,15 +39,38 @@ from dataclasses import dataclass, field
 
 # Visible columns — the template, unchanged.
 COL_NUM = "#"
-COL_SUBJECT = "Subject"
+# THE KIND OF A ROW IS DECLARED, NOT INFERRED. Until 2026-08-09 `Subject` meant
+# the project name when `Action` was empty and the topic when it was not — the
+# same column creating a project or tagging a task depending on whether the cell
+# beside it happened to be blank. Eyal hit it: "AWS expected expenses" became a
+# project when he meant an action, and his verdict was "i prefer solve those
+# stuff well in advance and not go with such a not robust solution".
+#
+# A dedicated column makes it structural. `Project` filled -> project row.
+# `Action` filled -> action row. Nothing to infer, and a row with both is an
+# error we can report rather than a guess we have to make.
+COL_PROJECT = "Project"
+# Renamed from `Subject`: it already meant the topic on action rows, and
+# "Subject" sitting beside "Project" reads as a synonym.
+COL_TOPIC = "Topic"
 COL_ACTION = "Action"
 COL_TODO = "To do"
 COL_DATE = "Date"
 COL_RESP = "Resp."
+# Brought over from the Tasks tab — one of the two reasons that tab still had a
+# reason to exist. 'Urgent' is new; L/M/H already exist on tasks.priority.
+COL_PRIORITY = "Priority"
 COL_COMMENTS = "Comments"
 
-VISIBLE_HEADERS = [COL_NUM, COL_SUBJECT, COL_ACTION, COL_TODO,
-                   COL_DATE, COL_RESP, COL_COMMENTS]
+VISIBLE_HEADERS = [COL_NUM, COL_PROJECT, COL_TOPIC, COL_ACTION, COL_TODO,
+                   COL_DATE, COL_RESP, COL_PRIORITY, COL_COMMENTS]
+
+PRIORITIES = ("Urgent", "H", "M", "L")
+# Sheet value -> tasks.priority. Stored uppercase-single-letter as today, with
+# 'U' for urgent so the existing H/M/L ordering logic keeps working.
+PRIORITY_TO_DB = {"urgent": "U", "u": "U", "h": "H", "high": "H",
+                  "m": "M", "medium": "M", "l": "L", "low": "L"}
+PRIORITY_TO_SHEET = {"U": "Urgent", "H": "H", "M": "M", "L": "L"}
 
 # Hidden, system-owned. Named with a leading underscore so they read as
 # machinery if anyone unhides them.
@@ -68,6 +96,9 @@ SYSTEM_ACTION = "system_action"
 HUMAN_ACTION = "human_action"
 HUMAN_PROJECT = "human_project"
 INCOMPLETE = "incomplete"
+# Project AND Action both filled — the one case the declared rule cannot
+# settle. Reported, never guessed.
+AMBIGUOUS = "ambiguous"
 SPACER = "spacer"
 
 # The header block occupies rows 1-3 (title / distribution / headers); body
@@ -104,6 +135,29 @@ def resolve_columns(header_row: list) -> dict:
     for default_idx, name in enumerate(ALL_HEADERS):
         found.setdefault(name, default_idx)
     return found
+
+
+def unresolved_columns(header_row: list) -> list:
+    """Headers the sheet does NOT declare — the layout-mismatch guard.
+
+    `resolve_columns` falls back to the canonical position for anything it
+    cannot find, which is the right behaviour for ONE renamed header and
+    catastrophic for a WHOLE DIFFERENT LAYOUT. Reading the 12-column sheet with
+    the 14-column model resolves `Topic` to the old `Action` column and
+    `Priority` to the old `_kind` — so the engine would compare an action's text
+    against a task's label and try to pull "A" in as a priority, on every row.
+
+    So the caller checks first: if a tab does not declare the layout this build
+    expects, it is skipped entirely and says so. That covers the deploy window
+    of this migration and, permanently, anyone who renames a header by hand.
+    """
+    def norm(s) -> str:
+        text = str(s or "").strip().lower()
+        stripped = re.sub(r"[^a-z0-9]", "", text)
+        return stripped or text
+
+    present = {norm(c) for c in (header_row or []) if norm(c)}
+    return [name for name in ALL_HEADERS if norm(name) not in present]
 
 
 def cell(row: list, cols: dict, name: str) -> str:
@@ -152,6 +206,59 @@ def format_provenance(origin: str, source: str = "", when: str = "",
     if closed:
         bits.append(f"done {closed}")
     return "[" + " · ".join(bits) + "]"
+
+
+def _plain_date(value) -> str:
+    """Default date renderer — blank for empty, never the string 'None'."""
+    return "" if value in (None, "", "None") else str(value)
+
+
+def project_row_values(project: dict, num="", fmt_date=_plain_date) -> list:
+    """A project row in ALL_HEADERS order.
+
+    THE ONE PLACE A ROW IS SHAPED. Three call sites used to hand-build this
+    literal — the pack builder, the injection path and the missing-block path —
+    and they drifted: the builder left `Subject` empty while the database held a
+    label, so the merge saw a divergence and queued 37 phantom cell writes on a
+    sheet nobody had touched. Adding a column made that a certainty rather than a
+    risk, so the literal now lives here, beside the header list it has to match.
+    """
+    pid = project.get("id") or ""
+    return [
+        num,                                  # '#' — set by the structural pass
+        project.get("name") or "",            # the declaring cell
+        "",                                   # Topic: action rows only
+        "",                                   # Action: action rows only
+        project.get("objective") or "",
+        fmt_date(project.get("target_date")),
+        project.get("owner") or "",
+        "",                                   # Priority: action rows only
+        project.get("notes") or "",
+        KIND_PROJECT, pid, pid, "", "",
+    ]
+
+
+def action_row_values(task: dict, parent_uid: str = "", marker: str = "",
+                      fmt_date=_plain_date, checked: bool = False) -> list:
+    """An action row in ALL_HEADERS order. See project_row_values."""
+    title = (task.get("title") or "").strip()
+    return [
+        checked,                              # column A is the done checkbox
+        "",                                   # Project: project rows only
+        task.get("label") or "",
+        f"{title} {marker}".strip() if marker else title,
+        "",                                   # To do belongs to the project row
+        fmt_date(task.get("deadline")),
+        task.get("assignee") or "",
+        # Blank when the task carries no priority, NOT a default 'M'. Showing a
+        # value the database does not hold makes the merge see a divergence and
+        # push it back every cycle, and it tells the reader the work has been
+        # triaged when nobody has triaged it.
+        PRIORITY_TO_SHEET.get(str(task.get("priority") or "").strip().upper(), ""),
+        task.get("notes") or "",
+        KIND_ACTION, task.get("id") or "", parent_uid or "",
+        task.get("_origin") or ORIGIN_AUTO, task.get("meeting_id") or "",
+    ]
 
 
 def parse_provenance(text: str) -> str | None:
@@ -219,19 +326,31 @@ def classify_row(raw: list, cols: dict) -> str:
         return SYSTEM_ACTION
 
     action = cell(raw, cols, COL_ACTION)
-    subject = cell(raw, cols, COL_SUBJECT)
+    project = cell(raw, cols, COL_PROJECT)
     todo = cell(raw, cols, COL_TODO)
     date = cell(raw, cols, COL_DATE)
     resp = cell(raw, cols, COL_RESP)
     comments = cell(raw, cols, COL_COMMENTS)
+    priority = cell(raw, cols, COL_PRIORITY)
 
+    # DECLARED, NOT INFERRED. `Project` filled means a project; `Action` filled
+    # means an action. The old rule keyed on Subject-with-an-empty-Action, so
+    # the same column created a project or tagged a task depending on whether
+    # the cell beside it happened to be blank — which is how "AWS expected
+    # expenses" became a project when Eyal meant an action. [2026-08-09]
+    if project and action:
+        # Genuinely ambiguous, so it is reported rather than guessed. Guessing
+        # here is exactly the behaviour this change exists to remove.
+        return AMBIGUOUS
     if action:
         return HUMAN_ACTION
-    if subject or todo:
+    if project:
         return HUMAN_PROJECT
-    if date or resp or comments:
+    if todo or date or resp or comments or priority:
         # She started a row and stopped. Counted and surfaced, never written —
-        # a task with no title is worse than no task.
+        # a task with no title is worse than no task. `To do` counts as started
+        # but not finished: without a Project it names no project, and without
+        # an Action it is not a step.
         return INCOMPLETE
     return SPACER
 

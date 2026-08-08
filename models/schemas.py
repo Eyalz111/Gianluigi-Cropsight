@@ -45,9 +45,30 @@ class TaskStatus(str, Enum):
 
 class TaskPriority(str, Enum):
     """Priority level of a task — its IMPORTANCE (long-term/business impact)."""
+    # Above HIGH. Added 2026-08-09 with the Priority column on the Project Status
+    # sheet — the Tasks tab had four levels and this sheet replaces it, so the
+    # vocabulary had to grow rather than lose a level in the move. `tasks.priority`
+    # is plain TEXT with no CHECK, so no migration was needed.
+    URGENT = "U"
     HIGH = "H"
     MEDIUM = "M"
     LOW = "L"
+
+
+# Sort weight — LOW NUMBER FIRST. Defined once because six separate call sites
+# had their own `{"H": 0, "M": 1, "L": 2}` literal; each of them would have
+# silently ranked a new 'U' as medium, so Urgent work would have sorted BELOW
+# High in the morning brief, the digest and every Telegram list.
+PRIORITY_RANK = {"U": 0, "H": 1, "M": 2, "L": 3}
+# What an unknown/blank priority scores. Medium, not last: an untriaged task
+# should not sink below work explicitly marked low.
+PRIORITY_RANK_DEFAULT = PRIORITY_RANK["M"]
+
+
+def priority_rank(value) -> int:
+    """Sort weight for a task priority, tolerant of blanks and casing."""
+    return PRIORITY_RANK.get(str(value or "").strip().upper(),
+                             PRIORITY_RANK_DEFAULT)
 
 
 class TaskUrgency(str, Enum):

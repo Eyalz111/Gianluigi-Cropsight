@@ -674,6 +674,7 @@ class TaskReminderScheduler:
                 "overdue": 0,
             },
             "by_priority": {
+                "U": 0,
                 "H": 0,
                 "M": 0,
                 "L": 0,
@@ -737,6 +738,7 @@ class TaskReminderScheduler:
             f"  - Completed: {summary['by_status']['done']}",
             "",
             "*By Priority:*",
+            f"  - Urgent: {summary['by_priority']['U']}",
             f"  - High: {summary['by_priority']['H']}",
             f"  - Medium: {summary['by_priority']['M']}",
             f"  - Low: {summary['by_priority']['L']}",
