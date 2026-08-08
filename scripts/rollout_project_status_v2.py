@@ -42,7 +42,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.settings import settings  # noqa: E402
+from processors.project_status_reconcile import READ_RANGE  # noqa: E402
+from services.project_status_rows import (  # noqa: E402
+    ALL_HEADERS, COL_KIND, KIND_ACTION, KIND_PROJECT,
+)
 from services.supabase_client import supabase_client  # noqa: E402
+
+# The `_kind` cell's position, derived. It was index 7 until Project and
+# Priority were added on 2026-08-09 and became 9; a hard-coded 7 here reported
+# "0 projects, 0 actions" and the written-vs-read-back check would have compared
+# two zeros and passed.
+KIND_IDX = ALL_HEADERS.index(COL_KIND)
 
 
 def preflight() -> tuple[bool, list[str]]:
@@ -98,8 +108,11 @@ def preflight() -> tuple[bool, list[str]]:
 def backup(sid: str) -> str:
     """files.copy the workbook to a dated name. Returns the new file id."""
     from services.google_drive import drive_service
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    name = f"CropSight — Projects Status (pre-v2 backup {stamp})"
+    # Dated and timed. The script is re-run for each layout change, so a
+    # date-only name collides and "pre-v2" stops being true after the first
+    # cutover — what matters is which state the copy holds.
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H%M")
+    name = f"CropSight — Projects Status (backup before rebuild {stamp} UTC)"
     created = drive_service._execute_with_retry(
         lambda: drive_service.service.files().copy(
             fileId=sid, body={"name": name},
@@ -120,8 +133,8 @@ def seed_snapshots(sid: str) -> dict:
     # Comparing against the raw value skipped every action row on the first
     # cutover run — caught by the written-vs-read-back check.
     from services.project_status_rows import (
-        COL_ACTION, COL_COMMENTS, COL_DATE, COL_PRIORITY, COL_RESP, COL_TOPIC,
-        PRIORITY_TO_DB, SYSTEM_ACTION, parse_tab, strip_provenance,
+        COL_ACTION, COL_COMMENTS, COL_DATE, COL_PRIORITY, COL_RESP, COL_TODO,
+        COL_TOPIC, PRIORITY_TO_DB, SYSTEM_ACTION, parse_tab, strip_provenance,
     )
 
     meta = sheets_service._execute_with_retry(
@@ -140,7 +153,7 @@ def seed_snapshots(sid: str) -> dict:
     for tab in tabs:
         grid = sheets_service._execute_with_retry(
             lambda t=tab: sheets_service.service.spreadsheets().values().get(
-                spreadsheetId=sid, range=f"'{t}'!A1:L2000")).get("values", [])
+                spreadsheetId=sid, range=f"'{t}'!{READ_RANGE}")).get("values", [])
         blocks, orphans, _ = parse_tab(grid)
 
         for block in blocks:
@@ -152,12 +165,12 @@ def seed_snapshots(sid: str) -> dict:
                 project_id=proj.uid,
                 sheet_row=proj.row_number,
                 sheet_tab=tab,
-                objective=proj.values.get("To do"),
+                objective=proj.values.get(COL_TODO),
                 # target_date is a DATE column: the DD/MM/YYYY cell must be
                 # normalised, exactly as sheets_sync does for the task surface.
-                target_date=parse_human_date(proj.values.get("Date")),
-                owner=proj.values.get("Resp."),
-                notes=proj.values.get("Comments"),
+                target_date=parse_human_date(proj.values.get(COL_DATE)),
+                owner=proj.values.get(COL_RESP),
+                notes=proj.values.get(COL_COMMENTS),
             )
             out["projects" if ok else "failed"] += 1
 
@@ -222,13 +235,15 @@ async def run(apply_it: bool, skip_backup: bool = False) -> int:
         return 1
 
     pack = build_status_blocks()
-    projects = sum(1 for rows in pack.values() for r in rows if r[7] == "P")
-    actions = sum(1 for rows in pack.values() for r in rows if r[7] == "A")
+    projects = sum(1 for rows in pack.values() for r in rows
+                   if r[KIND_IDX] == KIND_PROJECT)
+    actions = sum(1 for rows in pack.values() for r in rows
+                  if r[KIND_IDX] == KIND_ACTION)
     print(f"\n  WOULD WRITE  {projects} project blocks, {actions} actions, "
           f"{len(pack)} tabs")
     for area, rows in pack.items():
-        p = sum(1 for r in rows if r[7] == "P")
-        a = sum(1 for r in rows if r[7] == "A")
+        p = sum(1 for r in rows if r[KIND_IDX] == KIND_PROJECT)
+        a = sum(1 for r in rows if r[KIND_IDX] == KIND_ACTION)
         print(f"      {p:3} projects  {a:3} actions   {area}")
 
     if not apply_it:
@@ -262,6 +277,15 @@ async def run(apply_it: bool, skip_backup: bool = False) -> int:
           f"tabs: {', '.join(result['tabs'])}")
     if result.get("removed_tabs"):
         print(f"      removed stale v1 tab(s): {', '.join(result['removed_tabs'])}")
+
+    print("\n  3b. NUMBER THE BLOCKS")
+    # The builder deliberately leaves `#` blank — the number is contiguous per
+    # tab and depends on where the blocks SIT, which only a read-back knows.
+    # Done here rather than left for 02:00 so the file is not handed over with
+    # an empty first column.
+    from processors.project_status_reconcile import renumber_blocks
+    numbered = await renumber_blocks(sid, result["tabs"])
+    print(f"      {numbered['renumbered']} project row(s) numbered")
 
     print("\n  4. SEED SNAPSHOTS (read-back)")
     seeded = seed_snapshots(sid)
