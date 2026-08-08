@@ -460,45 +460,6 @@ class TestSlotGate:
             assert psr.structural_allowed(None) is False
 
 
-class TestClosedRows:
-    def test_a_plain_finished_row_is_removed(self):
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True))},
-            tasks=[_db_task(status="done")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done"}},
-        )
-        assert [r[2] for r in plan.row_deletes] == ["t1"]
-        assert plan.strikes == []
-
-    def test_an_annotated_finished_row_is_kept_and_struck(self):
-        """Her note is the only copy — deleting the row would throw it away."""
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True, notes="waiting on the bank"))},
-            tasks=[_db_task(status="done", notes="waiting on the bank")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done",
-                              "notes": "waiting on the bank"}},
-        )
-        assert [r[2] for r in plan.strikes] == ["t1"]
-        assert plan.row_deletes == []
-
-    def test_a_row_ticked_this_very_cycle_is_left_alone(self):
-        """She would watch the line vanish a second after clicking it."""
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True))},
-            tasks=[_db_task(status="pending")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
-        )
-        assert plan.task_updates["t1"]["status"] == "done"
-        assert plan.row_deletes == [] and plan.strikes == []
-
-    def test_an_open_row_is_never_removed(self):
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow())},
-            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
-        )
-        assert plan.row_deletes == [] and plan.strikes == []
-
-
 class TestAutoInject:
     def _inject(self, tasks, blocks_grid, act_snaps=None, **flags):
         settings_patches = {"PROJECT_STATUS_AUTO_INJECT_ENABLED": True, **flags}
@@ -1010,32 +971,6 @@ class TestDeletedProjectRowDoesNotRefile:
         assert writes and writes[0][3] == "p2"
 
 
-class TestAnnotatedIgnoresBookkeeping:
-    def test_manual_set_at_alone_does_not_make_a_row_annotated(self):
-        """Prefix-matching "manual_" caught the timestamp and source columns,
-        so virtually every closed task counted as annotated and nothing was
-        ever removed."""
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True))},
-            tasks=[_db_task(status="done", manual_set_at="2026-08-08T10:00:00Z",
-                            manual_set_source="sheet_edit")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done",
-                              "snapshot_at": "2026-08-08T10:00:00Z"}},
-        )
-        assert [r[2] for r in plan.row_deletes] == ["t1"]
-        assert plan.strikes == []
-
-    def test_a_real_sticky_flag_still_keeps_the_row(self):
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True))},
-            tasks=[_db_task(status="done", manual_assignee=True)],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done",
-                              "snapshot_at": "2026-08-08T10:00:00Z"}},
-        )
-        assert [r[2] for r in plan.strikes] == ["t1"]
-        assert plan.row_deletes == []
-
-
 class TestProjectsGetABlock:
     """Nothing else could add one. write_project_status_blocks is only reached
     from the one-shot rollout script, the weekly slot writes nothing, and
@@ -1096,11 +1031,14 @@ class TestClosedRowDropsItsSnapshot:
         )
         assert plan.row_deletes and plan.drop_snapshots == ["t1"]
 
-    def test_an_annotated_row_keeps_its_snapshot(self):
+    def test_an_open_row_keeps_its_snapshot(self):
+        """Only a REMOVED row drops its base. (A row carrying her comment used
+        to be kept and struck; since 2026-08-08 every finished row leaves, so
+        the open case is what distinguishes the two.)"""
         plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True, notes="waiting"))},
-            tasks=[_db_task(status="done", notes="waiting")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+            {TAB: _grid(_prow(), _arow(notes="waiting"))},
+            tasks=[_db_task(status="in_progress", notes="waiting")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
                               "notes": "waiting",
                               "snapshot_at": "2026-08-08T10:00:00Z"}},
         )
@@ -1209,52 +1147,6 @@ class TestStructuralApplyReachesTheSheet:
         assert starts == sorted(starts, reverse=True)
 
 
-class TestTickingDoesNotMakeARowUnremovable:
-    """Ticking the box calls mark_task_field_manual(task, 'status').
-
-    Counting manual_status as annotation therefore made EVERY completed row
-    annotated, so nothing was ever removed — the exact opposite of the intent,
-    and invisible unless you tick something and wait for a structural pass.
-    "Annotated" must mean "she added something that would be LOST if this row
-    went away"; a tick adds nothing beyond `done`, which is already in the DB.
-    """
-
-    def test_a_row_finished_by_ticking_is_removed(self):
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True))},
-            tasks=[_db_task(status="done", manual_status=True,
-                            manual_set_at="2026-08-08T00:00:00Z",
-                            manual_set_source="sheet_edit")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done",
-                              "snapshot_at": "2026-08-08T10:00:00Z"}},
-        )
-        assert [r[2] for r in plan.row_deletes] == ["t1"]
-        assert plan.strikes == []
-
-    def test_a_ticked_row_she_also_commented_on_is_kept(self):
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True, notes="waiting on the bank"))},
-            tasks=[_db_task(status="done", manual_status=True,
-                            notes="waiting on the bank")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done",
-                              "notes": "waiting on the bank",
-                              "snapshot_at": "2026-08-08T10:00:00Z"}},
-        )
-        assert [r[2] for r in plan.strikes] == ["t1"]
-        assert plan.row_deletes == []
-
-    def test_a_ticked_row_whose_owner_she_set_is_kept(self):
-        plan = _plan(
-            {TAB: _grid(_prow(), _arow(checked=True, resp="Nechama Tik"))},
-            tasks=[_db_task(status="done", manual_status=True,
-                            manual_assignee=True, assignee="Nechama Tik")],
-            act_snaps={"t1": {"title": "Ship the API", "status": "done",
-                              "assignee": "Nechama Tik",
-                              "snapshot_at": "2026-08-08T10:00:00Z"}},
-        )
-        assert [r[2] for r in plan.strikes] == ["t1"]
-
-
 class TestCrossTabMove:
     """Eyal moved a task from Product & Technology into the Italy block on
     Sales in his first real session. The per-tab parent check made that look
@@ -1297,3 +1189,65 @@ class TestCrossTabMove:
         plan = self._run("p_gone")
         assert "project_id" not in plan.task_updates.get("t1", {})
         assert plan.counters["orphaned_by_deleted_project"] == 1
+
+
+class TestEveryFinishedRowLeavesTheSheet:
+    """A tick is an instruction, not a suggestion.
+
+    Rows carrying anything of hers used to be kept and struck through instead,
+    on the reasoning that removing one would throw away the only copy. That was
+    wrong: every column on an action row persists to the database, so nothing
+    on the row exists only on the row. In practice setting a date or an owner is
+    the normal thing to do before finishing something, so almost every completed
+    row qualified and the sheet accumulated finished work.
+    """
+
+    def _closed(self, **task_kw):
+        return _plan(
+            {TAB: _grid(_prow(), _arow(checked=True, **{
+                k: v for k, v in task_kw.pop("row", {}).items()}))},
+            tasks=[_db_task(status="done", **task_kw)],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+
+    def test_a_plain_finished_row_is_removed(self):
+        plan = self._closed()
+        assert [r[2] for r in plan.row_deletes] == ["t1"]
+        assert plan.strikes == []
+
+    def test_a_row_with_her_comment_is_ALSO_removed(self):
+        """tasks.notes already holds it — the row is not the only copy."""
+        plan = self._closed(notes="waiting on the bank",
+                            row={"notes": "waiting on the bank"})
+        assert [r[2] for r in plan.row_deletes] == ["t1"]
+        assert plan.strikes == []
+
+    def test_a_row_whose_owner_and_date_she_set_is_ALSO_removed(self):
+        plan = self._closed(manual_assignee=True, manual_deadline=True,
+                            manual_status=True)
+        assert [r[2] for r in plan.row_deletes] == ["t1"]
+        assert plan.strikes == []
+
+    def test_its_snapshot_goes_with_it_so_re_opening_works(self):
+        plan = self._closed(manual_assignee=True)
+        assert plan.drop_snapshots == ["t1"]
+
+    def test_a_row_ticked_this_very_cycle_is_left_for_next_time(self):
+        """She would watch the line vanish under the cursor."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="pending")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert plan.task_updates["t1"]["status"] == "done"
+        assert plan.row_deletes == [] and plan.strikes == []
+
+    def test_an_open_row_is_never_removed(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert plan.row_deletes == [] and plan.strikes == []

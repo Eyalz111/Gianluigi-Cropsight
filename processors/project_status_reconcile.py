@@ -540,39 +540,23 @@ def build_plan(grids: dict) -> Plan:
     return plan
 
 
-def _annotated(row, db_task: dict) -> bool:
-    """Has a human left anything of their own on this auto row?
-
-    Comments is hers by definition, `auto_edited` records a previous cycle's
-    finding, and any manual_* flag means somebody set a field by hand on some
-    surface. Any of those makes the row worth keeping when the work closes —
-    deleting it would throw away a note nobody else has a copy of.
-    """
-    if str(row.values.get(COL_COMMENTS) or "").strip():
-        return True
-    if row.origin == "auto_edited":
-        return True
-    # `v is True` on purpose. Prefix-matching "manual_" also catches the
-    # bookkeeping columns manual_set_at and manual_set_source, which are
-    # timestamps and strings — truthy on almost every task that has ever been
-    # touched. That made virtually every closed row count as annotated.
-    # [2026-08-08 code review]
-    #
-    # manual_status is excluded for a different reason: TICKING THE BOX SETS
-    # IT. That is the normal way to finish work, so counting it made every
-    # completed row annotated and nothing was ever removed — the exact opposite
-    # of the intent, and invisible unless you actually tick something and wait
-    # for the next structural pass. "Annotated" has to mean "she added
-    # something that would be LOST if this row went away". A tick adds no
-    # information beyond `done`, which is already in the database and on the
-    # Tasks tab. A comment, an edited title, a date she chose — those are hers
-    # and are worth keeping the row for. [2026-08-08]
-    return any(k.startswith("manual_") and v is True and k != "manual_status"
-               for k, v in (db_task or {}).items())
-
-
 def _plan_closed_rows(parsed: dict, db_tasks: dict, plan: Plan) -> None:
-    """Rows whose task is finished: remove the plain ones, keep the annotated.
+    """A finished row leaves the sheet. All of them, no exceptions.
+
+    There used to be an exception: a row carrying anything of hers — a comment,
+    a date she chose — was kept and struck through instead, on the reasoning
+    that removing it would throw away the only copy. That reasoning was simply
+    wrong. EVERY column on an action row persists to the database: Date ->
+    deadline, Resp. -> assignee, Comments -> notes, Action -> title, Subject ->
+    label. Nothing on the row exists only on the row, so removing it loses
+    nothing and the exception was protecting data that was never at risk.
+
+    Its actual effect was the opposite of the intent. Setting a date or an owner
+    is the NORMAL thing to do before finishing a task, so in practice almost
+    every completed row qualified, stayed, and accumulated. Eyal, after his
+    first session: "I do want to have an ability to tick something and wait for
+    the last schedule that it will disappear automatically." A tick is an
+    instruction, not a suggestion. [2026-08-08]
 
     Only for tasks ALREADY closed in the database. A row ticked during this very
     cycle is deliberately left alone — she would watch the line vanish under the
@@ -592,18 +576,15 @@ def _plan_closed_rows(parsed: dict, db_tasks: dict, plan: Plan) -> None:
                 task = db_tasks.get(row.uid)
                 if not task or _normalize(task.get("status")) not in _CLOSED:
                     continue
-                if _annotated(row, task):
-                    plan.strikes.append((tab, row.row_number, row.uid))
-                else:
-                    # The snapshot goes WITH the row. Left behind, a task that
+                # The snapshot goes WITH the row. Left behind, a task that
                     # is later re-opened has a snapshot but no sheet row:
-                    # _detect_suppressions reads that as "she deleted it" and
-                    # sets ps_suppressed, while _plan_injections refuses to
-                    # re-add anything that already has a snapshot. The task
-                    # becomes permanently invisible with no way back short of
-                    # manual DB surgery. [2026-08-08 code review]
-                    plan.row_deletes.append((tab, row.row_number, row.uid))
-                    plan.drop_snapshots.append(row.uid)
+                # _detect_suppressions reads that as "she deleted it" and
+                # sets ps_suppressed, while _plan_injections refuses to
+                # re-add anything that already has a snapshot. The task
+                # becomes permanently invisible with no way back short of
+                # manual DB surgery. [2026-08-08 code review]
+                plan.row_deletes.append((tab, row.row_number, row.uid))
+                plan.drop_snapshots.append(row.uid)
 
 
 def _plan_injections(parsed: dict, db_tasks: dict, act_snaps: dict,
