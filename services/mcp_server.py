@@ -691,8 +691,9 @@ class MCPServer:
             description=(
                 "[PROPOSALS] List pending proposals awaiting your decision — knowledge "
                 "topic merges/assignments, task-field updates, decision supersessions, "
-                "Gantt row->topic tags. Optional type filter: knowledge|task|decision|"
-                "gantt_tag. Act on one with decide_proposal."
+                "Gantt row->topic tags, tasks that are really meetings. Optional type "
+                "filter: knowledge|task|decision|gantt_tag|project|question|meeting. "
+                "Act on one with decide_proposal."
             ),
         )
         async def get_proposals(type: str | None = None) -> dict:
@@ -705,6 +706,8 @@ class MCPServer:
                     types = ("topic_merge", "topic_assign")
                 elif type == "project":
                     types = ("project_new", "topic_project_link")
+                elif type == "meeting":
+                    types = ("task_is_a_meeting",)
                 elif type == "question":
                     types = ("question_resolved",)
                 elif type == "task":
@@ -807,9 +810,16 @@ class MCPServer:
 
                 # --- new canonical project (auto-learn) / question closure ---
                 if content_type in ("project_new", "topic_project_link",
-                                    "question_resolved"):
+                                    "question_resolved", "task_is_a_meeting"):
                     if content_type == "project_new":
                         from processors.project_learning import apply_project_proposal as _apply
+                    elif content_type == "task_is_a_meeting":
+                        # A task that is really a meeting needing booking. It
+                        # moves to the meetings pool and the task is CANCELLED,
+                        # never deleted — the citation trail is the point.
+                        from processors.meeting_shaped_tasks import (
+                            apply_meeting_shaped_proposal as _apply,
+                        )
                     elif content_type == "topic_project_link":
                         # A recurring TOPIC filed under the project its work
                         # already sits in — not a new entry in the vocabulary.

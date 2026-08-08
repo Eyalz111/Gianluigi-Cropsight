@@ -102,6 +102,7 @@ def run_qa_check() -> dict:
     report["checks"]["assignee_taxonomy"] = _check_assignee_taxonomy(report["issues"])
     report["checks"]["question_aging"] = _run_question_aging(report["issues"])
     report["checks"]["project_learning"] = _run_project_learning(report["issues"])
+    report["checks"]["meeting_shaped_tasks"] = _run_meeting_shaped_tasks(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -692,6 +693,34 @@ def _run_project_learning(issues: list[str]) -> dict:
             )
     except Exception as e:
         logger.warning(f"Project learning failed: {e}")
+    return result
+
+
+def _run_meeting_shaped_tasks(issues: list[str]) -> dict:
+    """Spot open tasks that are really meetings needing booking. [2026-08-09]
+
+    Rides the daily QA rather than earning its own scheduler: it is a cheap
+    deterministic scan over the open tasks that are already being read here, and
+    the output is a proposal Eyal reads with everything else.
+
+    Flag-gated OFF by default. It proposes, never moves — but a detector that
+    starts producing noise should be silenceable without a deploy.
+    """
+    result: dict = {"proposed": 0}
+    if not getattr(settings, "MEETING_SHAPED_TASKS_ENABLED", False):
+        return {"skipped": "MEETING_SHAPED_TASKS_ENABLED off"}
+    try:
+        from processors.meeting_shaped_tasks import propose_meeting_shaped_tasks
+
+        result.update(propose_meeting_shaped_tasks())
+        if result.get("titles"):
+            issues.append(
+                f"{len(result['titles'])} task(s) look like meetings that need "
+                "booking, awaiting your approval: "
+                + "; ".join(t[:45] for t in result["titles"][:3])
+            )
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning(f"Meeting-shaped task scan failed: {e}")
     return result
 
 

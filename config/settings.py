@@ -434,6 +434,15 @@ class Settings(BaseSettings):
         description="Verify the DB<->Sheet<->distribution chain after every meeting "
                     "distribution and in the daily QA sweep; alert Eyal on inconsistency."
     )
+    MEETING_SHAPED_TASKS_ENABLED: bool = Field(
+        default=False,
+        description="In the daily QA, propose open tasks that are really meetings "
+                    "needing booking ('Coordinate in-person meeting with the Calabria "
+                    "region president') for the follow-up meetings pool. Deterministic "
+                    "and proposal-only — it never moves a task — but off by default so "
+                    "a detector that starts producing noise is silenceable without a "
+                    "deploy."
+    )
     EMAIL_WATCHER_ENABLED: bool = Field(
         default=True,
         description="Run the Gmail watcher (approval replies + email Q&A auto-answer). "
