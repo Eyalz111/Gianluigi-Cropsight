@@ -1207,3 +1207,93 @@ class TestStructuralApplyReachesTheSheet:
         starts = [r["deleteDimension"]["range"]["startIndex"]
                   for r in reqs if "deleteDimension" in r]
         assert starts == sorted(starts, reverse=True)
+
+
+class TestTickingDoesNotMakeARowUnremovable:
+    """Ticking the box calls mark_task_field_manual(task, 'status').
+
+    Counting manual_status as annotation therefore made EVERY completed row
+    annotated, so nothing was ever removed — the exact opposite of the intent,
+    and invisible unless you tick something and wait for a structural pass.
+    "Annotated" must mean "she added something that would be LOST if this row
+    went away"; a tick adds nothing beyond `done`, which is already in the DB.
+    """
+
+    def test_a_row_finished_by_ticking_is_removed(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="done", manual_status=True,
+                            manual_set_at="2026-08-08T00:00:00Z",
+                            manual_set_source="sheet_edit")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert [r[2] for r in plan.row_deletes] == ["t1"]
+        assert plan.strikes == []
+
+    def test_a_ticked_row_she_also_commented_on_is_kept(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True, notes="waiting on the bank"))},
+            tasks=[_db_task(status="done", manual_status=True,
+                            notes="waiting on the bank")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "notes": "waiting on the bank",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert [r[2] for r in plan.strikes] == ["t1"]
+        assert plan.row_deletes == []
+
+    def test_a_ticked_row_whose_owner_she_set_is_kept(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True, resp="Nechama Tik"))},
+            tasks=[_db_task(status="done", manual_status=True,
+                            manual_assignee=True, assignee="Nechama Tik")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "assignee": "Nechama Tik",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert [r[2] for r in plan.strikes] == ["t1"]
+
+
+class TestCrossTabMove:
+    """Eyal moved a task from Product & Technology into the Italy block on
+    Sales in his first real session. The per-tab parent check made that look
+    identical to "the project row above me was deleted", so the move was
+    refused. The question is only ever "does the project this row claims still
+    exist ANYWHERE?" """
+
+    OTHER = "SALES & BUSINESS DEVELOPMENT"
+
+    def _grids(self, parent):
+        return {
+            TAB: _grid(_prow(uid="p1", name="MVP Delivery")),
+            self.OTHER: _grid(_prow(uid="p2", name="Italy"),
+                              _arow(uid="t1", parent=parent)),
+        }
+
+    def _run(self, parent):
+        return _plan(
+            self._grids(parent),
+            projects=[_db_project("p1", name="MVP Delivery"),
+                      _db_project("p2", name="Italy")],
+            tasks=[_db_task("t1", project_id="p1")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+
+    def test_a_task_moved_to_another_tab_is_repointed(self):
+        plan = self._run("p1")            # claims a project on the OTHER tab
+        assert plan.task_updates["t1"]["project_id"] == "p2"
+        assert plan.counters["reparented"] == 1
+        assert plan.counters["orphaned_by_deleted_project"] == 0
+
+    def test_its_parent_cell_is_rewritten_so_it_settles(self):
+        plan = self._run("p1")
+        writes = [w for w in plan.cell_writes if w[2] == COLS["_parent"]]
+        assert writes and writes[0][3] == "p2"
+
+    def test_a_parent_that_exists_nowhere_is_still_left_alone(self):
+        """The deleted-project-row case must keep working."""
+        plan = self._run("p_gone")
+        assert "project_id" not in plan.task_updates.get("t1", {})
+        assert plan.counters["orphaned_by_deleted_project"] == 1

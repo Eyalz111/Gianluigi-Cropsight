@@ -388,6 +388,14 @@ def build_plan(grids: dict) -> Plan:
     seen_projects: set = set()
     parsed: dict = {}
 
+    # Every project row present ANYWHERE in the workbook. The re-parent check
+    # needs this rather than a per-tab set, or a cross-tab move is refused.
+    all_project_uids: set = set()
+    for _grid in grids.values():
+        _blocks, _o, _c = parse_tab(_grid)
+        all_project_uids |= {b.project.uid for b in _blocks
+                             if b.project and b.project.uid}
+
     for tab, grid in grids.items():
         blocks, orphans, cols = parse_tab(grid)
         plan.fingerprints[tab] = tab_fingerprint(blocks, orphans)
@@ -419,11 +427,7 @@ def build_plan(grids: dict) -> Plan:
         # Only the TOPMOST occurrence of a uid is authoritative; the rest are a
         # paste and are left entirely alone this cycle.
         pasted = {id(r) for rows in dups.values() for r in rows[1:]}
-        # Which project rows still physically exist in this tab — the
-        # evidence that distinguishes "this row moved" from "the heading
-        # above it was deleted".
-        tab_project_uids = {b.project.uid for b in blocks
-                            if b.project and b.project.uid}
+        # NOTE: the workbook-wide set, not this tab's. See _handle_action.
 
         for block in blocks:
             proj = block.project
@@ -515,7 +519,7 @@ def build_plan(grids: dict) -> Plan:
                     continue
                 _handle_action(row, tab, parent_uid, db_tasks, act_snaps,
                                plan, assignees, seen_tasks, cols,
-                               tab_project_uids)
+                               all_project_uids)
 
         for row in orphans:
             plan.bump("orphans")
@@ -525,7 +529,7 @@ def build_plan(grids: dict) -> Plan:
                 # would be the worst possible behaviour.
                 _handle_action(row, tab, "", db_tasks, act_snaps, plan,
                                assignees, seen_tasks, cols,
-                               tab_project_uids)
+                               all_project_uids)
 
     _plan_missing_blocks(parsed, db_projects, seen_projects, plan)
     _detect_suppressions(act_snaps, seen_tasks, db_tasks, plan)
@@ -551,11 +555,19 @@ def _annotated(row, db_task: dict) -> bool:
     # `v is True` on purpose. Prefix-matching "manual_" also catches the
     # bookkeeping columns manual_set_at and manual_set_source, which are
     # timestamps and strings — truthy on almost every task that has ever been
-    # touched. That made virtually every closed row count as annotated, so
-    # nothing was ever removed and the sheet would fill with struck-out
-    # finished work. Only the real per-field booleans count.
+    # touched. That made virtually every closed row count as annotated.
     # [2026-08-08 code review]
-    return any(k.startswith("manual_") and v is True
+    #
+    # manual_status is excluded for a different reason: TICKING THE BOX SETS
+    # IT. That is the normal way to finish work, so counting it made every
+    # completed row annotated and nothing was ever removed — the exact opposite
+    # of the intent, and invisible unless you actually tick something and wait
+    # for the next structural pass. "Annotated" has to mean "she added
+    # something that would be LOST if this row went away". A tick adds no
+    # information beyond `done`, which is already in the database and on the
+    # Tasks tab. A comment, an edited title, a date she chose — those are hers
+    # and are worth keeping the row for. [2026-08-08]
+    return any(k.startswith("manual_") and v is True and k != "manual_status"
                for k, v in (db_task or {}).items())
 
 
@@ -727,6 +739,15 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
     # same re-parent was re-applied, with a fresh manual timestamp, on every
     # cycle forever. [2026-08-08 code review]
     if parent_uid and row.parent and parent_uid != row.parent:
+        # WORKBOOK-WIDE, not per-tab. Checking only the current tab made a
+        # CROSS-TAB move — dragging a task from Product & Technology into the
+        # Italy block on Sales — look identical to "the project row above me was
+        # deleted", so the move was refused and reported as an orphan. Eyal did
+        # exactly that in his first real session. The question is only ever "does
+        # the project this row claims still exist anywhere?": if it does, the ROW
+        # moved and the re-parent is deliberate; if it does not, the heading was
+        # deleted and the rows beneath it merely fell into the block above.
+        # [2026-08-08]
         if row.parent in tab_project_uids:
             plan.task_updates.setdefault(row.uid, {})["project_id"] = parent_uid
             plan.manual_marks.append(("task", row.uid, "project_id"))
