@@ -1628,3 +1628,37 @@ class TestARetiredProjectLosesItsBlock:
     def test_an_active_project_keeps_its_block(self):
         plan = _plan({TAB: _grid(_prow())}, tasks=[], proj_snaps={"p1": {}})
         assert plan.row_deletes == []
+
+
+class TestTheMeetingsPoolLivesHereToo:
+    """The Meetings + Past Meetings tabs moved into this workbook on 2026-08-09.
+    They are legitimate residents, not malformed area tabs."""
+
+    def test_they_are_not_read_as_area_tabs(self):
+        assert "Meetings" in psr.NON_AREA_TABS
+        assert "Past Meetings" in psr.NON_AREA_TABS
+        assert psr.HOWTO_TAB in psr.NON_AREA_TABS
+
+    def test_the_reader_skips_them(self):
+        from unittest.mock import MagicMock, patch
+        svc = MagicMock()
+        svc._execute_with_retry.side_effect = lambda fn: fn().execute()
+        sheets = svc.service.spreadsheets.return_value
+        sheets.get.return_value.execute.return_value = {"sheets": [
+            {"properties": {"title": t}} for t in
+            ["How to use", TAB, "Meetings", "Past Meetings"]]}
+        sheets.values.return_value.batchGet.return_value.execute.return_value = {
+            "valueRanges": [{"values": []}]}
+        with patch("services.google_sheets.sheets_service", svc):
+            out = psr._read_tabs("sid")
+        assert list(out) == [TAB]
+
+    def test_the_rebuild_never_deletes_them(self):
+        """The cutover script deletes any tab it does not recognise. A delete
+        list defined by exclusion has to name every legitimate resident — 123
+        meeting rows would otherwise go without a word."""
+        import inspect
+        import services.project_status_sheet as pss
+        src = inspect.getsource(pss.write_project_status_blocks)
+        assert "NON_AREA_TABS" in src
+        assert "keep = {HOWTO_TAB, *result" not in src

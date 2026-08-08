@@ -807,7 +807,14 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
         # 'גיליון2'. Leaving them looks like live content that nothing updates,
         # which is worse than removing them. Safe only because the caller has
         # already taken the Drive backup — hence cutover-only.
-        keep = {HOWTO_TAB, *result["tabs"]}
+        # NON_AREA_TABS, not just the How-to. This set is what a tab is measured
+        # against before being DELETED, and the meetings pool moved into this
+        # workbook on 2026-08-09 — 123 rows that a re-run of the cutover script
+        # would have removed without a word, because they are not area tabs and
+        # not the How-to. A delete list defined by exclusion has to name every
+        # legitimate resident.
+        from processors.project_status_reconcile import NON_AREA_TABS
+        keep = {*NON_AREA_TABS, *result["tabs"]}
         stale = {t: s for t, s in _tabs().items() if t not in keep}
         if stale:
             svc._execute_with_retry(

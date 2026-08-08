@@ -76,6 +76,14 @@ logger = logging.getLogger(__name__)
 READ_RANGE = f"A1:{chr(ord('A') + len(ALL_HEADERS) - 1)}2000"
 HOWTO_TAB = "How to use"
 
+# Tabs in this workbook that are NOT area tabs and must never be parsed as one.
+# The layout guard would catch them anyway — they do not declare the columns, so
+# they would be skipped — but it would log an ERROR about it every 30 minutes
+# forever, and an alarm that always fires is an alarm nobody reads. Named
+# explicitly instead: the meetings pool moved in here on 2026-08-09 and is a
+# legitimate resident, not a malformed area tab.
+NON_AREA_TABS = frozenset({HOWTO_TAB, "Meetings", "Past Meetings"})
+
 # Sheet column -> the DB field it maps to, per entity.
 _ACTION_FIELDS = {COL_DATE: "deadline", COL_RESP: "assignee",
                   COL_COMMENTS: "notes", COL_ACTION: "title",
@@ -267,7 +275,7 @@ def _read_tabs(spreadsheet_id: str) -> dict:
         lambda: sheets_service.service.spreadsheets().get(
             spreadsheetId=spreadsheet_id, fields="sheets.properties.title"))
     tabs = [s["properties"]["title"] for s in meta.get("sheets", [])
-            if s["properties"]["title"] != HOWTO_TAB]
+            if s["properties"]["title"] not in NON_AREA_TABS]
     if not tabs:
         return {}
     resp = sheets_service._execute_with_retry(
