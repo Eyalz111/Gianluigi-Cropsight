@@ -1264,12 +1264,14 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         the create rolled back if that writeback fails — the same guard the task
         create path uses, and the reason the old "Schedule: X" rows duplicated
         forever (they never got a UUID at all).
-      - Status is MONOTONIC: a stale cell can never move a meeting backwards
-        (held -> scheduled), because the meeting already happened.
+      - Status regression is blocked only FROM A TERMINAL STATE: a stale cell
+        can never un-hold or un-drop a meeting, because it already happened.
+        Every other move, including parking something already queued to
+        schedule, is a legitimate decision and is pulled.
     """
     from services.google_sheets import (
         sheets_service, MEETING_COLUMNS, MEETING_TAB_NAME,
-        MEETING_STATUSES, MEETING_STATUS_ORDER,
+        MEETING_STATUSES, MEETING_TERMINAL_STATUSES,
     )
 
     if not getattr(settings, "MEETING_RECONCILE_ENABLED", False):
@@ -1408,8 +1410,16 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             else:
                 final["proposed_date"] = s_date
 
-        # --- status: MONOTONIC. A meeting that was held cannot become merely
-        #     scheduled again because a stale cell says so. Forward moves pull. ---
+        # --- status: TERMINAL-ONLY GUARD. A meeting that has been held or
+        #     dropped cannot be walked backwards by a stale cell — it already
+        #     happened. Every other move is legitimate and is pulled.
+        #
+        #     This was a FULL monotonic ordering, which made every backward
+        #     transition illegal. That is wrong for a working document: parking
+        #     something already marked "to schedule" is a normal decision, and
+        #     it was silently refused with the cell snapping back inside 30
+        #     minutes — the sheet arguing with the person using it. The thing
+        #     actually worth protecting is history, not order. [2026-08-09] ---
         s_status = (sm.get("status") or "").strip().lower()
         d_status = (dm.get("status") or "not_scheduled").strip().lower()
         snap_status = (snap.get("status") or "").strip().lower()
@@ -1417,7 +1427,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             logger.warning(f"[meeting-reconcile] unknown status {s_status!r} (row {row})")
             s_status = ""
         if s_status and s_status != snap_status and s_status != d_status:
-            if MEETING_STATUS_ORDER.get(s_status, 0) >= MEETING_STATUS_ORDER.get(d_status, 0):
+            if d_status not in MEETING_TERMINAL_STATUSES:
                 upd["status"] = s_status
                 manual_marks.append((mid, "status"))
                 summary["pulled"] += 1
@@ -1474,7 +1484,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                     # left without its UUID is re-created on every subsequent
                     # run, which is precisely how "Schedule: X" rows multiplied.
                     await sheets_service._update_cell(
-                        sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                        sheet_id=sheets_service.meetings_workbook(),
                         range_name=f"'{MEETING_TAB_NAME}'!{MEETING_COLUMNS['id']}{row}",
                         value=new_id,
                     )
@@ -1574,7 +1584,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     if cell_writes:
         try:
             sheets_service.service.spreadsheets().values().batchUpdate(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                spreadsheetId=sheets_service.meetings_workbook(),
                 body={"valueInputOption": "RAW", "data": cell_writes},
             ).execute()
         except Exception as e:

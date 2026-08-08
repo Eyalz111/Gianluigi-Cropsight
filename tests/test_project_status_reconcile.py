@@ -1500,3 +1500,131 @@ class TestLayoutMismatchIsRefused:
         grid[2] = ["#", "Project", "Subject matter", *ALL_HEADERS[3:]]
         plan = _plan({TAB: grid})
         assert TAB in plan.skipped_tabs
+
+
+class TestACopiedRowThatWasRetypedIsNewWork:
+    """Eyal copied a row and retyped it, so the copy carried the original's
+    identity while reading something else entirely. Left as a "paste" it was
+    ignored forever — and when the ORIGINAL task was marked done, BOTH rows were
+    queued for deletion, including the one whose text existed nowhere but that
+    cell."""
+
+    def _plan_with_copy(self, copied_text, **task_kw):
+        return _plan(
+            {TAB: _grid(_prow(),
+                        _arow(),
+                        _arow(action=copied_text))},   # same uid, new text
+            tasks=[_db_task(**task_kw)],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+        )
+
+    def test_its_stolen_identity_is_cleared(self):
+        plan = self._plan_with_copy("Global coverage of Soybeans and Corn")
+        cleared = [w for w in plan.cell_writes
+                   if w[1] == FIRST_BODY_ROW + 2 and w[3] == ""]
+        assert {w[2] for w in cleared} == {
+            COLS["_kind"], COLS["_uid"], COLS["_parent"], COLS["_origin"],
+            COLS["_src"]}
+        assert plan.counters["identities_cleared"] == 1
+
+    def test_her_text_is_never_touched(self):
+        plan = self._plan_with_copy("Global coverage of Soybeans and Corn")
+        visible = {COLS[c] for c in VISIBLE_HEADERS}
+        assert not [w for w in plan.cell_writes
+                    if w[1] == FIRST_BODY_ROW + 2 and w[2] in visible]
+
+    def test_the_retyped_text_is_not_merged_into_the_original_task(self):
+        """The identity blanking is a cell write that has not landed yet, so
+        the row still carries the original's uid this cycle. Processing it now
+        would pull the new text into the old task — the exact damage."""
+        plan = self._plan_with_copy("Global coverage of Soybeans and Corn")
+        assert "title" not in plan.task_updates.get("t1", {})
+
+    def test_an_exact_paste_is_still_just_a_paste(self):
+        """Two identical rows are a copy, not new work — nothing is cleared."""
+        plan = self._plan_with_copy("Ship the API")
+        assert plan.counters["identities_cleared"] == 0
+        assert plan.counters["dup_uids"] == 1
+
+    def test_the_topmost_row_keeps_its_identity(self):
+        plan = self._plan_with_copy("Global coverage of Soybeans and Corn")
+        assert not [w for w in plan.cell_writes if w[1] == FIRST_BODY_ROW + 1]
+
+    def test_a_duplicated_project_row_renamed_is_also_released(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _prow(name="Something Else"))},
+            tasks=[], proj_snaps={"p1": {}},
+        )
+        assert plan.counters["identities_cleared"] == 1
+
+
+class TestARowWhoseTaskIsGone:
+    """A task hard-deleted, superseded (valid_to) or un-approved leaves a row
+    that nothing else will ever remove, so it accumulates."""
+
+    def _plan(self, tasks, snaps=None):
+        return _plan(
+            {TAB: _grid(_prow(), _arow(uid="t404"))},
+            tasks=tasks,
+            act_snaps=snaps if snaps is not None else {
+                "t404": {"title": "Ship the API", "status": "pending"}},
+        )
+
+    def test_the_row_is_queued_for_removal(self):
+        plan = self._plan([_db_task("t1")])
+        assert plan.row_deletes == [(TAB, FIRST_BODY_ROW + 1, "t404")]
+        assert plan.counters["ghost_rows_removed"] == 1
+        assert plan.drop_snapshots == ["t404"]
+
+    def test_removal_is_capped_and_reported(self):
+        """Five rows vanishing is tidying up; fifty is a symptom, and the
+        difference has to be visible before they are gone."""
+        rows = [_arow(uid=f"t{i}") for i in range(9)]
+        plan = _plan({TAB: _grid(_prow(), *rows)}, tasks=[_db_task("keep")],
+                     act_snaps={"x": {"title": "y"}})
+        assert plan.counters["ghost_rows_removed"] == 5
+        assert any("no longer exists" in o for o in plan.overrides)
+
+    def test_a_failed_database_read_removes_nothing(self):
+        """get_ps_tasks logs and returns [] rather than raising, so a transient
+        failure would make every row on the sheet look like a ghost."""
+        plan = self._plan([], snaps={"t404": {"title": "Ship the API"}})
+        assert plan.row_deletes == [] and plan.cell_writes == []
+        assert plan.counters["db_read_aborted"] == 1
+
+    def test_a_live_task_is_never_a_ghost(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
+        assert plan.row_deletes == [] and plan.counters["ghosts"] == 0
+
+
+class TestARetiredProjectLosesItsBlock:
+    """Retire-don't-delete is the rule, so the row has to actually go or the
+    file grows a tail of dead headings nothing will ever clear."""
+
+    def test_an_empty_retired_block_is_removed(self):
+        plan = _plan(
+            {TAB: _grid(_prow())}, tasks=[],
+            projects=[_db_project("p1", status="retired")],
+            proj_snaps={"p1": {}},
+        )
+        assert plan.row_deletes == [(TAB, FIRST_BODY_ROW, "p1")]
+        assert plan.counters["retired_blocks_removed"] == 1
+
+    def test_a_retired_block_with_actions_is_left_alone(self):
+        """Removing the heading re-parents every row beneath it into the block
+        above on the next parse — the same silent mis-filing the re-parent
+        guard exists to prevent."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            projects=[_db_project("p1", status="retired")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}},
+            proj_snaps={"p1": {}},
+        )
+        assert plan.row_deletes == []
+        assert any("retired but still has" in o for o in plan.overrides)
+
+    def test_an_active_project_keeps_its_block(self):
+        plan = _plan({TAB: _grid(_prow())}, tasks=[], proj_snaps={"p1": {}})
+        assert plan.row_deletes == []

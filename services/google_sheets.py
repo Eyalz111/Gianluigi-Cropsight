@@ -455,16 +455,32 @@ MEETING_TRACKER_HEADERS = [
 MEETINGS_ARCHIVE_TAB_NAME = "Past Meetings"
 MEETINGS_ARCHIVE_HEADERS = MEETING_TRACKER_HEADERS + ["Moved", "Outcome"]
 
-# Monotonic, like decision statuses: a stale Sheet cell must never un-schedule
-# a meeting that already happened.
-MEETING_STATUSES = ("not_scheduled", "scheduled", "held", "dropped")
-# PROGRESSION order — used by the monotonic status guard (a meeting can only move
-# forward: not_scheduled -> scheduled -> held/dropped). Do NOT reorder these.
-MEETING_STATUS_ORDER = {"not_scheduled": 0, "scheduled": 1, "held": 2, "dropped": 3}
+# `parked` = deliberately not being pursued right now, without claiming it was
+# held or dropped. Added 2026-08-09 with the meetings pool: without it, anything
+# Eyal was not currently chasing had to sit in "not_scheduled" looking like a
+# booking nobody had made. Named `parked` rather than "to hold", which reads as
+# "to be held" — the opposite of the intent. `status` is TEXT with no CHECK
+# constraint, so this needed no migration.
+MEETING_STATUSES = ("parked", "not_scheduled", "scheduled", "held", "dropped")
+
+# TERMINAL states. A meeting that has happened or been dropped must never be
+# walked backwards by a stale cell.
+MEETING_TERMINAL_STATUSES = frozenset({"held", "dropped"})
+
+# PROGRESSION order — kept for display/sorting and for the terminal comparison.
+# It is NO LONGER a monotonic gate on every transition: a full ordering made
+# every backward move illegal, so parking something already marked "to schedule"
+# — a legitimate, common decision — was silently refused and the cell snapped
+# back within 30 minutes. Only regression FROM a terminal state is blocked now.
+# Do NOT reorder these. [2026-08-09]
+MEETING_STATUS_ORDER = {"parked": 0, "not_scheduled": 1, "scheduled": 2,
+                        "held": 3, "dropped": 4}
 # DISPLAY order on the Meetings tab (Eyal's call, 2026-07-24): show the booked
 # ones first, then what still needs booking, then history. SEPARATE from the
 # progression order above so the sort can differ from the state machine.
-MEETING_DISPLAY_ORDER = {"scheduled": 0, "not_scheduled": 1, "held": 2, "dropped": 3}
+# Parked sits after "to schedule" — still live, but not being chased.
+MEETING_DISPLAY_ORDER = {"scheduled": 0, "not_scheduled": 1, "parked": 2,
+                         "held": 3, "dropped": 4}
 
 # ---------------------------------------------------------------------------
 # Read-only reference tabs (2026-07).
@@ -1299,7 +1315,19 @@ class GoogleSheetsService:
             "Decisions", decision_ids, self.get_all_decisions, "reject-cascade"
         )
 
-    async def _resort_tab(self, tab_name: str, headers: list[str], key_func) -> int:
+    def meetings_workbook(self) -> str:
+        """The workbook holding `Meetings` + `Past Meetings`.
+
+        ONE ACCESSOR, not a setting read at each site. The meetings tabs touch a
+        spreadsheet id in a dozen places — every one of them used to name the
+        Task Tracker directly, so moving the tabs meant finding all twelve and
+        missing one would leave a reader pointed at a workbook where the tab no
+        longer exists, reporting every meeting as an orphan rather than failing.
+        """
+        return settings.MEETINGS_SHEET_ID or settings.TASK_TRACKER_SHEET_ID
+
+    async def _resort_tab(self, tab_name: str, headers: list[str], key_func,
+                          spreadsheet_id: str | None = None) -> int:
         """Reorder a tab's data rows IN PLACE by key_func(raw_row).
 
         Reads the raw rows and rewrites them reordered — no clear, no DB read, no
@@ -1307,12 +1335,13 @@ class GoogleSheetsService:
         row and its UUID is preserved, and a mid-write failure just leaves rows
         partly reordered (recoverable). Returns the row count reordered.
         """
-        if not settings.TASK_TRACKER_SHEET_ID:
+        ssid = spreadsheet_id or ssid
+        if not ssid:
             return 0
         end_col = chr(ord("A") + len(headers) - 1)
         try:
             raw = await self._read_sheet_range(
-                sheet_id=settings.TASK_TRACKER_SHEET_ID,
+                sheet_id=ssid,
                 range_name=f"'{tab_name}'!A2:{end_col}",
             )
             raw_count = len(raw or [])
@@ -1328,7 +1357,7 @@ class GoogleSheetsService:
                 return 0  # already sorted — skip the write
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().update(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=ssid,
                     range=f"'{tab_name}'!A2:{end_col}{len(ordered) + 1}",
                     valueInputOption="RAW", body={"values": ordered},
                 )
@@ -1339,7 +1368,7 @@ class GoogleSheetsService:
             if raw_count > len(ordered):
                 self._execute_with_retry(
                     lambda: self.service.spreadsheets().values().clear(
-                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        spreadsheetId=ssid,
                         range=f"'{tab_name}'!A{len(ordered) + 2}:{end_col}{raw_count + 1}",
                         body={},
                     )
@@ -1370,7 +1399,8 @@ class GoogleSheetsService:
             rank = MEETING_DISPLAY_ORDER.get(st, 1)
             d = parse_human_date(_c("proposed_date"))
             return (rank, 0 if d else 1, d or "9999-99-99", _c("title").lower())
-        return await self._resort_tab(MEETING_TAB_NAME, MEETING_TRACKER_HEADERS, _key)
+        return await self._resort_tab(MEETING_TAB_NAME, MEETING_TRACKER_HEADERS, _key,
+                                      spreadsheet_id=self.meetings_workbook())
 
     async def rebuild_tasks_sheet(
         self, tasks_from_db: list[dict], force_empty: bool = False
@@ -2495,12 +2525,12 @@ class GoogleSheetsService:
         index 0 is what silently broke every sheet read in April 2026, because
         bare A1 ranges resolve against whichever sheet sits first.
         """
-        if not settings.TASK_TRACKER_SHEET_ID:
+        if not self.meetings_workbook():
             return None
         try:
             meta = self._execute_with_retry(
                 lambda: self.service.spreadsheets().get(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     fields="sheets.properties",
                 )
             )
@@ -2512,7 +2542,7 @@ class GoogleSheetsService:
 
             resp = self._execute_with_retry(
                 lambda: self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     body={"requests": [{"addSheet": {"properties": {
                         "title": MEETING_TAB_NAME,
                         "index": len(sheets),   # last, never index 0
@@ -2525,7 +2555,7 @@ class GoogleSheetsService:
             end_col = max(MEETING_COLUMNS.values())
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().update(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     range=f"'{MEETING_TAB_NAME}'!A1:{end_col}1",
                     valueInputOption="RAW",
                     body={"values": [MEETING_TRACKER_HEADERS]},
@@ -2576,7 +2606,7 @@ class GoogleSheetsService:
         orphan removal is reserved for the on-demand cleanup.
         Returns {'duplicates_removed', 'orphans_removed', 'details'}.
         """
-        if not settings.TASK_TRACKER_SHEET_ID:
+        if not self.meetings_workbook():
             return {"duplicates_removed": 0, "orphans_removed": 0, "details": []}
         rows = await self.get_all_meetings()
         from services.supabase_client import supabase_client
@@ -2614,26 +2644,26 @@ class GoogleSheetsService:
 
         if not to_delete:
             return {"duplicates_removed": 0, "orphans_removed": 0, "details": []}
-        sid = self._get_sheet_id_by_name(settings.TASK_TRACKER_SHEET_ID, MEETING_TAB_NAME)
+        sid = self._get_sheet_id_by_name(self.meetings_workbook(), MEETING_TAB_NAME)
         # Delete bottom-up (highest row first) so earlier row numbers stay valid.
         reqs = [{"deleteDimension": {"range": {"sheetId": sid, "dimension": "ROWS",
                  "startIndex": rn - 1, "endIndex": rn}}}
                 for rn in sorted(set(to_delete), reverse=True)]
         self._execute_with_retry(
             lambda: self.service.spreadsheets().batchUpdate(
-                spreadsheetId=settings.TASK_TRACKER_SHEET_ID, body={"requests": reqs})
+                spreadsheetId=self.meetings_workbook(), body={"requests": reqs})
         )
         logger.info(f"Deduped {MEETING_TAB_NAME}: removed {dups} duplicate + {orphans} orphan row(s)")
         return {"duplicates_removed": dups, "orphans_removed": orphans, "details": details}
 
     async def get_all_meetings(self) -> list[dict]:
         """Read the Meetings tab, one dict per row with row_number + id."""
-        if not settings.TASK_TRACKER_SHEET_ID:
+        if not self.meetings_workbook():
             return []
         num_cols = len(MEETING_TRACKER_HEADERS)
         end_col = max(MEETING_COLUMNS.values())
         rows = await self._read_sheet_range(
-            sheet_id=settings.TASK_TRACKER_SHEET_ID,
+            sheet_id=self.meetings_workbook(),
             range_name=f"'{MEETING_TAB_NAME}'!A:{end_col}",
         )
         if not rows or len(rows) < 2:
@@ -2670,7 +2700,7 @@ class GoogleSheetsService:
         the TASKS tab with NO col-J UUID — so reconcile classified every one as
         hand-added and created a duplicate `tasks` row on each run.
         """
-        if not settings.TASK_TRACKER_SHEET_ID or not meetings:
+        if not self.meetings_workbook() or not meetings:
             return False
         try:
             await self.ensure_meetings_tab()
@@ -2685,7 +2715,7 @@ class GoogleSheetsService:
                 id_col = MEETING_COLUMNS["id"]
                 resp = self._execute_with_retry(
                     lambda: self.service.spreadsheets().values().get(
-                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        spreadsheetId=self.meetings_workbook(),
                         range=f"'{MEETING_TAB_NAME}'!{id_col}2:{id_col}",
                     )
                 )
@@ -2703,7 +2733,7 @@ class GoogleSheetsService:
             end_col = max(MEETING_COLUMNS.values())
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().append(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     range=f"'{MEETING_TAB_NAME}'!A:{end_col}",
                     valueInputOption="RAW",
                     insertDataOption="INSERT_ROWS",
@@ -2724,9 +2754,10 @@ class GoogleSheetsService:
         move), delete bottom-up. The follow_up_meetings DB row is NOT deleted —
         it keeps its held/dropped status; only the sheet presence moves.
         """
-        if not settings.TASK_TRACKER_SHEET_ID or not sheet_rows:
+        if not self.meetings_workbook() or not sheet_rows:
             return 0
-        sid_dest = await self._ensure_tab(MEETINGS_ARCHIVE_TAB_NAME, MEETINGS_ARCHIVE_HEADERS)
+        sid_dest = await self._ensure_tab(MEETINGS_ARCHIVE_TAB_NAME, MEETINGS_ARCHIVE_HEADERS,
+                                        spreadsheet_id=self.meetings_workbook())
         if sid_dest is None:
             return 0
 
@@ -2735,7 +2766,7 @@ class GoogleSheetsService:
             id_col = MEETING_COLUMNS["id"]  # J
             resp = self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().get(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     range=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!{id_col}2:{id_col}",
                 )
             )
@@ -2755,7 +2786,7 @@ class GoogleSheetsService:
             end_col = chr(ord("A") + len(MEETINGS_ARCHIVE_HEADERS) - 1)
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().append(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     range=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!A:{end_col}",
                     valueInputOption="RAW", insertDataOption="INSERT_ROWS",
                     body={"values": arch_rows},
@@ -2766,7 +2797,7 @@ class GoogleSheetsService:
         # now on both tabs), same contract as archive_task_rows.
         row_numbers = sorted([m["row_number"] for m in sheet_rows if m.get("row_number")],
                              reverse=True)
-        sid_src = self._get_sheet_id_by_name(settings.TASK_TRACKER_SHEET_ID, MEETING_TAB_NAME)
+        sid_src = self._get_sheet_id_by_name(self.meetings_workbook(), MEETING_TAB_NAME)
         if sid_src is not None and row_numbers:
             requests = [{"deleteDimension": {
                 "range": {"sheetId": sid_src, "dimension": "ROWS",
@@ -2774,7 +2805,7 @@ class GoogleSheetsService:
             try:
                 self._execute_with_retry(
                     lambda: self.service.spreadsheets().batchUpdate(
-                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        spreadsheetId=self.meetings_workbook(),
                         body={"requests": requests}))
             except Exception as e:
                 logger.critical(
@@ -2793,7 +2824,7 @@ class GoogleSheetsService:
         Supabase read returning [] must never clear a populated tab. That is
         exactly how the Tasks sheet was wiped in April.
         """
-        if not settings.TASK_TRACKER_SHEET_ID:
+        if not self.meetings_workbook():
             return False
         if not meetings_from_db and not force_empty:
             logger.error(
@@ -2806,7 +2837,7 @@ class GoogleSheetsService:
             end_col = max(MEETING_COLUMNS.values())
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().clear(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     range=f"'{MEETING_TAB_NAME}'!A2:{end_col}",
                     body={},
                 )
@@ -2815,7 +2846,7 @@ class GoogleSheetsService:
                 rows = [self._meeting_row(m) for m in _sorted_meetings(meetings_from_db)]
                 self._execute_with_retry(
                     lambda: self.service.spreadsheets().values().update(
-                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        spreadsheetId=self.meetings_workbook(),
                         range=f"'{MEETING_TAB_NAME}'!A2:{end_col}{len(rows) + 1}",
                         valueInputOption="RAW",
                         body={"values": rows},
@@ -2840,19 +2871,21 @@ class GoogleSheetsService:
     # Read-only reference tabs — Open Questions + Areas.
     # =========================================================================
 
-    async def _ensure_tab(self, tab_name: str, headers: list[str]) -> int | None:
+    async def _ensure_tab(self, tab_name: str, headers: list[str],
+                          spreadsheet_id: str | None = None) -> int | None:
         """Create `tab_name` with a header row if missing; return its sheetId.
 
         Always appended LAST. A tab at index 0 is what silently broke every
         sheet read in April 2026, because bare A1 ranges resolve against
         whichever sheet sits first.
         """
-        if not settings.TASK_TRACKER_SHEET_ID:
+        ssid = spreadsheet_id or ssid
+        if not ssid:
             return None
         try:
             meta = self._execute_with_retry(
                 lambda: self.service.spreadsheets().get(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=ssid,
                     fields="sheets.properties",
                 )
             )
@@ -2863,7 +2896,7 @@ class GoogleSheetsService:
                     return props["sheetId"]
             resp = self._execute_with_retry(
                 lambda: self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=ssid,
                     body={"requests": [{"addSheet": {"properties": {
                         "title": tab_name, "index": len(sheets),
                     }}}]},
@@ -2873,7 +2906,7 @@ class GoogleSheetsService:
             end_col = chr(ord("A") + len(headers) - 1)
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().update(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=ssid,
                     range=f"'{tab_name}'!A1:{end_col}1",
                     valueInputOption="RAW",
                     body={"values": [headers]},
@@ -3249,7 +3282,7 @@ class GoogleSheetsService:
         errors against existing data (and Hebrew values), so Status uses
         conditional formatting instead.
         """
-        if not settings.TASK_TRACKER_SHEET_ID:
+        if not self.meetings_workbook():
             return False
         try:
             sid = await self.ensure_meetings_tab()
@@ -3285,7 +3318,7 @@ class GoogleSheetsService:
             requests.append(_text_wrap_request(sid, MEETING_COL_INDEX["agenda"]))
 
             requests.extend(self._clear_conditional_format_rules_for_sheet(
-                settings.TASK_TRACKER_SHEET_ID, sid))
+                self.meetings_workbook(), sid))
             status_rules = [
                 ("not_scheduled", COLORS["status_overdue"]),   # the queue — stands out
                 ("scheduled", COLORS["status_in_progress"]),
@@ -3315,7 +3348,7 @@ class GoogleSheetsService:
             try:
                 pmeta = self._execute_with_retry(
                     lambda: self.service.spreadsheets().get(
-                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        spreadsheetId=self.meetings_workbook(),
                         fields="sheets(properties.sheetId,protectedRanges)",
                     )
                 )
@@ -3345,7 +3378,7 @@ class GoogleSheetsService:
 
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=self.meetings_workbook(),
                     body={"requests": requests},
                 )
             )

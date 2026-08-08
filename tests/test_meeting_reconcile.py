@@ -12,7 +12,8 @@ Invariants pinned here:
   - hand-added rows create in the DB AND get their UUID written back
     synchronously; a writeback failure ROLLS BACK the create (that failure mode
     is exactly what made the old rows multiply)
-  - status is MONOTONIC — a stale cell can never un-hold a meeting
+  - status regression is blocked only FROM A TERMINAL state — a stale cell can
+    never un-hold a meeting, but parking one that was merely queued is allowed
   - the Rule 2 manual rail applies here too
   - an empty sheet read with snapshots present ABORTS
 """
@@ -125,7 +126,7 @@ class TestPullAndPush:
         assert calls["update"] == []
 
 
-class TestMonotonicStatus:
+class TestStatusRegressionGuard:
     async def test_forward_move_pulls(self, monkeypatch):
         sheet = [_srow(id="m1", title="T", status="scheduled")]
         db = [_dbrow(id="m1", title="T", status="not_scheduled")]
@@ -437,3 +438,97 @@ class TestFollowUpRenameThroughEdit:
             secondary_of=lambda f: f.get("led_by", ""))
         assert plan["deletes"] == ["X"]
         assert [i["title"] for i in plan["creates"]] == ["2SID VC"]
+
+
+class TestParkedAndBackwardMoves:
+    """The guard was a FULL monotonic ordering, so every backward transition
+    was illegal. That is wrong for a working document: parking something
+    already marked "to schedule" is a normal decision, and it was silently
+    refused with the cell snapping back inside 30 minutes — the sheet arguing
+    with the person using it. Only history is worth protecting. [2026-08-09]"""
+
+    async def test_parked_is_a_valid_status(self, monkeypatch):
+        sheet = [_srow(id="m1", title="T", status="parked")]
+        db = [_dbrow(id="m1", title="T", status="not_scheduled")]
+        snap = {"m1": {"title": "T", "status": "not_scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res["pulled"] == 1
+        assert calls["update"] == [("m1", {"status": "parked"})]
+
+    async def test_parking_a_queued_meeting_is_allowed(self, monkeypatch):
+        """'scheduled' -> 'parked' is backwards in the old ordering and was
+        refused. It is a decision, not a stale cell."""
+        sheet = [_srow(id="m1", title="T", status="parked")]
+        db = [_dbrow(id="m1", title="T", status="scheduled")]
+        snap = {"m1": {"title": "T", "status": "scheduled"}}
+        calls, res = _setup(monkeypatch, sheet, db, snap)
+
+        out = await ss.reconcile_meetings()
+
+        assert out["status_guarded"] == 0
+        assert calls["update"] == [("m1", {"status": "parked"})]
+
+    async def test_a_held_meeting_still_cannot_be_un_held(self, monkeypatch):
+        sheet = [_srow(id="m1", title="T", status="parked")]
+        db = [_dbrow(id="m1", title="T", status="held")]
+        snap = {"m1": {"title": "T", "status": "not_scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        out = await ss.reconcile_meetings()
+
+        assert out["status_guarded"] == 1
+        assert calls["update"] == []
+
+    async def test_a_dropped_meeting_still_cannot_be_revived_from_a_cell(self, monkeypatch):
+        sheet = [_srow(id="m1", title="T", status="scheduled")]
+        db = [_dbrow(id="m1", title="T", status="dropped")]
+        snap = {"m1": {"title": "T", "status": "not_scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        out = await ss.reconcile_meetings()
+
+        assert out["status_guarded"] == 1
+        assert calls["update"] == []
+
+
+class TestTheMeetingsWorkbookIsOneAccessor:
+    """The meetings tabs touch a spreadsheet id in a dozen places. Every one of
+    them used to name the Task Tracker directly, so moving the tabs meant
+    finding all twelve — and a reader left pointed at a workbook where the tab
+    no longer exists reads nothing and reports every meeting as an orphan
+    rather than failing."""
+
+    def test_it_defaults_to_the_task_tracker(self, monkeypatch):
+        from config.settings import settings
+        from services.google_sheets import sheets_service
+        monkeypatch.setattr(settings, "TASK_TRACKER_SHEET_ID", "tracker", raising=False)
+        monkeypatch.setattr(settings, "MEETINGS_SHEET_ID", "", raising=False)
+        assert sheets_service.meetings_workbook() == "tracker"
+
+    def test_the_override_wins(self, monkeypatch):
+        from config.settings import settings
+        from services.google_sheets import sheets_service
+        monkeypatch.setattr(settings, "TASK_TRACKER_SHEET_ID", "tracker", raising=False)
+        monkeypatch.setattr(settings, "MEETINGS_SHEET_ID", "elsewhere", raising=False)
+        assert sheets_service.meetings_workbook() == "elsewhere"
+
+    def test_no_meetings_method_names_the_task_tracker_directly(self):
+        """The mechanical form of "one accessor". A new call site that reads
+        the setting itself is exactly how the move leaves one reader behind."""
+        import inspect
+        import services.google_sheets as gs
+        for name in ("ensure_meetings_tab", "dedupe_meetings_tab",
+                     "get_all_meetings", "add_meetings_batch_to_sheet",
+                     "archive_meeting_rows", "rebuild_meetings_sheet",
+                     "format_meetings_tab"):
+            src = inspect.getsource(getattr(gs.GoogleSheetsService, name))
+            assert "TASK_TRACKER_SHEET_ID" not in src, name
+
+    def test_the_orphan_detector_reads_the_meetings_workbook(self):
+        import inspect
+        import processors.meeting_qa as mq
+        src = inspect.getsource(mq.read_sheet_index)
+        assert "meetings_workbook()" in src

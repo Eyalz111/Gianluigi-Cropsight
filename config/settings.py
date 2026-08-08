@@ -194,6 +194,14 @@ class Settings(BaseSettings):
     # ==========================================================================
     TASK_TRACKER_SHEET_ID: str = Field(default="", description="Task Tracker Google Sheet ID")
     TASK_TRACKER_TAB_NAME: str = Field(default="Tasks", description="Tab name in the Task Tracker spreadsheet")
+    # Which workbook holds the `Meetings` + `Past Meetings` tabs. Empty means
+    # the Task Tracker, which is where they have always lived — so this is a
+    # no-op until it is pointed somewhere, and pointing it back is the rollback.
+    # It exists because the meetings pool is moving to the Project Status
+    # workbook: Eyal works there now, and meetings currently have nowhere to
+    # live so they keep landing in the action list. Read through
+    # sheets_service.meetings_workbook(), never directly. [2026-08-09]
+    MEETINGS_SHEET_ID: str = Field(default="", description="Workbook holding the Meetings + Past Meetings tabs; empty = TASK_TRACKER_SHEET_ID")
     STAKEHOLDER_TRACKER_SHEET_ID: str = Field(default="", description="Stakeholder Tracker Sheet ID")
     STAKEHOLDER_TAB_NAME: str = Field(default="Stakeholder Tracker", description="Tab name in the Stakeholder Tracker spreadsheet")
 

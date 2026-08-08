@@ -58,7 +58,8 @@ from config.settings import settings
 from core.dates import edit_is_newer_than_sync, parse_human_date
 from services.project_status_rows import (
     ALL_HEADERS, FIRST_BODY_ROW, COL_ACTION, COL_COMMENTS, COL_DATE, COL_PARENT,
-    COL_KIND, COL_PRIORITY, COL_PROJECT, COL_RESP, COL_TODO, COL_TOPIC,
+    COL_KIND, COL_ORIGIN, COL_PRIORITY, COL_PROJECT, COL_RESP, COL_SRC,
+    COL_TODO, COL_TOPIC, COL_UID,
     AMBIGUOUS, HEADER_ROW, HUMAN_ACTION, HUMAN_PROJECT, INCOMPLETE,
     SYSTEM_ACTION, SYSTEM_PROJECT, PRIORITY_TO_DB, PRIORITY_TO_SHEET,
     find_duplicate_uids, parse_tab, resolve_columns, strip_provenance,
@@ -211,7 +212,9 @@ class Plan:
             "names_refreshed": 0, "paste_duplicates": 0, "blanks_refused": 0,
             "orphaned_by_deleted_project": 0, "adopted_rows": 0,
             "blocks_added": 0, "project_without_a_tab": 0,
-            "matched_existing_project": 0,
+            "matched_existing_project": 0, "db_read_aborted": 0,
+            "identities_cleared": 0, "ghost_rows_removed": 0,
+            "retired_blocks_removed": 0,
         }
         self.overrides: list = []             # human-readable "what changed"
         self.skipped_tabs: list = []
@@ -233,6 +236,8 @@ class Plan:
         self.adopt_rows: list = []
         # Active projects with no block on the sheet yet.
         self.new_blocks: list = []            # (tab, anchor_row, [row])
+        # Rows whose task no longer exists in the database at all.
+        self.ghosts: list = []                # (tab, row_number, uid)
 
     def bump(self, key: str, n: int = 1) -> None:
         self.counters[key] = self.counters.get(key, 0) + n
@@ -428,6 +433,19 @@ def build_plan(grids: dict) -> Plan:
     proj_snaps = supabase_client.get_ps_project_snapshots()
     act_snaps = supabase_client.get_sheet_snapshots(entity_type="ps_action")
 
+    # THE DATABASE SIDE NEEDS THE SAME EMPTY-READ GUARD THE SHEET SIDE HAS.
+    # get_ps_tasks logs and returns [] on error rather than raising, so a
+    # transient Supabase failure would make EVERY row on the sheet a task the
+    # database has never heard of. That was harmless while a ghost was merely
+    # ignored; it stops being harmless now that a ghost row can be removed.
+    if act_snaps and not db_tasks:
+        logger.error(
+            "[ps-reconcile] ABORTED — read 0 tasks while holding "
+            f"{len(act_snaps)} snapshots. Refusing to treat a failed read as "
+            "an empty database.")
+        plan.bump("db_read_aborted")
+        return plan
+
     seen_tasks: set = set()
     seen_projects: set = set()
     parsed: dict = {}
@@ -493,6 +511,22 @@ def build_plan(grids: dict) -> Plan:
         # paste and are left entirely alone this cycle.
         pasted = {id(r) for rows in dups.values() for r in rows[1:]}
         # NOTE: the workbook-wide set, not this tab's. See _handle_action.
+
+        # ...UNLESS ITS TEXT HAS CHANGED, IN WHICH CASE IT IS NEW WORK.
+        # Eyal copied a row and retyped it, so the copy carried the original's
+        # identity while reading something else entirely. Left as a "paste" it
+        # was ignored forever — and when the ORIGINAL task was marked done,
+        # BOTH rows were queued for deletion, including the one whose text
+        # existed nowhere but that cell. Copy-then-retype is a normal way to
+        # write a similar line; it must not be a way to lose one. Clearing the
+        # stolen identity makes it a plain typed row, and the next cycle
+        # creates it. [2026-08-09]
+        # It STAYS in `pasted` for this cycle. The identity blanking is a cell
+        # write that has not landed yet, so the row still carries the original's
+        # uid right now — processing it would merge the retyped text INTO the
+        # original task, which is the very damage this is here to prevent. Next
+        # cycle it reads as a plain typed row and is created.
+        _clear_stolen_identities(dups, db_tasks, db_projects, tab, cols, plan)
 
         for block in blocks:
             proj = block.project
@@ -597,12 +631,41 @@ def build_plan(grids: dict) -> Plan:
                                all_project_uids)
 
     _plan_missing_blocks(parsed, db_projects, seen_projects, plan)
+    _plan_retired_blocks(parsed, db_projects, plan)
+    _plan_ghost_rows(plan)
     _detect_suppressions(act_snaps, seen_tasks, db_tasks, plan)
     _propose_people(plan, assignees)
     _plan_closed_rows(parsed, db_tasks, plan)
     if getattr(settings, "PROJECT_STATUS_AUTO_INJECT_ENABLED", False):
         _plan_injections(parsed, db_tasks, act_snaps, seen_tasks, plan)
     return plan
+
+
+_MAX_GHOST_ROWS_PER_CYCLE = 5
+
+
+def _plan_ghost_rows(plan: Plan) -> None:
+    """Queue removal of rows whose task no longer exists. Capped.
+
+    The cap is the same instinct as the suppression cap: five rows vanishing is
+    the system tidying up, fifty is a symptom, and the difference has to be
+    visible BEFORE the rows are gone rather than after.
+    """
+    if not plan.ghosts:
+        return
+    take = plan.ghosts[:_MAX_GHOST_ROWS_PER_CYCLE]
+    if len(plan.ghosts) > len(take):
+        logger.warning(
+            f"[ps-reconcile] {len(plan.ghosts)} row(s) point at tasks that no "
+            f"longer exist; removing {len(take)} this cycle. If this number is "
+            "not falling, something is deleting tasks out from under the sheet.")
+        plan.overrides.append(
+            f"{len(plan.ghosts)} row(s) whose task no longer exists — removing "
+            f"{len(take)} this cycle")
+    for tab, row_number, uid in take:
+        plan.row_deletes.append((tab, row_number, uid))
+        plan.drop_snapshots.append(uid)
+        plan.bump("ghost_rows_removed")
 
 
 def _plan_closed_rows(parsed: dict, db_tasks: dict, plan: Plan) -> None:
@@ -769,7 +832,17 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
 
     db_task = db_tasks.get(row.uid)
     if not db_task:
+        # The task is gone from the database — hard-deleted, superseded
+        # (valid_to set) or un-approved. The row is the last trace of it and
+        # nothing else will ever remove it, so it accumulates.
+        #
+        # Removal is STRUCTURAL and therefore only happens in a quiet slot,
+        # after the fingerprint re-check. It is also capped and it is the ONLY
+        # deletion path with no snapshot to fall back on, which is why the
+        # empty-read abort above had to come first: a failed read would
+        # otherwise make every row on the sheet look like this.
         plan.bump("ghosts")
+        plan.ghosts.append((tab, row.row_number, row.uid))
         return
 
     seen_tasks.add(row.uid)
@@ -840,6 +913,69 @@ def _looks_like_a_copy(title: str, project_id: str, db_tasks: dict) -> bool:
                 and _normalize(task.get("title")) == key):
             return True
     return False
+
+
+def _clear_stolen_identities(dups: dict, db_tasks: dict, db_projects: dict,
+                             tab: str, cols: dict, plan: Plan) -> None:
+    """Blank the identity cells of a duplicate row whose TEXT has changed.
+
+    Only the copy is ever touched, never the topmost row, and only its five
+    hidden cells — her text is not modified. Matching is exact: a paste
+    reproduces text character for character, so anything else is a retype.
+    """
+    for uid, rows in dups.items():
+        for row in rows[1:]:
+            if row.kind == SYSTEM_ACTION:
+                db_row = db_tasks.get(uid)
+                current = _normalize(strip_provenance(row.values.get(COL_ACTION)))
+                known = _normalize(db_row.get("title")) if db_row else ""
+            elif row.kind == SYSTEM_PROJECT:
+                db_row = db_projects.get(uid)
+                current = _normalize(row.values.get(COL_PROJECT))
+                known = _normalize(db_row.get("name")) if db_row else ""
+            else:
+                continue
+            if not db_row or not current or current == known:
+                continue        # a true paste, or nothing to compare against
+            for col in (COL_KIND, COL_UID, COL_PARENT, COL_ORIGIN, COL_SRC):
+                plan.cell_writes.append((tab, row.row_number, cols[col], ""))
+            plan.bump("identities_cleared")
+            plan.overrides.append(
+                f"{tab} r{row.row_number}: reads differently from the row it "
+                f"was copied from — treated as new work, not a duplicate")
+
+
+
+def _plan_retired_blocks(parsed: dict, db_projects: dict, plan: Plan) -> None:
+    """A retired project's block leaves the sheet, but only once it is empty.
+
+    Retiring is how a project is removed — Eyal's rule is retire, don't delete,
+    so the row has to actually go or the file grows a tail of dead headings that
+    nothing will ever clear.
+
+    A block with actions still under it is LEFT ALONE and reported. Removing the
+    heading would re-parent every one of those rows into the block above on the
+    next parse, which is the same silent mis-filing the re-parent guard exists
+    to prevent.
+    """
+    for tab, blocks in parsed.items():
+        if tab in plan.skipped_tabs:
+            continue
+        for block in blocks:
+            proj = block.project
+            if proj is None or proj.kind != SYSTEM_PROJECT or not proj.uid:
+                continue
+            db_proj = db_projects.get(proj.uid)
+            if not db_proj or (db_proj.get("status") or "active") != "retired":
+                continue
+            if block.actions:
+                plan.overrides.append(
+                    f"{tab} r{proj.row_number}: {db_proj.get('name')!r} is "
+                    f"retired but still has {len(block.actions)} action(s) — "
+                    "left in place; move or close them first")
+                continue
+            plan.row_deletes.append((tab, proj.row_number, proj.uid))
+            plan.bump("retired_blocks_removed")
 
 
 def _plan_missing_blocks(parsed: dict, db_projects: dict, seen: set,

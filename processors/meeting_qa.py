@@ -57,10 +57,16 @@ async def read_sheet_index() -> dict:
                 out.setdefault(uid, []).append(r[title_i] if len(r) > title_i else "")
         return out
 
+    # The meetings tabs may live in a DIFFERENT workbook from tasks/decisions.
+    # This function is the ORPHAN DETECTOR — pointed at a workbook where the tab
+    # does not exist it reads nothing and reports every meeting as an orphan,
+    # which is a page of false alarms rather than a visible failure.
+    msid = sheets_service.meetings_workbook()
+
     tr = await sheets_service._read_sheet_range(sheet_id=sid, range_name=f"'{tab}'!A2:L")
     dr = await sheets_service._read_sheet_range(sheet_id=sid, range_name="'Decisions'!A2:H")
-    mr = await sheets_service._read_sheet_range(sheet_id=sid, range_name=f"'{MEETING_TAB_NAME}'!A2:J")
-    pr = await sheets_service._read_sheet_range(sheet_id=sid, range_name=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!A2:J")
+    mr = await sheets_service._read_sheet_range(sheet_id=msid, range_name=f"'{MEETING_TAB_NAME}'!A2:J")
+    pr = await sheets_service._read_sheet_range(sheet_id=msid, range_name=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!A2:J")
 
     d_id_i = ord(DECISION_ID_COLUMN) - ord("A")
     return {
