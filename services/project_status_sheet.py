@@ -127,9 +127,19 @@ def _project_row_requests(sheet_id: int, rows: list) -> list[dict]:
     formatting, so a 28-row tab reads as one flat list and the block structure —
     the whole point of v2 — is invisible.
 
-    A tinted bold band plus a heavy rule ABOVE each project row draws the fence.
-    Emitted per project row rather than as a conditional format because a border
-    is not something conditional formatting can set.
+    ONLY THE BORDER IS PAINTED HERE. The band and the bold come from the
+    conditional rule keyed on `_kind = "P"`, and deliberately so: a STATIC
+    background is inherited by any row inserted beneath it, whether the system
+    inserts with inheritFromBefore or Nechama presses "insert row" in the UI. So
+    the first action row under every project arrived tinted and bold, looking
+    like a second heading — Eyal hit it in his first session and fixed it by
+    hand.
+
+    Patching the format reset would only have covered the system's own inserts;
+    hers would still inherit. A conditional rule is evaluated per row against
+    that row's own kind, so nothing can inherit it and there is no reset to
+    forget. The border stays static only because conditional formatting cannot
+    set borders. [2026-08-08]
     """
     from services.project_status_rows import FIRST_BODY_ROW, KIND_PROJECT
 
@@ -138,16 +148,9 @@ def _project_row_requests(sheet_id: int, rows: list) -> list[dict]:
         if (row[7] if len(row) > 7 else "") != KIND_PROJECT:
             continue
         r = FIRST_BODY_ROW - 1 + idx
-        rng = {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
-               "startColumnIndex": 0, "endColumnIndex": 7}
-        reqs.append({"repeatCell": {
-            "range": rng,
-            "cell": {"userEnteredFormat": {
-                "backgroundColor": _PROJECT_BG,
-                "textFormat": {"bold": True, "fontSize": 11}}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
         reqs.append({"updateBorders": {
-            "range": rng,
+            "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                      "startColumnIndex": 0, "endColumnIndex": 7},
             "top": {"style": "SOLID_THICK",
                     "color": {"red": 0.1, "green": 0.3, "blue": 0.5}}}})
     return reqs

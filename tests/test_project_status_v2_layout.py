@@ -282,15 +282,16 @@ class TestVisualFeedbackRound2:
             out.append(row)
         return out
 
-    def test_project_rows_get_a_band_and_a_fence(self):
-        """"we don't have a clear distinction between subjects and action rows"
-        — a 28-row tab read as one flat list."""
+    def test_project_rows_get_a_fence_but_NO_static_paint(self):
+        """The band and bold come from the conditional rule. A STATIC background
+        is inherited by any row inserted beneath it — by the system with
+        inheritFromBefore, or by Nechama pressing "insert row" — so the first
+        action under every project arrived tinted and bold. Patching the format
+        reset would only have covered the system's inserts. [2026-08-08]"""
         from services.project_status_sheet import _project_row_requests
         reqs = _project_row_requests(9, self._rows(["P", "A", "A", "P"]))
-        bands = [r for r in reqs if "repeatCell" in r]
-        borders = [r for r in reqs if "updateBorders" in r]
-        assert len(bands) == 2 and len(borders) == 2
-        assert bands[0]["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["bold"]
+        assert [next(iter(r)) for r in reqs] == ["updateBorders"] * 2
+        assert not [r for r in reqs if "repeatCell" in r]
 
     def test_action_rows_get_neither(self):
         from services.project_status_sheet import _project_row_requests
@@ -506,3 +507,22 @@ class TestUnfiledWorkIsSurfaced:
             result = await mod.project_status_scheduler.refresh(notify=False)
 
         assert result["unfiled"] == 0
+
+
+class TestNothingCanInheritTheProjectTint:
+    """The whole point of moving the band to a conditional rule."""
+
+    def test_the_band_is_only_ever_conditional(self):
+        from services.project_status_sheet import (
+            _conditional_format_rules, _project_row_requests)
+        rule = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]["rule"]
+        assert rule["booleanRule"]["format"]["backgroundColor"]
+        static = _project_row_requests(9, [[""] * 7 + ["P", "u", "u", "", ""]])
+        assert not any("repeatCell" in r for r in static)
+
+    def test_a_new_action_row_needs_no_background_reset(self):
+        """Because there is no static background above it to inherit."""
+        from services.project_status_sheet import new_row_format_requests
+        reqs = new_row_format_requests(9, 12, KIND_ACTION, "x")
+        fields = [r["repeatCell"]["fields"] for r in reqs if "repeatCell" in r]
+        assert all("backgroundColor" not in f for f in fields)

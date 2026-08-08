@@ -321,6 +321,20 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
         elif not _eq(field, db_val, sheet_cmp, assignees):
             if db_row.get(f"manual_{field}") and not _db_edit_is_newer(db_row, snap):
                 plan.bump("manual_held")                    # Rule 2
+                # NOTE: `final` (and therefore the snapshot) keeps the sheet
+                # value here, and that is not a mistake to "fix" — the hold
+                # branch only fires when sheet == snapshot already, so the two
+                # are the same value. Setting it to snap_val instead changes
+                # nothing, and when there is NO base it would record None,
+                # which is worse.
+                #
+                # Three of Eyal's labels were nevertheless stuck divergent
+                # (sheet "Salesman In Italy", DB "Italy"). The cause is not
+                # here: the task carries TWO snapshots, one per surface, and
+                # the Tasks tab pulled its own stale cell over the value the
+                # Project Status sheet had just written. A second writer, not a
+                # bad merge rule. Retiring the Tasks tab as a writer is the
+                # fix. [2026-08-08]
                 final[field] = sheet_cmp
             else:
                 plan.cell_writes.append(

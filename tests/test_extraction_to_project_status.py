@@ -163,3 +163,67 @@ class TestFourTierResolution:
         rows = _batch2([{"title": "x", "label": "t", "project": None,
                          "category": "General"}])
         assert "project_id" not in rows[0]
+
+
+class TestUnresolvableAreaFallsBackToTheMeeting:
+    """Two of the four tasks from the 2026-08-08 weekly meeting resolved to
+    category "General", which is not an area — so the Others-bucket fallback had
+    nothing to catch them and they landed with project_id NULL, invisible on the
+    sheet with no error to notice.
+
+    Every task in a batch comes from ONE meeting, so its siblings are the best
+    available evidence. Same trick project_status.build_status_pack already uses
+    to place open questions, which carry no category at all.
+    """
+
+    def test_a_stray_task_is_filed_under_its_siblings_others_bucket(self):
+        rows = _batch2([
+            {"title": "real one", "label": "x", "project": "Finance",
+             "category": "LEGAL, CORPORATE & FINANCE"},
+            {"title": "stray", "label": "", "project": None, "category": "General"},
+        ])
+        stray = next(r for r in rows if r["title"] == "stray")
+        assert stray["project_id"] == "p_other_fin"      # visible on the sheet
+        # category is NOT guessed: it IS the Gantt area taxonomy, read by the
+        # Gantt, the morning brief and the area rollups. Pushing an inference
+        # there to fix a visibility problem on one sheet is too wide a blast
+        # radius. "General" is the honest answer and stays. [2026-08-08]
+        assert stray["category"] == "General"
+
+    def test_the_majority_area_decides_the_bucket(self):
+        rows = _batch2([
+            {"title": "a", "label": "", "project": None, "category": "LEGAL, CORPORATE & FINANCE"},
+            {"title": "b", "label": "", "project": None, "category": "LEGAL, CORPORATE & FINANCE"},
+            {"title": "c", "label": "", "project": None, "category": "PRODUCT & TECHNOLOGY"},
+            {"title": "stray", "label": "", "project": None, "category": "General"},
+        ])
+        stray = next(r for r in rows if r["title"] == "stray")
+        assert stray["project_id"] == "p_other_fin"   # LEGAL wins the vote
+        assert stray["category"] == "General"         # taxonomy left honest
+
+    def test_a_task_that_already_resolved_is_untouched(self):
+        rows = _batch2([
+            {"title": "a", "label": "", "project": None, "category": "PRODUCT & TECHNOLOGY"},
+            {"title": "b", "label": "", "project": "Finance",
+             "category": "LEGAL, CORPORATE & FINANCE"},
+        ])
+        assert next(r for r in rows if r["title"] == "b")["category"] == \
+            "LEGAL, CORPORATE & FINANCE"
+        assert next(r for r in rows if r["title"] == "b")["project_id"] == "p_fin"
+
+    def test_no_sibling_has_an_area_so_nothing_is_guessed(self):
+        rows = _batch2([
+            {"title": "a", "label": "", "project": None, "category": "General"},
+            {"title": "b", "label": "", "project": None, "category": "General"},
+        ])
+        assert all(r["category"] == "General" for r in rows)
+        assert all("project_id" not in r for r in rows)
+
+    def test_an_explicit_project_survives_the_fallback(self):
+        """The fallback fixes the AREA; it must not overwrite a real project."""
+        rows = _batch2([
+            {"title": "a", "label": "", "project": None, "category": "PRODUCT & TECHNOLOGY"},
+            {"title": "stray", "label": "", "project": "Finance", "category": "General"},
+        ])
+        stray = next(r for r in rows if r["title"] == "stray")
+        assert stray["project_id"] == "p_fin"

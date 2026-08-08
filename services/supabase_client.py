@@ -1221,6 +1221,45 @@ class SupabaseClient:
 
         data = [_row(t) for t in valid_tasks]
 
+        # A task whose category resolved to "General" has no area, so the
+        # Others-bucket fallback has nothing to catch it and the task lands
+        # with project_id NULL — invisible on the Project Status sheet, with no
+        # error to notice. Two of the four tasks from the 2026-08-08 weekly
+        # meeting did exactly that.
+        #
+        # Every task in a batch comes from ONE meeting, so the rest of the batch
+        # is the best available evidence for where a stray one belongs. Same
+        # trick project_status.build_status_pack already uses to place open
+        # questions, which carry no category at all: take the majority real area
+        # among its siblings. No majority (or no siblings with an area) means it
+        # stays NULL rather than being guessed into the wrong place.
+        # [2026-08-08]
+        area_names = {(a.get("name") or "").strip().lower() for a in _areas}
+        placed = [r for r in data
+                  if (r.get("category") or "").strip().lower() in area_names]
+        if placed and len(placed) != len(data):
+            from collections import Counter
+            majority, count = Counter(
+                r["category"] for r in placed).most_common(1)[0]
+            bucket = _others.get(majority.strip().lower())
+            for r in data:
+                if (r.get("category") or "").strip().lower() in area_names:
+                    continue
+                if not bucket or r.get("project_id"):
+                    continue
+                # ONLY project_id — deliberately NOT category. `category` IS the
+                # Gantt area taxonomy, read by the Gantt, the morning brief and
+                # the area rollups, so guessing it would push an inference into
+                # half the system to fix a visibility problem on one sheet.
+                # Setting the project alone puts the task in the right area's
+                # Others bucket on the Project Status sheet and leaves the
+                # taxonomy honest: category stays "General", which is true.
+                r["project_id"] = bucket
+                logger.info(
+                    f"create_tasks_batch: '{str(r.get('title'))[:40]}' has no "
+                    f"resolvable area — filed under {majority}'s Others bucket "
+                    f"from its meeting's other {count} task(s); category left as-is")
+
         # [audit P1-01] Stamp the tier ATOMICALLY at insert (belt; propagate is
         # the suspenders) so a propagate failure can't leave CEO tasks team-visible.
         if sensitivity:

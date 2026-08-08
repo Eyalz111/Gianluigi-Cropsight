@@ -674,6 +674,8 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
     if shadow is None:
         shadow = getattr(settings, "RECONCILE_SHADOW_MODE", True)
     write_allowed = not (dry_run or shadow)
+    # See the note in the field loop: this tab is a mirror, not an input.
+    read_only = getattr(settings, "TASKS_TAB_READ_ONLY", False)
     tab = settings.TASK_TRACKER_TAB_NAME or "Tasks"
 
     try:
@@ -807,6 +809,25 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         deadline_unparseable = False
         for field in _ACTION_FIELDS:
             sheet_val, snap_val, db_val = st.get(field), snap.get(field), dt.get(field)
+            # READ-ONLY MIRROR. The Project Status sheet is the single editable
+            # surface for tasks as of 2026-08-08; this tab stays as the flat,
+            # sortable view but must never WRITE. Two writers on the same rows
+            # is what produced every cross-surface defect this week — the
+            # rename-revert loop, the manual_set_at recency bug, and three
+            # labels left permanently divergent because this tab pulled its own
+            # stale cell over a value Project Status had just written.
+            #
+            # Forcing every field down the Rule 4 path makes the tab a true
+            # mirror: the DB is copied out, nothing is ever read back in, and
+            # `manual_*` stops being set from here at all.
+            if read_only:
+                if not _field_eq(field, db_val, sheet_val):
+                    _cell(_ACTION_SHEET_KEY[field], row, db_val)
+                    summary["pushed"] += 1
+                    if field == "deadline":
+                        deadline_cell_written = True
+                final[field] = db_val
+                continue
             # A non-empty deadline cell that didn't parse to ISO is raw text
             # (get_all_tasks convention). NEVER pull it — that's how the
             # 2026-06-11 NULL-deadline data loss happened. Keep the DB value,
@@ -880,6 +901,12 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
         # content-revert trap (Eyal's 2026-07-06 /sync incident).
         for db_key, (col_key, sheet_key) in _CONTENT_MAP.items():
             c_sheet, c_snap, c_db = st.get(sheet_key), snap.get(db_key), dt.get(db_key)
+            if read_only:                       # mirror — never read text back in
+                if _normalize(c_db) != _normalize(c_sheet):
+                    _cell(col_key, row, c_db)
+                    summary["pushed"] += 1
+                final[db_key] = c_db
+                continue
             if (str(c_sheet or "").strip()
                     and _normalize(c_sheet) != _normalize(c_snap)
                     and _normalize(c_sheet) != _normalize(c_db)):
@@ -952,6 +979,16 @@ async def reconcile_tasks(dry_run: bool = False, shadow: bool | None = None) -> 
                                     final.get("title"), final.get("label")))
 
     # --- Sheet rows with no UUID -> create in DB + write UUID back ---
+    # A mirror does not accept new work. A row typed here would become a task
+    # that the Project Status sheet then has to be told about, which is the
+    # second-writer problem wearing a different hat. Reported so a row typed
+    # out of habit is not silently ignored.
+    if read_only and creates:
+        logger.info(
+            f"[reconcile] {len(creates)} hand-typed row(s) on the Tasks tab "
+            "ignored — it is a read-only mirror; add work on Project Status.")
+        summary["ignored_creates"] = len(creates)
+        creates = []
     for st in creates:
         summary["created"] += 1
         if not write_allowed:

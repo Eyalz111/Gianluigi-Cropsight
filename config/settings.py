@@ -159,6 +159,14 @@ class Settings(BaseSettings):
     PROJECT_STATUS_AUTO_INJECT_ENABLED: bool = Field(default=False, description="Append newly-extracted tasks to their project block")
     PROJECT_STATUS_MAX_AUTO_PER_PROJECT: int = Field(default=5, description="Max auto-injected actions per project per cycle")
     PROJECT_STATUS_MAX_ACTIONS_PER_PROJECT: int = Field(default=25, description="Max action rows a project block may hold")
+    # ONE EDITABLE SURFACE FOR TASKS. With this on, the Tasks tab is refreshed
+    # from the database and never read back — the Project Status sheet is the
+    # only place a task is edited. Two writers on the same rows produced every
+    # cross-surface defect of 2026-08: the rename-revert loop, the per-task
+    # manual_set_at recency bug, and three labels left permanently divergent
+    # because the Tasks tab pulled a stale cell over a value Project Status had
+    # just written. [2026-08-08]
+    TASKS_TAB_READ_ONLY: bool = Field(default=False, description="Tasks tab is a read-only mirror; Project Status is the only editable task surface")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")

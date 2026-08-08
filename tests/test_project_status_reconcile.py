@@ -1251,3 +1251,5 @@ class TestEveryFinishedRowLeavesTheSheet:
                               "snapshot_at": "2026-08-08T10:00:00Z"}},
         )
         assert plan.row_deletes == [] and plan.strikes == []
+
+
