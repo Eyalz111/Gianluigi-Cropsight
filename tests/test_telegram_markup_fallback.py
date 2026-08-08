@@ -64,3 +64,27 @@ class TestPassthrough:
         cleaned = _strip_markup(text, "Markdown")
         for word in ("Chase", "NCPB", "follow-up", "deck", "now"):
             assert word in cleaned
+
+
+class TestStrayAngleBracketsKeepTheirText:
+    """`<[^>]+>` deleted everything between a stray "<" and the next ">" —
+    precisely the content that caused the parse failure being recovered from.
+    A message would arrive looking complete with words cut out of the middle."""
+
+    def test_a_less_than_in_prose_does_not_eat_the_sentence(self):
+        text = "Margin is <5% on the Kenya deal, so we should <re-price> it"
+        cleaned = _strip_markup(text, "HTML")
+        assert "5% on the Kenya deal" in cleaned
+        assert "re-price" in cleaned
+
+    def test_real_tags_are_still_removed(self):
+        assert _strip_markup("<b>Projects</b> \u2014 <i>3 open</i>", "HTML") == \
+            "Projects \u2014 3 open"
+
+    def test_a_tag_with_attributes_is_removed(self):
+        assert _strip_markup('<a href="http://x.test">the sheet</a>', "HTML") == \
+            "the sheet"
+
+    def test_a_maths_comparison_survives_intact(self):
+        assert _strip_markup("if x < y and y > z then ship", "HTML") == \
+            "if x < y and y > z then ship"

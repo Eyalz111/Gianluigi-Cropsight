@@ -57,9 +57,11 @@ from datetime import datetime, timezone
 from config.settings import settings
 from core.dates import edit_is_newer_than_sync, parse_human_date
 from services.project_status_rows import (
-    COL_ACTION, COL_COMMENTS, COL_DATE, COL_RESP, COL_SUBJECT, COL_TODO,
+    ALL_HEADERS, FIRST_BODY_ROW, COL_ACTION, COL_COMMENTS, COL_DATE, COL_PARENT, COL_RESP,
+    COL_SUBJECT, COL_TODO,
     HUMAN_ACTION, HUMAN_PROJECT, INCOMPLETE, SYSTEM_ACTION, SYSTEM_PROJECT,
-    find_duplicate_uids, parse_tab, strip_provenance, tab_fingerprint,
+    find_duplicate_uids, parse_tab, resolve_columns, strip_provenance,
+    tab_fingerprint,
 )
 from services.supabase_client import supabase_client
 
@@ -189,6 +191,8 @@ class Plan:
             "reparented": 0, "ticked": 0, "unticked": 0, "incomplete": 0,
             "ghosts": 0, "dup_uids": 0, "normalized_dates": 0, "orphans": 0,
             "names_refreshed": 0, "paste_duplicates": 0, "blanks_refused": 0,
+            "orphaned_by_deleted_project": 0, "adopted_rows": 0,
+            "blocks_added": 0, "project_without_a_tab": 0,
             "matched_existing_project": 0,
         }
         self.overrides: list = []             # human-readable "what changed"
@@ -200,6 +204,17 @@ class Plan:
         self.row_deletes: list = []           # (tab, row_number, task_id)
         self.strikes: list = []               # (tab, row_number, task_id)
         self.fingerprints: dict = {}          # tab -> uid-sequence hash
+        # tab -> {header name: index} AS RESOLVED FROM THAT TAB. Writes must
+        # use the same map the read used; a canonical index is only correct
+        # while nobody has inserted a column. [2026-08-08 code review]
+        self.columns: dict = {}
+        # ps_action snapshots to delete alongside their removed rows.
+        self.drop_snapshots: list = []
+        # Human rows that resolve to an existing entity and must be
+        # stamped with its identity so they stop being re-evaluated.
+        self.adopt_rows: list = []
+        # Active projects with no block on the sheet yet.
+        self.new_blocks: list = []            # (tab, anchor_row, [row])
 
     def bump(self, key: str, n: int = 1) -> None:
         self.counters[key] = self.counters.get(key, 0) + n
@@ -214,6 +229,7 @@ class Plan:
             "suppress": len(self.suppress),
             "person_proposals": len(self.person_proposals),
             "injects": sum(len(rows) for _, _, rows in self.injects),
+            "new_blocks": sum(len(r) for _, _, r in self.new_blocks),
             "row_deletes": len(self.row_deletes),
             "strikes": len(self.strikes),
             "skipped_tabs": self.skipped_tabs,
@@ -240,7 +256,8 @@ def _read_tabs(spreadsheet_id: str) -> dict:
 
 
 def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
-               tab: str, plan: Plan, assignees: _Assignees) -> dict:
+               tab: str, plan: Plan, assignees: _Assignees,
+               cols: dict) -> dict:
     """Apply Rules 1/2/4 to one row. Returns the settled values for the snapshot."""
     updates, final = {}, {}
     id_key = "project" if kind == "project" else "task"
@@ -266,7 +283,15 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
         else:
             sheet_cmp = sheet_val
 
-        edited = (not _eq(field, sheet_cmp, snap_val, assignees)
+        # NO MERGE BASE MEANS NO EDIT. With snap == {} every populated cell
+        # differs from a None snapshot, so a row whose snapshot failed to write
+        # (the helper logs and returns False rather than raising) or that was
+        # injected before its snapshot landed would have its ENTIRE contents
+        # pulled into the database and marked sticky — freezing machine-written
+        # values as human decisions. The sibling rename rail already refuses to
+        # act without a base; this one did not. [2026-08-08 code review]
+        edited = (bool(snap)
+                  and not _eq(field, sheet_cmp, snap_val, assignees)
                   and not _eq(field, sheet_cmp, db_val, assignees))
         if field in _NEVER_BLANK and not str(sheet_cmp).strip():
             if edited:
@@ -290,7 +315,7 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
             if (field in _DATE_FIELDS and sheet_val
                     and _display(field, sheet_cmp) != sheet_val):
                 plan.cell_writes.append(
-                    (tab, row.row_number, _col_index(col),
+                    (tab, row.row_number, cols[col],
                      _display(field, sheet_cmp)))
                 plan.bump("normalized_dates")
         elif not _eq(field, db_val, sheet_cmp, assignees):
@@ -299,7 +324,7 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
                 final[field] = sheet_cmp
             else:
                 plan.cell_writes.append(
-                    (tab, row.row_number, _col_index(col), _display(field, db_val)))
+                    (tab, row.row_number, cols[col], _display(field, db_val)))
                 plan.bump("pushed")                         # Rule 4
                 final[field] = db_val
         else:
@@ -310,7 +335,7 @@ def _merge_row(row, kind: str, db_row: dict, snap: dict, field_map: dict,
             if (field in _DATE_FIELDS and sheet_val
                     and _display(field, sheet_cmp) != sheet_val):
                 plan.cell_writes.append(
-                    (tab, row.row_number, _col_index(col),
+                    (tab, row.row_number, cols[col],
                      _display(field, sheet_cmp)))
                 plan.bump("normalized_dates")
                 plan.overrides.append(
@@ -331,6 +356,7 @@ def _snap_key(field: str) -> str:
 
 
 def _col_index(col: str) -> int:
+    """Canonical position — the FALLBACK only. Prefer the tab's resolved map."""
     from services.project_status_rows import ALL_HEADERS
     return ALL_HEADERS.index(col)
 
@@ -363,8 +389,9 @@ def build_plan(grids: dict) -> Plan:
     parsed: dict = {}
 
     for tab, grid in grids.items():
-        blocks, orphans, _ = parse_tab(grid)
+        blocks, orphans, cols = parse_tab(grid)
         plan.fingerprints[tab] = tab_fingerprint(blocks, orphans)
+        plan.columns[tab] = cols
 
         # GUARD: a transient Sheets read can return an EMPTY tab without
         # raising. Treating that as "everything was deleted" would suppress the
@@ -392,6 +419,11 @@ def build_plan(grids: dict) -> Plan:
         # Only the TOPMOST occurrence of a uid is authoritative; the rest are a
         # paste and are left entirely alone this cycle.
         pasted = {id(r) for rows in dups.values() for r in rows[1:]}
+        # Which project rows still physically exist in this tab — the
+        # evidence that distinguishes "this row moved" from "the heading
+        # above it was deleted".
+        tab_project_uids = {b.project.uid for b in blocks
+                            if b.project and b.project.uid}
 
         for block in blocks:
             proj = block.project
@@ -406,7 +438,8 @@ def build_plan(grids: dict) -> Plan:
                     seen_projects.add(proj.uid)
                     final = _merge_row(proj, "project", db_proj,
                                        proj_snaps.get(proj.uid, {}),
-                                       _PROJECT_FIELDS, tab, plan, assignees)
+                                       _PROJECT_FIELDS, tab, plan, assignees,
+                                       cols)
                     plan.snapshots.append(("project", proj.uid, tab,
                                            proj.row_number, final))
 
@@ -421,7 +454,7 @@ def build_plan(grids: dict) -> Plan:
                     db_name = db_proj.get("name") or ""
                     if _normalize(proj.values.get(COL_SUBJECT)) != _normalize(db_name):
                         plan.cell_writes.append(
-                            (tab, proj.row_number, _col_index(COL_SUBJECT), db_name))
+                            (tab, proj.row_number, cols[COL_SUBJECT], db_name))
                         plan.bump("names_refreshed")
             elif proj is not None and proj.kind == HUMAN_PROJECT:
                 # A typed project name that ALREADY EXISTS is that project, not
@@ -441,6 +474,35 @@ def build_plan(grids: dict) -> Plan:
                 if existing:
                     parent_uid = existing["id"]
                     plan.bump("matched_existing_project")
+                    # ADOPT IT. Setting parent_uid alone left the row a HUMAN
+                    # row forever: its objective/owner/date were never merged,
+                    # never snapshotted and never persisted, so everything she
+                    # typed on that line was silently discarded and the row was
+                    # re-evaluated from scratch every cycle. Stamping identity
+                    # makes it a system row, and the normal project merge runs
+                    # on it from the next pass. [2026-08-08 code review]
+                    plan.adopt_rows.append(
+                        {"kind": "project", "tab": tab, "row": proj.row_number,
+                         "uid": existing["id"], "parent": existing["id"]})
+                    fields = {}
+                    for col, field in _PROJECT_FIELDS.items():
+                        typed_val = proj.values.get(col, "")
+                        if not str(typed_val).strip():
+                            continue
+                        if field in _DATE_FIELDS:
+                            typed_val = parse_human_date(typed_val,
+                                                         allow_relative=True)
+                            if not typed_val:
+                                continue
+                        if not _eq(field, typed_val, existing.get(field),
+                                   assignees):
+                            fields[field] = typed_val
+                            plan.manual_marks.append(
+                                ("project", existing["id"], field))
+                    if fields:
+                        plan.project_updates.setdefault(
+                            existing["id"], {}).update(fields)
+                        plan.bump("pulled", len(fields))
                 else:
                     plan.creates.append({"kind": "project", "tab": tab,
                                          "row": proj.row_number,
@@ -452,7 +514,8 @@ def build_plan(grids: dict) -> Plan:
                 if id(row) in pasted:
                     continue
                 _handle_action(row, tab, parent_uid, db_tasks, act_snaps,
-                               plan, assignees, seen_tasks)
+                               plan, assignees, seen_tasks, cols,
+                               tab_project_uids)
 
         for row in orphans:
             plan.bump("orphans")
@@ -461,8 +524,10 @@ def build_plan(grids: dict) -> Plan:
                 # losing a line she typed because it sat in the wrong place
                 # would be the worst possible behaviour.
                 _handle_action(row, tab, "", db_tasks, act_snaps, plan,
-                               assignees, seen_tasks)
+                               assignees, seen_tasks, cols,
+                               tab_project_uids)
 
+    _plan_missing_blocks(parsed, db_projects, seen_projects, plan)
     _detect_suppressions(act_snaps, seen_tasks, db_tasks, plan)
     _propose_people(plan, assignees)
     _plan_closed_rows(parsed, db_tasks, plan)
@@ -483,7 +548,15 @@ def _annotated(row, db_task: dict) -> bool:
         return True
     if row.origin == "auto_edited":
         return True
-    return any(k.startswith("manual_") and v for k, v in (db_task or {}).items())
+    # `v is True` on purpose. Prefix-matching "manual_" also catches the
+    # bookkeeping columns manual_set_at and manual_set_source, which are
+    # timestamps and strings — truthy on almost every task that has ever been
+    # touched. That made virtually every closed row count as annotated, so
+    # nothing was ever removed and the sheet would fill with struck-out
+    # finished work. Only the real per-field booleans count.
+    # [2026-08-08 code review]
+    return any(k.startswith("manual_") and v is True
+               for k, v in (db_task or {}).items())
 
 
 def _plan_closed_rows(parsed: dict, db_tasks: dict, plan: Plan) -> None:
@@ -510,7 +583,15 @@ def _plan_closed_rows(parsed: dict, db_tasks: dict, plan: Plan) -> None:
                 if _annotated(row, task):
                     plan.strikes.append((tab, row.row_number, row.uid))
                 else:
+                    # The snapshot goes WITH the row. Left behind, a task that
+                    # is later re-opened has a snapshot but no sheet row:
+                    # _detect_suppressions reads that as "she deleted it" and
+                    # sets ps_suppressed, while _plan_injections refuses to
+                    # re-add anything that already has a snapshot. The task
+                    # becomes permanently invisible with no way back short of
+                    # manual DB surgery. [2026-08-08 code review]
                     plan.row_deletes.append((tab, row.row_number, row.uid))
+                    plan.drop_snapshots.append(row.uid)
 
 
 def _plan_injections(parsed: dict, db_tasks: dict, act_snaps: dict,
@@ -576,7 +657,9 @@ def _plan_injections(parsed: dict, db_tasks: dict, act_snaps: dict,
 
 def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
                    act_snaps: dict, plan: Plan, assignees: _Assignees,
-                   seen_tasks: set) -> None:
+                   seen_tasks: set, cols: dict,
+                   tab_project_uids: set | None = None) -> None:
+    tab_project_uids = tab_project_uids if tab_project_uids is not None else set()
     if row.kind == INCOMPLETE:
         # Date or owner filled but no Action text. Counted and surfaced, never
         # written: a task with no title is worse than no task.
@@ -633,14 +716,31 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
         plan.manual_marks.append(("task", row.uid, "status"))
         plan.bump("ticked" if row.checked else "unticked")
 
-    # A row dragged into another project's block is a deliberate re-parent.
+    # A row dragged into another project's block is a deliberate re-parent —
+    # but ONLY if its own project row is still in this tab. Deleting a project
+    # row makes every action beneath it parse into the block ABOVE, so without
+    # this check one delete silently re-files all of that project's tasks under
+    # a neighbouring project AND marks each sticky, which stops the system ever
+    # correcting itself. "The row moved" and "the heading above it vanished"
+    # produce identical parses; the surviving project row is what tells them
+    # apart. And the _parent CELL is rewritten too — leaving it stale meant the
+    # same re-parent was re-applied, with a fresh manual timestamp, on every
+    # cycle forever. [2026-08-08 code review]
     if parent_uid and row.parent and parent_uid != row.parent:
-        plan.task_updates.setdefault(row.uid, {})["project_id"] = parent_uid
-        plan.manual_marks.append(("task", row.uid, "project_id"))
-        plan.bump("reparented")
+        if row.parent in tab_project_uids:
+            plan.task_updates.setdefault(row.uid, {})["project_id"] = parent_uid
+            plan.manual_marks.append(("task", row.uid, "project_id"))
+            plan.cell_writes.append(
+                (tab, row.row_number, cols[COL_PARENT], parent_uid))
+            plan.bump("reparented")
+        else:
+            plan.bump("orphaned_by_deleted_project")
+            plan.overrides.append(
+                f"{tab} r{row.row_number}: its project row is gone — left where "
+                "it is rather than re-filed under the block above")
 
     final = _merge_row(row, "task", db_task, snap, _ACTION_FIELDS, tab, plan,
-                       assignees)
+                       assignees, cols)
     final["status"] = "done" if row.checked else "pending"
     plan.snapshots.append(("task", row.uid, tab, row.row_number, final))
 
@@ -662,6 +762,54 @@ def _looks_like_a_copy(title: str, project_id: str, db_tasks: dict) -> bool:
                 and _normalize(task.get("title")) == key):
             return True
     return False
+
+
+def _plan_missing_blocks(parsed: dict, db_projects: dict, seen: set,
+                         plan: Plan) -> None:
+    """Give an active project a block if it has none.
+
+    NOTHING ELSE CAN. write_project_status_blocks is only reached from the
+    one-shot rollout script, the weekly slot became review-prep and writes
+    nothing, and _plan_injections can only append actions INTO blocks that
+    already exist. So a project created anywhere else — MCP, the Projects tab, a
+    seed script — never appeared here, and every task attached to it was
+    invisible too: not an empty block, no warning, simply absent from the review
+    it belonged to. The only remedy was re-running the rollout by hand.
+    [2026-08-08 code review]
+    """
+    from processors.project_status import _project_area_names, tab_name_for
+    from services.project_status_rows import KIND_PROJECT
+
+    missing = [p for p in db_projects.values()
+               if p["id"] not in seen
+               and (p.get("status") or "active") != "retired"]
+    if not missing:
+        return
+
+    area_of = _project_area_names()
+    ends = {}
+    for tab, blocks in parsed.items():
+        if tab in plan.skipped_tabs:
+            continue
+        ends[tab] = max((b.end_row for b in blocks), default=FIRST_BODY_ROW)
+
+    for project in sorted(missing, key=lambda r: (r.get("display_order") or 999,
+                                                  r.get("name") or "")):
+        tab = tab_name_for(area_of.get(project.get("area_id")) or "General")
+        if tab not in ends:
+            # No tab for that area on this sheet — report rather than guess.
+            plan.bump("project_without_a_tab")
+            continue
+        pid = project["id"]
+        row = [
+            project.get("display_order") or "", project.get("name") or "", "",
+            project.get("objective") or "", _display("target_date", project.get("target_date")),
+            project.get("owner") or "", project.get("notes") or "",
+            KIND_PROJECT, pid, pid, "", "",
+        ]
+        plan.new_blocks.append((tab, ends[tab], [row]))
+        ends[tab] += 1
+        plan.bump("blocks_added")
 
 
 def _detect_suppressions(act_snaps: dict, seen: set, db_tasks: dict,
@@ -889,21 +1037,45 @@ def _create_entity(spec: dict) -> tuple[str, str]:
     return (created or {}).get("id", ""), "A"
 
 
+def _a1(index: int) -> str:
+    """0-based column index -> A1 letters, past Z."""
+    letters = ""
+    index += 1
+    while index:
+        index, rem = divmod(index - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
 def _write_identity(sheets_service, spreadsheet_id: str, tab: str, row: int,
-                    kind: str, uid: str, parent: str) -> None:
+                    kind: str, uid: str, parent: str, cols: dict) -> None:
     """Stamp _kind/_uid/_parent into a row we just created a record for.
 
     Synchronous and per-row on purpose: batching this with the other cell
     writes would make one failure indistinguishable from all of them, and the
     rollback below has to know exactly which create lost its identity.
     """
+    # Addressed through the tab's OWN resolved columns, not a hard-coded H:J.
+    # If someone inserts a column, H:J are three of her VISIBLE cells — stamping
+    # there blanks her text and leaves the real identity columns empty, so the
+    # row reads as fresh human input next cycle and the task is created a second
+    # time. Written as one contiguous range only when the three are adjacent,
+    # which they are in the standard layout. [2026-08-08 code review]
+    from services.project_status_rows import COL_KIND, COL_PARENT, COL_UID
+
+    idx = [cols[COL_KIND], cols[COL_UID], cols[COL_PARENT]]
+    contiguous = idx == list(range(idx[0], idx[0] + 3))
     try:
+        if contiguous:
+            data = [{"range": f"'{tab}'!{_a1(idx[0])}{row}:{_a1(idx[2])}{row}",
+                     "values": [[kind, uid, parent or uid]]}]
+        else:
+            data = [{"range": f"'{tab}'!{_a1(c)}{row}", "values": [[v]]}
+                    for c, v in zip(idx, [kind, uid, parent or uid])]
         sheets_service._execute_with_retry(
-            lambda: sheets_service.service.spreadsheets().values().update(
+            lambda: sheets_service.service.spreadsheets().values().batchUpdate(
                 spreadsheetId=spreadsheet_id,
-                range=f"'{tab}'!H{row}:J{row}",
-                valueInputOption="RAW",
-                body={"values": [[kind, uid, parent or uid]]}))
+                body={"valueInputOption": "RAW", "data": data}))
     except Exception as e:                                  # noqa: BLE001
         # Roll the create back rather than leave an identity-less row that
         # would be re-created on every future cycle.
@@ -995,7 +1167,7 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
             "fields": "userEnteredValue"}}))
         out["struck"] += 1
 
-    for tab, anchor, rows in plan.injects:
+    for tab, anchor, rows in list(plan.new_blocks) + list(plan.injects):
         if tab in stale or tab not in gid:
             continue
         sheet_id = gid[tab]
@@ -1021,12 +1193,18 @@ async def _apply_structural(plan: Plan, spreadsheet_id: str) -> dict:
         from services.project_status_rows import ALL_HEADERS, KIND_ACTION
 
         act_col = ALL_HEADERS.index("Action")
+        kind_col = ALL_HEADERS.index("_kind")
         for offset, new_row in enumerate(rows):
+            # A project row must NOT get the action-row treatment (checkbox,
+            # date validation, bold reset) — it needs its block fence instead.
+            row_kind = str(new_row[kind_col] or KIND_ACTION)
             for req in new_row_format_requests(
-                    sheet_id, anchor + offset, KIND_ACTION,
+                    sheet_id, anchor + offset, row_kind,
                     str(new_row[act_col] or "")):
                 ops.append((anchor, req))
-        out["injected"] += len(rows)
+        out["injected"] += sum(1 for r in rows if str(r[kind_col] or "") != "P")
+        out["blocks_added"] = out.get("blocks_added", 0) + sum(
+            1 for r in rows if str(r[kind_col] or "") == "P")
 
     if not ops:
         return out
@@ -1140,7 +1318,9 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
             if not new_id:
                 continue
             _write_identity(sheets_service, spreadsheet_id, spec["tab"],
-                            spec["row"], kind, new_id, spec.get("project_id", ""))
+                            spec["row"], kind, new_id, spec.get("project_id", ""),
+                            plan.columns.get(spec["tab"])
+                            or resolve_columns(ALL_HEADERS))
             applied["created"] += 1
             # Style it NOW, not at the next structural pass. A line she typed
             # this morning has to be tickable this morning; the colour rules
@@ -1169,6 +1349,21 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
                          f"advanced: {e}")
             return {**applied, "error": "sheet_write_failed"}
 
+    # 4.1c Stamp identity on rows that resolved to an EXISTING entity. Without
+    #      this they stay human rows and are re-resolved from scratch forever.
+    for spec in plan.adopt_rows:
+        try:
+            _write_identity(sheets_service, spreadsheet_id, spec["tab"],
+                            spec["row"], "P" if spec["kind"] == "project" else "A",
+                            spec["uid"], spec.get("parent", ""),
+                            plan.columns.get(spec["tab"])
+                            or resolve_columns(ALL_HEADERS))
+            applied["adopted"] = applied.get("adopted", 0) + 1
+            _format_rows.append((spec["tab"], spec["row"],
+                                 "P" if spec["kind"] == "project" else "A", ""))
+        except Exception as e:                              # noqa: BLE001
+            logger.warning(f"[ps-reconcile] adopt {spec['uid']} failed: {e}")
+
     # 4.2b Style the rows we just adopted. Row numbers are unchanged here — a
     #      create writes into a row that already physically exists, so nothing
     #      has shifted and these are safe outside the structural slot.
@@ -1188,11 +1383,46 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
                 # next structural pass repaints it.
                 logger.warning(f"[ps-reconcile] styling new rows failed: {e}")
 
+    # 4.2c RE-BASELINE after our own identity writes. The structural guard
+    #      compares the tab against the fingerprint taken at read time — but
+    #      stamping a uid on a row we just adopted CHANGES that tab's sequence,
+    #      so the engine's own writes read as human interference and every tab
+    #      with a new row had its structural work silently skipped. Exactly the
+    #      busiest tabs, every time. Re-read the affected tabs so the baseline
+    #      reflects what WE did; anything a human does after this still trips it.
+    #      [2026-08-08 code review]
+    touched = {t for t, _r, _k, _x in _format_rows}
+    if structural and touched:
+        try:
+            fresh = sheets_service._execute_with_retry(
+                lambda: sheets_service.service.spreadsheets().values().batchGet(
+                    spreadsheetId=spreadsheet_id,
+                    ranges=[f"'{t}'!{READ_RANGE}" for t in sorted(touched)]))
+            for tab, vr in zip(sorted(touched), fresh.get("valueRanges", [])):
+                blocks, orphans, _ = parse_tab(vr.get("values") or [])
+                plan.fingerprints[tab] = tab_fingerprint(blocks, orphans)
+        except Exception as e:                              # noqa: BLE001
+            logger.warning(f"[ps-reconcile] re-baseline failed, structural will "
+                           f"skip those tabs: {e}")
+
     # 4.3/4.4 Structural pass. Only in the allowed slots, and only after
     #         re-reading the sheet to prove nobody moved anything since we
     #         computed these row numbers.
-    if structural and (plan.injects or plan.row_deletes or plan.strikes):
+    if structural and (plan.injects or plan.row_deletes or plan.strikes
+                       or plan.new_blocks):
         applied.update(await _apply_structural(plan, spreadsheet_id))
+
+    # 4.4b Drop the snapshots of rows the structural pass removed. Only after
+    #      the batch succeeded — dropping a snapshot for a row that is still
+    #      there would make the next cycle treat that row as having no merge
+    #      base.
+    if structural and plan.drop_snapshots:
+        for task_id in plan.drop_snapshots:
+            try:
+                supabase_client.client.table("sheet_snapshots").delete().eq(
+                    "task_id", task_id).eq("entity_type", "ps_action").execute()
+            except Exception as e:                          # noqa: BLE001
+                logger.warning(f"[ps-reconcile] snapshot drop {task_id}: {e}")
 
     # 4.5 Snapshots LAST, and only for rows that survived 4.1.
     for kind, row_id, tab, row_number, values in plan.snapshots:

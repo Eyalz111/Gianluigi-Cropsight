@@ -111,7 +111,17 @@ def _strip_markup(text: str, parse_mode: str | None) -> str:
     out = text
     if parse_mode.lower() == "html":
         out = re.sub(r"<br\s*/?>", "\n", out, flags=re.IGNORECASE)
-        out = re.sub(r"<[^>]+>", "", out)
+        # ONLY the tags Telegram actually supports. `<[^>]+>` deleted everything
+        # between a stray unescaped "<" and the next ">" anywhere later in the
+        # message — which is precisely the content that caused the parse failure
+        # being recovered from. A title reading "<5% margin" would silently lose
+        # the whole span up to the next ">", and the message would arrive
+        # looking complete with words cut out of the middle.
+        # [2026-08-08 code review]
+        out = re.sub(
+            r"</?(?:b|strong|i|em|u|ins|s|strike|del|a|code|pre|span|"
+            r"tg-spoiler|blockquote)(?:\s[^<>]*)?/?>",
+            "", out, flags=re.IGNORECASE)
         for entity, char in (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"),
                              ("&quot;", '"'), ("&#39;", "'")):
             out = out.replace(entity, char)

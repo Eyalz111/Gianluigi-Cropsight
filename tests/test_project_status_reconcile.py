@@ -616,9 +616,12 @@ class TestUnknownNamesOnEdits:
         assert plan.person_proposals == ["Ayala"]
 
     def test_an_unknown_owner_on_a_project_row_proposes_too(self):
+        # A real snapshot row always carries snapshot_at; `{}` means NO merge
+        # base, which the engine deliberately refuses to read as an edit.
         plan = _plan(
             {TAB: _grid(_prow(resp="Ayala"))},
-            tasks=[], proj_snaps={"p1": {}},
+            tasks=[], proj_snaps={"p1": {"owner": None,
+                                         "snapshot_at": "2026-08-08T10:00:00Z"}},
         )
         assert plan.person_proposals == ["Ayala"]
 
@@ -935,3 +938,187 @@ class TestPastedProjectRowResolves:
             {TAB: _grid(["", "Brand New Area", "", "", "", "", ""])}, tasks=[])
         assert [c["name"] for c in plan.creates] == ["Brand New Area"]
         assert plan.counters["matched_existing_project"] == 0
+
+
+class TestNoMergeBaseIsNotAnEdit:
+    """With snap == {} every populated cell differs from a None snapshot.
+
+    A row whose snapshot failed to write (the helper logs and returns False
+    rather than raising) or that was injected before its snapshot landed would
+    have had its ENTIRE contents pulled into the database and marked sticky —
+    freezing machine-written values as human decisions.
+    """
+
+    def test_a_row_with_no_snapshot_is_never_pulled(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Roye Tadmor", date="12/08/2026"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={},                      # snapshot write failed
+        )
+        assert plan.task_updates == {}
+        assert plan.counters["pulled"] == 0
+
+    def test_it_is_refreshed_from_the_database_instead(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Roye Tadmor"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={},
+        )
+        writes = [w for w in plan.cell_writes if w[2] == COLS["Resp."]]
+        assert writes and writes[0][3] == "Eyal Zror"
+
+    def test_a_real_snapshot_still_detects_the_edit(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(resp="Roye Tadmor"))},
+            tasks=[_db_task(assignee="Eyal Zror")],
+            act_snaps={"t1": {"title": "Ship the API", "assignee": "Eyal Zror",
+                              "status": "pending",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert plan.task_updates["t1"]["assignee"] == "Roye Tadmor"
+
+
+class TestDeletedProjectRowDoesNotRefile:
+    """Deleting a project row makes every action beneath it parse into the
+    block ABOVE. Without evidence that the row's own project is gone, that is
+    indistinguishable from a deliberate drag — so one delete silently re-filed
+    a whole project's tasks and marked them sticky, blocking correction."""
+
+    def test_actions_orphaned_by_a_deleted_project_row_are_left_alone(self):
+        plan = _plan(
+            {TAB: _grid(_prow(uid="p1"),
+                        _arow(uid="t1", parent="p_gone"))},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert "project_id" not in plan.task_updates.get("t1", {})
+        assert plan.counters["orphaned_by_deleted_project"] == 1
+        assert plan.counters["reparented"] == 0
+
+    def test_a_genuine_drag_still_repoints_and_rewrites_parent(self):
+        """The _parent CELL must be rewritten too — leaving it stale re-applied
+        the same re-parent, with a fresh manual timestamp, every cycle."""
+        plan = _plan(
+            {TAB: _grid(_prow(uid="p1"), _prow(uid="p2", name="Cloud", num=20),
+                        _arow(uid="t1", parent="p1"))},
+            projects=[_db_project("p1"), _db_project("p2", name="Cloud")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert plan.task_updates["t1"]["project_id"] == "p2"
+        writes = [w for w in plan.cell_writes if w[2] == COLS["_parent"]]
+        assert writes and writes[0][3] == "p2"
+
+
+class TestAnnotatedIgnoresBookkeeping:
+    def test_manual_set_at_alone_does_not_make_a_row_annotated(self):
+        """Prefix-matching "manual_" caught the timestamp and source columns,
+        so virtually every closed task counted as annotated and nothing was
+        ever removed."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="done", manual_set_at="2026-08-08T10:00:00Z",
+                            manual_set_source="sheet_edit")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert [r[2] for r in plan.row_deletes] == ["t1"]
+        assert plan.strikes == []
+
+    def test_a_real_sticky_flag_still_keeps_the_row(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="done", manual_assignee=True)],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert [r[2] for r in plan.strikes] == ["t1"]
+        assert plan.row_deletes == []
+
+
+class TestProjectsGetABlock:
+    """Nothing else could add one. write_project_status_blocks is only reached
+    from the one-shot rollout script, the weekly slot writes nothing, and
+    _plan_injections can only append INTO blocks that already exist — so a
+    project created via MCP or the Projects tab never appeared here, and every
+    task attached to it was invisible too."""
+
+    def test_a_project_with_no_block_gets_one(self):
+        with patch("processors.project_status._project_area_names",
+                   return_value={"a1": TAB}):
+            plan = _plan(
+                {TAB: _grid(_prow(uid="p1"))},
+                projects=[_db_project("p1", area_id="a1"),
+                          _db_project("p2", name="Brand New", area_id="a1")],
+                tasks=[],
+            )
+        names = [r[1] for _t, _a, rows in plan.new_blocks for r in rows]
+        assert names == ["Brand New"]
+        assert plan.counters["blocks_added"] == 1
+
+    def test_the_new_block_carries_its_identity(self):
+        with patch("processors.project_status._project_area_names",
+                   return_value={"a1": TAB}):
+            plan = _plan(
+                {TAB: _grid(_prow(uid="p1"))},
+                projects=[_db_project("p1", area_id="a1"),
+                          _db_project("p2", name="Brand New", area_id="a1")],
+                tasks=[],
+            )
+        row = plan.new_blocks[0][2][0]
+        assert row[7] == "P" and row[8] == "p2" and row[9] == "p2"
+
+    def test_an_existing_project_is_not_re_added(self):
+        plan = _plan({TAB: _grid(_prow(uid="p1"))},
+                     projects=[_db_project("p1")], tasks=[])
+        assert [r for _t, _a, rows in plan.new_blocks for r in rows] == []
+
+    def test_a_retired_project_never_gets_a_block(self):
+        plan = _plan(
+            {TAB: _grid(_prow(uid="p1"))},
+            projects=[_db_project("p1"),
+                      _db_project("p9", name="Gone", status="retired")],
+            tasks=[])
+        names = [r[1] for _t, _a, rows in plan.new_blocks for r in rows]
+        assert "Gone" not in names
+
+
+class TestClosedRowDropsItsSnapshot:
+    def test_a_removed_closed_row_queues_its_snapshot_for_deletion(self):
+        """Left behind, a task later re-opened has a snapshot but no row:
+        suppression reads that as a delete, and injection refuses to re-add
+        anything that already has a snapshot. Permanently invisible."""
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True))},
+            tasks=[_db_task(status="done")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert plan.row_deletes and plan.drop_snapshots == ["t1"]
+
+    def test_an_annotated_row_keeps_its_snapshot(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow(checked=True, notes="waiting"))},
+            tasks=[_db_task(status="done", notes="waiting")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "done",
+                              "notes": "waiting",
+                              "snapshot_at": "2026-08-08T10:00:00Z"}},
+        )
+        assert plan.drop_snapshots == []
+
+
+class TestMatchedProjectRowIsAdopted:
+    def test_it_is_stamped_with_the_existing_identity(self):
+        """Setting parent_uid alone left the row human forever: what she typed
+        on that line was never persisted and re-evaluated every cycle."""
+        plan = _plan(
+            {TAB: _grid(["", "Product V1", "", "Win Lombardy", "", "", ""])},
+            tasks=[])
+        assert plan.adopt_rows and plan.adopt_rows[0]["uid"] == "p1"
+
+    def test_the_cells_she_typed_are_pulled(self):
+        plan = _plan(
+            {TAB: _grid(["", "Product V1", "", "Win Lombardy", "", "", ""])},
+            tasks=[])
+        assert plan.project_updates["p1"]["objective"] == "Win Lombardy"
+        assert ("project", "p1", "objective") in plan.manual_marks

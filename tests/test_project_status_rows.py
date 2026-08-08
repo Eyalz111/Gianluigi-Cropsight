@@ -249,3 +249,54 @@ class TestFingerprint:
         a = parse_tab(_grid(_project("K", "p1"), _action("Chase NCPB", "t1", "p1")))
         b = parse_tab(_grid(_project("K", "p1"), _action("Chase NCPB again", "t1", "p1")))
         assert tab_fingerprint(*a[:2]) == tab_fingerprint(*b[:2])
+
+
+class TestFingerprintCatchesRowShifts:
+    """The guard exists to prove row numbers are still valid. Hashing only the
+    uid sequence made it blind to the single most likely mid-review edit —
+    inserting a blank row — because parse_tab discards blank rows entirely. The
+    sequence was unchanged while everything below had shifted, so a queued
+    deleteDimension landed on the wrong line."""
+
+    def test_a_blank_row_inserted_above_changes_the_fingerprint(self):
+        before = parse_tab(_grid(_project("Kenya", "p1"),
+                                 _action("Chase", "t1", "p1")))
+        after = parse_tab(_grid(["", "", "", "", "", "", ""],
+                                _project("Kenya", "p1"),
+                                _action("Chase", "t1", "p1")))
+        assert tab_fingerprint(*before[:2]) != tab_fingerprint(*after[:2])
+
+    def test_a_blank_row_inserted_between_rows_changes_it(self):
+        before = parse_tab(_grid(_project("Kenya", "p1"),
+                                 _action("Chase", "t1", "p1")))
+        after = parse_tab(_grid(_project("Kenya", "p1"),
+                                ["", "", "", "", "", "", ""],
+                                _action("Chase", "t1", "p1")))
+        assert tab_fingerprint(*before[:2]) != tab_fingerprint(*after[:2])
+
+    def test_a_pure_text_edit_still_does_not_trip_it(self):
+        """Retyping an action must not cancel that tab's structural work."""
+        a = parse_tab(_grid(_project("K", "p1"), _action("Chase NCPB", "t1", "p1")))
+        b = parse_tab(_grid(_project("K", "p1"), _action("Chase NCPB again", "t1", "p1")))
+        assert tab_fingerprint(*a[:2]) == tab_fingerprint(*b[:2])
+
+
+class TestHashHeaderResolves:
+    def test_the_number_column_resolves_from_the_sheet(self):
+        """"#" is all punctuation, so normalising stripped it to "" and the
+        truthiness guard skipped it — column A could never be resolved and
+        always fell back to its hard-coded index."""
+        shifted = ["NEW", "#", "Subject", "Action", "To do", "Date", "Resp.",
+                   "Comments", "_kind", "_uid", "_parent", "_origin", "_src"]
+        cols = resolve_columns(shifted)
+        assert cols["#"] == 1
+
+    def test_a_shifted_sheet_reads_the_checkbox_from_the_right_cell(self):
+        """With '#' unresolvable, every ticked row read as unticked and the
+        engine wrote status='pending' back over completed work."""
+        hdr = ["NEW", *ALL_HEADERS]
+        row = ["", True, "", "Chase", "", "", "", "", KIND_ACTION, "t1", "p1", "", ""]
+        blocks, _, _ = parse_tab([["t"], ["d"], hdr,
+                                  ["", 1, "Kenya", "", "", "", "", "",
+                                   KIND_PROJECT, "p1", "p1", "", ""], row])
+        assert blocks[0].actions[0].checked is True

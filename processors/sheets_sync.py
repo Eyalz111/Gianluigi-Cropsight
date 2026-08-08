@@ -1718,7 +1718,14 @@ async def reconcile_projects(dry_run: bool = False, shadow: bool | None = None) 
 
         # Snapshot the name LAST, and only for a row we did not just fail on.
         if write_allowed:
-            settled = name if sheet_edited else (dbp.get("name") if db_advanced else name)
+            # On the UNBASED path the settled value must be the DB name, not
+            # the typed cell. Seeding from the cell made the next pass read
+            # sheet == snapshot, classify it as db_advanced, and push the OLD
+            # name back over the rename — discarding it rather than applying it
+            # "one cycle late" as intended. Seeding from the DB leaves the cell
+            # differing from both base and DB, which is exactly the Rule 1 shape
+            # the next pass needs to perform the rename. [2026-08-08 code review]
+            settled = name if sheet_edited else dbp.get("name")
             try:
                 supabase_client.upsert_project_snapshot(
                     pid, settled, sr.get("row_number"))

@@ -84,7 +84,16 @@ def resolve_columns(header_row: list) -> dict:
     is case/space-insensitive because "Resp." and "Resp" both occur in the wild.
     """
     def norm(s) -> str:
-        return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+        text = str(s or "").strip().lower()
+        stripped = re.sub(r"[^a-z0-9]", "", text)
+        # "#" is entirely punctuation, so stripping non-alphanumerics reduced it
+        # to "" — which the truthiness guard below then skipped, meaning column A
+        # could NEVER be resolved from the sheet and always fell back to its
+        # hard-coded index. Insert a column to the left and every action row's
+        # checkbox is read from the wrong cell: ticked work silently reverts to
+        # pending. Fall back to the raw text when normalising empties it.
+        # [2026-08-08 code review]
+        return stripped or text
 
     found = {}
     for idx, cell in enumerate(header_row or []):
@@ -305,12 +314,22 @@ def iter_rows(blocks: list, orphans: list = None):
 
 
 def tab_fingerprint(blocks: list, orphans: list = None) -> str:
-    """Stable hash of the tab's uid sequence.
+    """Stable hash of the tab's uid sequence AND their row positions.
 
     Taken before the value pass and re-checked immediately before the
     structural pass: if it changed, a human edited the tab mid-cycle and the
     row numbers we computed are stale, so that tab's structural work is skipped
     rather than applied at the wrong offsets.
+
+    ROW NUMBERS ARE PART OF THE HASH. Hashing only the uid sequence made the
+    guard blind to the single most likely mid-review edit: inserting a blank
+    row. parse_tab discards blank rows entirely, so the sequence was unchanged
+    while every row BELOW the insert had shifted by one — the guard passed and
+    a queued deleteDimension landed on the wrong line, silently removing a live
+    row. Position is exactly what the structural pass depends on, so position
+    is what has to be verified. Text edits still don't move rows, so retyping
+    an action still doesn't trip it. [2026-08-08 code review]
     """
-    seq = "|".join(f"{r.kind}:{r.uid}" for r in iter_rows(blocks, orphans))
+    seq = "|".join(f"{r.kind}:{r.uid}@{r.row_number}"
+                   for r in iter_rows(blocks, orphans))
     return hashlib.sha1(seq.encode("utf-8")).hexdigest()
