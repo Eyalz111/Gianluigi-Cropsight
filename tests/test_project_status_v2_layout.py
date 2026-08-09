@@ -734,16 +734,12 @@ class TestAlignmentIsDeliberate:
     def test_every_visible_column_gets_one(self):
         assert set(self._map()) == set(VISIBLE_HEADERS)
 
-    def test_the_short_columns_centre(self):
-        m = self._map()
-        for name in (COL_NUM, COL_DATE, COL_PRIORITY, COL_PROJECT):
-            assert m[name]["horizontalAlignment"] == "CENTER", name
-
-    def test_the_sentence_columns_stay_left(self):
-        """Centring wrapped prose loses the left edge on every line."""
-        m = self._map()
-        for name in (COL_ACTION, COL_TODO):
-            assert m[name]["horizontalAlignment"] == "LEFT", name
+    def test_every_column_centres(self):
+        """Including the sentence-shaped ones. They were left-aligned on the
+        first pass and Eyal asked for them centred anyway — his file, and a
+        consistent grid beats the typographic argument."""
+        assert all(f["horizontalAlignment"] == "CENTER"
+                   for f in self._map().values())
 
     def test_everything_is_vertically_middle(self):
         """Top-aligned short cells float away from the wrapped text they

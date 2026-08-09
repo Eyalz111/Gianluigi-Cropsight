@@ -3602,18 +3602,19 @@ class GoogleSheetsService:
             reqs.append(_column_width_request(sid, i, widths[min(i, len(widths) - 1)]))
         reqs.append(_text_wrap_request(sid, MEETING_COL_INDEX["title"]))
 
-        # ONE DELIBERATE ALIGNMENT PER COLUMN. Dates default RIGHT and text
-        # defaults LEFT, so a tab nobody aligned looks hand-aligned at random.
-        # The two sentence-shaped columns stay left — centring wrapped prose
-        # loses the left edge on every line — everything else centres.
-        left = {MEETING_COL_INDEX["title"], MEETING_COL_INDEX["participants"]}
+        # EVERY COLUMN CENTRED, matching the area tabs. Dates default RIGHT and
+        # text defaults LEFT, so a tab nobody aligned looks hand-aligned at
+        # random. The sentence-shaped columns were left-aligned on the first
+        # pass — centring wrapped prose loses the left edge on every line — and
+        # Eyal asked for them centred anyway. It is his file to read, and a
+        # consistent grid is worth more to him than the typographic argument.
         for i in range(n_vis):
             reqs.append({"repeatCell": {
                 "range": {"sheetId": sid,
                           "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
                           "startColumnIndex": i, "endColumnIndex": i + 1},
                 "cell": {"userEnteredFormat": {
-                    "horizontalAlignment": "LEFT" if i in left else "CENTER",
+                    "horizontalAlignment": "CENTER",
                     "verticalAlignment": "MIDDLE"}},
                 "fields": ("userEnteredFormat(horizontalAlignment,"
                            "verticalAlignment)")}})

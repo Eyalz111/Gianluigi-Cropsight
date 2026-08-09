@@ -178,21 +178,21 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
 # Comfortably past any real tab (the busiest has ~30 rows).
 _MAX_BODY_ROW = 2000
 
-# Columns whose content is a SENTENCE. Centring wrapped prose makes it harder to
-# read — the eye loses the left edge on every line — so these stay left while
-# everything else centres. Eyal asked for "all the sheet aligned to the center";
-# what he was fixing is the INCONSISTENCY of some cells left and some right, and
-# this removes that without making the long columns worse.
-_LEFT_ALIGNED = (COL_ACTION, COL_TODO, COL_COMMENTS)
-
-
 def _alignment_requests(sheet_id: int) -> list[dict]:
-    """One deliberate alignment per column, so nothing falls back to a default.
+    """Every column centred, top to bottom. Eyal's call, twice.
 
     Numbers and dates default RIGHT and text defaults LEFT, which is why the tab
-    looked like it had been aligned by hand at random. Vertical middle
-    throughout: with wrapped cells of different heights, top-aligned short cells
-    float away from the text they belong to.
+    looked like it had been aligned by hand at random. One alignment for all of
+    them removes that.
+
+    The sentence-shaped columns (Action / To do / Comments) were left aligned
+    left on the first pass, on the reasoning that centring wrapped prose loses
+    the left edge on every line. Eyal asked for them centred anyway, and it is
+    his file to read — a consistent grid is worth more to him than the typographic
+    argument. Noted here so it reads as a decision rather than an oversight.
+
+    Vertical middle throughout: with wrapped cells of different heights,
+    top-aligned short cells float away from the text they belong to.
     """
     out = []
     for name in VISIBLE_HEADERS:
@@ -201,7 +201,7 @@ def _alignment_requests(sheet_id: int) -> list[dict]:
             "range": {"sheetId": sheet_id, "startRowIndex": FIRST_BODY_ROW - 1,
                       "startColumnIndex": i, "endColumnIndex": i + 1},
             "cell": {"userEnteredFormat": {
-                "horizontalAlignment": "LEFT" if name in _LEFT_ALIGNED else "CENTER",
+                "horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE"}},
             "fields": ("userEnteredFormat(horizontalAlignment,"
                        "verticalAlignment)")}})
