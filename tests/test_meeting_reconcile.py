@@ -538,12 +538,18 @@ class TestTheSimplifiedLayout:
     """Eyal, 2026-08-09: "we dont need the columns - agenda, prep needed,
     source meeting, id - too much non necessery information"."""
 
-    def test_six_visible_columns_and_one_hidden(self):
+    def test_the_visible_columns_are_the_ones_agreed(self):
         import services.google_sheets as gs
         assert gs.MEETING_TRACKER_HEADERS == [
             "Meeting", "Project", "Led By", "Proposed Date", "Participants",
-            "Status", "_id"]
-        assert gs.MEETING_VISIBLE_COLUMNS == 6
+            "Status", "Priority", "_id"]
+
+    def test_the_visible_count_matches_the_headers(self):
+        """Derived, not asserted as a number — the count and the header list
+        drifting apart is what hides a column."""
+        import services.google_sheets as gs
+        assert (gs.MEETING_VISIBLE_COLUMNS
+                == gs.MEETING_TRACKER_HEADERS.index("_id"))
 
     def test_the_dropped_columns_are_gone(self):
         import services.google_sheets as gs
@@ -583,9 +589,11 @@ class TestTheSimplifiedLayout:
         further right. Sharing the Meetings letter read the "Moved" date as a
         UUID and reported every archived meeting as missing."""
         import services.google_sheets as gs
-        assert gs.MEETINGS_ARCHIVE_ID_COLUMN == "H"
-        assert gs.MEETING_COLUMNS["id"] == "G"
         assert gs.MEETINGS_ARCHIVE_HEADERS[-1] == "_id"
+        assert gs.MEETING_TRACKER_HEADERS[-1] == "_id"
+        # One letter further right, because the archive has the extra "Moved".
+        assert (ord(gs.MEETINGS_ARCHIVE_ID_COLUMN)
+                == ord(gs.MEETING_COLUMNS["id"]) + 1)
 
     def test_outcome_is_gone_from_the_archive(self):
         """It was written from `status`, so it said "held" beside a Status
@@ -710,7 +718,8 @@ class TestOperationalOrdering:
         import services.google_sheets as gs
         order = sorted(gs.MEETING_DISPLAY_ORDER,
                        key=gs.MEETING_DISPLAY_ORDER.get)
-        assert order[:4] == ["scheduled", "not_scheduled", "parked", "held"]
+        assert order == ["recurring", "scheduled", "not_scheduled", "parked",
+                         "held", "dropped"]
 
     def test_it_is_separate_from_the_state_machine(self):
         """Display order and progression order answer different questions;
@@ -791,7 +800,8 @@ class TestTheSharedTabHelpersStillWork:
             "Meetings", gs.MEETING_TRACKER_HEADERS, lambda r: 0,
             spreadsheet_id="wb-1", first_body_row=gs.MEETING_FIRST_BODY_ROW)
         assert seen["ssid"] == "wb-1"
-        assert seen["range"] == f"'Meetings'!A{gs.MEETING_FIRST_BODY_ROW}:G"
+        end = chr(ord("A") + len(gs.MEETING_TRACKER_HEADERS) - 1)
+        assert seen["range"] == f"'Meetings'!A{gs.MEETING_FIRST_BODY_ROW}:{end}"
 
     async def test_resort_tab_falls_back_to_the_task_tracker(self, monkeypatch):
         import services.google_sheets as gs
@@ -822,7 +832,9 @@ class TestTheSortWritesWhereItRead:
         from unittest.mock import MagicMock
         import services.google_sheets as gs
 
-        rows = [[f"t{i}", "", "", "", "", "s", f"id{i}"] for i in range(n_rows)]
+        width = len(gs.MEETING_TRACKER_HEADERS)
+        rows = [[f"t{i}"] + [""] * (width - 2) + [f"id{i}"]
+                for i in range(n_rows)]
 
         async def _read(sheet_id, range_name):
             return list(reversed(rows))       # unsorted, so a write happens
@@ -842,10 +854,217 @@ class TestTheSortWritesWhereItRead:
     async def test_it_writes_back_to_the_row_it_read_from(self, monkeypatch):
         import services.google_sheets as gs
         b = gs.MEETING_FIRST_BODY_ROW
+        end = chr(ord("A") + len(gs.MEETING_TRACKER_HEADERS) - 1)
         call = await self._ranges(monkeypatch, b, 3)
-        assert call.kwargs["range"] == f"'Meetings'!A{b}:G{b + 2}"
+        assert call.kwargs["range"] == f"'Meetings'!A{b}:{end}{b + 2}"
 
     async def test_the_default_still_starts_at_row_two(self, monkeypatch):
         """Tasks and Decisions have a one-row header and must be unaffected."""
+        import services.google_sheets as gs
+        end = chr(ord("A") + len(gs.MEETING_TRACKER_HEADERS) - 1)
         call = await self._ranges(monkeypatch, 2, 3)
-        assert call.kwargs["range"] == "'Meetings'!A2:G4"
+        assert call.kwargs["range"] == f"'Meetings'!A2:{end}4"
+
+
+class TestRecurringIsAStatus:
+    """Eyal floated putting "recurring" in the PRIORITY list. A priority answers
+    "how much does this matter" and a recurrence answers "does this need booking
+    at all" — fusing them makes "is it urgent or recurring?" a question somebody
+    has to answer. As a status it also falls out naturally: permanently live,
+    never terminal, sorts to the top with no special case."""
+
+    def test_it_is_a_status_not_a_priority(self):
+        import services.google_sheets as gs
+        assert "recurring" in gs.MEETING_STATUSES
+        assert "recurring" not in [p.lower() for p in gs.MEETING_PRIORITIES]
+
+    def test_it_sorts_to_the_top(self):
+        """Eyal: "they will be fixed in the upper parts"."""
+        import services.google_sheets as gs
+        assert gs.MEETING_DISPLAY_ORDER["recurring"] == 0
+
+    def test_it_is_never_terminal(self):
+        """The most live state there is — a stale cell must still be able to
+        move it, and the archive must never sweep it away."""
+        import services.google_sheets as gs
+        assert "recurring" not in gs.MEETING_TERMINAL_STATUSES
+
+    async def test_a_recurring_meeting_can_still_be_changed(self, monkeypatch):
+        sheet = [_srow(id="m1", title="Weekly sync", status="scheduled")]
+        db = [_dbrow(id="m1", title="Weekly sync", status="recurring")]
+        snap = {"m1": {"title": "Weekly sync", "status": "recurring"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        out = await ss.reconcile_meetings()
+        assert out["status_guarded"] == 0
+
+
+class TestEveryStatusLooksDifferent:
+    """Eyal: "dropped and parked have the same color! not good!" — they both
+    rendered in status_inactive grey, so a meeting deliberately set aside looked
+    exactly like one abandoned. That is the single distinction the pool exists
+    to show."""
+
+    def test_every_status_has_its_own_colour(self):
+        import services.google_sheets as gs
+        seen = [tuple(sorted(c.items()))
+                for c in gs.MEETING_STATUS_COLORS.values()]
+        assert len(set(seen)) == len(gs.MEETING_STATUSES)
+
+    def test_every_status_is_covered(self):
+        import services.google_sheets as gs
+        assert set(gs.MEETING_STATUS_COLORS) == set(gs.MEETING_STATUSES)
+
+    def test_parked_and_dropped_differ(self):
+        import services.google_sheets as gs
+        assert (gs.MEETING_STATUS_COLORS["parked"]
+                != gs.MEETING_STATUS_COLORS["dropped"])
+
+    def test_the_rules_match_exactly_not_by_substring(self):
+        """TEXT_CONTAINS made "not_scheduled" match the "scheduled" rule too,
+        so which colour won depended on rule order rather than on the value."""
+        import services.google_sheets as gs
+        reqs = gs.sheets_service.meetings_format_requests(
+            1, gs.MEETING_TRACKER_HEADERS)
+        status_rules = [r["addConditionalFormatRule"]["rule"] for r in reqs
+                        if "addConditionalFormatRule" in r
+                        and r["addConditionalFormatRule"]["rule"]["ranges"][0]
+                        ["startColumnIndex"] == gs.MEETING_COL_INDEX["status"]]
+        assert len(status_rules) == len(gs.MEETING_STATUSES)
+        assert all(r["booleanRule"]["condition"]["type"] == "TEXT_EQ"
+                   for r in status_rules)
+
+
+class TestMeetingDatesMatchTheRestOfTheWorkbook:
+    """Eyal: "i want the proposed dates format to align with how the dates are
+    formatted in the rest"."""
+
+    def test_a_date_renders_day_first(self):
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "T", "proposed_date": "2026-08-12"})
+        assert row[gs.MEETING_COL_INDEX["proposed_date"]] == "12/08/2026"
+
+    def test_an_empty_date_is_blank_not_none(self):
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row({"id": "m1", "title": "T"})
+        assert row[gs.MEETING_COL_INDEX["proposed_date"]] == ""
+
+    def test_an_unparseable_value_is_left_exactly_as_typed(self):
+        """It used to truncate to ten characters — right for an ISO timestamp,
+        and it silently mangled a human's "next Tuesday" into "next Tuesd"."""
+        from services.google_sheets import _fmt_ddmmyyyy
+        assert _fmt_ddmmyyyy("next Tuesday") == "next Tuesday"
+
+    async def test_the_push_writes_the_sheet_format(self, monkeypatch):
+        """It pushed the raw ISO, putting a differently-formatted date in a
+        column where every other cell reads DD/MM/YYYY."""
+        sheet = [_srow(id="m1", title="T", proposed_date="2026-01-01",
+                       proposed_date_raw="01/01/2026")]
+        db = [_dbrow(id="m1", title="T", proposed_date="2026-08-12")]
+        snap = {"m1": {"title": "T", "proposed_date": "2026-01-01"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+        await ss.reconcile_meetings()
+        writes = fake.service.spreadsheets.return_value.values.return_value \
+            .batchUpdate.call_args
+        body = writes.kwargs["body"]["data"] if writes else []
+        dates = [d["values"][0][0] for d in body
+                 if d["range"].startswith("'Meetings'!D")]
+        assert dates == ["12/08/2026"], dates
+
+
+class TestMeetingPriority:
+    """Eyal: "i think we should have priorities also for the meetings"."""
+
+    def test_it_is_the_same_scale_as_a_task(self):
+        import services.google_sheets as gs
+        from services.project_status_rows import PRIORITIES
+        assert tuple(gs.MEETING_PRIORITIES) == tuple(PRIORITIES)
+
+    def test_the_sheet_spelling_maps_to_the_stored_letter(self):
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "T", "priority": "U"})
+        assert row[gs.MEETING_COL_INDEX["priority"]] == "Urgent"
+
+    def test_no_priority_renders_blank_not_a_default(self):
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row({"id": "m1", "title": "T"})
+        assert row[gs.MEETING_COL_INDEX["priority"]] == ""
+
+    def test_the_dropdown_offers_the_four_levels(self):
+        import services.google_sheets as gs
+        reqs = gs.sheets_service.meetings_format_requests(
+            1, gs.MEETING_TRACKER_HEADERS)
+        dv = next(r["setDataValidation"] for r in reqs
+                  if "setDataValidation" in r
+                  and r["setDataValidation"]["range"]["startColumnIndex"]
+                  == gs.MEETING_COL_INDEX["priority"])
+        vals = [v["userEnteredValue"] for v in dv["rule"]["condition"]["values"]]
+        assert vals == ["Urgent", "H", "M", "L"]
+
+    async def test_it_is_not_merged_until_the_column_exists(self, monkeypatch):
+        """The code ships before the migration runs. Merging a column the DB row
+        does not have would compare every sheet value against None and pull the
+        lot in as human edits."""
+        sheet = [_srow(id="m1", title="T", priority="U")]
+        db = [_dbrow(id="m1", title="T")]              # no priority key
+        snap = {"m1": {"title": "T"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        await ss.reconcile_meetings()
+        assert all("priority" not in u for _mid, u in calls["update"])
+
+    async def test_it_is_merged_once_the_column_exists(self, monkeypatch):
+        sheet = [_srow(id="m1", title="T", priority="U")]
+        db = [_dbrow(id="m1", title="T", priority="M")]
+        snap = {"m1": {"title": "T", "priority": "M"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        await ss.reconcile_meetings()
+        assert ("m1", {"priority": "U"}) in calls["update"]
+
+
+class TestDeletingARowMeansDropIt:
+    """Eyal: "all that i pressed park and than deleted are either not relevant
+    or duplications - so stick and align with those actions of mine". They came
+    straight back on the next re-add."""
+
+    def _plan(self, monkeypatch, snap, status="not_scheduled"):
+        # A SURVIVING ROW MATTERS. An entirely empty read is a bad read, and
+        # the guard that aborts on one fires before any of this — correctly.
+        # A deletion always leaves the rest of the tab behind.
+        sheet = [_srow(id="keep", title="Still here", row_number=4)]
+        db = [_dbrow(id="keep", title="Still here"),
+              _dbrow(id="m1", title="Deleted by hand", status=status)]
+        snap = {"keep": {"title": "Still here"}, **snap}
+        return _setup(monkeypatch, sheet, db, snap)
+
+    async def test_a_deleted_row_is_dropped_not_re_added(self, monkeypatch):
+        calls, fake = self._plan(monkeypatch, {"m1": {"title": "Deleted by hand"}})
+        out = await ss.reconcile_meetings()
+        assert out.get("deleted_to_dropped") == 1
+        assert ("m1", {"status": "dropped"}) in calls["update"]
+
+    async def test_a_row_never_rendered_is_still_re_added(self, monkeypatch):
+        """No snapshot means it was never on the tab, so its absence is not a
+        deletion."""
+        calls, fake = self._plan(monkeypatch, {})
+        out = await ss.reconcile_meetings()
+        assert out.get("deleted_to_dropped") == 0
+        fake.add_meetings_batch_to_sheet.assert_called()
+
+    async def test_a_mass_disappearance_drops_nothing(self, monkeypatch):
+        """Five meetings vanishing is tidying up; fifty is a bad read, and the
+        difference has to be visible BEFORE they go."""
+        sheet = [_srow(id="keep", title="Still here", row_number=4)]
+        db = ([_dbrow(id="keep", title="Still here")]
+              + [_dbrow(id=f"m{i}", title=f"T{i}") for i in range(12)])
+        snap = {"keep": {"title": "Still here"},
+                **{f"m{i}": {"title": f"T{i}"} for i in range(12)}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+        out = await ss.reconcile_meetings()
+        assert out.get("deleted_to_dropped") == 0
+        assert not [u for _m, u in calls["update"] if u.get("status") == "dropped"]
+
+    async def test_an_already_terminal_meeting_is_not_re_dropped(self, monkeypatch):
+        calls, _ = self._plan(monkeypatch, {"m1": {"title": "x"}}, status="held")
+        out = await ss.reconcile_meetings()
+        assert out.get("deleted_to_dropped") == 0

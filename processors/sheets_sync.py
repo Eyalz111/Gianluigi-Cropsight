@@ -1242,6 +1242,17 @@ _MEETING_CONTENT_MAP = {
     "led_by": "led_by",
     "participants": "participants",
 }
+# Merged the same way, but ONLY once the column exists. follow_up_meetings.
+# priority arrives with migrate_meeting_priority_2026_08.sql; until then the DB
+# row simply has no such key, and merging it would compare every sheet value
+# against None and pull the lot in as human edits. Presence is checked per row
+# rather than assumed, so the code can ship before the migration runs.
+_MEETING_OPTIONAL_MAP = {"priority": "priority"}
+
+
+# Five meetings vanishing is tidying up; fifty is a bad read.
+_MAX_MEETING_DROPS = 5
+_MEETING_TERMINAL = frozenset({"held", "dropped"})
 
 
 def _meeting_participants_to_list(text: str) -> list[str]:
@@ -1271,7 +1282,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     """
     from services.google_sheets import (
         sheets_service, MEETING_COLUMNS, MEETING_TAB_NAME,
-        MEETING_STATUSES, MEETING_TERMINAL_STATUSES,
+        MEETING_STATUSES, MEETING_TERMINAL_STATUSES, _fmt_ddmmyyyy,
     )
 
     if not getattr(settings, "MEETING_RECONCILE_ENABLED", False):
@@ -1354,7 +1365,10 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         snap = snapshots.get(mid) or {}
         upd, final = {}, {}
 
-        for field, sheet_key in _MEETING_CONTENT_MAP.items():
+        merged = dict(_MEETING_CONTENT_MAP)
+        merged.update({f: k for f, k in _MEETING_OPTIONAL_MAP.items()
+                       if f in dm})
+        for field, sheet_key in merged.items():
             s_val = sm.get(sheet_key)
             snap_val = snap.get(field)
             d_val = dm.get(field)
@@ -1404,7 +1418,10 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                     manual_held.append((mid, "proposed_date", d_date, s_date))
                     final["proposed_date"] = s_date
                 else:
-                    _cell("proposed_date", row, d_date)
+                    # DD/MM/YYYY going out, ISO staying in the database —
+                    # pushing the raw ISO put a differently-formatted date in a
+                    # column where every other cell reads DD/MM/YYYY.
+                    _cell("proposed_date", row, _fmt_ddmmyyyy(d_date))
                     summary["pushed"] += 1
                     final["proposed_date"] = d_date
             else:
@@ -1538,6 +1555,45 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             return False
         return True
     missing = [m for m in db_rows if _readd_ok(m)]
+
+    # DELETING A ROW MEANS "DROP IT". A meeting that HAS a snapshot was on the
+    # tab last cycle and is not on it now, so somebody removed it deliberately —
+    # and it came straight back on the next re-add, which is the loop Eyal hit:
+    # "all that i pressed park and than deleted are either not relevant or
+    # duplications - so stick and align with those actions of mine".
+    #
+    # `dropped` rather than a hidden-suppression flag, because that is what the
+    # gesture means here and the status already exists. Nothing is lost: dropped
+    # is terminal, so the guard protects it from a stale cell afterwards, and
+    # the row moves to Past Meetings where the history stays readable.
+    #
+    # No snapshot means it was never rendered, so its absence is not a deletion
+    # — that one is re-added as before. And the whole thing is capped: five
+    # meetings disappearing is tidying up, fifty is a symptom, and the
+    # difference has to be visible BEFORE they go.
+    deleted = [m for m in missing
+               if m["id"] in snapshots
+               and (m.get("status") or "").strip().lower() not in _MEETING_TERMINAL]
+    if len(deleted) > _MAX_MEETING_DROPS:
+        logger.error(
+            f"[meeting-reconcile] {len(deleted)} row(s) look deleted — that is "
+            f"more than the cap of {_MAX_MEETING_DROPS}. Dropping none of them; "
+            "a whole tab going missing is a bad read, not a decision.")
+        deleted = []
+    dropped_ids = {m["id"] for m in deleted}
+    missing = [m for m in missing if m["id"] not in dropped_ids]
+    summary["deleted_to_dropped"] = len(deleted)
+    if deleted and write_allowed:
+        for m in deleted:
+            try:
+                supabase_client.update_follow_up_meeting(m["id"], status="dropped")
+                supabase_client.mark_meeting_field_manual(
+                    m["id"], "status", "sheet_delete")
+                logger.info("[meeting-reconcile] dropped (row deleted): "
+                            f"{(m.get('title') or '')[:60]}")
+            except Exception as e:                          # noqa: BLE001
+                logger.warning(
+                    f"[meeting-reconcile] could not drop {m['id']}: {e}")
     _readd_cap = max(30, len(sheet_by_id))
     if len(missing) > _readd_cap:
         logger.error(

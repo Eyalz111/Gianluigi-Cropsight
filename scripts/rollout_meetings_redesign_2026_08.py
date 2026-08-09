@@ -269,6 +269,10 @@ async def run(apply_it: bool) -> int:
             ssid, sid))
         reqs.extend(sheets_service.meetings_format_requests(
             sid, headers, projects))
+        # The provenance chip, styled exactly as it is on the action rows.
+        # A marker that looks different reads as a different KIND of thing,
+        # which is the opposite of what a shared convention is for.
+        reqs.extend(sheets_service.meeting_marker_requests(sid, plan[tab]))
     sheets_service._execute_with_retry(
         lambda: sheets_service.service.spreadsheets().batchUpdate(
             spreadsheetId=ssid, body={"requests": reqs}))

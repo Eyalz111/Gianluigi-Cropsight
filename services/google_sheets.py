@@ -461,20 +461,21 @@ MEETING_COLUMNS = {
     "title": "A",           # what the meeting is (+ its provenance chip)
     "label": "B",           # Project — dropdown of the canonical projects
     "led_by": "C",          # who owns making it happen
-    "proposed_date": "D",   # when it was proposed for
+    "proposed_date": "D",   # when it was proposed for, DD/MM/YYYY
     "participants": "E",    # comma-separated
-    "status": "F",          # parked / not_scheduled / scheduled / held / dropped
-    "id": "G",              # UUID — the reconcile identity. HIDDEN, never shown.
+    "status": "F",          # recurring/scheduled/not_scheduled/parked/held/dropped
+    "priority": "G",        # Urgent / H / M / L — the tasks scale
+    "id": "H",              # UUID — the reconcile identity. HIDDEN, never shown.
 }
 MEETING_COL_INDEX = {k: ord(v) - ord("A") for k, v in MEETING_COLUMNS.items()}
 
 MEETING_TRACKER_HEADERS = [
     "Meeting", "Project", "Led By", "Proposed Date", "Participants",
-    "Status", "_id",
+    "Status", "Priority", "_id",
 ]
 # Everything from here on is hidden. One number, so the styling, the protection
 # and the "is this column visible" question can never disagree.
-MEETING_VISIBLE_COLUMNS = 6
+MEETING_VISIBLE_COLUMNS = 7
 
 # The tab now carries the same three-row header as the area tabs (title band,
 # distribution line, column headers) so the workbook reads as one document
@@ -538,11 +539,67 @@ def meetings_header_block(headers: list | None = None,
 # booking nobody had made. Named `parked` rather than "to hold", which reads as
 # "to be held" — the opposite of the intent. `status` is TEXT with no CHECK
 # constraint, so this needed no migration.
-MEETING_STATUSES = ("parked", "not_scheduled", "scheduled", "held", "dropped")
+# `recurring` = a standing commitment that never needs booking again — the
+# weekly Italy GTM sync, the Monday roadmap session. Eyal, 2026-08-09: "another
+# option of recurring meetings... they will be fixed in the upper parts".
+#
+# IT IS A STATUS, NOT A PRIORITY, and that was a real choice. He floated putting
+# it in the priority list; a priority answers "how much does this matter" and a
+# recurrence answers "does this need booking at all" — two different questions,
+# and fusing them makes "is it urgent or recurring?" a question somebody has to
+# answer. As a status it also falls out naturally: a recurring meeting is
+# permanently live, never reaches a terminal state, and sorts to the top on its
+# own without a special case.
+MEETING_STATUSES = ("recurring", "scheduled", "not_scheduled", "parked",
+                    "held", "dropped")
 
 # TERMINAL states. A meeting that has happened or been dropped must never be
-# walked backwards by a stale cell.
+# walked backwards by a stale cell. `recurring` is deliberately NOT here: it is
+# the most live state there is.
 MEETING_TERMINAL_STATUSES = frozenset({"held", "dropped"})
+
+# One colour per status, all visibly different. `parked` and `dropped` both
+# used to render in the same grey, which made a meeting deliberately set aside
+# look exactly like one abandoned — the single distinction the pool exists to
+# show. Chosen for meaning: blue is a fixture, green is booked, amber needs
+# action, lilac is paused on purpose, grey is finished, red is abandoned.
+MEETING_STATUS_COLORS = {
+    "recurring": _hex_color("#D9E2F3"),
+    "scheduled": _hex_color("#C6E0B4"),
+    "not_scheduled": _hex_color("#FFE699"),
+    "parked": _hex_color("#E1D5E7"),
+    "held": _hex_color("#D9D9D9"),
+    "dropped": _hex_color("#F4CCCC"),
+}
+
+# Priority on a meeting is the SAME scale as on a task, so one word means one
+# thing across the workbook.
+MEETING_PRIORITIES = ("Urgent", "H", "M", "L")
+_MEETING_PRIORITY_TO_SHEET = {"U": "Urgent", "H": "H", "M": "M", "L": "L"}
+_MEETING_PRIORITY_TO_DB = {"urgent": "U", "u": "U", "h": "H", "high": "H",
+                           "m": "M", "medium": "M", "l": "L", "low": "L"}
+
+
+def _fmt_ddmmyyyy(value) -> str:
+    """A date cell in the workbook's one format. Blank when unset.
+
+    Every other date the team reads — task deadlines, project targets — renders
+    DD/MM/YYYY. The meetings tab rendered YYYY-MM-DD, which on a tab sitting
+    beside the project blocks reads as a different kind of value.
+    """
+    if not value:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in ("none", "null"):
+        return ""
+    try:
+        from datetime import datetime as _dt
+        return _dt.fromisoformat(text.replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        # Anything unparseable is returned AS TYPED. The version this replaced
+        # truncated to ten characters, which is right for an ISO timestamp and
+        # silently mangles a human's "next Tuesday" into "next Tuesd".
+        return text
 
 # PROGRESSION order — kept for display/sorting and for the terminal comparison.
 # It is NO LONGER a monotonic gate on every transition: a full ordering made
@@ -550,14 +607,17 @@ MEETING_TERMINAL_STATUSES = frozenset({"held", "dropped"})
 # — a legitimate, common decision — was silently refused and the cell snapped
 # back within 30 minutes. Only regression FROM a terminal state is blocked now.
 # Do NOT reorder these. [2026-08-09]
-MEETING_STATUS_ORDER = {"parked": 0, "not_scheduled": 1, "scheduled": 2,
-                        "held": 3, "dropped": 4}
-# DISPLAY order on the Meetings tab (Eyal's call, 2026-07-24): show the booked
-# ones first, then what still needs booking, then history. SEPARATE from the
-# progression order above so the sort can differ from the state machine.
-# Parked sits after "to schedule" — still live, but not being chased.
-MEETING_DISPLAY_ORDER = {"scheduled": 0, "not_scheduled": 1, "parked": 2,
-                         "held": 3, "dropped": 4}
+MEETING_STATUS_ORDER = {"recurring": 0, "parked": 1, "not_scheduled": 2,
+                        "scheduled": 3, "held": 4, "dropped": 5}
+# DISPLAY order on the Meetings tab — operational importance, Eyal 2026-08-09.
+# Recurring first: those are the fixtures the week is built around, and he asked
+# for them "fixed in the upper parts". Then what is booked, then what still
+# needs booking, then what is parked, then history. SEPARATE from the
+# progression order above so the sort can differ from the state machine —
+# fusing them is how "show the booked ones first" would start meaning "a booked
+# meeting cannot be parked".
+MEETING_DISPLAY_ORDER = {"recurring": 0, "scheduled": 1, "not_scheduled": 2,
+                         "parked": 3, "held": 4, "dropped": 5}
 
 # ---------------------------------------------------------------------------
 # Read-only reference tabs (2026-07).
@@ -2685,9 +2745,16 @@ class GoogleSheetsService:
             title,
             m.get("label") or "",
             m.get("led_by") or "",
-            _fmt_day(m.get("proposed_date")),
+            # DD/MM/YYYY, the same form every other date in the workbook uses.
+            # It rendered as YYYY-MM-DD here, which read as a different kind of
+            # value on a tab sitting beside the project blocks.
+            _fmt_ddmmyyyy(m.get("proposed_date")),
             ", ".join(parts) if isinstance(parts, list) else str(parts or ""),
             m.get("status") or "not_scheduled",
+            # Blank when unset, never a default 'M' — showing a value the
+            # database does not hold makes the merge push it back every cycle.
+            _MEETING_PRIORITY_TO_SHEET.get(
+                str(m.get("priority") or "").strip().upper(), ""),
             m.get("id") or "",
         ]
 
@@ -2841,6 +2908,12 @@ class GoogleSheetsService:
                 "proposed_date_raw": raw_date,
                 "participants": row[MEETING_COL_INDEX["participants"]],
                 "status": row[MEETING_COL_INDEX["status"]],
+                # The sheet spells it 'Urgent'; the column stores 'U'. Mapped
+                # here so the merge only ever compares canonical values — the
+                # same treatment the Project Status priority gets.
+                "priority": _MEETING_PRIORITY_TO_DB.get(
+                    str(row[MEETING_COL_INDEX["priority"]]).strip().lower(), ""),
+                "priority_raw": row[MEETING_COL_INDEX["priority"]],
                 "id": row[MEETING_COL_INDEX["id"]],
             })
         return out
@@ -3524,7 +3597,7 @@ class GoogleSheetsService:
                 "fields": "userEnteredFormat.textFormat"}},
         ]
 
-        widths = [340, 170, 120, 120, 220, 120, 100]
+        widths = [340, 170, 120, 115, 220, 120, 85]
         for i in range(n_vis):
             reqs.append(_column_width_request(sid, i, widths[min(i, len(widths) - 1)]))
         reqs.append(_text_wrap_request(sid, MEETING_COL_INDEX["title"]))
@@ -3534,17 +3607,57 @@ class GoogleSheetsService:
         reqs.append(_data_validation_request(
             sid, MEETING_COL_INDEX["status"], list(MEETING_STATUSES),
             start_row=MEETING_FIRST_BODY_ROW - 1))
-        status_colours = [
-            ("scheduled", COLORS["status_in_progress"]),
-            ("not_scheduled", COLORS["status_overdue"]),   # the queue
-            ("parked", COLORS["status_inactive"]),
-            ("held", COLORS["status_done"]),
-            ("dropped", COLORS["status_inactive"]),
-        ]
-        for idx, (text, colour) in enumerate(status_colours):
-            reqs.append(_conditional_format_rule(
-                sid, MEETING_COL_INDEX["status"], text, colour, idx,
-                start_row=MEETING_FIRST_BODY_ROW - 1))
+        # EXACT MATCH, not "contains". TEXT_CONTAINS made "not_scheduled" match
+        # the "scheduled" rule as well, so which colour won depended on rule
+        # order rather than on the value.
+        idx = 0
+        for status in MEETING_STATUSES:
+            reqs.append({"addConditionalFormatRule": {"index": idx, "rule": {
+                "ranges": [{"sheetId": sid,
+                            "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
+                            "startColumnIndex": MEETING_COL_INDEX["status"],
+                            "endColumnIndex": MEETING_COL_INDEX["status"] + 1}],
+                "booleanRule": {
+                    "condition": {"type": "TEXT_EQ", "values": [
+                        {"userEnteredValue": status}]},
+                    "format": {"backgroundColor": MEETING_STATUS_COLORS[status]}}}}})
+            idx += 1
+
+        # Priority: the same four levels as a task, and Urgent stands out.
+        reqs.append(_data_validation_request(
+            sid, MEETING_COL_INDEX["priority"], list(MEETING_PRIORITIES),
+            start_row=MEETING_FIRST_BODY_ROW - 1))
+        reqs.append({"addConditionalFormatRule": {"index": idx, "rule": {
+            "ranges": [{"sheetId": sid,
+                        "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
+                        "startColumnIndex": MEETING_COL_INDEX["priority"],
+                        "endColumnIndex": MEETING_COL_INDEX["priority"] + 1}],
+            "booleanRule": {
+                "condition": {"type": "TEXT_EQ",
+                              "values": [{"userEnteredValue": "Urgent"}]},
+                "format": {"backgroundColor": _hex_color("#F4CCCC")}}}}})
+        idx += 1
+
+        # A proposed date already in the past on a meeting nobody has booked.
+        # Locale-proof for the same reason the area tabs are: DATEVALUE reads
+        # the SPREADSHEET's locale, so 05/08 is 5 August in en_GB and 8 May in
+        # en_US, and this file is Israel/Europe.
+        d = MEETING_COLUMNS["proposed_date"]
+        b = MEETING_FIRST_BODY_ROW
+        expr = (f"DATE(VALUE(RIGHT(${d}{b},4)),VALUE(MID(${d}{b},4,2)),"
+                f"VALUE(LEFT(${d}{b},2)))")
+        st = MEETING_COLUMNS["status"]
+        reqs.append({"addConditionalFormatRule": {"index": idx, "rule": {
+            "ranges": [{"sheetId": sid, "startRowIndex": b - 1,
+                        "startColumnIndex": MEETING_COL_INDEX["proposed_date"],
+                        "endColumnIndex": MEETING_COL_INDEX["proposed_date"] + 1}],
+            "booleanRule": {
+                "condition": {"type": "CUSTOM_FORMULA", "values": [
+                    {"userEnteredValue":
+                     f'=AND(${d}{b}<>"",OR(${st}{b}="not_scheduled",'
+                     f'${st}{b}="scheduled"),IFERROR({expr}<TODAY(),FALSE))'}]},
+                "format": {"backgroundColor": _hex_color("#F4CCCC")}}}}})
+        idx += 1
 
         # Project: the canonical vocabulary, as a dropdown. strict=False so
         # anything else warns rather than being refused — and the reconcile
@@ -3560,7 +3673,7 @@ class GoogleSheetsService:
         # have to read past.
         col_a1 = MEETING_COLUMNS["label"]
         reqs.append({"addConditionalFormatRule": {
-            "index": len(status_colours), "rule": {
+            "index": idx, "rule": {
                 "ranges": [{"sheetId": sid,
                             "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
                             "startColumnIndex": MEETING_COL_INDEX["label"],
@@ -3572,6 +3685,41 @@ class GoogleSheetsService:
                          f'${col_a1}{MEETING_FIRST_BODY_ROW}="")'}]},
                     "format": {"backgroundColor": _hex_color("#EFEFEF")}}}}})
         return reqs
+
+    @staticmethod
+    def meeting_marker_requests(sid: int, rows: list,
+                                first_row: int = MEETING_FIRST_BODY_ROW) -> list:
+        """Bold + grey the `[auto · …]` chip inside each meeting title.
+
+        Identical treatment to the action rows, and it has to be: Eyal spotted
+        the difference immediately — "the [auto...] in the meeting tabs are not
+        in the same color and style like in the others - its small but important
+        distinction". A marker that looks different reads as a different KIND of
+        thing, which is the opposite of what a shared convention is for.
+
+        Cell formatting cannot do this — it applies to the whole cell — so it
+        uses textFormatRuns, which style ranges of characters within one cell.
+        `fields: textFormatRuns` leaves the value untouched.
+        """
+        col = MEETING_COL_INDEX["title"]
+        out = []
+        for offset, row in enumerate(rows):
+            text = str((row[col] if len(row) > col else "") or "")
+            start = text.rfind("[")
+            if start <= 0:
+                continue
+            r = first_row - 1 + offset
+            out.append({"updateCells": {
+                "range": {"sheetId": sid, "startRowIndex": r, "endRowIndex": r + 1,
+                          "startColumnIndex": col, "endColumnIndex": col + 1},
+                "rows": [{"values": [{"textFormatRuns": [
+                    {"startIndex": 0, "format": {"bold": False}},
+                    {"startIndex": start,
+                     "format": {"bold": True,
+                                "foregroundColor": _hex_color("#6B6B6B")}},
+                ]}]}],
+                "fields": "textFormatRuns"}})
+        return out
 
     async def format_meetings_tab(self) -> bool:
         """Restyle the Meetings tab to match the area tabs. Idempotent."""
