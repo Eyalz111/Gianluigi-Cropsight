@@ -1433,10 +1433,17 @@ class GoogleSheetsService:
             ordered = sorted(data, key=key_func)
             if ordered == data:
                 return 0  # already sorted — skip the write
+            # THE WRITE-BACK USES first_body_row TOO. It read from there and
+            # wrote to a hard-coded A2, so on the Meetings tab — whose body
+            # starts at row 4 — it read 33 data rows and pasted them one row
+            # higher, straight over the column headers. Parameterising a read
+            # without its matching write is a half-move, and the half that is
+            # left behind is the one that writes.
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().update(
                     spreadsheetId=ssid,
-                    range=f"'{tab_name}'!A2:{end_col}{len(ordered) + 1}",
+                    range=(f"'{tab_name}'!A{first_body_row}:"
+                           f"{end_col}{first_body_row + len(ordered) - 1}"),
                     valueInputOption="RAW", body={"values": ordered},
                 )
             )
@@ -1447,7 +1454,8 @@ class GoogleSheetsService:
                 self._execute_with_retry(
                     lambda: self.service.spreadsheets().values().clear(
                         spreadsheetId=ssid,
-                        range=f"'{tab_name}'!A{len(ordered) + 2}:{end_col}{raw_count + 1}",
+                        range=(f"'{tab_name}'!A{first_body_row + len(ordered)}:"
+                               f"{end_col}{first_body_row + raw_count - 1}"),
                         body={},
                     )
                 )

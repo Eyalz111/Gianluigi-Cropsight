@@ -808,3 +808,44 @@ class TestTheSharedTabHelpersStillWork:
         monkeypatch.setattr(gs.sheets_service, "_read_sheet_range", _read)
         await gs.sheets_service._resort_tab("Tasks", ["A", "B"], lambda r: 0)
         assert seen["ssid"] == "tracker"
+
+
+class TestTheSortWritesWhereItRead:
+    """_resort_tab read from `first_body_row` and wrote to a hard-coded A2, so
+    on the Meetings tab — whose body starts at row 4 — it read 33 data rows and
+    pasted them one row higher, straight over the column headers.
+
+    Parameterising a read without its matching write is a half-move, and the
+    half left behind is the one that writes."""
+
+    async def _ranges(self, monkeypatch, first_body_row, n_rows):
+        from unittest.mock import MagicMock
+        import services.google_sheets as gs
+
+        rows = [[f"t{i}", "", "", "", "", "s", f"id{i}"] for i in range(n_rows)]
+
+        async def _read(sheet_id, range_name):
+            return list(reversed(rows))       # unsorted, so a write happens
+
+        monkeypatch.setattr(gs.sheets_service, "_read_sheet_range", _read)
+        # Mock the singleton's client, exactly as the conftest guard instructs.
+        fake = MagicMock()
+        monkeypatch.setattr(gs.sheets_service, "_service", fake)
+        monkeypatch.setattr(gs.sheets_service, "_execute_with_retry",
+                            lambda fn: fn())
+
+        await gs.sheets_service._resort_tab(
+            "Meetings", gs.MEETING_TRACKER_HEADERS, lambda r: r[0],
+            spreadsheet_id="wb", first_body_row=first_body_row)
+        return fake.spreadsheets.return_value.values.return_value.update.call_args
+
+    async def test_it_writes_back_to_the_row_it_read_from(self, monkeypatch):
+        import services.google_sheets as gs
+        b = gs.MEETING_FIRST_BODY_ROW
+        call = await self._ranges(monkeypatch, b, 3)
+        assert call.kwargs["range"] == f"'Meetings'!A{b}:G{b + 2}"
+
+    async def test_the_default_still_starts_at_row_two(self, monkeypatch):
+        """Tasks and Decisions have a one-row header and must be unaffected."""
+        call = await self._ranges(monkeypatch, 2, 3)
+        assert call.kwargs["range"] == "'Meetings'!A2:G4"

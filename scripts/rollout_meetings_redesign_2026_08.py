@@ -32,6 +32,7 @@ would erase them. Wait one cycle, then re-run.
 
 import argparse
 import asyncio
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,36 +64,64 @@ def _sheet_ids() -> dict:
             for s in meta.get("sheets", [])}
 
 
-async def _read_rows_either_layout(new_layout: bool) -> list:
-    """[{row, title, id}] from the Meetings tab, whichever shape it is in.
+_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
-    OLD: header on row 1, data from row 2, `_id` in column J (index 9).
-    NEW: header on row 3, data from row 4, `_id` in column G (index 6).
+
+def _rows_on_the_tab() -> list:
+    """[{row, title, id}] read WITHOUT assuming a layout.
+
+    The question this has to answer is "does the sheet hold anything the
+    database does not?", and asking it must not depend on the very geometry the
+    script exists to change. A layout-specific reader got it wrong twice: once
+    against the old shape (id read from the vacated Agenda column) and once
+    against a half-migrated one.
+
+    So: the title is the first non-empty cell, and the id is whatever cell in
+    the row LOOKS like a UUID. Both are true in every layout this tab has ever
+    had.
     """
-    if new_layout:
-        return [{"row": r.get("row_number"), "title": (r.get("title") or "").strip(),
-                 "id": (r.get("id") or "").strip()}
-                for r in await sheets_service.get_all_meetings()]
-
     raw = sheets_service._execute_with_retry(
         lambda: sheets_service.service.spreadsheets().values().get(
             spreadsheetId=sheets_service.meetings_workbook(),
-            range=f"'{MEETING_TAB_NAME}'!A2:J")).get("values", [])
+            range=f"'{MEETING_TAB_NAME}'!A1:N400")).get("values", [])
+    # Rows that are STRUCTURE, not meetings: the banner, the distribution line
+    # and the column headers, in whichever position this layout puts them.
+    structural = {"meetings", "past meetings", "meeting"}
+    structural |= {h.lower() for h in MEETING_TRACKER_HEADERS}
     out = []
-    for i, row in enumerate(raw, start=2):
-        row = list(row) + [""] * 10
-        title = str(row[0]).strip()
+    for i, row in enumerate(raw, start=1):
+        cells = [str(c).strip() for c in row]
+        title = next((c for c in cells if c), "")
         if not title:
             continue
-        out.append({"row": i, "title": title, "id": str(row[9]).strip()})
+        low = title.lower()
+        if low in structural or low.startswith("distribution:"):
+            continue
+        out.append({"row": i, "title": title,
+                    "id": next((c for c in cells if _UUID.match(c)), "")})
     return out
+
+
+def _operational_key(m: dict):
+    """scheduled -> to schedule -> parked -> held -> dropped, then by date.
+
+    The SAME order the every-cycle sort applies. Writing the rebuild in
+    alphabetical order instead meant the tab was handed over wrong and only
+    became right on the next cycle — which is the one moment somebody is
+    actually looking at it.
+    """
+    from services.google_sheets import MEETING_DISPLAY_ORDER
+    status = (m.get("status") or "not_scheduled").strip().lower()
+    date = str(m.get("proposed_date") or "")
+    return (MEETING_DISPLAY_ORDER.get(status, 1), 0 if date else 1,
+            date or "9999-99-99", (m.get("title") or "").lower())
 
 
 def _rows_for(tab: str, meetings: list, archived_on: dict) -> list:
     """Build a tab's data rows from the database records."""
     out = []
-    for m in sorted(meetings, key=lambda r: (
-            (r.get("title") or "").lower())):
+    for m in sorted(meetings, key=_operational_key):
         row = sheets_service._meeting_row(m)
         if tab == MEETINGS_ARCHIVE_TAB_NAME:
             moved = archived_on.get(m["id"]) or ""
@@ -118,27 +147,9 @@ async def run(apply_it: bool) -> int:
             print(f"    [FAIL] {tab!r} is not in the workbook")
             return 1
 
-    # A row with no UUID has not been created yet and exists ONLY on the sheet.
-    # Rebuilding from the database would erase it without a trace.
-    #
-    # READ IT WITH WHATEVER LAYOUT THE TAB IS ACTUALLY ON. This script exists
-    # precisely because the tab is on the OLD shape, so get_all_meetings — which
-    # now maps the NEW one — reads the identity out of the old "Agenda" column
-    # and reports all 36 rows as hand-typed. The check has to be right in both
-    # states or the migration can never start.
     new_layout = await sheets_service.meetings_layout_ok()
     print(f"    [OK ] Meetings tab is on the "
-          f"{'NEW' if new_layout else 'OLD'} layout")
-    live = await _read_rows_either_layout(new_layout)
-    pending = [r for r in live if not r["id"] and r["title"]]
-    if pending:
-        print(f"    [FAIL] {len(pending)} hand-typed row(s) have no UUID yet — "
-              "they exist ONLY on the sheet")
-        for r in pending[:5]:
-            print(f"           r{r['row']}: {r['title'][:60]}")
-        print("           Wait for one reconcile cycle to create them, then re-run.")
-        return 1
-    print(f"    [OK ] {len(live)} row(s) on the Meetings tab, all with a UUID")
+          f"{'NEW' if new_layout else 'an older'} layout")
 
     db = supabase_client.list_follow_up_meetings(limit=2000,
                                                  include_pending=True) or []
@@ -146,6 +157,30 @@ async def run(apply_it: bool) -> int:
         print("    [FAIL] the database returned NO meetings — refusing to "
               "rebuild from an empty read")
         return 1
+
+    # THE ONE THING THE REBUILD COULD DESTROY: a row that exists only here.
+    # Everything else is rewritten from the database, which is the source of
+    # truth for all six fields and the id. A row is safe if its UUID is known
+    # OR its text matches a meeting we already hold; anything else is somebody's
+    # typing that has not been created yet, and rebuilding would erase it.
+    from services.project_status_rows import strip_provenance
+    known_ids = {m["id"] for m in db}
+    known_titles = {" ".join((m.get("title") or "").split()).strip().lower()
+                    for m in db}
+    live = _rows_on_the_tab()
+    unique = [r for r in live
+              if r["id"] not in known_ids
+              and " ".join(strip_provenance(r["title"]).split()).strip().lower()
+              not in known_titles]
+    if unique:
+        print(f"    [FAIL] {len(unique)} row(s) exist ONLY on the sheet — "
+              "rebuilding from the database would erase them")
+        for r in unique[:6]:
+            print(f"           r{r['row']}: {r['title'][:60]}")
+        print("           Wait for one reconcile cycle to create them, then re-run.")
+        return 1
+    print(f"    [OK ] {len(live)} row(s) read; every one is already in the "
+          "database, so nothing is lost by rewriting")
     working = [m for m in db
                if (m.get("status") or "").strip().lower() not in _CLOSED]
     closed = [m for m in db
