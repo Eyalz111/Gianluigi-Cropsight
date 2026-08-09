@@ -93,7 +93,22 @@ class ReconcileScheduler:
         try:
             from services.google_sheets import sheets_service
 
+            # THE LAYOUT DOOR, FIRST. get_all_meetings() returns [] when the tab
+            # does not declare the expected header — and an empty read made
+            # `pending` empty, so the guard below PASSED and the sort ran anyway.
+            # _resort_tab rewrites only the columns it knows about, so on an
+            # older/taller layout it reorders the left-hand block and leaves the
+            # identity column where it was: every row welded to a different
+            # meeting's UUID. Silent, sheet-side, and invisible to the DB guards.
+            # "Every caller treats an empty read as change nothing" has to
+            # include this one. [2026-08-09 code review]
+            if not await sheets_service.meetings_layout_ok():
+                return 0
+
             rows = await sheets_service.get_all_meetings()
+            if not rows:
+                return 0
+
             pending = [r for r in rows
                        if not (r.get("id") or "").strip()
                        and (r.get("title") or "").strip()]

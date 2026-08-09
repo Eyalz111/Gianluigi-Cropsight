@@ -739,6 +739,7 @@ class TestOperationalOrdering:
         monkeypatch.setattr(settings, "MEETING_RECONCILE_ENABLED", True,
                             raising=False)
         fake = MagicMock()
+        fake.meetings_layout_ok = AsyncMock(return_value=True)
         fake.get_all_meetings = AsyncMock(return_value=[
             {"id": "", "title": "Typed just now"}])
         fake.sort_meetings_tab = AsyncMock(return_value=9)
@@ -756,6 +757,7 @@ class TestOperationalOrdering:
         monkeypatch.setattr(settings, "MEETING_RECONCILE_ENABLED", True,
                             raising=False)
         fake = MagicMock()
+        fake.meetings_layout_ok = AsyncMock(return_value=True)
         fake.get_all_meetings = AsyncMock(return_value=[
             {"id": "m1", "title": "Booked"}])
         fake.sort_meetings_tab = AsyncMock(return_value=3)
@@ -773,6 +775,7 @@ class TestOperationalOrdering:
         monkeypatch.setattr(settings, "MEETING_RECONCILE_ENABLED", True,
                             raising=False)
         fake = MagicMock()
+        fake.meetings_layout_ok = AsyncMock(return_value=True)
         fake.get_all_meetings = AsyncMock(side_effect=RuntimeError("boom"))
         monkeypatch.setattr(gs, "sheets_service", fake)
 
@@ -1068,3 +1071,122 @@ class TestDeletingARowMeansDropIt:
         calls, _ = self._plan(monkeypatch, {"m1": {"title": "x"}}, status="held")
         out = await ss.reconcile_meetings()
         assert out.get("deleted_to_dropped") == 0
+
+
+class TestTheCriticalReviewFindings:
+    """2026-08-09 max-effort review. Each of these was CONFIRMED against the
+    live data or reproduced with this harness before the fix."""
+
+    async def test_a_deliberately_dropped_meeting_is_never_re_added(self, monkeypatch):
+        """FINDING 2. Deleting a row set `dropped`, and `_readd_ok` then read
+        that as "a recent drop, not yet aged out" and put the row straight back
+        — the same resurrection loop the delete-detection was written to end,
+        30 minutes later instead of immediately."""
+        sheet = [_srow(id="keep", title="Still here", row_number=4)]
+        db = [_dbrow(id="keep", title="Still here"),
+              _dbrow(id="m1", title="Deleted on purpose", status="dropped",
+                     manual_status=True)]
+        snap = {"keep": {"title": "Still here"}, "m1": {"title": "x"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        out = await ss.reconcile_meetings()
+
+        assert out.get("readded", 0) == 0
+        fake.add_meetings_batch_to_sheet.assert_not_called()
+
+    async def test_an_automatic_drop_still_ages_out_as_before(self, monkeypatch):
+        """The permanence is for a HUMAN decision only."""
+        sheet = [_srow(id="keep", title="Still here", row_number=4)]
+        db = [_dbrow(id="keep", title="Still here"),
+              _dbrow(id="m1", title="Auto dropped", status="dropped")]
+        snap = {"keep": {"title": "Still here"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        fake.add_meetings_batch_to_sheet.assert_called()
+
+    async def test_the_priority_push_uses_the_sheet_spelling(self, monkeypatch):
+        """FINDING 6. The cell stores 'Urgent' and the column stores 'U';
+        pushing the raw letter put a value outside the dropdown into the cell,
+        so the most important meeting was the only one with a red invalid-entry
+        triangle and no colour."""
+        sheet = [_srow(id="m1", title="T", priority="M")]
+        db = [_dbrow(id="m1", title="T", priority="U")]
+        snap = {"m1": {"title": "T", "priority": "M"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        body = fake.service.spreadsheets.return_value.values.return_value \
+            .batchUpdate.call_args
+        written = [d["values"][0][0] for d in (body.kwargs["body"]["data"] if body else [])
+                   if d["range"].startswith("'Meetings'!G")]
+        assert written == ["Urgent"], written
+
+    async def test_an_untouched_default_priority_is_not_written_to_the_sheet(
+            self, monkeypatch):
+        """FINDING 15. `ADD COLUMN priority DEFAULT 'M'` backfilled all 122
+        meetings, so every blank cell differed from the DB and the merge stamped
+        "M" across a column nobody had filled in — announcing a triage that had
+        not happened."""
+        sheet = [_srow(id="m1", title="T", priority="")]
+        db = [_dbrow(id="m1", title="T", priority="M")]   # manual_priority False
+        snap = {"m1": {"title": "T"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        out = await ss.reconcile_meetings()
+
+        assert out.get("pushed", 0) == 0
+        assert all("priority" not in u for _mid, u in calls["update"])
+
+    async def test_a_real_priority_is_still_written(self, monkeypatch):
+        """The suppression is for the untouched DEFAULT only — any other value
+        is a decision somebody made and still reaches the cell."""
+        sheet = [_srow(id="m1", title="T", priority="")]
+        db = [_dbrow(id="m1", title="T", priority="H")]
+        snap = {"m1": {"title": "T"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        out = await ss.reconcile_meetings()
+
+        assert out.get("pushed", 0) >= 1
+
+
+class TestTheSortPassesTheLayoutDoor:
+    """FINDING 1, the most dangerous of the fifteen. `get_all_meetings()`
+    returns [] when the header does not match, which made `pending` empty and
+    the guard PASS — so the sort ran on an unrecognised layout, rewrote only the
+    columns it knows about, and left the identity column where it was."""
+
+    def _fake(self, monkeypatch, layout_ok, rows):
+        from unittest.mock import AsyncMock, MagicMock
+        import schedulers.reconcile_scheduler as rs
+        import services.google_sheets as gs
+        from config.settings import settings
+
+        monkeypatch.setattr(settings, "MEETING_RECONCILE_ENABLED", True,
+                            raising=False)
+        fake = MagicMock()
+        fake.meetings_layout_ok = AsyncMock(return_value=layout_ok)
+        fake.get_all_meetings = AsyncMock(return_value=rows)
+        fake.sort_meetings_tab = AsyncMock(return_value=7)
+        monkeypatch.setattr(gs, "sheets_service", fake)
+        return rs, fake
+
+    async def test_a_failed_layout_check_stops_the_sort(self, monkeypatch):
+        rs, fake = self._fake(monkeypatch, layout_ok=False, rows=[])
+        assert await rs.reconcile_scheduler._sort_meetings_now() == 0
+        fake.sort_meetings_tab.assert_not_called()
+        fake.get_all_meetings.assert_not_called()
+
+    async def test_an_empty_read_stops_the_sort(self, monkeypatch):
+        """Belt and braces: even if the door says yes, no rows means no sort."""
+        rs, fake = self._fake(monkeypatch, layout_ok=True, rows=[])
+        assert await rs.reconcile_scheduler._sort_meetings_now() == 0
+        fake.sort_meetings_tab.assert_not_called()
+
+    async def test_a_healthy_tab_still_sorts(self, monkeypatch):
+        rs, fake = self._fake(monkeypatch, layout_ok=True,
+                              rows=[{"id": "m1", "title": "Booked"}])
+        assert await rs.reconcile_scheduler._sort_meetings_now() == 7

@@ -1283,6 +1283,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     from services.google_sheets import (
         sheets_service, MEETING_COLUMNS, MEETING_TAB_NAME,
         MEETING_STATUSES, MEETING_TERMINAL_STATUSES, _fmt_ddmmyyyy,
+        _MEETING_PRIORITY_TO_SHEET,
     )
 
     if not getattr(settings, "MEETING_RECONCILE_ENABLED", False):
@@ -1368,6 +1369,19 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         merged = dict(_MEETING_CONTENT_MAP)
         merged.update({f: k for f, k in _MEETING_OPTIONAL_MAP.items()
                        if f in dm})
+        # AN UNTOUCHED DEFAULT IS NOT A DECISION. `ADD COLUMN priority DEFAULT
+        # 'M'` backfilled all 122 meetings, so every blank Priority cell
+        # differed from the database and the merge stamped "M" across a column
+        # nobody had filled in — telling Eyal the whole pool had been triaged
+        # when none of it had, and burying the handful he actually marked.
+        # _meeting_row already refuses to RENDER an unset priority for exactly
+        # this reason; the push path needed to agree. Once a human sets one,
+        # manual_priority makes it real and it renders normally.
+        # [2026-08-09 code review]
+        if (not str(sm.get("priority") or "").strip()
+                and str(dm.get("priority") or "").strip().upper() == "M"
+                and not dm.get("manual_priority")):
+            merged.pop("priority", None)
         for field, sheet_key in merged.items():
             s_val = sm.get(sheet_key)
             snap_val = snap.get(field)
@@ -1389,7 +1403,18 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                     manual_held.append((mid, field, d_val, s_val))
                     final[field] = s_val
                 else:
-                    _cell(sheet_key, row, d_val)
+                    # RENDER IT THE WAY THE SHEET SPELLS IT. The cell stores
+                    # 'Urgent' and the column stores 'U'; pushing the raw letter
+                    # put a value outside the dropdown into the cell, so the
+                    # most important meeting on the tab was the only one with a
+                    # red invalid-entry triangle and no colour (the TEXT_EQ
+                    # rules match 'Urgent', never 'U'). Reading it back maps
+                    # u -> U, so it was stable and never self-corrected.
+                    # [2026-08-09 code review]
+                    _cell(sheet_key, row,
+                          _MEETING_PRIORITY_TO_SHEET.get(
+                              str(d_val or "").strip().upper(), d_val)
+                          if field == "priority" else d_val)
                     summary["pushed"] += 1
                     final[field] = d_val
             else:
@@ -1551,8 +1576,17 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     def _readd_ok(m: dict) -> bool:
         if not m.get("id") or m["id"] in sheet_by_id:
             return False
-        if (m.get("status") or "").strip().lower() == "dropped" and _aged_out(m.get("updated_at")):
-            return False
+        if (m.get("status") or "").strip().lower() == "dropped":
+            # A DELIBERATE DROP IS PERMANENT. Deleting a row sets `dropped` AND
+            # marks the status manual, and without this the very next cycle read
+            # that as "a recent drop, not yet aged out" and re-added the row —
+            # the same resurrection loop the delete-detection was written to
+            # end, just 30 minutes later instead of immediately. An automatic
+            # drop still ages out as before. [2026-08-09 code review]
+            if m.get("manual_status"):
+                return False
+            if _aged_out(m.get("updated_at")):
+                return False
         return True
     missing = [m for m in db_rows if _readd_ok(m)]
 
