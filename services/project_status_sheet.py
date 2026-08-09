@@ -68,6 +68,7 @@ _BAD_DATE = _hex_color("#E5D0F0")    # typed a date nothing can read
 _PROJECT_BG = _hex_color("#EAF1F8")  # project row band
 _MARKER_GREY = _hex_color("#6B6B6B")  # the [auto · …] provenance chip
 _INK = _hex_color("#212121")         # ordinary body text, asserted not assumed
+_IGNORED = _hex_color("#F9CB9C")     # typed into a cell nothing reads
 _PROTECT_DESC = "Gianluigi system columns — do not edit"
 HOWTO_TAB = "How to use"
 
@@ -165,12 +166,22 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
     # so it tints the chip rather than shouting across the whole row, and only
     # on action rows that are still open — a finished row should not keep
     # advertising how urgent it was.
+    # A CELL THAT WILL NOT BE SAVED SAYS SO. `To do` is the project's
+    # objective, so on an ACTION row nothing reads it — text typed there is
+    # swallowed silently, which is exactly what happened to "Search for
+    # investors" on 2026-08-09. Tinting it is the same instinct as the purple
+    # unreadable-date: the sheet answering at the moment of typing rather than
+    # thirty minutes later, or never. [2026-08-09]
+    rules.append(rule(
+        IDX[COL_TODO], IDX[COL_TODO] + 1,
+        f'=AND({is_action},${_a1(IDX[COL_TODO])}4<>"")', _IGNORED, 6))
+
     prio_a1 = _a1(IDX[COL_PRIORITY])
     for offset, level in enumerate(PRIORITIES):
         rules.append(rule(
             IDX[COL_PRIORITY], IDX[COL_PRIORITY] + 1,
             f'=AND({is_action},{not_done},${prio_a1}4="{level}")',
-            _hex_color(PRIORITY_COLORS[level]), 6 + offset))
+            _hex_color(PRIORITY_COLORS[level]), 7 + offset))
     return rules
 
 
@@ -636,7 +647,9 @@ def _header_note_requests(sheet_id: int) -> list[dict]:
                     "concrete step. Lines marked [auto · …] were added by "
                     "Gianluigi; yours are unmarked and never overwritten.",
         COL_TODO: "Where we want to take this project — the eventual "
-                  "objective. Belongs to the project row.",
+                  "objective. IT BELONGS TO THE PROJECT ROW: type it on an "
+                  "action row and it turns orange, because nothing will save "
+                  "it.",
         COL_DATE: "Target date, DD/MM/YYYY. Type it any way you like (12/8, "
                   "12 Aug, next Tuesday) and it is rewritten to the standard "
                   "form. Purple means nothing could read it.",

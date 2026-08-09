@@ -217,6 +217,7 @@ class Plan:
             "reparented": 0, "ticked": 0, "unticked": 0, "incomplete": 0,
             "ghosts": 0, "dup_uids": 0, "normalized_dates": 0, "orphans": 0,
             "bad_priorities": 0, "ambiguous_rows": 0, "layout_mismatch": 0,
+            "stranded_cells": 0,
             "names_refreshed": 0, "paste_duplicates": 0, "blanks_refused": 0,
             "orphaned_by_deleted_project": 0, "adopted_rows": 0,
             "blocks_added": 0, "project_without_a_tab": 0,
@@ -897,6 +898,21 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
             plan.overrides.append(
                 f"{tab} r{row.row_number}: its project row is gone — left where "
                 "it is rather than re-filed under the block above")
+
+    # A CELL THE ENGINE DOES NOT READ IS NOT AN EMPTY CELL. `To do` belongs to
+    # the project row, so text typed there on an ACTION row is merged by
+    # nothing, reported by nothing, and sits looking exactly like saved data.
+    # Nechama typed the Investor Outreach objective — "Search for investors" —
+    # into two action rows on 2026-08-09 and it was silently swallowed; the
+    # project row's own objective was empty the whole time. Anything the system
+    # will not keep has to say so. [2026-08-09]
+    stranded = (row.values.get(COL_TODO) or "").strip()
+    if stranded:
+        plan.bump("stranded_cells")
+        plan.overrides.append(
+            f"{tab} r{row.row_number}: 'To do' is the PROJECT's objective, so "
+            f"{stranded[:40]!r} on an action row is not saved anywhere — move "
+            "it to the project row above")
 
     final = _merge_row(row, "task", db_task, snap, _ACTION_FIELDS, tab, plan,
                        assignees, cols)

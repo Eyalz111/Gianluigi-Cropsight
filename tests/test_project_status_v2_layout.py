@@ -869,3 +869,39 @@ class TestATypedPriorityReachesTheDatabase:
         from processors import project_status_reconcile as psr
         assert '"priority": _to_db_priority(' in inspect.getsource(psr._handle_action)
         assert 'spec.get("priority")' in inspect.getsource(psr._create_entity)
+
+
+class TestTheSheetSaysWhatItWillNotKeep:
+    """A cell nothing reads must not look like a cell that is saved. The same
+    instinct as the purple unreadable-date: answer at the moment of typing,
+    rather than thirty minutes later — or, as happened here, never."""
+
+    def _rule(self):
+        rules = [r["addConditionalFormatRule"]["rule"]
+                 for r in _conditional_format_rules(7, 7)
+                 if r["addConditionalFormatRule"]["rule"]["ranges"][0]
+                 ["startColumnIndex"] == IDX[COL_TODO]]
+        assert len(rules) == 1
+        return rules[0]
+
+    def test_to_do_on_an_action_row_is_tinted(self):
+        f = self._rule()["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        assert f'{_a1(IDX[COL_KIND])}4="A"' in f
+        assert f'${_a1(IDX[COL_TODO])}4<>""' in f
+
+    def test_it_does_not_tint_the_project_row(self):
+        """That is where the objective belongs."""
+        f = self._rule()["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        assert '="P"' not in f
+
+    def test_its_colour_is_its_own(self):
+        """Distinct from past-due red and unreadable-date purple — it means
+        something different: not wrong, just not kept."""
+        from services.project_status_sheet import _BAD_DATE, _RED, _IGNORED
+        bg = self._rule()["booleanRule"]["format"]["backgroundColor"]
+        assert bg == _IGNORED and bg != _BAD_DATE and bg != _RED
+
+    def test_the_header_note_warns_about_it(self):
+        req = _header_note_requests(3)[0]["updateCells"]
+        note = req["rows"][0]["values"][IDX[COL_TODO]]["note"]
+        assert "PROJECT ROW" in note.upper()

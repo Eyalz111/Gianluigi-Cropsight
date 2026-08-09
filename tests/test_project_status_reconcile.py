@@ -1672,3 +1672,51 @@ class TestTheMeetingsPoolLivesHereToo:
         src = inspect.getsource(pss.write_project_status_blocks)
         assert "NON_AREA_TABS" in src
         assert "keep = {HOWTO_TAB, *result" not in src
+
+
+class TestACellNothingReadsIsReported:
+    """`To do` is the PROJECT's objective, so text typed there on an ACTION row
+    is merged by nothing, reported by nothing, and sits looking exactly like
+    saved data.
+
+    Nechama typed the Investor Outreach objective — "Search for investors" —
+    into two action rows on 2026-08-09. The project row's own objective was
+    empty the whole time, the reconcile reported a completely idle cycle, and
+    the text was invisible to every part of the system. Only the Drive revision
+    history showed she had edited the file at all."""
+
+    def _plan_with_stranded(self, text="Search for investors"):
+        row = _arow()
+        row[COLS[COL_TODO]] = text
+        return _plan(
+            {TAB: _grid(_prow(), row)},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
+
+    def test_it_is_counted(self):
+        plan = self._plan_with_stranded()
+        assert plan.counters["stranded_cells"] == 1
+
+    def test_it_says_where_the_text_should_go(self):
+        plan = self._plan_with_stranded()
+        assert any("move it to the project row" in o for o in plan.overrides)
+        assert any("Search for investors" in o for o in plan.overrides)
+
+    def test_the_text_is_never_moved_or_erased(self):
+        """Reported, not guessed — the same rule as an ambiguous row. Moving
+        somebody's words to a cell they did not choose is not a repair."""
+        plan = self._plan_with_stranded()
+        assert plan.cell_writes == []
+        assert plan.task_updates == {}
+
+    def test_an_empty_cell_is_not_reported(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
+        assert plan.counters["stranded_cells"] == 0
+
+    def test_the_objective_on_the_PROJECT_row_is_still_merged(self):
+        """The column is not ignored everywhere — only where it means nothing."""
+        plan = _plan(
+            {TAB: _grid(_prow(todo="Win Lombardy"))},
+            tasks=[], proj_snaps={"p1": {"objective": None}})
+        assert plan.project_updates["p1"]["objective"] == "Win Lombardy"
