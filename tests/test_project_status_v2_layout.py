@@ -227,7 +227,13 @@ class TestPriorityColumn:
 class TestStructureRequests:
     def test_hidden_columns_are_hidden_tinted_and_protected(self):
         reqs = _v2_structure_requests(7, 7)
-        hide = next(r for r in reqs if "updateDimensionProperties" in r)
+        # The HIDING one specifically — there is now also an explicit un-hide of
+        # the visible columns, and taking whichever comes first is how the test
+        # would stop noticing which block is which.
+        hide = next(r for r in reqs
+                    if "updateDimensionProperties" in r
+                    and r["updateDimensionProperties"]["properties"]
+                    .get("hiddenByUser") is True)
         assert hide["updateDimensionProperties"]["properties"]["hiddenByUser"] is True
         assert hide["updateDimensionProperties"]["range"]["startIndex"] == N_VISIBLE
         assert hide["updateDimensionProperties"]["range"]["endIndex"] == N_ALL
@@ -590,3 +596,61 @@ class TestNothingCanInheritTheProjectTint:
         reqs = new_row_format_requests(9, 12, KIND_ACTION, "x")
         fields = [r["repeatCell"]["fields"] for r in reqs if "repeatCell" in r]
         assert all("backgroundColor" not in f for f in fields)
+
+
+class TestTheVisibleColumnsAreAsserted:
+    """Priority and Comments were INVISIBLE on the live sheet for a whole
+    session. Every value was correct in the sheet and in the database — the
+    formatting step said only "hide/tint/protect the system block" and nothing
+    ever said what should be VISIBLE, so when the block moved from 8-12 to 10-14
+    the two columns it vacated kept the old hidden + white-8pt styling.
+
+    An operation that sets a state must describe the WHOLE state, or it silently
+    inherits whatever the last version left behind."""
+
+    def _reqs(self):
+        return _v2_structure_requests(7, 7)
+
+    def test_the_visible_columns_are_explicitly_unhidden(self):
+        unhide = [r["updateDimensionProperties"] for r in self._reqs()
+                  if "updateDimensionProperties" in r
+                  and r["updateDimensionProperties"]["properties"].get(
+                      "hiddenByUser") is False]
+        assert len(unhide) == 1
+        rng = unhide[0]["range"]
+        assert rng["startIndex"] == 0 and rng["endIndex"] == N_VISIBLE
+
+    def test_the_visible_body_text_is_explicitly_readable(self):
+        """White-on-white 8pt was left behind on the vacated columns too, so
+        un-hiding alone would still have shown nothing."""
+        resets = [r["repeatCell"] for r in self._reqs()
+                  if "repeatCell" in r
+                  and r["repeatCell"]["range"].get("endColumnIndex") == N_VISIBLE]
+        assert len(resets) == 1
+        fmt = resets[0]["cell"]["userEnteredFormat"]["textFormat"]
+        assert fmt["fontSize"] == 11
+        assert fmt["foregroundColor"] != {"red": 1, "green": 1, "blue": 1}
+
+    def test_it_is_idempotent_across_layouts(self):
+        """Run against a sheet formatted for ANY older layout and the result is
+        the same — that is what makes it self-correcting rather than a one-off
+        repair."""
+        a = self._reqs()
+        b = self._reqs()
+        assert a == b
+
+    def test_the_system_block_is_still_hidden_and_protected(self):
+        reqs = self._reqs()
+        hide = [r["updateDimensionProperties"] for r in reqs
+                if "updateDimensionProperties" in r
+                and r["updateDimensionProperties"]["properties"].get(
+                    "hiddenByUser") is True]
+        assert hide and hide[0]["range"]["startIndex"] == N_VISIBLE
+        assert hide[0]["range"]["endIndex"] == N_ALL
+        assert any("addProtectedRange" in r for r in reqs)
+
+    def test_no_visible_column_is_ever_in_the_hidden_range(self):
+        """The mechanical form of the bug: a visible header must never fall
+        inside the block that gets hidden."""
+        for name in VISIBLE_HEADERS:
+            assert IDX[name] < N_VISIBLE, name

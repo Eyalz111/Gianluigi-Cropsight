@@ -17,7 +17,7 @@ from services.google_sheets import sheets_service, _hex_color, _column_width_req
 from services.project_status_rows import (
     ALL_HEADERS, VISIBLE_HEADERS, COL_ACTION, COL_COMMENTS, COL_DATE, COL_KIND,
     COL_NUM, COL_PRIORITY, COL_PROJECT, COL_RESP, COL_TODO, COL_TOPIC,
-    PRIORITIES,
+    FIRST_BODY_ROW, PRIORITIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ _AMBER = _hex_color("#FCE8B2")       # due soon
 _BAD_DATE = _hex_color("#E5D0F0")    # typed a date nothing can read
 _PROJECT_BG = _hex_color("#EAF1F8")  # project row band
 _MARKER_GREY = _hex_color("#6B6B6B")  # the [auto · …] provenance chip
+_INK = _hex_color("#212121")         # ordinary body text, asserted not assumed
 _PROTECT_DESC = "Gianluigi system columns — do not edit"
 HOWTO_TAB = "How to use"
 
@@ -295,6 +296,30 @@ def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
     """
     protection = {"warningOnly": True}
     reqs: list[dict] = [
+        # ASSERT THE WHOLE STATE, DON'T ADD TO IT. These three requests used to
+        # say only "hide/tint/protect the system block" — nothing ever said what
+        # should be VISIBLE. That is fine until the block moves, and on
+        # 2026-08-09 it moved: adding Project and Priority pushed the hidden
+        # block from columns 8-12 to 10-14, so the two columns it vacated kept
+        # the old hidden + white-on-white-8pt styling and Priority and Comments
+        # were simply not there. Every value was correct in the sheet and in the
+        # database; you just could not see either column.
+        #
+        # An operation that should set a state must describe the whole state, or
+        # it silently inherits whatever the last version left behind. Written
+        # this way it is idempotent and self-correcting: run it on any older
+        # layout and the sheet ends up right.
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                      "startIndex": 0, "endIndex": N_VISIBLE},
+            "properties": {"hiddenByUser": False},
+            "fields": "hiddenByUser"}},
+        {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": FIRST_BODY_ROW - 1,
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"foregroundColor": _INK, "fontSize": 11}}},
+            "fields": "userEnteredFormat.textFormat(foregroundColor,fontSize)"}},
         {"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
                       "startIndex": N_VISIBLE, "endIndex": N_ALL},
