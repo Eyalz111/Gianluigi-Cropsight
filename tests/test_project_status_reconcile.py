@@ -1674,49 +1674,128 @@ class TestTheMeetingsPoolLivesHereToo:
         assert "keep = {HOWTO_TAB, *result" not in src
 
 
-class TestACellNothingReadsIsReported:
-    """`To do` is the PROJECT's objective, so text typed there on an ACTION row
-    is merged by nothing, reported by nothing, and sits looking exactly like
-    saved data.
+class TestAnActionHasItsOwnObjective:
+    """`To do` now means "what this is meant to achieve" on BOTH row kinds —
+    where we are taking the project, or what this step is for.
 
-    Nechama typed the Investor Outreach objective — "Search for investors" —
-    into two action rows on 2026-08-09. The project row's own objective was
-    empty the whole time, the reconcile reported a completely idle cycle, and
-    the text was invisible to every part of the system. Only the Drive revision
-    history showed she had edited the file at all."""
+    This is NOT the Subject/Project ambiguity returning: that column DECIDED a
+    row's kind. This one only reads a kind already declared, exactly as `Resp.`
+    already does (project owner vs step owner) without confusing anybody."""
 
-    def _plan_with_stranded(self, text="Search for investors"):
+    def _row(self, todo):
         row = _arow()
-        row[COLS[COL_TODO]] = text
-        return _plan(
-            {TAB: _grid(_prow(), row)},
-            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
+        row[COLS[COL_TODO]] = todo
+        return row
 
-    def test_it_is_counted(self):
-        plan = self._plan_with_stranded()
-        assert plan.counters["stranded_cells"] == 1
-
-    def test_it_says_where_the_text_should_go(self):
-        plan = self._plan_with_stranded()
-        assert any("move it to the project row" in o for o in plan.overrides)
-        assert any("Search for investors" in o for o in plan.overrides)
-
-    def test_the_text_is_never_moved_or_erased(self):
-        """Reported, not guessed — the same rule as an ambiguous row. Moving
-        somebody's words to a cell they did not choose is not a repair."""
-        plan = self._plan_with_stranded()
-        assert plan.cell_writes == []
-        assert plan.task_updates == {}
-
-    def test_an_empty_cell_is_not_reported(self):
+    def test_it_is_pulled_into_the_task(self):
         plan = _plan(
-            {TAB: _grid(_prow(), _arow())},
+            {TAB: _grid(_prow(), self._row("Search for investors"))},
+            tasks=[_db_task(objective=None)],
             act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
-        assert plan.counters["stranded_cells"] == 0
+        assert plan.task_updates["t1"]["objective"] == "Search for investors"
+        assert ("task", "t1", "objective") in plan.manual_marks
 
-    def test_the_objective_on_the_PROJECT_row_is_still_merged(self):
-        """The column is not ignored everywhere — only where it means nothing."""
+    def test_the_database_value_is_pushed_back(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), self._row(""))},
+            tasks=[_db_task(objective="Win Lombardy")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
+                              "objective": ""}})
+        assert (TAB, FIRST_BODY_ROW + 1, COLS[COL_TODO], "Win Lombardy")             in plan.cell_writes
+
+    def test_clearing_it_is_refused_like_every_other_field(self):
+        """Eyal: removal is "a full row/rows of task or the all project", never
+        one cell. Consistent with the guard that saved 8 deadlines and 10
+        assignees when ten rows were selected and deleted."""
+        plan = _plan(
+            {TAB: _grid(_prow(), self._row(""))},
+            tasks=[_db_task(objective="Win Lombardy")],
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending",
+                              "objective": "Win Lombardy"}})
+        assert "objective" not in plan.task_updates.get("t1", {})
+        assert plan.counters["blanks_refused"] == 1
+
+    def test_it_is_not_merged_before_the_migration_runs(self):
+        """The column arrives with migrate_task_objective_2026_08.sql. Merging a
+        field the row does not have would compare every cell against None and
+        pull the lot in as human edits."""
+        plan = _plan(
+            {TAB: _grid(_prow(), self._row("Search for investors"))},
+            tasks=[_db_task()],                       # no `objective` key
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
+        assert "objective" not in plan.task_updates.get("t1", {})
+
+    def test_a_typed_row_carries_its_objective_into_the_new_task(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _human(action="Call the bank",
+                                        todo="Get the account open"))},
+            tasks=[])
+        assert plan.creates[0]["objective"] == "Get the account open"
+
+    def test_the_project_row_keeps_its_own(self):
+        """Two levels of the same idea, not two ideas."""
         plan = _plan(
             {TAB: _grid(_prow(todo="Win Lombardy"))},
             tasks=[], proj_snaps={"p1": {"objective": None}})
         assert plan.project_updates["p1"]["objective"] == "Win Lombardy"
+
+
+class TestACellFromTheWrongKindOfRowIsReported:
+    """The row's kind is already declared, so these are not ambiguous — just
+    unreadable, and they look exactly like saved data."""
+
+    def test_project_text_on_an_action_row(self):
+        row = _arow()
+        row[COLS[COL_PROJECT]] = "Some Project"
+        plan = _plan(
+            {TAB: _grid(_prow(), row)},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
+        assert plan.counters["wrong_kind_cells"] == 1
+        assert any("makes a row a project" in o for o in plan.overrides)
+
+    def test_action_only_fields_on_a_project_row(self):
+        row = _prow()
+        row[COLS[COL_PRIORITY]] = "Urgent"
+        row[COLS[COL_TOPIC]] = "A topic"
+        plan = _plan({TAB: _grid(row)}, tasks=[], proj_snaps={"p1": {}})
+        assert plan.counters["wrong_kind_cells"] == 2
+
+    def test_a_clean_sheet_reports_none(self):
+        plan = _plan(
+            {TAB: _grid(_prow(), _arow())},
+            act_snaps={"t1": {"title": "Ship the API", "status": "pending"}})
+        assert plan.counters["wrong_kind_cells"] == 0
+
+
+class TestProvenanceTellsTheTruth:
+    """16 of 68 live rows carried an `[auto · …]` chip while having come from no
+    meeting at all — they were typed by Eyal or Nechama. Extraction ALWAYS
+    attaches its source meeting, so no meeting_id means nobody automatic wrote
+    it. format_provenance already documented the rule: "a human row carries no
+    marker at all; that absence is the signal"."""
+
+    def test_a_hand_typed_task_gets_no_chip(self):
+        from services.project_status_rows import (
+            ORIGIN_MANUAL, action_row_values, ALL_HEADERS, COL_ORIGIN)
+        row = action_row_values({"id": "t1", "title": "Typed by hand"},
+                                "p1", marker="[auto - Weekly]")
+        assert row[ALL_HEADERS.index(COL_ACTION)] == "Typed by hand"
+        assert row[ALL_HEADERS.index(COL_ORIGIN)] == ORIGIN_MANUAL
+
+    def test_a_task_from_a_meeting_keeps_its_chip(self):
+        from services.project_status_rows import (
+            ORIGIN_AUTO, action_row_values, ALL_HEADERS, COL_ORIGIN)
+        row = action_row_values({"id": "t1", "title": "Ship it",
+                                 "meeting_id": "m1"},
+                                "p1", marker="[auto - Weekly]")
+        assert "[auto" in row[ALL_HEADERS.index(COL_ACTION)]
+        assert row[ALL_HEADERS.index(COL_ORIGIN)] == ORIGIN_AUTO
+
+    def test_the_caller_cannot_override_it(self):
+        """Decided at the ONE place a row is shaped. Every caller passed the
+        automatic marker, which is how all 16 rows came to claim the system had
+        written them."""
+        from services.project_status_rows import action_row_values, ALL_HEADERS
+        row = action_row_values({"id": "t1", "title": "Typed"}, "p1",
+                                marker="[auto - anything at all]")
+        assert "[" not in row[ALL_HEADERS.index(COL_ACTION)]

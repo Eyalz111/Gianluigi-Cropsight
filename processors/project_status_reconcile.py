@@ -88,6 +88,12 @@ NON_AREA_TABS = frozenset({HOWTO_TAB, "Meetings", "Past Meetings"})
 _ACTION_FIELDS = {COL_DATE: "deadline", COL_RESP: "assignee",
                   COL_COMMENTS: "notes", COL_ACTION: "title",
                   COL_TOPIC: "label", COL_PRIORITY: "priority"}
+# Merged only once the column exists. `tasks.objective` arrives with
+# migrate_task_objective_2026_08.sql; until then the row simply has no such
+# key, and merging it would compare every cell against None and pull the lot in
+# as human edits. Presence is checked PER ROW rather than assumed, so this ships
+# before the migration runs — the same shape that worked for meeting priority.
+_ACTION_OPTIONAL_FIELDS = {COL_TODO: "objective"}
 _PROJECT_FIELDS = {COL_TODO: "objective", COL_DATE: "target_date",
                    COL_RESP: "owner", COL_COMMENTS: "notes"}
 
@@ -217,7 +223,7 @@ class Plan:
             "reparented": 0, "ticked": 0, "unticked": 0, "incomplete": 0,
             "ghosts": 0, "dup_uids": 0, "normalized_dates": 0, "orphans": 0,
             "bad_priorities": 0, "ambiguous_rows": 0, "layout_mismatch": 0,
-            "stranded_cells": 0,
+            "wrong_kind_cells": 0,
             "names_refreshed": 0, "paste_duplicates": 0, "blanks_refused": 0,
             "orphaned_by_deleted_project": 0, "adopted_rows": 0,
             "blocks_added": 0, "project_without_a_tab": 0,
@@ -563,6 +569,16 @@ def build_plan(grids: dict) -> Plan:
                     # cell was neither pulled nor pushed, so a stray edit to a
                     # project name sat there diverging from the database
                     # silently and forever. [2026-08-07]
+                    # A cell that belongs to the OTHER kind of row. The row's
+                    # kind is already declared, so these are not ambiguous —
+                    # just unreadable, and they look exactly like saved data.
+                    for _c in (COL_TOPIC, COL_ACTION, COL_PRIORITY):
+                        if (proj.values.get(_c) or "").strip():
+                            plan.bump("wrong_kind_cells")
+                            plan.overrides.append(
+                                f"{tab} r{proj.row_number}: {_c!r} belongs to an "
+                                "ACTION row — nothing reads it on a project row")
+
                     db_name = db_proj.get("name") or ""
                     if _normalize(proj.values.get(COL_PROJECT)) != _normalize(db_name):
                         plan.cell_writes.append(
@@ -830,6 +846,7 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
             "assignee": row.values.get(COL_RESP, ""),
             "notes": row.values.get(COL_COMMENTS, ""),
             "label": row.values.get(COL_TOPIC, ""),
+            "objective": row.values.get(COL_TODO, ""),
             # Off-vocabulary text is dropped rather than stored; the DB default
             # ('M') then applies and the next push writes the cell back.
             "priority": _to_db_priority(row.values.get(COL_PRIORITY)),
@@ -899,22 +916,22 @@ def _handle_action(row, tab: str, parent_uid: str, db_tasks: dict,
                 f"{tab} r{row.row_number}: its project row is gone — left where "
                 "it is rather than re-filed under the block above")
 
-    # A CELL THE ENGINE DOES NOT READ IS NOT AN EMPTY CELL. `To do` belongs to
-    # the project row, so text typed there on an ACTION row is merged by
-    # nothing, reported by nothing, and sits looking exactly like saved data.
-    # Nechama typed the Investor Outreach objective — "Search for investors" —
-    # into two action rows on 2026-08-09 and it was silently swallowed; the
-    # project row's own objective was empty the whole time. Anything the system
-    # will not keep has to say so. [2026-08-09]
-    stranded = (row.values.get(COL_TODO) or "").strip()
-    if stranded:
-        plan.bump("stranded_cells")
+    # `To do` USED TO BE A DEAD END HERE and was reported as one. It is now the
+    # action's own objective (tasks.objective), so the warning is gone and the
+    # text is merged like any other field. What remains reported is the cell
+    # that belongs to the OTHER kind of row — see _report_wrong_kind_cells.
+    # [2026-08-09]
+    if (row.values.get(COL_PROJECT) or "").strip():
+        plan.bump("wrong_kind_cells")
         plan.overrides.append(
-            f"{tab} r{row.row_number}: 'To do' is the PROJECT's objective, so "
-            f"{stranded[:40]!r} on an action row is not saved anywhere — move "
-            "it to the project row above")
+            f"{tab} r{row.row_number}: 'Project' names a project, so text there "
+            "on an ACTION row is not saved anywhere — it is the column that "
+            "makes a row a project")
 
-    final = _merge_row(row, "task", db_task, snap, _ACTION_FIELDS, tab, plan,
+    fields = dict(_ACTION_FIELDS)
+    fields.update({c: f for c, f in _ACTION_OPTIONAL_FIELDS.items()
+                   if f in db_task})
+    final = _merge_row(row, "task", db_task, snap, fields, tab, plan,
                        assignees, cols)
     final["status"] = "done" if row.checked else "pending"
     plan.snapshots.append(("task", row.uid, tab, row.row_number, final))
@@ -1785,7 +1802,7 @@ async def _apply(plan: Plan, spreadsheet_id: str, structural: bool = False) -> d
                     assignee=values.get("assignee"),
                     title=values.get("title"), label=values.get("label"),
                     entity_type="ps_action", notes=values.get("notes"),
-                    sheet_tab=tab)
+                    objective=values.get("objective"), sheet_tab=tab)
         except Exception as e:                              # noqa: BLE001
             logger.warning(f"[ps-reconcile] snapshot {row_id}: {e}")
     return applied

@@ -5400,9 +5400,13 @@ class SupabaseClient:
     # Status sheet (a row dragged to another block re-parents the task; the
     # Comments cell is hers), so both need the sticky rail or a system write
     # would silently revert her.
+    # `objective` joined the editable set on 2026-08-09 — the `To do` cell on an
+    # ACTION row, which until then nothing read. A field without a rail is only
+    # half-editable: Rule 2 cannot protect it, so the system stays free to
+    # overwrite a human decision. That is exactly the gap meeting priority had.
     _MANUAL_FIELDS = (
         "status", "deadline", "priority", "assignee", "title", "label",
-        "project_id", "notes",
+        "project_id", "notes", "objective",
     )
 
     def get_sheet_snapshots(self, entity_type: str = "task") -> dict:
@@ -5469,6 +5473,11 @@ class SupabaseClient:
             if entity_type == "ps_action":
                 data["notes"] = (notes or None)
                 data["sheet_tab"] = (sheet_tab or None)
+                # `objective` is the action's own `To do`. No migration was
+                # needed: sheet_snapshots is shared across entity types and the
+                # column already exists for ps_project. Scoped to this surface
+                # so the plain task snapshots keep exactly the shape they have.
+                data["objective"] = (objective or None)
             existing = (
                 self.client.table("sheet_snapshots")
                 .select("id")

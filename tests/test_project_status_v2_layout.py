@@ -15,7 +15,7 @@ from services.project_status_rows import (
     parse_tab, resolve_columns, strip_provenance,
 )
 from services.project_status_sheet import (
-    IDX, N_ALL, N_VISIBLE, _a1,
+    IDX, N_ALL, N_VISIBLE, _IGNORED, _a1,
     _checkbox_requests, _conditional_format_rules, _ddmmyyyy,
     _header_note_requests, _priority_requests, _v2_structure_requests,
 )
@@ -255,8 +255,11 @@ class TestStructureRequests:
         formulas = [r["addConditionalFormatRule"]["rule"]["booleanRule"]
                     ["condition"]["values"][0]["userEnteredValue"] for r in rules]
         assert formulas[0] == f'=${KIND_A1}4="P"'
+        # Every rule asks the kind column first — some scope to action rows,
+        # some (the wrong-kind tints) to project rows. What matters is that none
+        # colours a row without knowing which kind it is.
         for f in formulas[1:]:
-            assert f'${KIND_A1}4="A"' in f, f
+            assert (f'${KIND_A1}4="A"' in f or f'${KIND_A1}4="P"' in f), f
 
     def test_rule_precedence_is_bad_date_then_overdue_then_due_soon(self):
         """First match wins. An unreadable date must not be evaluated as
@@ -753,10 +756,18 @@ class TestEveryPriorityHasAColour:
     made the column decorative."""
 
     def _rules(self):
-        return [r["addConditionalFormatRule"]["rule"]
-                for r in _conditional_format_rules(7, 7)
-                if r["addConditionalFormatRule"]["rule"]["ranges"][0]
-                ["startColumnIndex"] == IDX[COL_PRIORITY]]
+        """The rules that colour a priority VALUE — not the wrong-kind tint,
+        which also lives on this column but answers a different question."""
+        from services.project_status_rows import PRIORITIES
+        out = []
+        for r in _conditional_format_rules(7, 7):
+            rule = r["addConditionalFormatRule"]["rule"]
+            if rule["ranges"][0]["startColumnIndex"] != IDX[COL_PRIORITY]:
+                continue
+            f = rule["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+            if any(f'="{lvl}"' in f for lvl in PRIORITIES):
+                out.append(rule)
+        return out
 
     def test_one_rule_per_level(self):
         from services.project_status_rows import PRIORITIES
@@ -871,37 +882,55 @@ class TestATypedPriorityReachesTheDatabase:
         assert 'spec.get("priority")' in inspect.getsource(psr._create_entity)
 
 
-class TestTheSheetSaysWhatItWillNotKeep:
-    """A cell nothing reads must not look like a cell that is saved. The same
-    instinct as the purple unreadable-date: answer at the moment of typing,
-    rather than thirty minutes later — or, as happened here, never."""
+class TestTheSheetFlagsAWrongKindCell:
+    """Eyal: the orange "should be in the places where we want to distinguish
+    between projects and actions". `To do` no longer qualifies — it is now the
+    action's own objective — so the warning moved to the cells that really do
+    belong to the other kind of row."""
 
-    def _rule(self):
-        rules = [r["addConditionalFormatRule"]["rule"]
-                 for r in _conditional_format_rules(7, 7)
-                 if r["addConditionalFormatRule"]["rule"]["ranges"][0]
-                 ["startColumnIndex"] == IDX[COL_TODO]]
+    def _rules_for(self, col):
+        return [r["addConditionalFormatRule"]["rule"]
+                for r in _conditional_format_rules(7, 7)
+                if r["addConditionalFormatRule"]["rule"]["ranges"][0]
+                ["startColumnIndex"] == IDX[col]
+                and r["addConditionalFormatRule"]["rule"]["booleanRule"]
+                ["format"]["backgroundColor"] == _IGNORED]
+
+    def test_project_text_on_an_action_row_is_tinted(self):
+        """That column is what MAKES a row a project."""
+        rules = self._rules_for(COL_PROJECT)
         assert len(rules) == 1
-        return rules[0]
-
-    def test_to_do_on_an_action_row_is_tinted(self):
-        f = self._rule()["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        f = rules[0]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
         assert f'{_a1(IDX[COL_KIND])}4="A"' in f
-        assert f'${_a1(IDX[COL_TODO])}4<>""' in f
 
-    def test_it_does_not_tint_the_project_row(self):
-        """That is where the objective belongs."""
-        f = self._rule()["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
-        assert '="P"' not in f
+    def test_action_only_columns_are_tinted_on_a_project_row(self):
+        for col in (COL_TODO, COL_ACTION, COL_PRIORITY):
+            rules = self._rules_for(col)
+            if col is COL_TODO:
+                continue
+            assert len(rules) == 1, col
+            f = rules[0]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+            assert f'{_a1(IDX[COL_KIND])}4="P"' in f, col
 
-    def test_its_colour_is_its_own(self):
-        """Distinct from past-due red and unreadable-date purple — it means
-        something different: not wrong, just not kept."""
-        from services.project_status_sheet import _BAD_DATE, _RED, _IGNORED
-        bg = self._rule()["booleanRule"]["format"]["backgroundColor"]
-        assert bg == _IGNORED and bg != _BAD_DATE and bg != _RED
+    def test_to_do_is_no_longer_flagged(self):
+        """It is a real, saved field on both kinds now — flagging it would be
+        telling somebody their correct input is wrong."""
+        assert self._rules_for(COL_TODO) == []
 
-    def test_the_header_note_warns_about_it(self):
+    def test_the_priority_colours_still_win_on_action_rows(self):
+        """Rule ORDER matters — first match wins. The wrong-kind tint is scoped
+        to project rows, so an action row's Urgent must still be red."""
+        rules = [r["addConditionalFormatRule"] for r in _conditional_format_rules(7, 7)
+                 if r["addConditionalFormatRule"]["rule"]["ranges"][0]
+                 ["startColumnIndex"] == IDX[COL_PRIORITY]]
+        by_index = sorted(rules, key=lambda r: r["index"])
+        first = by_index[0]["rule"]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        assert f'{_a1(IDX[COL_KIND])}4="P"' in first   # the project-row guard
+        rest = [r["rule"]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+                for r in by_index[1:]]
+        assert all(f'{_a1(IDX[COL_KIND])}4="A"' in f for f in rest)
+
+    def test_the_header_note_says_both_kinds_are_saved(self):
         req = _header_note_requests(3)[0]["updateCells"]
         note = req["rows"][0]["values"][IDX[COL_TODO]]["note"]
-        assert "PROJECT ROW" in note.upper()
+        assert "Both are saved" in note

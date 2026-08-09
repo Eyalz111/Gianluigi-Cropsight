@@ -166,22 +166,36 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
     # so it tints the chip rather than shouting across the whole row, and only
     # on action rows that are still open — a finished row should not keep
     # advertising how urgent it was.
-    # A CELL THAT WILL NOT BE SAVED SAYS SO. `To do` is the project's
-    # objective, so on an ACTION row nothing reads it — text typed there is
-    # swallowed silently, which is exactly what happened to "Search for
-    # investors" on 2026-08-09. Tinting it is the same instinct as the purple
-    # unreadable-date: the sheet answering at the moment of typing rather than
-    # thirty minutes later, or never. [2026-08-09]
+    # A CELL THAT WILL NOT BE SAVED SAYS SO — but only where that is actually
+    # true. `To do` used to be tinted here because nothing read it on an action
+    # row; it is now the action's own objective, so the warning moved to the
+    # cells that really do belong to the OTHER kind of row:
+    #
+    #   · `Project` on an ACTION row  — that column is what MAKES a row a
+    #     project, so text there on an action row is read by nothing.
+    #   · `Topic` / `Action` / `Priority` on a PROJECT row — action-only fields.
+    #
+    # Eyal: the orange "should be in the places where we want to distinguish
+    # between projects and actions". Which is the honest scope: the row's kind
+    # is already declared, so these are not ambiguous — just unreadable, and
+    # they look exactly like saved data. Same instinct as the purple
+    # unreadable-date: answer at the moment of typing rather than never.
+    # [2026-08-09]
+    is_project = f'${kind_a1}4="P"'
     rules.append(rule(
-        IDX[COL_TODO], IDX[COL_TODO] + 1,
-        f'=AND({is_action},${_a1(IDX[COL_TODO])}4<>"")', _IGNORED, 6))
+        IDX[COL_PROJECT], IDX[COL_PROJECT] + 1,
+        f'=AND({is_action},${_a1(IDX[COL_PROJECT])}4<>"")', _IGNORED, 6))
+    for off, col in enumerate((COL_TOPIC, COL_ACTION, COL_PRIORITY)):
+        rules.append(rule(
+            IDX[col], IDX[col] + 1,
+            f'=AND({is_project},${_a1(IDX[col])}4<>"")', _IGNORED, 7 + off))
 
     prio_a1 = _a1(IDX[COL_PRIORITY])
     for offset, level in enumerate(PRIORITIES):
         rules.append(rule(
             IDX[COL_PRIORITY], IDX[COL_PRIORITY] + 1,
             f'=AND({is_action},{not_done},${prio_a1}4="{level}")',
-            _hex_color(PRIORITY_COLORS[level]), 7 + offset))
+            _hex_color(PRIORITY_COLORS[level]), 10 + offset))
     return rules
 
 
@@ -646,10 +660,9 @@ def _header_note_requests(sheet_id: int) -> list[dict]:
         COL_ACTION: "Fill this in and the row IS an action. The nearest "
                     "concrete step. Lines marked [auto · …] were added by "
                     "Gianluigi; yours are unmarked and never overwritten.",
-        COL_TODO: "Where we want to take this project — the eventual "
-                  "objective. IT BELONGS TO THE PROJECT ROW: type it on an "
-                  "action row and it turns orange, because nothing will save "
-                  "it.",
+        COL_TODO: "What this is meant to achieve. On a PROJECT row it is where "
+                  "we want to take the project; on an ACTION row it is what "
+                  "that step is for. Both are saved.",
         COL_DATE: "Target date, DD/MM/YYYY. Type it any way you like (12/8, "
                   "12 Aug, next Tuesday) and it is rewritten to the standard "
                   "form. Purple means nothing could read it.",

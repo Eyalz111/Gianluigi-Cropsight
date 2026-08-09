@@ -251,14 +251,38 @@ def project_row_values(project: dict, num="", fmt_date=_plain_date) -> list:
 
 def action_row_values(task: dict, parent_uid: str = "", marker: str = "",
                       fmt_date=_plain_date, checked: bool = False) -> list:
-    """An action row in ALL_HEADERS order. See project_row_values."""
+    """An action row in ALL_HEADERS order. See project_row_values.
+
+    A TASK FROM NO MEETING WAS NOT WRITTEN BY THE SYSTEM. Extraction always
+    attaches its source meeting — that is the citation principle — so a task
+    with no `meeting_id` is one somebody typed. Those were being rendered with
+    an `[auto · …]` chip anyway, because the marker was decided by the caller
+    and every caller passed the automatic one: 16 of 68 rows on the live sheet
+    claimed the system had written them when Eyal or Nechama had. The rule this
+    restores is the one format_provenance already documents — "a human row
+    carries no marker at all; that absence is the signal". Decided HERE, at the
+    one place a row is shaped, so no caller can drift from it. [2026-08-09]
+    """
     title = (task.get("title") or "").strip()
+    # EITHER SHAPE COUNTS. A task read with its source joined in carries
+    # `meetings: {title, date}`; one read flat carries `meeting_id`. Checking
+    # only the id would call a genuinely extracted task hand-typed and strip a
+    # chip it had earned.
+    _joined = task.get("meetings") if isinstance(task.get("meetings"), dict) else {}
+    by_hand = not (str(task.get("meeting_id") or "").strip()
+                   or str((_joined or {}).get("title") or "").strip())
+    if by_hand:
+        marker, origin = "", ORIGIN_MANUAL
+    else:
+        origin = task.get("_origin") or ORIGIN_AUTO
     return [
         checked,                              # column A is the done checkbox
         "",                                   # Project: project rows only
         task.get("label") or "",
         f"{title} {marker}".strip() if marker else title,
-        "",                                   # To do belongs to the project row
+        # The action's OWN objective — what this step is meant to achieve. It
+        # was hard-blank until 2026-08-09, so anything typed here was swallowed.
+        task.get("objective") or "",
         fmt_date(task.get("deadline")),
         task.get("assignee") or "",
         # Blank when the task carries no priority, NOT a default 'M'. Showing a
@@ -268,7 +292,7 @@ def action_row_values(task: dict, parent_uid: str = "", marker: str = "",
         PRIORITY_TO_SHEET.get(str(task.get("priority") or "").strip().upper(), ""),
         task.get("notes") or "",
         KIND_ACTION, task.get("id") or "", parent_uid or "",
-        task.get("_origin") or ORIGIN_AUTO, task.get("meeting_id") or "",
+        origin, task.get("meeting_id") or "",
     ]
 
 
