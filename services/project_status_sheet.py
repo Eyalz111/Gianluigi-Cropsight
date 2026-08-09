@@ -17,7 +17,7 @@ from services.google_sheets import sheets_service, _hex_color, _column_width_req
 from services.project_status_rows import (
     ALL_HEADERS, VISIBLE_HEADERS, COL_ACTION, COL_COMMENTS, COL_DATE, COL_KIND,
     COL_NUM, COL_PRIORITY, COL_PROJECT, COL_RESP, COL_TODO, COL_TOPIC,
-    FIRST_BODY_ROW, PRIORITIES,
+    FIRST_BODY_ROW, PRIORITIES, PRIORITY_COLORS,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
                               "values": [{"userEnteredValue": formula}]},
                 "format": fmt or {"backgroundColor": colour}}}}}
 
-    return [
+    rules = [
         # THE PROJECT BAND IS A RULE, NOT PER-ROW PAINT. Eyal: "I want the new
         # project distinctions to also work once we add manually or through
         # meeting transcriptions — every time content is added there."
@@ -160,12 +160,52 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
              f'=AND({is_action},${date_a1}4="")', _GREY, 4),
         rule(IDX[COL_RESP], IDX[COL_RESP] + 1,
              f'=AND({is_action},${resp_a1}4="")', _GREY, 5),
-        # Urgent stands out on sight. Scoped to the Priority cell only, so it
-        # tints the chip rather than shouting across the whole row.
-        rule(IDX[COL_PRIORITY], IDX[COL_PRIORITY] + 1,
-             f'=AND({is_action},{not_done},'
-             f'${_a1(IDX[COL_PRIORITY])}4="Urgent")', _RED, 6),
     ]
+    # A COLOUR PER PRIORITY, not just Urgent. Scoped to the Priority cell only,
+    # so it tints the chip rather than shouting across the whole row, and only
+    # on action rows that are still open — a finished row should not keep
+    # advertising how urgent it was.
+    prio_a1 = _a1(IDX[COL_PRIORITY])
+    for offset, level in enumerate(PRIORITIES):
+        rules.append(rule(
+            IDX[COL_PRIORITY], IDX[COL_PRIORITY] + 1,
+            f'=AND({is_action},{not_done},${prio_a1}4="{level}")',
+            _hex_color(PRIORITY_COLORS[level]), 6 + offset))
+    return rules
+
+
+# updateBorders needs a bounded range; a whole-column clear is not allowed.
+# Comfortably past any real tab (the busiest has ~30 rows).
+_MAX_BODY_ROW = 2000
+
+# Columns whose content is a SENTENCE. Centring wrapped prose makes it harder to
+# read — the eye loses the left edge on every line — so these stay left while
+# everything else centres. Eyal asked for "all the sheet aligned to the center";
+# what he was fixing is the INCONSISTENCY of some cells left and some right, and
+# this removes that without making the long columns worse.
+_LEFT_ALIGNED = (COL_ACTION, COL_TODO, COL_COMMENTS)
+
+
+def _alignment_requests(sheet_id: int) -> list[dict]:
+    """One deliberate alignment per column, so nothing falls back to a default.
+
+    Numbers and dates default RIGHT and text defaults LEFT, which is why the tab
+    looked like it had been aligned by hand at random. Vertical middle
+    throughout: with wrapped cells of different heights, top-aligned short cells
+    float away from the text they belong to.
+    """
+    out = []
+    for name in VISIBLE_HEADERS:
+        i = IDX[name]
+        out.append({"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": FIRST_BODY_ROW - 1,
+                      "startColumnIndex": i, "endColumnIndex": i + 1},
+            "cell": {"userEnteredFormat": {
+                "horizontalAlignment": "LEFT" if name in _LEFT_ALIGNED else "CENTER",
+                "verticalAlignment": "MIDDLE"}},
+            "fields": ("userEnteredFormat(horizontalAlignment,"
+                       "verticalAlignment)")}})
+    return out
 
 
 def _project_row_requests(sheet_id: int, rows: list) -> list[dict]:
@@ -349,7 +389,35 @@ def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
             "range": {"sheetId": sheet_id, "startColumnIndex": N_VISIBLE,
                       "endColumnIndex": N_ALL},
             "description": _PROTECT_DESC, **protection}}},
+        # WIPE THE BODY'S VALIDATION AND BORDERS BEFORE ANYTHING RE-APPLIES
+        # THEM. Both are per-cell and neither is touched by values().clear(), so
+        # they outlive a rebuild at whatever position the PREVIOUS layout put
+        # them. Two visible symptoms of exactly that:
+        #
+        #   · `To do` raised "invalid date" on every row — it now sits where
+        #     `Date` used to, and the old DATE_IS_VALID rule never moved.
+        #   · Action rows carried the thick blue fence that marks the top of a
+        #     project block, spanning the old seven columns rather than nine,
+        #     because a project row used to sit at that row number.
+        #
+        # The per-row passes that follow put both back where they belong. Same
+        # rule as the columns above: describe the whole state, or inherit
+        # whatever the last version left behind.
+        {"setDataValidation": {
+            "range": {"sheetId": sheet_id,
+                      "startRowIndex": FIRST_BODY_ROW - 1,
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE}}},
+        {"updateBorders": {
+            "range": {"sheetId": sheet_id,
+                      "startRowIndex": FIRST_BODY_ROW - 1,
+                      "endRowIndex": _MAX_BODY_ROW,
+                      "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
+            "top": {"style": "NONE"}, "bottom": {"style": "NONE"},
+            "left": {"style": "NONE"}, "right": {"style": "NONE"},
+            "innerHorizontal": {"style": "NONE"},
+            "innerVertical": {"style": "NONE"}}},
     ]
+    reqs.extend(_alignment_requests(sheet_id))
     reqs.extend(_conditional_format_rules(sheet_id, due_soon_days))
     return reqs
 

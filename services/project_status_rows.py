@@ -66,6 +66,17 @@ VISIBLE_HEADERS = [COL_NUM, COL_PROJECT, COL_TOPIC, COL_ACTION, COL_TODO,
                    COL_DATE, COL_RESP, COL_PRIORITY, COL_COMMENTS]
 
 PRIORITIES = ("Urgent", "H", "M", "L")
+# One colour per level, so the column can be read at a glance instead of
+# letter by letter. Only Urgent was coloured, which made the other three
+# indistinguishable and the column mostly decorative. A heat scale: red, orange,
+# neutral sand, cool grey-blue — deliberately the same four on the meetings tab,
+# because one scale meaning one thing everywhere is the point of sharing it.
+PRIORITY_COLORS = {
+    "Urgent": "#F4CCCC",
+    "H": "#FCE4D6",
+    "M": "#FFF2CC",
+    "L": "#DEEAF6",
+}
 # Sheet value -> tasks.priority. Stored uppercase-single-letter as today, with
 # 'U' for urgent so the existing H/M/L ordering logic keeps working.
 PRIORITY_TO_DB = {"urgent": "U", "u": "U", "h": "H", "high": "H",

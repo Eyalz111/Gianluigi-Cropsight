@@ -3602,6 +3602,39 @@ class GoogleSheetsService:
             reqs.append(_column_width_request(sid, i, widths[min(i, len(widths) - 1)]))
         reqs.append(_text_wrap_request(sid, MEETING_COL_INDEX["title"]))
 
+        # ONE DELIBERATE ALIGNMENT PER COLUMN. Dates default RIGHT and text
+        # defaults LEFT, so a tab nobody aligned looks hand-aligned at random.
+        # The two sentence-shaped columns stay left — centring wrapped prose
+        # loses the left edge on every line — everything else centres.
+        left = {MEETING_COL_INDEX["title"], MEETING_COL_INDEX["participants"]}
+        for i in range(n_vis):
+            reqs.append({"repeatCell": {
+                "range": {"sheetId": sid,
+                          "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
+                          "startColumnIndex": i, "endColumnIndex": i + 1},
+                "cell": {"userEnteredFormat": {
+                    "horizontalAlignment": "LEFT" if i in left else "CENTER",
+                    "verticalAlignment": "MIDDLE"}},
+                "fields": ("userEnteredFormat(horizontalAlignment,"
+                           "verticalAlignment)")}})
+
+        # WIPE VALIDATION AND BORDERS FIRST, then put back only what belongs.
+        # Neither is touched by values().clear(), so both outlive a rebuild at
+        # whatever position the PREVIOUS layout left them.
+        reqs.insert(0, {"setDataValidation": {
+            "range": {"sheetId": sid,
+                      "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
+                      "startColumnIndex": 0, "endColumnIndex": n_all}}})
+        reqs.insert(1, {"updateBorders": {
+            "range": {"sheetId": sid,
+                      "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
+                      "endRowIndex": 2000,
+                      "startColumnIndex": 0, "endColumnIndex": n_all},
+            "top": {"style": "NONE"}, "bottom": {"style": "NONE"},
+            "left": {"style": "NONE"}, "right": {"style": "NONE"},
+            "innerHorizontal": {"style": "NONE"},
+            "innerVertical": {"style": "NONE"}}})
+
         # Status: dropdown + colour. strict=False so a reconcile-written value
         # can never hard-error a cell. [2026-07-23]
         reqs.append(_data_validation_request(
@@ -3627,16 +3660,23 @@ class GoogleSheetsService:
         reqs.append(_data_validation_request(
             sid, MEETING_COL_INDEX["priority"], list(MEETING_PRIORITIES),
             start_row=MEETING_FIRST_BODY_ROW - 1))
-        reqs.append({"addConditionalFormatRule": {"index": idx, "rule": {
-            "ranges": [{"sheetId": sid,
-                        "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
-                        "startColumnIndex": MEETING_COL_INDEX["priority"],
-                        "endColumnIndex": MEETING_COL_INDEX["priority"] + 1}],
-            "booleanRule": {
-                "condition": {"type": "TEXT_EQ",
-                              "values": [{"userEnteredValue": "Urgent"}]},
-                "format": {"backgroundColor": _hex_color("#F4CCCC")}}}}})
-        idx += 1
+        # A COLOUR PER LEVEL, and the SAME four the area tabs use. Only Urgent
+        # was tinted, which left the other three indistinguishable and made the
+        # column decorative. Eyal: "the priorities dont have different colors in
+        # the meeting tab... it is kind of detached from the rest of the file".
+        from services.project_status_rows import PRIORITY_COLORS
+        for level in MEETING_PRIORITIES:
+            reqs.append({"addConditionalFormatRule": {"index": idx, "rule": {
+                "ranges": [{"sheetId": sid,
+                            "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
+                            "startColumnIndex": MEETING_COL_INDEX["priority"],
+                            "endColumnIndex": MEETING_COL_INDEX["priority"] + 1}],
+                "booleanRule": {
+                    "condition": {"type": "TEXT_EQ",
+                                  "values": [{"userEnteredValue": level}]},
+                    "format": {"backgroundColor":
+                               _hex_color(PRIORITY_COLORS[level])}}}}})
+            idx += 1
 
         # A proposed date already in the past on a meeting nobody has booked.
         # Locale-proof for the same reason the area tabs are: DATEVALUE reads
@@ -3721,6 +3761,39 @@ class GoogleSheetsService:
                 "fields": "textFormatRuns"}})
         return out
 
+    def meetings_protection_cleanup(self, sid: int) -> list:
+        """Remove every protected range this module has ever put on a tab.
+
+        The old layout protected "agenda / prep / source / id" — columns 6..10.
+        Column 6 is now PRIORITY, so editing it raised a "you are editing a
+        protected cell" confirmation: Eyal, "i get an alert for changing
+        priorities in the meeting tab - it allows it but it dosent need to have
+        it and it raises suspicion". Exactly right — the alert was true of a
+        layout that no longer exists.
+
+        The identity column is hidden and white-on-white, and the engine already
+        defends itself against a broken uid (unknown = ghost, duplicated = keep
+        the topmost, create re-reads before adopting), so there is nothing left
+        here worth a confirmation dialog.
+        """
+        out = []
+        try:
+            meta = self._execute_with_retry(
+                lambda: self.service.spreadsheets().get(
+                    spreadsheetId=self.meetings_workbook(),
+                    fields="sheets(properties.sheetId,protectedRanges)"))
+        except Exception as e:                              # noqa: BLE001
+            logger.warning(f"[meetings] could not read protected ranges: {e}")
+            return out
+        for sheet in meta.get("sheets", []):
+            if sid is not None and sheet.get("properties", {}).get("sheetId") != sid:
+                continue
+            for pr in sheet.get("protectedRanges", []):
+                if str(pr.get("description") or "").startswith("Gianluigi"):
+                    out.append({"deleteProtectedRange": {
+                        "protectedRangeId": pr["protectedRangeId"]}})
+        return out
+
     async def format_meetings_tab(self) -> bool:
         """Restyle the Meetings tab to match the area tabs. Idempotent."""
         if not self.meetings_workbook():
@@ -3742,6 +3815,7 @@ class GoogleSheetsService:
 
             requests = list(self._clear_conditional_format_rules_for_sheet(
                 self.meetings_workbook(), sid))
+            requests.extend(self.meetings_protection_cleanup(sid))
             requests.extend(self.meetings_format_requests(
                 sid, MEETING_TRACKER_HEADERS, names))
             self._execute_with_retry(

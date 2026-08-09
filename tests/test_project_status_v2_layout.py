@@ -621,9 +621,13 @@ class TestTheVisibleColumnsAreAsserted:
         assert rng["startIndex"] == 0 and rng["endIndex"] == N_VISIBLE
 
     def _body_reset(self):
+        """Selected by WHAT IT SETS, not by how wide it is. Keying on
+        `endColumnIndex == N_VISIBLE` also matched the per-column alignment
+        request for the last column the moment one was added."""
         resets = [r["repeatCell"] for r in self._reqs()
                   if "repeatCell" in r
-                  and r["repeatCell"]["range"].get("endColumnIndex") == N_VISIBLE]
+                  and "backgroundColor" in r["repeatCell"]["fields"]
+                  and "bold" in r["repeatCell"]["fields"]]
         assert len(resets) == 1
         return resets[0]["cell"]["userEnteredFormat"]
 
@@ -677,3 +681,104 @@ class TestTheVisibleColumnsAreAsserted:
         inside the block that gets hidden."""
         for name in VISIBLE_HEADERS:
             assert IDX[name] < N_VISIBLE, name
+
+
+class TestStaleFormattingCannotSurviveALayoutChange:
+    """Formatting is per-cell and `values().clear()` does not touch it, so a
+    rebuild leaves the PREVIOUS layout's validation and borders sitting at
+    whatever row and column they were applied to. Both were reported from the
+    live file: `To do` raising "invalid date" because it now sits where `Date`
+    used to, and action rows carrying the project block's blue fence across
+    seven columns instead of nine."""
+
+    def _reqs(self):
+        return _v2_structure_requests(7, 7)
+
+    def test_the_body_validation_is_cleared_first(self):
+        clears = [r["setDataValidation"] for r in self._reqs()
+                  if "setDataValidation" in r and "rule" not in r["setDataValidation"]]
+        assert len(clears) == 1
+        rng = clears[0]["range"]
+        assert rng["startRowIndex"] == FIRST_BODY_ROW - 1
+        assert rng["startColumnIndex"] == 0 and rng["endColumnIndex"] == N_VISIBLE
+
+    def test_the_body_borders_are_cleared_first(self):
+        clears = [r["updateBorders"] for r in self._reqs()
+                  if "updateBorders" in r
+                  and r["updateBorders"].get("top", {}).get("style") == "NONE"]
+        assert len(clears) == 1
+        assert clears[0]["range"]["startRowIndex"] == FIRST_BODY_ROW - 1
+
+    def test_the_fence_is_re_applied_only_to_project_rows(self):
+        from services.project_status_sheet import _project_row_requests
+        rows = [[""] * N_VISIBLE + [k, "u", "u", "", ""] for k in ("P", "A", "A", "P")]
+        reqs = _project_row_requests(9, rows)
+        assert len(reqs) == 2
+        for r in reqs:
+            assert r["updateBorders"]["range"]["endColumnIndex"] == N_VISIBLE
+
+
+class TestAlignmentIsDeliberate:
+    """Eyal: "some that are aligned to the left and some to the right". Dates
+    default RIGHT and text defaults LEFT, so a tab nobody aligned looks
+    hand-aligned at random."""
+
+    def _map(self):
+        from services.project_status_sheet import _alignment_requests
+        out = {}
+        for r in _alignment_requests(7):
+            i = r["repeatCell"]["range"]["startColumnIndex"]
+            out[ALL_HEADERS[i]] = r["repeatCell"]["cell"]["userEnteredFormat"]
+        return out
+
+    def test_every_visible_column_gets_one(self):
+        assert set(self._map()) == set(VISIBLE_HEADERS)
+
+    def test_the_short_columns_centre(self):
+        m = self._map()
+        for name in (COL_NUM, COL_DATE, COL_PRIORITY, COL_PROJECT):
+            assert m[name]["horizontalAlignment"] == "CENTER", name
+
+    def test_the_sentence_columns_stay_left(self):
+        """Centring wrapped prose loses the left edge on every line."""
+        m = self._map()
+        for name in (COL_ACTION, COL_TODO):
+            assert m[name]["horizontalAlignment"] == "LEFT", name
+
+    def test_everything_is_vertically_middle(self):
+        """Top-aligned short cells float away from the wrapped text they
+        belong to."""
+        assert all(f["verticalAlignment"] == "MIDDLE"
+                   for f in self._map().values())
+
+
+class TestEveryPriorityHasAColour:
+    """Only Urgent was tinted, which left the other three indistinguishable and
+    made the column decorative."""
+
+    def _rules(self):
+        return [r["addConditionalFormatRule"]["rule"]
+                for r in _conditional_format_rules(7, 7)
+                if r["addConditionalFormatRule"]["rule"]["ranges"][0]
+                ["startColumnIndex"] == IDX[COL_PRIORITY]]
+
+    def test_one_rule_per_level(self):
+        from services.project_status_rows import PRIORITIES
+        assert len(self._rules()) == len(PRIORITIES)
+
+    def test_the_colours_all_differ(self):
+        seen = [tuple(sorted(r["booleanRule"]["format"]["backgroundColor"].items()))
+                for r in self._rules()]
+        assert len(set(seen)) == len(seen)
+
+    def test_the_scale_is_shared_with_the_meetings_tab(self):
+        """One scale meaning one thing everywhere is the point of sharing it."""
+        import services.google_sheets as gs
+        from services.project_status_rows import PRIORITIES, PRIORITY_COLORS
+        assert tuple(gs.MEETING_PRIORITIES) == tuple(PRIORITIES)
+        assert set(PRIORITY_COLORS) == set(PRIORITIES)
+
+    def test_a_finished_row_stops_advertising_its_priority(self):
+        assert all("NOT($A4=TRUE)" in
+                   r["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+                   for r in self._rules())
