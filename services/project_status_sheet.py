@@ -174,9 +174,14 @@ def _conditional_format_rules(sheet_id: int, due_soon_days: int) -> list[dict]:
     return rules
 
 
-# updateBorders needs a bounded range; a whole-column clear is not allowed.
-# Comfortably past any real tab (the busiest has ~30 rows).
-_MAX_BODY_ROW = 2000
+# updateBorders needs a BOUNDED range, and a bounded range that runs past the
+# grid is rejected outright — `Range ... exceeds grid limits. Max rows: 1000`.
+# batchUpdate is atomic, so one out-of-bounds request discards the ENTIRE
+# formatting batch and the tab keeps exactly the stale state the wipe exists to
+# clear. A bare `addSheet` allocates 1000 rows, so 2000 was past the end of
+# every freshly created tab. Callers that know the real row count pass it.
+# [2026-08-09 code review]
+_DEFAULT_GRID_ROWS = 1000
 
 def _alignment_requests(sheet_id: int) -> list[dict]:
     """Every column centred, top to bottom. Eyal's call, twice.
@@ -313,7 +318,8 @@ def _date_validation_requests(sheet_id: int, rows: list) -> list[dict]:
     return reqs
 
 
-def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
+def _v2_structure_requests(sheet_id: int, due_soon_days: int,
+                           row_count: int = _DEFAULT_GRID_ROWS) -> list[dict]:
     """Hide/tint/protect the system columns and attach the colour rules.
 
     Hidden + white-on-white + a WARNING, deliberately not a hard lock.
@@ -410,7 +416,7 @@ def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
         {"updateBorders": {
             "range": {"sheetId": sheet_id,
                       "startRowIndex": FIRST_BODY_ROW - 1,
-                      "endRowIndex": _MAX_BODY_ROW,
+                      "endRowIndex": max(row_count, FIRST_BODY_ROW),
                       "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
             "top": {"style": "NONE"}, "bottom": {"style": "NONE"},
             "left": {"style": "NONE"}, "right": {"style": "NONE"},

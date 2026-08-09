@@ -1248,6 +1248,13 @@ def _create_entity(spec: dict) -> tuple[str, str]:
     created = supabase_client.create_task(
         title=title,
         assignee=spec.get("assignee") or "",
+        # THE PRIORITY SHE TYPED. `_handle_action` collects it into the spec and
+        # a test asserts the plan carries it, but it was never passed on — so
+        # create_task applied its own 'M' default, and on the very next cycle
+        # the Rule-4 push wrote "M" back into the cell she had typed "Urgent"
+        # into. Her decision was overwritten within 30 minutes, by the system,
+        # in the cell she made it in. [2026-08-09 code review]
+        priority=spec.get("priority") or "M",
         deadline=spec.get("deadline") or None,
         project_id=spec.get("project_id") or None,
         notes=spec.get("notes") or None,

@@ -778,3 +778,94 @@ class TestEveryPriorityHasAColour:
         assert all("NOT($A4=TRUE)" in
                    r["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
                    for r in self._rules())
+
+
+class TestBatchTwoReviewFindings:
+    """2026-08-09 max-effort review, second batch."""
+
+    def test_the_border_wipe_stays_inside_the_grid(self):
+        """FINDING 4. A bare `addSheet` allocates 1000 rows, and a BOUNDED range
+        past the end of the grid is rejected outright — `Range ... exceeds grid
+        limits`. batchUpdate is atomic, so one such request discards the ENTIRE
+        formatting batch and the tab keeps exactly the stale state the wipe
+        exists to clear."""
+        wipe = next(r["updateBorders"] for r in _v2_structure_requests(7, 7)
+                    if "updateBorders" in r
+                    and r["updateBorders"].get("top", {}).get("style") == "NONE")
+        assert wipe["range"]["endRowIndex"] == 1000
+
+    def test_a_taller_grid_is_wiped_in_full(self):
+        wipe = next(r["updateBorders"] for r in
+                    _v2_structure_requests(7, 7, row_count=4200)
+                    if "updateBorders" in r
+                    and r["updateBorders"].get("top", {}).get("style") == "NONE")
+        assert wipe["range"]["endRowIndex"] == 4200
+
+    def test_the_meetings_wipe_stays_inside_its_grid_too(self):
+        import services.google_sheets as gs
+        wipe = next(r["updateBorders"] for r in
+                    gs.sheets_service.meetings_format_requests(
+                        1, gs.MEETING_TRACKER_HEADERS)
+                    if "updateBorders" in r
+                    and r["updateBorders"].get("top", {}).get("style") == "NONE")
+        assert wipe["range"]["endRowIndex"] == 1000
+
+    def test_urgent_outranks_high_in_the_tasks_tab_sort(self):
+        """FINDING 7. `_PRI_SCORE` had no 'U', so Urgent scored exactly as
+        Medium and sorted BELOW every High task."""
+        from services.google_sheets import _PRI_SCORE
+        assert _PRI_SCORE["U"] > _PRI_SCORE["H"] > _PRI_SCORE["M"] > _PRI_SCORE["L"]
+
+    def test_urgent_is_the_most_emphasised_in_telegram(self):
+        """It fell through to the default, so the one Urgent task was the only
+        one in the list with no emphasis at all."""
+        import inspect
+        import services.telegram_bot as tb
+        src = inspect.getsource(tb)
+        assert '{"U": "!!! ", "H": "!! ", "M": "", "L": "~ "}' in src
+
+    def test_the_repair_script_no_longer_strips_the_tick_boxes(self):
+        """FINDING 5. It called `_v2_structure_requests` alone, which wipes
+        validation — with nothing to put the tick boxes, dropdowns, date rules
+        and project fences back."""
+        import ast
+        import pathlib
+        tree = ast.parse(pathlib.Path(
+            "scripts/fix_project_status_columns.py").read_text(encoding="utf-8"))
+        # By IMPORT, not by substring — the name is discussed in the docstring,
+        # and a test that reads prose is testing the prose.
+        imported = {a.name for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom)
+                    for a in node.names}
+        assert "_v2_structure_requests" not in imported
+        assert "run" in imported          # delegates to restyle_workbook.run
+
+    def test_the_restyle_script_has_the_layout_guard(self):
+        """FINDING 11. Without it a tab on an older layout has every checkbox
+        wiped and none restored, because no row classifies as an action."""
+        import pathlib
+        src = pathlib.Path("scripts/restyle_workbook.py").read_text(
+            encoding="utf-8")
+        assert "unresolved_columns" in src
+        assert "SKIPPED, " in src
+
+
+class TestATypedPriorityReachesTheDatabase:
+    """FINDING 3. `_handle_action` collected the priority into the create spec
+    and a test asserted the plan carried it, but `_create_entity` never passed
+    it on — so create_task applied its own 'M' default and the next cycle pushed
+    "M" back into the cell she had typed "Urgent" into."""
+
+    def test_create_entity_forwards_the_priority(self):
+        import inspect
+        from processors import project_status_reconcile as psr
+        src = inspect.getsource(psr._create_entity)
+        assert 'priority=spec.get("priority")' in src
+
+    def test_the_plan_and_the_create_agree_on_the_key(self):
+        """The spec key the planner writes must be the one the creator reads —
+        a mismatch here is silent."""
+        import inspect
+        from processors import project_status_reconcile as psr
+        assert '"priority": _to_db_priority(' in inspect.getsource(psr._handle_action)
+        assert 'spec.get("priority")' in inspect.getsource(psr._create_entity)

@@ -1,14 +1,26 @@
-"""Re-assert the column visibility/tint/protection on every area tab.
+"""Report hidden-column damage on the area tabs, and repair it.
 
-Priority and Comments were INVISIBLE on the live sheet: the formatting step said
-only "hide/tint/protect the system block" and nothing said what should be
+Priority and Comments were once INVISIBLE on the live sheet: the formatting step
+said only "hide/tint/protect the system block" and nothing said what should be
 VISIBLE, so when the block moved from columns 8-12 to 10-14 the two columns it
 vacated kept the old hidden + white-on-white-8pt styling.
 
-FORMATTING ONLY. No cell value is read or written, so this cannot lose data and
-can be re-run at any time — `_v2_structure_requests` now describes the whole
-state rather than adding to it, which is exactly what makes re-running it a
-repair rather than another layer.
+The CHECK lives here because it names that exact symptom in one line per tab.
+The REPAIR delegates to scripts/restyle_workbook.py.
+
+WHY IT DELEGATES
+----------------
+This script used to call `_v2_structure_requests` on its own. That function
+later gained a body-wide validation and border WIPE — correct there, because
+every other caller re-applies the per-row passes immediately afterwards. This
+one did not, so running it stripped every tick box, dropdown, date rule and
+project fence off the live workbook with nothing to put them back. The tick box
+is the sheet's primary write gesture; the repair would have removed the ability
+to mark anything done.
+
+Duplicating those passes here would just let the two copies drift again, which
+is how this happened in the first place. One implementation, one caller.
+[2026-08-09 code review, finding 5]
 
     python scripts/fix_project_status_columns.py            # show what is wrong
     python scripts/fix_project_status_columns.py --apply
@@ -24,10 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.settings import settings                            # noqa: E402
 from processors.project_status_reconcile import NON_AREA_TABS    # noqa: E402
 from services.google_sheets import sheets_service               # noqa: E402
-from services.project_status_sheet import (                     # noqa: E402
-    N_ALL, N_VISIBLE, _v2_structure_requests,
-)
 from services.project_status_rows import ALL_HEADERS            # noqa: E402
+from services.project_status_sheet import N_ALL, N_VISIBLE      # noqa: E402
 
 
 def _state(ssid: str) -> dict:
@@ -53,9 +63,8 @@ async def main(apply_it: bool) -> int:
     print(f"workbook: {ssid}")
     want = list(range(N_VISIBLE, N_ALL))
 
-    before = _state(ssid)
     wrong = []
-    for tab, (_sid, hidden) in before.items():
+    for tab, (_sid, hidden) in _state(ssid).items():
         bad = [ALL_HEADERS[i] for i in hidden if i < N_VISIBLE]
         mark = "  ok  " if hidden == want else " !!   "
         print(f"{mark}{tab:<34} hidden={hidden}"
@@ -67,55 +76,24 @@ async def main(apply_it: bool) -> int:
         print("\n  every tab already correct — nothing to do")
         return 0
     if not apply_it:
-        print(f"\n  WOULD re-assert formatting on {len(wrong)} tab(s). "
-              "Nothing was written. Re-run with --apply")
+        print(f"\n  {len(wrong)} tab(s) need repair. Nothing was written. "
+              "Re-run with --apply")
         return 0
 
-    # The protected range is re-added by _v2_structure_requests, so the existing
-    # one has to go first or every run stacks another copy on the same columns.
-    from services.project_status_sheet import _PROTECT_DESC
-    meta = sheets_service._execute_with_retry(
-        lambda: sheets_service.service.spreadsheets().get(
-            spreadsheetId=ssid, fields="sheets(properties.title,protectedRanges)"))
-    drops = [{"deleteProtectedRange": {"protectedRangeId": pr["protectedRangeId"]}}
-             for sh in meta.get("sheets", [])
-             if sh["properties"]["title"] not in NON_AREA_TABS
-             for pr in (sh.get("protectedRanges") or [])
-             if pr.get("description") == _PROTECT_DESC]
+    print("\n  repairing via scripts/restyle_workbook.py — it re-applies the "
+          "per-row tick boxes, dropdowns, date rules and project fences that "
+          "the structure pass clears")
+    from scripts.restyle_workbook import run as restyle
+    rc = await restyle(True)
+    if rc:
+        return rc
 
-    reqs = list(drops)
-    for tab, (sid, _hidden) in before.items():
-        reqs.extend(_v2_structure_requests(
-            sid, settings.PROJECT_STATUS_DUE_SOON_DAYS))
-    # The colour rules come along with the structure requests and would stack a
-    # duplicate set on every run, so the existing ones are cleared first.
-    rules = sheets_service._execute_with_retry(
-        lambda: sheets_service.service.spreadsheets().get(
-            spreadsheetId=ssid,
-            fields="sheets(properties(title,sheetId),conditionalFormats)"))
-    clears = []
-    for sh in rules.get("sheets", []):
-        if sh["properties"]["title"] in NON_AREA_TABS:
-            continue
-        n = len(sh.get("conditionalFormats") or [])
-        for i in range(n - 1, -1, -1):
-            clears.append({"deleteConditionalFormatRule": {
-                "sheetId": sh["properties"]["sheetId"], "index": i}})
-    reqs = drops + clears + reqs[len(drops):]
-
-    sheets_service._execute_with_retry(
-        lambda: sheets_service.service.spreadsheets().batchUpdate(
-            spreadsheetId=ssid, body={"requests": reqs}))
-    print(f"\n  applied to {len(before)} tab(s)")
-
-    after = _state(ssid)
-    ok = True
-    for tab, (_sid, hidden) in after.items():
-        good = hidden == want
-        ok = ok and good
-        print(f"{'  ok  ' if good else ' !!   '}{tab:<34} hidden={hidden}")
-    print("\n  DONE — Priority and Comments are visible"
-          if ok else "\n  ** still wrong, investigate")
+    after = {t: h for t, (_s, h) in _state(ssid).items()}
+    ok = all(h == want for h in after.values())
+    for tab, hidden in after.items():
+        print(f"{'  ok  ' if hidden == want else ' !!   '}{tab:<34} hidden={hidden}")
+    print("\n  DONE — Priority and Comments are visible" if ok
+          else "\n  ** still wrong, investigate")
     return 0 if ok else 1
 
 

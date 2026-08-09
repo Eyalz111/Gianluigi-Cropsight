@@ -1616,7 +1616,11 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             lines = [header + ".\n"]
             for i, task in enumerate(tasks[:display_limit], 1):
                 priority = task.get("priority", "M")
-                indicator = {"H": "!! ", "M": "", "L": "~ "}.get(priority, "")
+                # 'U' fell through to the default here, so the ONE task marked
+                # Urgent was the only one in the list with no emphasis at all —
+                # the exact inverse of what the marker is for.
+                indicator = {"U": "!!! ", "H": "!! ", "M": "", "L": "~ "}.get(
+                    str(priority or "").strip().upper(), "")
                 title = _escape_html(task.get("title", "Untitled"))
                 assignee = _escape_html(task.get("assignee", ""))
                 deadline = task.get("deadline", "")

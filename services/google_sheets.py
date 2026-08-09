@@ -670,7 +670,13 @@ def _fmt_day(value) -> str:
     return text[:10] if len(text) >= 10 else text
 
 
-_PRI_SCORE = {"H": 3, "M": 2, "L": 1}
+# HIGH NUMBER SORTS FIRST here (the inverse of models.schemas.priority_rank,
+# which is a rank). `U` was missing, so an Urgent task scored 2 — identical to
+# Medium — and sorted BELOW every High one, in both the Tasks-tab rebuild and
+# the nightly reorder. models/schemas.py names six call sites that each carried
+# their own H/M/L literal; this was one of the three that never got converted.
+# [2026-08-09 code review]
+_PRI_SCORE = {"U": 4, "H": 3, "M": 2, "L": 1}
 
 
 def _task_status_band(status: str, deadline_iso: str | None, today_iso: str) -> int:
@@ -3514,7 +3520,8 @@ class GoogleSheetsService:
             return False
 
     def meetings_format_requests(self, sid: int, headers: list,
-                                 project_names: list | None = None) -> list:
+                                 project_names: list | None = None,
+                                 row_count: int = 1000) -> list:
         """Every formatting request for one meetings tab. Pure — no I/O.
 
         Built to match the area tabs: red title cell, blue header band on row 3,
@@ -3629,7 +3636,11 @@ class GoogleSheetsService:
         reqs.insert(1, {"updateBorders": {
             "range": {"sheetId": sid,
                       "startRowIndex": MEETING_FIRST_BODY_ROW - 1,
-                      "endRowIndex": 2000,
+                      # The grid's real height. A bounded range past the end of
+                      # the sheet is rejected outright, and batchUpdate is
+                      # atomic — one such request discards the whole batch and
+                      # the tab keeps the stale formatting this clears.
+                      "endRowIndex": max(row_count, MEETING_FIRST_BODY_ROW),
                       "startColumnIndex": 0, "endColumnIndex": n_all},
             "top": {"style": "NONE"}, "bottom": {"style": "NONE"},
             "left": {"style": "NONE"}, "right": {"style": "NONE"},

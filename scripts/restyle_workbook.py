@@ -34,7 +34,8 @@ from services.google_sheets import (                            # noqa: E402
     MEETING_TAB_NAME, MEETING_TRACKER_HEADERS, sheets_service,
 )
 from services.project_status_rows import (                      # noqa: E402
-    SYSTEM_ACTION, SYSTEM_PROJECT, parse_tab,
+    HEADER_ROW, SYSTEM_ACTION, SYSTEM_PROJECT, parse_tab,
+    unresolved_columns,
 )
 from services.project_status_sheet import (                     # noqa: E402
     _PROTECT_DESC, _checkbox_requests, _conditional_format_rules,
@@ -64,8 +65,8 @@ async def run(apply_it: bool) -> int:
     meta = sheets_service._execute_with_retry(
         lambda: sheets_service.service.spreadsheets().get(
             spreadsheetId=ssid,
-            fields="sheets(properties(title,sheetId),protectedRanges,"
-                   "conditionalFormats)"))
+            fields="sheets(properties(title,sheetId,gridProperties.rowCount),"
+                   "protectedRanges,conditionalFormats)"))
     sheets = {s["properties"]["title"]: s for s in meta.get("sheets", [])}
     area_tabs = [t for t in sheets if t not in NON_AREA_TABS]
 
@@ -83,6 +84,20 @@ async def run(apply_it: bool) -> int:
         if not grid:
             print(f"    .. {tab}: read back empty — skipped, nothing touched")
             continue
+        # THE SAME LAYOUT DOOR THE ENGINE USES. Without it, a tab still on an
+        # older layout parses with `_kind` read from the wrong column, so NO row
+        # classifies as an action — while the structure pass still wipes the
+        # body's validation. Every tick box on that tab would vanish, leaving
+        # bare TRUE/FALSE text and no way to mark anything done, and the per-row
+        # passes would put nothing back. build_plan refuses to touch such a tab;
+        # so does this now. [2026-08-09 code review]
+        header = grid[HEADER_ROW - 1] if len(grid) >= HEADER_ROW else []
+        missing = unresolved_columns(header)
+        if missing:
+            print(f"    !! {tab}: header does not declare {missing} — SKIPPED, "
+                  "nothing touched. Rebuild it first.")
+            continue
+
         sheet = sheets[tab]
         sid = sheet["properties"]["sheetId"]
         blocks, orphans, _cols = parse_tab(grid)
@@ -105,8 +120,13 @@ async def run(apply_it: bool) -> int:
                     "protectedRangeId": pr["protectedRangeId"]}})
 
         reqs.extend(_tab_format_requests(sid))
+        # The tab's ACTUAL height. A bounded range past the end of the grid is
+        # rejected, and batchUpdate is atomic — one such request discards every
+        # other change in the batch.
         reqs.extend(_v2_structure_requests(
-            sid, settings.PROJECT_STATUS_DUE_SOON_DAYS))
+            sid, settings.PROJECT_STATUS_DUE_SOON_DAYS,
+            row_count=(sheet["properties"].get("gridProperties") or {})
+            .get("rowCount") or 1000))
         reqs.extend(_header_note_requests(sid))
         # Per-row, computed from what the tab ACTUALLY holds right now.
         reqs.extend(_checkbox_requests(sid, rows))

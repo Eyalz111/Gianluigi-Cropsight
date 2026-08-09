@@ -455,7 +455,9 @@ class TaskReminderScheduler:
         source = task.get("source_meeting", "")
 
         # Priority emoji
-        priority_emoji = {"H": "!!!", "M": "!!", "L": "!"}.get(priority, "!!")
+        # Urgent used to degrade to the medium glyph via the default.
+        priority_emoji = {"U": "!!!!", "H": "!!!", "M": "!!", "L": "!"}.get(
+            str(priority or "").strip().upper(), "!!")
 
         message = f"<b>{task_desc}</b> is {days_overdue} days overdue ({assignee})."
         message += _urgency_area_suffix(task)
