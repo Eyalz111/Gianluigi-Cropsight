@@ -532,3 +532,279 @@ class TestTheMeetingsWorkbookIsOneAccessor:
         import processors.meeting_qa as mq
         src = inspect.getsource(mq.read_sheet_index)
         assert "meetings_workbook()" in src
+
+
+class TestTheSimplifiedLayout:
+    """Eyal, 2026-08-09: "we dont need the columns - agenda, prep needed,
+    source meeting, id - too much non necessery information"."""
+
+    def test_six_visible_columns_and_one_hidden(self):
+        import services.google_sheets as gs
+        assert gs.MEETING_TRACKER_HEADERS == [
+            "Meeting", "Project", "Led By", "Proposed Date", "Participants",
+            "Status", "_id"]
+        assert gs.MEETING_VISIBLE_COLUMNS == 6
+
+    def test_the_dropped_columns_are_gone(self):
+        import services.google_sheets as gs
+        for gone in ("agenda", "prep_needed", "source_meeting"):
+            assert gone not in gs.MEETING_COLUMNS
+
+    def test_the_identity_column_survives_hidden(self):
+        """It cannot be deleted: without it the reconcile cannot tell which
+        meeting a row IS - the defect that made "Schedule: X" rows multiply
+        forever. Hidden is what Eyal actually wanted."""
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row({"id": "m1", "title": "T"})
+        assert len(row) == len(gs.MEETING_TRACKER_HEADERS)
+        assert row[gs.MEETING_COL_INDEX["id"]] == "m1"
+        reqs = gs.sheets_service.meetings_format_requests(
+            1, gs.MEETING_TRACKER_HEADERS)
+        hide = [r["updateDimensionProperties"] for r in reqs
+                if "updateDimensionProperties" in r
+                and r["updateDimensionProperties"]["properties"].get(
+                    "hiddenByUser") is True]
+        assert hide[0]["range"]["startIndex"] == gs.MEETING_VISIBLE_COLUMNS
+
+    def test_the_visible_columns_are_explicitly_shown(self):
+        """Same assert-the-whole-state rule the area tabs needed after Priority
+        and Comments spent a session invisible."""
+        import services.google_sheets as gs
+        reqs = gs.sheets_service.meetings_format_requests(
+            1, gs.MEETING_TRACKER_HEADERS)
+        show = [r["updateDimensionProperties"] for r in reqs
+                if "updateDimensionProperties" in r
+                and r["updateDimensionProperties"]["properties"].get(
+                    "hiddenByUser") is False]
+        assert show and show[0]["range"]["endIndex"] == gs.MEETING_VISIBLE_COLUMNS
+
+    def test_the_archive_keeps_its_own_identity_column(self):
+        """Past Meetings has an extra visible column, so `_id` sits a letter
+        further right. Sharing the Meetings letter read the "Moved" date as a
+        UUID and reported every archived meeting as missing."""
+        import services.google_sheets as gs
+        assert gs.MEETINGS_ARCHIVE_ID_COLUMN == "H"
+        assert gs.MEETING_COLUMNS["id"] == "G"
+        assert gs.MEETINGS_ARCHIVE_HEADERS[-1] == "_id"
+
+    def test_outcome_is_gone_from_the_archive(self):
+        """It was written from `status`, so it said "held" beside a Status
+        column already saying "held"."""
+        import services.google_sheets as gs
+        assert "Outcome" not in gs.MEETINGS_ARCHIVE_HEADERS
+
+
+class TestTheProvenanceChip:
+    """Source Meeting survives as a chip in the title rather than a column, so
+    "every extracted item cites its source" outlives the simplification."""
+
+    def test_the_source_is_folded_into_the_title(self):
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "Call with Brian"}, source_meeting="Weekly Sync")
+        assert "Call with Brian" in row[0] and "Weekly Sync" in row[0]
+
+    def test_it_is_stripped_on_read_so_the_merge_is_honest(self):
+        """The DB title has no chip. Comparing raw text would make every row
+        look edited, every cycle."""
+        from services.project_status_rows import strip_provenance
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "Call with Brian"}, source_meeting="Weekly Sync")
+        assert strip_provenance(row[0]) == "Call with Brian"
+
+    def test_a_chip_is_never_stacked_twice(self):
+        """archive_meeting_rows passes a row read back OFF the sheet, whose
+        title already carries one."""
+        import services.google_sheets as gs
+        once = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "Call with Brian"}, source_meeting="Weekly")
+        twice = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": once[0]}, source_meeting="Weekly")
+        assert twice[0].count("[") == 1
+
+
+class TestTheHeaderBlock:
+    def test_it_is_three_rows_like_the_area_tabs(self):
+        import services.google_sheets as gs
+        block = gs.meetings_header_block()
+        assert len(block) == gs.MEETING_HEADER_ROW
+        assert block[-1] == gs.MEETING_TRACKER_HEADERS
+        assert gs.MEETING_FIRST_BODY_ROW == gs.MEETING_HEADER_ROW + 1
+
+    def test_every_banner_row_spans_the_full_width(self):
+        """A short row leaves the right-hand cells unstyled by the band."""
+        import services.google_sheets as gs
+        assert all(len(r) == len(gs.MEETING_TRACKER_HEADERS)
+                   for r in gs.meetings_header_block())
+
+    def test_the_body_starts_below_the_block(self):
+        """Being one row out here writes every edit into the wrong meeting."""
+        import services.google_sheets as gs
+        reqs = gs.sheets_service.meetings_format_requests(
+            1, gs.MEETING_TRACKER_HEADERS)
+        frozen = next(r for r in reqs if "updateSheetProperties" in r)
+        assert (frozen["updateSheetProperties"]["properties"]["gridProperties"]
+                ["frozenRowCount"] == gs.MEETING_HEADER_ROW)
+
+
+class TestTheProjectColumn:
+    """Eyal: "column project - must be connected with a project on one of the
+    tabs! in not, keep it clean or say not connected"."""
+
+    def _reqs(self, names=("Italy", "Product V1")):
+        import services.google_sheets as gs
+        return gs.sheets_service.meetings_format_requests(
+            1, gs.MEETING_TRACKER_HEADERS, list(names))
+
+    def test_it_is_a_dropdown_of_the_canonical_projects(self):
+        import services.google_sheets as gs
+        dv = [r["setDataValidation"] for r in self._reqs()
+              if "setDataValidation" in r
+              and r["setDataValidation"]["range"]["startColumnIndex"]
+              == gs.MEETING_COL_INDEX["label"]]
+        assert len(dv) == 1
+        vals = [v["userEnteredValue"]
+                for v in dv[0]["rule"]["condition"]["values"]]
+        assert vals == ["Italy", "Product V1"]
+
+    def test_it_warns_rather_than_refusing(self):
+        """Silently erasing what somebody typed is the one thing this system
+        never does - the reconcile declines to store an off-vocabulary value,
+        so a typo cannot reach the database either way."""
+        import services.google_sheets as gs
+        dv = next(r["setDataValidation"] for r in self._reqs()
+                  if "setDataValidation" in r
+                  and r["setDataValidation"]["range"]["startColumnIndex"]
+                  == gs.MEETING_COL_INDEX["label"])
+        assert dv["rule"]["strict"] is False
+
+    def test_an_unassigned_project_is_greyed_not_labelled(self):
+        """Grey registers instantly; twenty rows of "Not connected" is text you
+        have to read past."""
+        import services.google_sheets as gs
+        rules = [r["addConditionalFormatRule"]["rule"] for r in self._reqs()
+                 if "addConditionalFormatRule" in r
+                 and r["addConditionalFormatRule"]["rule"]["ranges"][0]
+                 ["startColumnIndex"] == gs.MEETING_COL_INDEX["label"]]
+        assert len(rules) == 1
+        f = rules[0]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        assert f.startswith("=AND(") and '$B4=""' in f
+
+    def test_no_dropdown_when_the_project_list_is_unavailable(self):
+        """Better no dropdown than one listing nothing, which would flag every
+        real project as invalid."""
+        import services.google_sheets as gs
+        dv = [r for r in self._reqs(names=())
+              if "setDataValidation" in r
+              and r["setDataValidation"]["range"]["startColumnIndex"]
+              == gs.MEETING_COL_INDEX["label"]]
+        assert dv == []
+
+
+class TestOperationalOrdering:
+    """Eyal: "i want it to be organized all the time (every refresh) in the
+    order of scheduled, not scheduled, parked, held - operational importance"."""
+
+    def test_the_display_order_is_operational(self):
+        import services.google_sheets as gs
+        order = sorted(gs.MEETING_DISPLAY_ORDER,
+                       key=gs.MEETING_DISPLAY_ORDER.get)
+        assert order[:4] == ["scheduled", "not_scheduled", "parked", "held"]
+
+    def test_it_is_separate_from_the_state_machine(self):
+        """Display order and progression order answer different questions;
+        fusing them is how "show the booked ones first" would start meaning
+        "a booked meeting cannot be parked"."""
+        import services.google_sheets as gs
+        assert gs.MEETING_DISPLAY_ORDER != gs.MEETING_STATUS_ORDER
+
+    async def test_a_row_awaiting_its_identity_blocks_the_sort(self, monkeypatch):
+        """That row is stamped by ROW NUMBER on the next cycle. Move it first
+        and the stamp lands on somebody else's meeting."""
+        from unittest.mock import AsyncMock, MagicMock
+        import schedulers.reconcile_scheduler as rs
+        import services.google_sheets as gs
+        from config.settings import settings
+
+        monkeypatch.setattr(settings, "MEETING_RECONCILE_ENABLED", True,
+                            raising=False)
+        fake = MagicMock()
+        fake.get_all_meetings = AsyncMock(return_value=[
+            {"id": "", "title": "Typed just now"}])
+        fake.sort_meetings_tab = AsyncMock(return_value=9)
+        monkeypatch.setattr(gs, "sheets_service", fake)
+
+        assert await rs.reconcile_scheduler._sort_meetings_now() == 0
+        fake.sort_meetings_tab.assert_not_called()
+
+    async def test_a_settled_tab_is_sorted(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+        import schedulers.reconcile_scheduler as rs
+        import services.google_sheets as gs
+        from config.settings import settings
+
+        monkeypatch.setattr(settings, "MEETING_RECONCILE_ENABLED", True,
+                            raising=False)
+        fake = MagicMock()
+        fake.get_all_meetings = AsyncMock(return_value=[
+            {"id": "m1", "title": "Booked"}])
+        fake.sort_meetings_tab = AsyncMock(return_value=3)
+        monkeypatch.setattr(gs, "sheets_service", fake)
+
+        assert await rs.reconcile_scheduler._sort_meetings_now() == 3
+
+    async def test_a_sort_failure_never_fails_the_cycle(self, monkeypatch):
+        """It is cosmetic, and the cycle has already written real data."""
+        from unittest.mock import AsyncMock, MagicMock
+        import schedulers.reconcile_scheduler as rs
+        import services.google_sheets as gs
+        from config.settings import settings
+
+        monkeypatch.setattr(settings, "MEETING_RECONCILE_ENABLED", True,
+                            raising=False)
+        fake = MagicMock()
+        fake.get_all_meetings = AsyncMock(side_effect=RuntimeError("boom"))
+        monkeypatch.setattr(gs, "sheets_service", fake)
+
+        assert await rs.reconcile_scheduler._sort_meetings_now() == 0
+
+
+class TestTheSharedTabHelpersStillWork:
+    """_resort_tab and _ensure_tab gained a workbook parameter in a bulk
+    rewrite that turned `settings.TASK_TRACKER_SHEET_ID` into `ssid` on BOTH
+    sides of the assignment, leaving `ssid = spreadsheet_id or ssid` - an
+    UnboundLocalError on every call. Every test passed, because every test
+    mocks sheets_service rather than calling through it."""
+
+    async def test_resort_tab_reads_from_the_given_first_body_row(self, monkeypatch):
+        import services.google_sheets as gs
+
+        seen = {}
+
+        async def _read(sheet_id, range_name):
+            seen["ssid"], seen["range"] = sheet_id, range_name
+            return []
+
+        monkeypatch.setattr(gs.sheets_service, "_read_sheet_range", _read)
+        await gs.sheets_service._resort_tab(
+            "Meetings", gs.MEETING_TRACKER_HEADERS, lambda r: 0,
+            spreadsheet_id="wb-1", first_body_row=gs.MEETING_FIRST_BODY_ROW)
+        assert seen["ssid"] == "wb-1"
+        assert seen["range"] == f"'Meetings'!A{gs.MEETING_FIRST_BODY_ROW}:G"
+
+    async def test_resort_tab_falls_back_to_the_task_tracker(self, monkeypatch):
+        import services.google_sheets as gs
+        from config.settings import settings
+
+        monkeypatch.setattr(settings, "TASK_TRACKER_SHEET_ID", "tracker",
+                            raising=False)
+        seen = {}
+
+        async def _read(sheet_id, range_name):
+            seen["ssid"] = sheet_id
+            return []
+
+        monkeypatch.setattr(gs.sheets_service, "_read_sheet_range", _read)
+        await gs.sheets_service._resort_tab("Tasks", ["A", "B"], lambda r: 0)
+        assert seen["ssid"] == "tracker"

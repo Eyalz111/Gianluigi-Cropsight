@@ -79,6 +79,39 @@ class ReconcileScheduler:
                 logger.error(f"Reconcile scheduler error: {e}")
                 await asyncio.sleep(300)
 
+    async def _sort_meetings_now(self) -> int:
+        """Keep the meetings pool in operational order, every cycle.
+
+        scheduled -> to schedule -> parked -> held -> dropped. Returns the
+        number of rows reordered; 0 when it deliberately skipped.
+
+        Never raises: this is cosmetic, and a sort failure must not fail a
+        cycle that already wrote real data.
+        """
+        if not getattr(settings, "MEETING_RECONCILE_ENABLED", False):
+            return 0
+        try:
+            from services.google_sheets import sheets_service
+
+            rows = await sheets_service.get_all_meetings()
+            pending = [r for r in rows
+                       if not (r.get("id") or "").strip()
+                       and (r.get("title") or "").strip()]
+            if pending:
+                # See the note at the call site: a row with no UUID is stamped
+                # by ROW NUMBER on the next cycle, and moving it first puts that
+                # stamp on somebody else's meeting.
+                logger.info(f"[meetings] sort skipped — {len(pending)} row(s) "
+                            "still waiting for their identity")
+                return 0
+            moved = await sheets_service.sort_meetings_tab()
+            if moved:
+                logger.info(f"[meetings] reordered {moved} row(s)")
+            return moved
+        except Exception as e:                              # noqa: BLE001
+            logger.warning(f"[meetings] sort failed (non-fatal): {e}")
+            return 0
+
     async def _notify_sync(self, tasks, meetings, decisions, projects) -> None:
         """Post a one-line 'synced N edits' to the group after an auto-sync.
 
@@ -259,10 +292,29 @@ class ReconcileScheduler:
                         if dd.get("duplicates_removed"):
                             logger.info(f"Nightly Meetings dedupe: removed {dd['duplicates_removed']} dup row(s)")
                         nt = await sheets_service.sort_tasks_tab()
-                        nm = await sheets_service.sort_meetings_tab()
-                        logger.info(f"Daily reorder: {nt} tasks, {nm} meetings")
+                        logger.info(f"Daily reorder: {nt} tasks")
                     except Exception as se:
                         logger.warning(f"Daily reorder failed (non-fatal): {se}")
+
+                # MEETINGS RE-SORT ON EVERY CYCLE, not just at 02:00. Eyal:
+                # "i want it to be organized all the time (every refresh) in the
+                # order of scheduled, not scheduled, parked, held - operational
+                # importance". The pool is the thing he scans to decide what to
+                # book next, so an order that is right once a day is right at
+                # the wrong time.
+                #
+                # AFTER the reconcile, never before: the row numbers the merge
+                # just used come from a read taken at the start of the cycle,
+                # and re-sorting first would address every write to a row that
+                # had moved.
+                #
+                # SKIPPED while a hand-typed row is waiting for its UUID. Such a
+                # row is created and stamped on the NEXT cycle by row number; if
+                # the sort moves it in between, the stamp lands on somebody
+                # else's meeting. One cycle of imperfect ordering is a fair
+                # price. It also means a row cannot jump under the cursor in the
+                # moments right after it is typed.
+                await self._sort_meetings_now()
             return True
         except Exception as e:
             logger.error(f"Reconcile failed ({slot}): {e}")

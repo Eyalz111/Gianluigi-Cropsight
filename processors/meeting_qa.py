@@ -35,7 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 def _norm(t: object) -> str:
-    return " ".join(str(t or "").split()).strip().lower()
+    """Comparable form of a title.
+
+    Strips the `[auto · meeting · date]` provenance chip. Meeting titles carry
+    one on the sheet and never in the database, so comparing raw text reported
+    a title DRIFT on every single meeting — a page of alarms describing a
+    marker the system itself had added.
+    """
+    from services.project_status_rows import strip_provenance
+    return " ".join(strip_provenance(str(t or "")).split()).strip().lower()
 
 
 async def read_sheet_index() -> dict:
@@ -44,7 +52,8 @@ async def read_sheet_index() -> dict:
     duplicate UUIDs (len > 1)."""
     from services.google_sheets import (
         sheets_service, TASK_COL_INDEX, DECISION_ID_COLUMN, DECISION_COL_INDEX,
-        MEETING_COL_INDEX, MEETING_TAB_NAME, MEETINGS_ARCHIVE_TAB_NAME,
+        MEETING_COL_INDEX, MEETING_COLUMNS, MEETING_FIRST_BODY_ROW,
+        MEETING_TAB_NAME, MEETINGS_ARCHIVE_ID_COLUMN, MEETINGS_ARCHIVE_TAB_NAME,
     )
     sid = settings.TASK_TRACKER_SHEET_ID
     tab = settings.TASK_TRACKER_TAB_NAME or "Tasks"
@@ -65,15 +74,29 @@ async def read_sheet_index() -> dict:
 
     tr = await sheets_service._read_sheet_range(sheet_id=sid, range_name=f"'{tab}'!A2:L")
     dr = await sheets_service._read_sheet_range(sheet_id=sid, range_name="'Decisions'!A2:H")
-    mr = await sheets_service._read_sheet_range(sheet_id=msid, range_name=f"'{MEETING_TAB_NAME}'!A2:J")
-    pr = await sheets_service._read_sheet_range(sheet_id=msid, range_name=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!A2:J")
+    # The meetings tabs carry a THREE-row header block and their own id
+    # columns — Past Meetings has one extra visible column, so its `_id` sits a
+    # letter further right. A shared "A2:J" read both the header rows as data
+    # and the wrong column as the identity.
+    _b = MEETING_FIRST_BODY_ROW
+    mr = await sheets_service._read_sheet_range(
+        sheet_id=msid,
+        range_name=f"'{MEETING_TAB_NAME}'!A{_b}:{MEETING_COLUMNS['id']}")
+    pr = await sheets_service._read_sheet_range(
+        sheet_id=msid,
+        range_name=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!A{_b}:{MEETINGS_ARCHIVE_ID_COLUMN}")
 
     d_id_i = ord(DECISION_ID_COLUMN) - ord("A")
+    # Past Meetings' identity sits one column further right than the Meetings
+    # tab's, because the archive carries an extra visible column. Using the same
+    # index for both read the "Moved" date as a UUID, so every archived meeting
+    # matched nothing and was reported missing from the sheet.
+    past_id_i = ord(MEETINGS_ARCHIVE_ID_COLUMN) - ord("A")
     return {
         "tasks": _index(tr, TASK_COL_INDEX["id"], TASK_COL_INDEX["task"]),
         "decisions": _index(dr, d_id_i, DECISION_COL_INDEX["decision"]),
         "meetings": _index(mr, MEETING_COL_INDEX["id"], MEETING_COL_INDEX["title"]),
-        "past_meetings": _index(pr, MEETING_COL_INDEX["id"], MEETING_COL_INDEX["title"]),
+        "past_meetings": _index(pr, past_id_i, MEETING_COL_INDEX["title"]),
     }
 
 
