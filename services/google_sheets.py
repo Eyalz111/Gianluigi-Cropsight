@@ -431,29 +431,68 @@ ARCHIVE_HEADERS = TASK_TRACKER_HEADERS + ["Archived", "Prior Status", "Reason"]
 # ---------------------------------------------------------------------------
 MEETING_TAB_NAME = "Meetings"
 
+# SIX VISIBLE COLUMNS, ONE HIDDEN. Eyal, 2026-08-09: "we need to simplify it.
+# we dont need the columns - agenda, prep needed, source meeting, id - too much
+# non necessery information".
+#
+# Agenda, Prep Needed and Source Meeting were WRITE-ONLY here — _meeting_row
+# filled them and nothing ever read them back, since the reconcile only merges
+# title/project/led-by/date/participants/status. They still live in the
+# database; they just stopped taking up a column. Source Meeting survives as a
+# `[auto · meeting · date]` chip inside the title, the same provenance marker
+# the action rows already carry, so the citation is kept without the column.
+#
+# `_id` is the exception and CANNOT go. It is the row's identity: without it the
+# reconcile cannot tell which meeting a row IS, which is precisely the defect
+# that made "Schedule: X" rows multiply forever on the Tasks tab. It is HIDDEN
+# instead, exactly as the project tabs hide theirs — invisible to a reader,
+# intact for the engine.
 MEETING_COLUMNS = {
-    "title": "A",           # what the meeting is
-    "label": "B",           # Project — same vocabulary as Tasks/Decisions
+    "title": "A",           # what the meeting is (+ its provenance chip)
+    "label": "B",           # Project — dropdown of the canonical projects
     "led_by": "C",          # who owns making it happen
     "proposed_date": "D",   # when it was proposed for
     "participants": "E",    # comma-separated
-    "status": "F",          # not_scheduled / scheduled / held / dropped
-    "agenda": "G",          # system-owned (from extraction)
-    "prep_needed": "H",     # system-owned
-    "source_meeting": "I",  # system-owned
-    "id": "J",              # UUID — the reconcile identity
+    "status": "F",          # parked / not_scheduled / scheduled / held / dropped
+    "id": "G",              # UUID — the reconcile identity. HIDDEN, never shown.
 }
 MEETING_COL_INDEX = {k: ord(v) - ord("A") for k, v in MEETING_COLUMNS.items()}
 
 MEETING_TRACKER_HEADERS = [
     "Meeting", "Project", "Led By", "Proposed Date", "Participants",
-    "Status", "Agenda", "Prep Needed", "Source Meeting", "ID",
+    "Status", "_id",
 ]
+# Everything from here on is hidden. One number, so the styling, the protection
+# and the "is this column visible" question can never disagree.
+MEETING_VISIBLE_COLUMNS = 6
+
+# The tab now carries the same three-row header as the area tabs (title band,
+# distribution line, column headers) so the workbook reads as one document
+# rather than one designed file and one raw table.
+MEETING_HEADER_ROW = 3
+MEETING_FIRST_BODY_ROW = 4
 
 # Past Meetings = terminal (held/dropped) meetings moved off the working tab —
-# the meeting counterpart to the Tasks Archive. Same columns + when + outcome.
+# the meeting counterpart to the Tasks Archive. Same visible columns plus when
+# it moved. "Outcome" is gone: it was written from `status`, so it said `held`
+# next to a Status column already saying `held`.
 MEETINGS_ARCHIVE_TAB_NAME = "Past Meetings"
-MEETINGS_ARCHIVE_HEADERS = MEETING_TRACKER_HEADERS + ["Moved", "Outcome"]
+MEETINGS_ARCHIVE_HEADERS = (
+    MEETING_TRACKER_HEADERS[:MEETING_VISIBLE_COLUMNS] + ["Moved", "_id"]
+)
+
+
+def _id_column(headers: list) -> str:
+    """The identity column's letter for a tab, from its own header list.
+
+    Meetings puts `_id` at G and Past Meetings at H, because the archive has one
+    extra visible column. Deriving it per tab is what stops the archive paths
+    reading the id out of the "Moved" column.
+    """
+    return chr(ord("A") + headers.index("_id"))
+
+
+MEETINGS_ARCHIVE_ID_COLUMN = _id_column(MEETINGS_ARCHIVE_HEADERS)
 
 # `parked` = deliberately not being pursued right now, without claiming it was
 # held or dropped. Added 2026-08-09 with the meetings pool: without it, anything
@@ -2568,27 +2607,39 @@ class GoogleSheetsService:
 
     @staticmethod
     def _meeting_row(m: dict, source_meeting: str = "") -> list:
-        """Build one Meetings-tab row from a follow_up_meetings record."""
+        """Build one Meetings-tab row from a follow_up_meetings record.
+
+        The source meeting is folded into the TITLE as a `[auto · … ]` chip
+        rather than occupying a column — the same provenance marker the action
+        rows carry, so "every extracted item cites its source" survives the
+        simplification. It is stripped again on read, so the merge only ever
+        compares the title itself.
+        """
+        from services.project_status_rows import (
+            ORIGIN_AUTO, format_provenance, strip_provenance)
+
         parts = m.get("participants") or []
-        # Accept BOTH shapes: a DB follow_up_meetings row (agenda_items / joined
-        # meetings.title) AND a Meetings-tab sheet-row dict (agenda / source_meeting).
-        # archive_meeting_rows passes the latter, so reading only the DB keys wrote
-        # blank Agenda + Source Meeting cells into Past Meetings. [review #10]
-        agenda = m.get("agenda_items") or m.get("agenda") or []
+        # Accept BOTH shapes: a DB follow_up_meetings row (joined meetings.title)
+        # AND a Meetings-tab sheet-row dict. archive_meeting_rows passes the
+        # latter, so reading only the DB keys wrote blank cells into Past
+        # Meetings. [review #10]
         src = source_meeting
         if not src:
             mi = m.get("meetings") if isinstance(m.get("meetings"), dict) else {}
             src = (mi or {}).get("title", "") or m.get("source_meeting", "") or ""
+        # Strip first: the row may be coming back off the sheet, where the title
+        # already carries a chip. Without this the archive path stacked a second
+        # one on every move.
+        title = strip_provenance(m.get("title") or "")
+        if src:
+            title = f"{title} {format_provenance(ORIGIN_AUTO, src)}".strip()
         return [
-            m.get("title") or "",
+            title,
             m.get("label") or "",
             m.get("led_by") or "",
             _fmt_day(m.get("proposed_date")),
             ", ".join(parts) if isinstance(parts, list) else str(parts or ""),
             m.get("status") or "not_scheduled",
-            "; ".join(agenda) if isinstance(agenda, list) else str(agenda or ""),
-            m.get("prep_needed") or "",
-            src,
             m.get("id") or "",
         ]
 
@@ -2657,25 +2708,40 @@ class GoogleSheetsService:
         return {"duplicates_removed": dups, "orphans_removed": orphans, "details": details}
 
     async def get_all_meetings(self) -> list[dict]:
-        """Read the Meetings tab, one dict per row with row_number + id."""
+        """Read the Meetings tab, one dict per row with row_number + id.
+
+        Reads from MEETING_FIRST_BODY_ROW, not row 2 — the tab now carries the
+        same three-row header block as the area tabs, and `row_number` is what
+        every subsequent write addresses, so being one row out here writes every
+        edit into the wrong meeting.
+        """
+        from services.project_status_rows import strip_provenance
+
         if not self.meetings_workbook():
             return []
         num_cols = len(MEETING_TRACKER_HEADERS)
         end_col = max(MEETING_COLUMNS.values())
         rows = await self._read_sheet_range(
             sheet_id=self.meetings_workbook(),
-            range_name=f"'{MEETING_TAB_NAME}'!A:{end_col}",
+            range_name=f"'{MEETING_TAB_NAME}'!A{MEETING_FIRST_BODY_ROW}:{end_col}",
         )
-        if not rows or len(rows) < 2:
+        if not rows:
             return []
         out = []
-        for i, row in enumerate(rows[1:], start=2):
+        for i, row in enumerate(rows, start=MEETING_FIRST_BODY_ROW):
             while len(row) < num_cols:
                 row.append("")
             raw_date = row[MEETING_COL_INDEX["proposed_date"]]
+            raw_title = row[MEETING_COL_INDEX["title"]]
+            if not any(str(c).strip() for c in row[:MEETING_VISIBLE_COLUMNS]):
+                continue                       # spacer row, not a meeting
             out.append({
                 "row_number": i,
-                "title": row[MEETING_COL_INDEX["title"]],
+                # The displayed title carries a `[auto · …]` provenance chip.
+                # The merge compares against the DB title, which does not, so
+                # the chip is stripped here or every row reads as an edit.
+                "title": strip_provenance(raw_title),
+                "title_displayed": raw_title,
                 "label": row[MEETING_COL_INDEX["label"]],
                 "led_by": row[MEETING_COL_INDEX["led_by"]],
                 # Day-first parsing, same convention as the Tasks deadline cell:
@@ -2684,9 +2750,6 @@ class GoogleSheetsService:
                 "proposed_date_raw": raw_date,
                 "participants": row[MEETING_COL_INDEX["participants"]],
                 "status": row[MEETING_COL_INDEX["status"]],
-                "agenda": row[MEETING_COL_INDEX["agenda"]],
-                "prep_needed": row[MEETING_COL_INDEX["prep_needed"]],
-                "source_meeting": row[MEETING_COL_INDEX["source_meeting"]],
                 "id": row[MEETING_COL_INDEX["id"]],
             })
         return out

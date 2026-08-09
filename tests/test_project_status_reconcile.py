@@ -549,9 +549,19 @@ class TestAutoInject:
                             PROJECT_STATUS_MAX_ACTIONS_PER_PROJECT=6)
         assert plan.injects == []
 
-    def test_injection_is_off_by_default(self):
-        plan = _plan({TAB: _grid(_prow())}, tasks=[_db_task("t9")])
+    def test_the_flag_off_means_nothing_is_injected(self):
+        """This read the AMBIENT setting and asserted "off by default", so it
+        passed only while the flag happened to be off — and started failing the
+        day it was turned on in .env, reporting a config change as a code
+        defect. The behaviour worth pinning is the flag doing its job."""
+        with patch.object(psr.settings, "PROJECT_STATUS_AUTO_INJECT_ENABLED",
+                          False):
+            plan = _plan({TAB: _grid(_prow())}, tasks=[_db_task("t9")])
         assert plan.injects == []
+
+    def test_the_flag_on_means_it_does(self):
+        plan = self._inject([_db_task("t9")], _grid(_prow()))
+        assert len(plan.injects) == 1
 
     def test_a_skipped_tab_gets_no_injections(self):
         plan = self._inject([_db_task("t9")], [], act_snaps={"t1": {}})

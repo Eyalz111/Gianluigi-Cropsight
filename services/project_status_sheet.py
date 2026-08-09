@@ -314,12 +314,26 @@ def _v2_structure_requests(sheet_id: int, due_soon_days: int) -> list[dict]:
                       "startIndex": 0, "endIndex": N_VISIBLE},
             "properties": {"hiddenByUser": False},
             "fields": "hiddenByUser"}},
+        # The body starts PLAIN — not bold, no band, readable ink. The project
+        # band and its bold come back on top from the conditional rule, which
+        # asks each row what kind it is.
+        #
+        # This also clears paint left by an OLDER layout. `values().clear()`
+        # removes values and nothing else, so when the rebuild rewrote the tabs
+        # the static band that used to mark project rows stayed at those row
+        # NUMBERS — and a task now sitting there rendered bold and tinted, which
+        # is exactly the "no clear distinction between subjects and actions"
+        # problem the band exists to solve, inverted. Eyal spotted four of them
+        # on one tab. [2026-08-09]
         {"repeatCell": {
             "range": {"sheetId": sheet_id, "startRowIndex": FIRST_BODY_ROW - 1,
                       "startColumnIndex": 0, "endColumnIndex": N_VISIBLE},
             "cell": {"userEnteredFormat": {
-                "textFormat": {"foregroundColor": _INK, "fontSize": 11}}},
-            "fields": "userEnteredFormat.textFormat(foregroundColor,fontSize)"}},
+                "backgroundColor": _WHITE,
+                "textFormat": {"bold": False, "foregroundColor": _INK,
+                               "fontSize": 11}}},
+            "fields": ("userEnteredFormat(backgroundColor,"
+                       "textFormat(bold,foregroundColor,fontSize))")}},
         {"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
                       "startIndex": N_VISIBLE, "endIndex": N_ALL},

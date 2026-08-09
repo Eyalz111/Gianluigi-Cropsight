@@ -620,16 +620,39 @@ class TestTheVisibleColumnsAreAsserted:
         rng = unhide[0]["range"]
         assert rng["startIndex"] == 0 and rng["endIndex"] == N_VISIBLE
 
-    def test_the_visible_body_text_is_explicitly_readable(self):
-        """White-on-white 8pt was left behind on the vacated columns too, so
-        un-hiding alone would still have shown nothing."""
+    def _body_reset(self):
         resets = [r["repeatCell"] for r in self._reqs()
                   if "repeatCell" in r
                   and r["repeatCell"]["range"].get("endColumnIndex") == N_VISIBLE]
         assert len(resets) == 1
-        fmt = resets[0]["cell"]["userEnteredFormat"]["textFormat"]
+        return resets[0]["cell"]["userEnteredFormat"]
+
+    def test_the_visible_body_text_is_explicitly_readable(self):
+        """White-on-white 8pt was left behind on the vacated columns too, so
+        un-hiding alone would still have shown nothing."""
+        fmt = self._body_reset()["textFormat"]
         assert fmt["fontSize"] == 11
         assert fmt["foregroundColor"] != {"red": 1, "green": 1, "blue": 1}
+
+    def test_the_body_starts_plain_so_old_paint_cannot_survive(self):
+        """values().clear() removes values and nothing else. When the rebuild
+        rewrote the tabs, the static band that used to mark project rows stayed
+        at those row NUMBERS — and the task now sitting there rendered bold and
+        tinted, which is the block-structure signal inverted. Four of them on
+        one tab."""
+        fmt = self._body_reset()
+        assert fmt["textFormat"]["bold"] is False
+        assert fmt["backgroundColor"] == {"red": 1, "green": 1, "blue": 1}
+
+    def test_the_project_band_still_comes_from_the_rule(self):
+        """Resetting the body must not mean painting project rows statically
+        again — an inserted row inherits static paint, which is why the band
+        became a conditional rule in the first place."""
+        from services.project_status_sheet import _project_row_requests
+        rows = [[""] * N_VISIBLE + ["P", "u", "u", "", ""]]
+        assert not any("repeatCell" in r for r in _project_row_requests(9, rows))
+        rule = _conditional_format_rules(9, 7)[0]["addConditionalFormatRule"]
+        assert rule["rule"]["booleanRule"]["format"]["textFormat"]["bold"] is True
 
     def test_it_is_idempotent_across_layouts(self):
         """Run against a sheet formatted for ANY older layout and the result is
