@@ -1,70 +1,130 @@
-# Known Issues — Gianluigi v2.2 (Post Session 3 + Live Ops Hardening)
+# Known Issues — Gianluigi
 
-Current as of June 11, 2026.
+**Current as of 10 August 2026.** Live issues only. For change history use
+`git log`; for the reasoning behind a design, the memory topic files.
 
 ---
 
-## Open Issues
+## Open
 
-### Critical Bugs
-- None currently open (distribution pre-edit and Telegram orphans fixed in Phase 11)
+### Needs a decision from Eyal
+- **44 proposals are queued and unseen.** `get_proposals()` lists them,
+  `decide_proposal()` actions them. Includes the **7 `task_is_a_meeting`**
+  proposals from the detector enabled 2026-08-09 — the Calabria meeting, the
+  Avi Perl call and five more — plus 11 topic merges, 11 task-field updates,
+  10 decision merge/supersede, 3 question closures. Nothing expires for 30 days,
+  but the meeting ones are the reason that detector exists.
+- **10 of 23 project rows have no objective** (`To do` on the project row):
+  Legal, Corporate, Finance, Investor Outreach, Investors Materials, Business
+  Plan and the four "Others" buckets. More visible since actions gained their
+  own objective on 2026-08-09.
 
-### Recently fixed (2026-06-11, category realignment branch)
-- **NULL-deadline data loss (FIXED):** hand-typed sheet dates like `20.6.26` were
-  pulled by reconcile and silently stored as NULL (`_serialize_datetime` only knew
-  ISO), erasing deadlines. Fix: `core/dates.parse_human_date` (day-first) at every
-  Sheet→DB date boundary; reconcile never pulls an unparseable date (flags it as
-  `bad_dates` instead) and normalizes sloppy-but-valid cells to ISO.
-- **Sheet row deletions resurrected (FIXED by design change):** reconcile re-added
-  any open DB task missing from the sheet. New sanctioned removal: status
-  `archived` — set it in the sheet/MCP/Telegram and reconcile moves the row to the
-  Archive tab and never re-adds it. Plain row deletion still resurrects (safety).
-- **Task category ≠ Gantt areas (FIXED):** the legacy 6-bucket category taxonomy
-  ("BD & Sales"…) was unrelated to the Gantt board areas, while the parallel
-  `area` field stayed 99% `non-area`. Category now IS the Gantt-area taxonomy
-  (live `areas` table + "General"); the separate task `area` surface was removed
-  (`tasks.area_id`/`area_label` columns retained but no longer written).
+### Operational
+- **Nechama has no `telegram_id`.** She is in `team_members` (founders,
+  `nechama@cropsight.io`) and is actively editing the workbook, but gets no
+  notifications and cannot action anything from her phone. She sends `/myid`
+  to the bot; the id goes in her roster row.
+- **Tactiq is still not re-pointed**, so auto-ingest depends on transcripts
+  being dropped into Drive by hand. Tactiq holds `drive.file` scope, so its
+  picker cannot target an existing or Shared-Drive folder — folder choice needs
+  the Business plan, Drive integration itself needs Team. The watcher polls both
+  known inboxes via `RAW_TRANSCRIPTS_FOLDER_IDS`. Verify the account is on a
+  PAID plan: Free has no Drive integration and fails silently.
+- **A meeting can be marked `scheduled` with no date.** One is, today
+  ("Business plan R&D personnel section review session"). Nothing reminds
+  anyone about a booked meeting with no date; `scripts/check_project_status.py`
+  now flags it.
 
-### Google Sheets API
-- **Intermittent "broken pipe":** Cloud Run idle connections to Sheets API occasionally break. **Mitigated** in Phase 10 with `_execute_with_retry()` (3 retries, exponential backoff). Monitor — should be rare now.
+### Product Status workbook — usage notes, not defects
+- **`Action` is being used as a progress log.** Three rows now read "Reached
+  out — will follow up with his boss in a few days" while still `pending`. The
+  Action cell is `tasks.title`, so that text becomes the task's name everywhere
+  it appears — morning brief, Telegram, digests — and the original commitment is
+  gone. `Comments` is the place for an outcome and the tick box is the signal
+  for done. Working as designed; flagged because the cost is invisible from the
+  sheet.
+- **Three actions share identical text**, distinguished only by `Topic`
+  ("Yoram to reach out - Eyal to articulate a message for him" ×3). Fine in the
+  sheet, ambiguous anywhere Topic is not shown.
 
-### Tombstone Matching (Tier 1.9)
-- **source_file_path collision:** The watcher matches rejected-meeting tombstones by filename using ILIKE substring match on `meetings.source_file_path`. If a new file is uploaded with the same filename as a previously-rejected file, the watcher will match the tombstone and skip the new file as "already rejected." In practice this is rare because Tactiq uses timestamp-prefixed filenames (e.g., `2026-04-09_1428_cropsight-sync.txt`) — collisions only happen for exact filename+timestamp duplicates, which don't occur organically. Future mitigation: add `drive_file_id` column to `meetings` and match by Drive file ID instead of filename for exact identity. Deferred — not causing active bugs.
+### Known limitations
+- **MCP personal-data leakage.** Claude.ai mixes tool results with its own
+  conversation memory; MCP `instructions` are guidance, not a sandbox.
+  Mitigation: a dedicated Claude Project ("CropSight Ops").
+- **`MCP_ALLOW_AUTHLESS=true` in production** and must stay until OAuth is
+  activated (`MCP_OAUTH_ENABLED=false`, `docs/MCP_OAUTH_RUNBOOK.md`).
+- **Topic threading surfaces fabricated links.** Needs the redesign to explicit
+  project labels + approval.
+- **Gantt metrics read status from cell background colours** via an HSL
+  heuristic; non-standard colours parse wrongly.
+- **Document ingestion**: no OCR (scanned PDFs extract empty), images and charts
+  ignored, paragraph-based chunking.
+- **Telegram**: polling not webhook, so a cold start drops messages; 4096-char
+  limit truncates long approval previews.
+- **Email**: 5-minute polling, so approval replies are not instant; forwarded
+  threads dedup imperfectly at low volume.
+- **Tombstone matching by filename.** A re-uploaded file with a previously
+  rejected name is skipped as "already rejected". Rare — Tactiq names are
+  timestamp-prefixed. Real fix is matching on `drive_file_id`.
+- **Calendar OR-chain false positives**: a personal meeting with 2+ team members
+  classifies as CropSight. Believed fixed; unverified.
+- **Test baseline: 5 failures** — `test_ux_hardening` search ×3,
+  `test_rag_search`, `test_tier3_approval_status`. Two more
+  (`test_gantt_drift`) fail on date-sensitive days.
 
-### Email Intelligence
-- **Forwarded thread dedup:** Forwarded email threads may not deduplicate perfectly at low volume. Cosmetic.
-- **5-minute polling delay:** Email watcher is not real-time. Replies to approval emails take up to 5 minutes.
+---
 
-### Telegram UX
-- **Polling vs webhook:** Using `run_polling()` on Cloud Run with `min-instances=1`. Cold start means missed messages until warm.
-- **Long messages truncated:** Telegram 4096-char limit. Long approval previews or search results get cut off.
+## Corrections to earlier entries in this file
 
-### Calendar
-- **OR-chain false positives:** Calendar filter classifies personal meetings with 2+ team members as CropSight. Likely fixed — verify.
+- **"Plain row deletion still resurrects (safety)" is NO LONGER TRUE**, and the
+  behaviour now differs by surface, deliberately:
+  - **Project Status action row** deleted -> `ps_suppressed`. It leaves the
+    sheet and stays OPEN in the database. Not done, not archived, not deleted.
+  - **Meetings row** deleted -> `status='dropped'` with the status marked
+    manual. Terminal, so it is never re-added, and it moves to Past Meetings
+    where the history stays readable. Capped at 5 per cycle.
+  - **Tasks tab** is a READ-ONLY MIRROR since 2026-08-09
+    (`TASKS_TAB_READ_ONLY=true`); edits there are ignored, not applied.
+- **The disabled-scheduler list below is stale.** Live production today:
+  `TRANSCRIPT_WATCHER_ENABLED=true`, `TASK_ARCHIVAL_ENABLED=true`,
+  `RECONCILE_ENABLED=true`, `MEETING_RECONCILE_ENABLED=true`,
+  `PROJECT_STATUS_RECONCILE_ENABLED=true`,
+  `PROJECT_STATUS_AUTO_INJECT_ENABLED=true`,
+  `MEETING_SHAPED_TASKS_ENABLED=true`, `QUESTION_TRIAGE_ENABLED=true`,
+  `WORKSPACE_SORT_ENABLED=true`. Off on purpose:
+  `TASK_REMINDER_ENABLED=false`, `EMAIL_DAILY_SCAN_ENABLED=false`,
+  `DROPBOX_SYNC_ENABLED` (needs SDK + credentials),
+  `CONTINUITY_AUTO_APPLY_ENABLED`. **`config/settings.py` defaults are NOT what
+  production runs** — read the Cloud Run env before believing a flag.
 
-### Gantt
-- **Metrics depend on color accuracy:** `compute_gantt_metrics()` reads status from cell background colors. If the Gantt sheet uses non-standard colors, status parsing may be inaccurate.
-- **Free-text cells:** Gantt cells use free text, not standardized status labels. The metrics engine handles this via color-to-status HSL heuristic.
+---
 
-### Document Ingestion
-- **No OCR:** Scanned PDFs produce empty text extraction.
-- **No image processing:** Charts/diagrams in PPTX/DOCX are ignored.
-- **Basic chunking:** Fixed-size character chunking doesn't respect document structure (structure-aware hints added in B2 metadata, but chunking logic is still paragraph-based).
+## Fixed — 2026-08-09/10 (Project Status v2, meetings pool, max code review)
 
-### MCP / Claude.ai
-- **Personal data leakage:** Claude.ai mixes Gianluigi tool results with its own conversation history. **Mitigation:** Dedicated Claude Project ("CropSight Ops") isolates business from personal context.
+Detail in `git log` and the memory topic files. Headlines:
 
-### Cross-Meeting Intelligence
-- **Hallucinated connections:** Topic threading surfaces irrelevant or fabricated cross-meeting links. Needs redesign — replace fuzzy semantic threading with explicit project labels + approval.
-
-### Disabled Schedulers
-These are implemented but disabled by default:
-- `TRANSCRIPT_WATCHER_ENABLED=false` — Google Drive transcript watcher
-- `TASK_ARCHIVAL_ENABLED=false` — Archive completed tasks
-- `DROPBOX_SYNC_ENABLED=false` — Dropbox → Drive sync (needs SDK + credentials)
-- `CONTINUITY_AUTO_APPLY_ENABLED=false` — Auto-apply task matches from extraction (needs A3 production gate)
-
-Note: Morning brief, email scan, debrief prompt, alert scheduler, and task reminders were enabled in Phase 11.
+- **Project Status v2**: `# | Project | Topic | Action | To do | Date | Resp. |
+  Priority | Comments`. Row kind is DECLARED (`Project` filled vs `Action`
+  filled), never inferred; both filled is reported, never guessed. Contiguous
+  per-tab numbering. `To do` is the objective on BOTH row kinds
+  (`canonical_projects.objective` / `tasks.objective`).
+- **Meetings pool moved** into the Project Status workbook, simplified to six
+  visible columns with a hidden identity, `parked` and `recurring` statuses,
+  one colour per status, and re-sorted every cycle.
+- **16 verified defects** from a max-effort review, all closed. Two themes worth
+  remembering: sheet formatting is per-cell and survives `values().clear()`, so
+  **assert the whole state rather than adding to it** (5 of the 16); and **a
+  constant changed on only one side of a round-trip** (read through a mapping,
+  written back raw; a read parameterised without its write; an enum member that
+  never reached the sort maps).
+- **Layout guards** now stand between a column change and mass duplicate
+  creation: `unresolved_columns` / `NON_AREA_TABS` for the area tabs,
+  `meetings_layout_ok()` for the pool. A tab that does not declare the expected
+  header is skipped entirely and says so.
+- **Provenance stopped lying**: 16 of 68 rows carried an `[auto · …]` chip while
+  having come from no meeting. Extraction always attaches its source, so no
+  `meeting_id` means a human typed it — decided at the one place a row is
+  shaped, so no caller can drift again.
 
 ---
 

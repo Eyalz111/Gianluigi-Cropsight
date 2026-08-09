@@ -178,6 +178,20 @@ async def check_meetings() -> int:
         print(f"{BAD}status values nothing recognises: {sorted(unknown)}")
         print(f"{NOTE}valid: {', '.join(MEETING_STATUSES)}")
         problems += 1
+    # A BOOKED MEETING WITH NO DATE IS A CONTRADICTION. `scheduled` and
+    # `recurring` both claim the meeting is happening, and nothing will remind
+    # anyone about a date that does not exist. The pool exists to get things
+    # into the calendar, so this is the one state it should never sit in
+    # quietly. [2026-08-10]
+    undated = [r for r in rows
+               if (r.get("status") or "").strip().lower() in ("scheduled",)
+               and not (r.get("proposed_date_raw") or "").strip()]
+    if undated:
+        problems += 1
+        print(f"{BAD}{len(undated)} meeting(s) marked scheduled with NO date:")
+        for r in undated:
+            print(f"{NOTE}  {(r.get('title') or '')[:66]}")
+
     blank = [r for r in rows if not (r.get("id") or "").strip()]
     if blank:
         print(f"{NOTE}{len(blank)} hand-typed row(s) with no UUID yet — they "
