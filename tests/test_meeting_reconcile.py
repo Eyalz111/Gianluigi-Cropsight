@@ -55,6 +55,10 @@ def _setup(monkeypatch, sheet, db, snap, enabled=True, shadow=False):
     fake.get_all_meetings = AsyncMock(return_value=sheet)
     fake.add_meetings_batch_to_sheet = AsyncMock(return_value=True)
     fake._update_cell = AsyncMock(return_value=None)
+    fake.meetings_layout_ok = AsyncMock(return_value=True)
+    # Nothing archived unless a test says so — so a terminal meeting on NEITHER
+    # tab is still surfaced, which is the invariant review #3 established.
+    fake.archived_meeting_ids = AsyncMock(return_value=set())
     monkeypatch.setattr(gs, "sheets_service", fake)
 
     sc = ss.supabase_client
@@ -387,6 +391,10 @@ class TestAddMeetingsIdempotency:
 
         monkeypatch.setattr(gs.sheets_service, "_service", svc)
         monkeypatch.setattr(gs.sheets_service, "ensure_meetings_tab", AsyncMock(return_value=0))
+        # The append now refuses to run against a tab it cannot recognise; these
+        # tests are about idempotency, so the layout is a given.
+        monkeypatch.setattr(gs.sheets_service, "meetings_layout_ok",
+                            AsyncMock(return_value=True))
         monkeypatch.setattr(gs.settings, "TASK_TRACKER_SHEET_ID", "sheet123")
 
         ok = await gs.sheets_service.add_meetings_batch_to_sheet(
@@ -404,6 +412,10 @@ class TestAddMeetingsIdempotency:
         vals.append.side_effect = AssertionError("append must not be called when all present")
         monkeypatch.setattr(gs.sheets_service, "_service", svc)
         monkeypatch.setattr(gs.sheets_service, "ensure_meetings_tab", AsyncMock(return_value=0))
+        # The append now refuses to run against a tab it cannot recognise; these
+        # tests are about idempotency, so the layout is a given.
+        monkeypatch.setattr(gs.sheets_service, "meetings_layout_ok",
+                            AsyncMock(return_value=True))
         monkeypatch.setattr(gs.settings, "TASK_TRACKER_SHEET_ID", "sheet123")
         ok = await gs.sheets_service.add_meetings_batch_to_sheet(
             meetings=[{"id": "m1", "title": "A"}, {"id": "m2", "title": "B"}])
@@ -1190,3 +1202,145 @@ class TestTheSortPassesTheLayoutDoor:
         rs, fake = self._fake(monkeypatch, layout_ok=True,
                               rows=[{"id": "m1", "title": "Booked"}])
         assert await rs.reconcile_scheduler._sort_meetings_now() == 7
+
+
+class TestBatchThreeReviewFindings:
+    """The last six of the fifteen, 2026-08-09."""
+
+    def test_a_bracket_in_the_source_title_cannot_corrupt_it(self):
+        """FINDING 14. `_PROV_RE`'s `[^\]]*` stops at the first `]`, so a chip
+        built from "Weekly Sync [Italy]" could not be fully stripped: the read
+        returned 'Book follow-up ]', the reconcile called that a human edit,
+        wrote it to the DB and set manual_title — after which the stored title
+        grew one ' ]' per cycle forever, uncorrectable."""
+        import services.google_sheets as gs
+        from services.project_status_rows import strip_provenance
+        row = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "Book follow-up"},
+            source_meeting="Weekly Sync [Italy]")
+        assert strip_provenance(row[0]) == "Book follow-up"
+        assert row[0].count("[") == 1 and row[0].count("]") == 1
+
+    def test_archiving_keeps_the_provenance_chip(self):
+        """FINDING 8. `get_all_meetings` returns the STRIPPED title plus
+        `title_displayed`, and archive_meeting_rows passes exactly those dicts —
+        so every archived row lost the citation the Source Meeting column was
+        removed in favour of."""
+        import services.google_sheets as gs
+        row = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "Book follow-up",
+             "title_displayed": "Book follow-up [auto · Weekly Sync]"})
+        assert "[auto" in row[0] and "Weekly Sync" in row[0]
+
+    def test_the_chip_is_still_not_stacked_twice(self):
+        import services.google_sheets as gs
+        once = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": "T"}, source_meeting="Weekly")
+        twice = gs.GoogleSheetsService._meeting_row(
+            {"id": "m1", "title": once[0]}, source_meeting="Weekly")
+        assert twice[0].count("[auto") == 1
+
+    async def test_a_terminal_meeting_is_never_dragged_back(self, monkeypatch):
+        """FINDING 10. Held and dropped meetings live on Past Meetings now, but
+        `_readd_ok` still expected them on the working tab, so it tried to pull
+        ~46 archived rows back every cycle. The cap caught it every time, which
+        jammed the re-add path completely — a genuinely missing LIVE meeting
+        could never be restored either."""
+        sheet = [_srow(id="keep", title="Still here", row_number=4)]
+        db = ([_dbrow(id="keep", title="Still here")]
+              + [_dbrow(id=f"h{i}", title=f"Held {i}", status="held")
+                 for i in range(40)]
+              + [_dbrow(id="d1", title="Dropped", status="dropped")])
+        snap = {"keep": {"title": "Still here"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+        from unittest.mock import AsyncMock
+        fake.archived_meeting_ids = AsyncMock(
+            return_value={f"h{i}" for i in range(40)} | {"d1"})
+
+        out = await ss.reconcile_meetings()
+
+        assert out.get("readded", 0) == 0
+        fake.add_meetings_batch_to_sheet.assert_not_called()
+
+    async def test_a_missing_LIVE_meeting_is_still_restored(self, monkeypatch):
+        """The point of unjamming it: the re-add path has to still work."""
+        sheet = [_srow(id="keep", title="Still here", row_number=4)]
+        db = [_dbrow(id="keep", title="Still here"),
+              _dbrow(id="live", title="Lost its row", status="not_scheduled")]
+        snap = {"keep": {"title": "Still here"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        out = await ss.reconcile_meetings()
+
+        assert out.get("readded") == 1
+
+    async def test_a_terminal_meeting_on_NEITHER_tab_is_still_surfaced(
+            self, monkeypatch):
+        """The invariant review #3 established: a held meeting that lost its row
+        must not vanish from the workspace. Skipping every terminal meeting
+        outright would have reintroduced exactly that."""
+        calls, fake = _setup(
+            monkeypatch, [], [_dbrow(id="m9", title="Kept", status="held")], {})
+        res = await ss.reconcile_meetings()
+        assert res["readded"] == 1
+
+    async def test_an_unreadable_archive_touches_nothing(self, monkeypatch):
+        """If the archive cannot be read, everything would look un-archived —
+        the failure direction has to be "leave it alone"."""
+        from unittest.mock import AsyncMock
+        sheet = [_srow(id="keep", title="Still here", row_number=4)]
+        db = [_dbrow(id="keep", title="Still here"),
+              _dbrow(id="h1", title="Held", status="held")]
+        calls, fake = _setup(monkeypatch, sheet, db,
+                             {"keep": {"title": "Still here"}})
+        fake.archived_meeting_ids = AsyncMock(return_value=None)
+        res = await ss.reconcile_meetings()
+        assert res.get("readded", 0) == 0
+
+    def test_a_meeting_priority_can_be_marked_sticky(self):
+        """The Priority column was added to the tab and missed on the manual
+        rail, so mark_meeting_field_manual REFUSED it — Rule 2 could not protect
+        a priority somebody set."""
+        from services.supabase_client import supabase_client as sc
+        assert "priority" in sc._MEETING_MANUAL_FIELDS
+
+    def test_the_rollout_wipe_spares_the_meetings_tabs(self):
+        """FINDING 9. The wipe enumerated every sheet in the WORKBOOK, and the
+        meetings pool moved in here — its ~12 colour rules were deleted and
+        never re-added, because only area tabs get rules back."""
+        import inspect
+        import services.project_status_sheet as pss
+        src = inspect.getsource(pss.write_project_status_blocks)
+        assert "NON_AREA_TABS" in src
+        wipe = src[src.index("Clear what a previous run"):]
+        assert 'if sheet["properties"]["title"] in NON_AREA_TABS' in wipe
+
+    def test_the_archive_moved_dates_are_read_by_shape(self):
+        """FINDING 13. The read range came from the NEW headers (9 cells) while
+        the loop indexed the OLD positions (9, 10), so its guard could never be
+        true and the fallback restamped every historical date with today."""
+        import pathlib
+        src = pathlib.Path(
+            "scripts/rollout_meetings_redesign_2026_08.py").read_text(
+                encoding="utf-8")
+        # By CODE, not by substring — the old expression is quoted in the
+        # comment that explains why it was wrong, and a test that reads prose
+        # is testing the prose.
+        import ast
+        body = ast.parse(src)
+        srcs = {ast.unparse(nd) for nd in ast.walk(body)
+                if isinstance(nd, ast.Compare)}
+        assert not any("len(r)" in x and ">= 10" in x for x in srcs)
+        assert "_UUID.match(c)" in src
+
+    def test_the_batch_add_checks_the_layout_first(self):
+        """FINDING 12. The idempotency read trusts one column to BE the
+        identity; on an older layout it is blank, so every follow-up passes the
+        already-present filter and blind-append duplication returns."""
+        import inspect
+        import services.google_sheets as gs
+        src = inspect.getsource(gs.GoogleSheetsService.add_meetings_batch_to_sheet)
+        assert "meetings_layout_ok()" in src
+        # Before the READ that trusts the column, not merely before the word.
+        assert (src.index("meetings_layout_ok()")
+                < src.index("existing: set[str]"))

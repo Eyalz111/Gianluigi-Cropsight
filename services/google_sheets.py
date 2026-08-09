@@ -2741,12 +2741,31 @@ class GoogleSheetsService:
         if not src:
             mi = m.get("meetings") if isinstance(m.get("meetings"), dict) else {}
             src = (mi or {}).get("title", "") or m.get("source_meeting", "") or ""
-        # Strip first: the row may be coming back off the sheet, where the title
-        # already carries a chip. Without this the archive path stacked a second
-        # one on every move.
-        title = strip_provenance(m.get("title") or "")
-        if src:
-            title = f"{title} {format_provenance(ORIGIN_AUTO, src)}".strip()
+        # A ROW READ BACK OFF THE SHEET already carries its chip and has no
+        # source key at all — `get_all_meetings` returns the STRIPPED title plus
+        # `title_displayed`. archive_meeting_rows passes exactly those dicts, so
+        # every archived row lost its citation: the Source Meeting column was
+        # removed on the promise the chip would carry it, and the one tab that
+        # is pure history carried nothing. [2026-08-09 code review, #8]
+        if not src and str(m.get("title_displayed") or "").strip():
+            # Nothing to rebuild — keep the chip the sheet already shows.
+            title = str(m["title_displayed"]).strip()
+        else:
+            # Strip first: the row may be coming back off the sheet, where the
+            # title already carries a chip. Without this the archive path
+            # stacked a second one on every move.
+            title = strip_provenance(m.get("title") or "")
+            if src:
+                # BRACKETS OUT OF THE SOURCE TITLE. The marker regex stops at
+                # the first `]`, so a source meeting called "Weekly Sync
+                # [Italy]" produced a chip strip_provenance could not fully
+                # remove — the read returned "Book follow-up ]", the reconcile
+                # saw that as a human edit, wrote it to the database and set
+                # manual_title (blocking any correction), and the stored title
+                # then grew one " ]" per cycle forever.
+                # [2026-08-09 code review, #14]
+                src = str(src).replace("[", "(").replace("]", ")")
+                title = f"{title} {format_provenance(ORIGIN_AUTO, src)}".strip()
         return [
             title,
             m.get("label") or "",
@@ -2867,6 +2886,31 @@ class GoogleSheetsService:
             "hand-typed. Run scripts/rollout_meetings_redesign_2026_08.py.")
         return False
 
+    async def archived_meeting_ids(self) -> set:
+        """UUIDs already sitting on the Past Meetings tab.
+
+        A terminal meeting belongs there, not on the working tab — but "belongs
+        there" is only safe to act on if it is ACTUALLY there. Without this the
+        re-add path had to choose between dragging every archived meeting back
+        onto the working tab (46 of them, every cycle, jamming the cap) and
+        letting a held meeting that lost its row vanish from the workspace
+        entirely. Reading the archive removes the choice.
+        """
+        try:
+            col = MEETINGS_ARCHIVE_ID_COLUMN
+            resp = self._execute_with_retry(
+                lambda: self.service.spreadsheets().values().get(
+                    spreadsheetId=self.meetings_workbook(),
+                    range=(f"'{MEETINGS_ARCHIVE_TAB_NAME}'!{col}"
+                           f"{MEETING_FIRST_BODY_ROW}:{col}")))
+        except Exception as e:                              # noqa: BLE001
+            logger.warning(f"[meetings] could not read the archive ids: {e}")
+            # An unreadable archive must not make everything look un-archived.
+            # Returning None tells the caller to leave terminal rows alone.
+            return None
+        return {(r[0] or "").strip() for r in (resp.get("values") or [])
+                if r and (r[0] or "").strip()}
+
     async def get_all_meetings(self) -> list[dict]:
         """Read the Meetings tab, one dict per row with row_number + id.
 
@@ -2937,7 +2981,19 @@ class GoogleSheetsService:
             return False
         try:
             await self.ensure_meetings_tab()
-            # IDEMPOTENCY by col-J UUID: skip follow-ups already on the tab. This
+            # THE LAYOUT DOOR. The read below trusts one column to BE the
+            # identity. On an older layout that column holds something else and
+            # is blank on nearly every row, so `existing` comes back empty, the
+            # filter passes every follow-up through, and a re-distribution
+            # blind-appends duplicates — the 2026-07-24 failure this guard was
+            # added to stop. Appending nothing is the safe direction.
+            # [2026-08-09 code review, #12]
+            if not await self.meetings_layout_ok():
+                logger.error("[meetings] refusing to append — the tab does not "
+                             "declare the expected layout")
+                return False
+            # IDEMPOTENCY by the hidden UUID column: skip follow-ups already on
+            # the tab. This
             # is a plain `append`, so without the guard a SECOND write for the same
             # meeting (a re-distribution, or the reconcile re-add racing this write)
             # blind-appended duplicate rows — 10 rows for 7 follow-ups on the

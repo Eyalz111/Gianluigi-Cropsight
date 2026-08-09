@@ -1568,24 +1568,41 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                 logger.error(f"[meeting-reconcile] create failed for row {sm.get('row_number')}: {e}")
 
     # --- DB-only meetings -> re-add to the Sheet (never treated as deletes) ---
-    # Only AGED-OUT DROPPED meetings legitimately live on Past Meetings, so only
-    # they are expected to be absent here. HELD (which must stay on the tab as
-    # history) and recent-dropped belong on the working tab and are re-added if
-    # absent — the old `not in _TERMINAL` filter also excluded held, so a held
-    # meeting that lost its row silently vanished from the whole workspace. [review #3]
+    # A TERMINAL MEETING LIVES ON PAST MEETINGS. Held and dropped ones used to
+    # be re-added to the WORKING tab whenever they were absent, from the older
+    # design where held stayed there as history. The 2026-08-09 redesign files
+    # every terminal meeting into Past Meetings instead — so the two halves
+    # disagreed, and the re-add path tried to drag ~46 archived meetings back
+    # onto the working tab on EVERY cycle. The cap caught it every time
+    # (`re-add of N rows exceeds cap` in the logs is precisely this), which also
+    # meant the whole re-add path was permanently jammed: a genuinely missing
+    # LIVE meeting could never be restored either.
+    #
+    # It makes a deliberate deletion permanent too — that sets `dropped`, and
+    # the row used to come straight back as "a recent drop, not yet aged out".
+    # [2026-08-09 code review, #10]
+    archived_ids = await sheets_service.archived_meeting_ids()
+
     def _readd_ok(m: dict) -> bool:
         if not m.get("id") or m["id"] in sheet_by_id:
             return False
-        if (m.get("status") or "").strip().lower() == "dropped":
-            # A DELIBERATE DROP IS PERMANENT. Deleting a row sets `dropped` AND
-            # marks the status manual, and without this the very next cycle read
-            # that as "a recent drop, not yet aged out" and re-added the row —
-            # the same resurrection loop the delete-detection was written to
-            # end, just 30 minutes later instead of immediately. An automatic
-            # drop still ages out as before. [2026-08-09 code review]
+        status = (m.get("status") or "").strip().lower()
+        if status in _MEETING_TERMINAL:
+            # On Past Meetings already, or the archive could not be read at all
+            # — either way, leave it alone. Only a terminal meeting that is on
+            # NEITHER tab is genuinely invisible, and that one is still surfaced
+            # so it can be seen and archived properly. [review #3's invariant]
+            if archived_ids is None or m["id"] in archived_ids:
+                return False
+            # A HUMAN'S DECISION OUTRANKS THE ARCHIVE. Deleting a row sets
+            # `dropped` and marks the status manual; if the archive write has
+            # not caught up yet, surfacing it again would undo the deletion in
+            # front of them.
             if m.get("manual_status"):
                 return False
-            if _aged_out(m.get("updated_at")):
+            # Old history. An aged-out drop is not something to drag back into
+            # the working view just because the archive lost its row.
+            if status == "dropped" and _aged_out(m.get("updated_at")):
                 return False
         return True
     missing = [m for m in db_rows if _readd_ok(m)]

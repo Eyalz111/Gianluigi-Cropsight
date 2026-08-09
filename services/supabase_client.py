@@ -5655,8 +5655,14 @@ class SupabaseClient:
     # Tasks tab with no UUID, which reconcile then duplicated on every run.
     # =========================================================================
 
+    # `priority` was added to the Meetings tab on 2026-08-09 and missed here, so
+    # mark_meeting_field_manual REFUSED it and a priority somebody set was never
+    # made sticky — Rule 2 could not protect it, leaving the DB free to
+    # overwrite a human decision. Every editable column needs a rail, or it is
+    # only half-editable. [2026-08-09 code review]
     _MEETING_MANUAL_FIELDS = (
         "title", "label", "led_by", "proposed_date", "participants", "status",
+        "priority",
     )
 
     def create_manual_decision(

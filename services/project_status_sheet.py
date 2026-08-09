@@ -840,7 +840,18 @@ async def write_project_status_blocks(pack: dict, title_blocks: dict,
         # range on every tab. Same delete-then-re-add idempotence the Tasks sheet
         # uses, keyed on our own description. Deletes go first in the batch, and
         # rule indices descend so earlier deletions don't shift later ones.
+        # ONLY THE TABS THIS FUNCTION RE-ADDS TO. The wipe used to enumerate
+        # every sheet in the WORKBOOK, and since the meetings pool moved in here
+        # that included Meetings and Past Meetings — whose ~12 status, priority,
+        # overdue-date and unassigned-project rules were deleted and never put
+        # back, because only area tabs get rules re-added. Re-running the rollout
+        # would have left the whole pool flat white. The delete-tab path ten
+        # lines below already knew they were residents; this one did not.
+        # [2026-08-09 code review, #9]
+        from processors.project_status_reconcile import NON_AREA_TABS
         for sheet in _meta():
+            if sheet["properties"]["title"] in NON_AREA_TABS:
+                continue
             sid_ = sheet["properties"]["sheetId"]
             for idx in reversed(range(len(sheet.get("conditionalFormats") or []))):
                 struct.append({"deleteConditionalFormatRule":

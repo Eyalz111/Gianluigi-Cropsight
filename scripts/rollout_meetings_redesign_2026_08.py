@@ -209,10 +209,22 @@ async def run(apply_it: bool) -> int:
             lambda: sheets_service.service.spreadsheets().values().get(
                 spreadsheetId=ssid,
                 range=f"'{MEETINGS_ARCHIVE_TAB_NAME}'!A:{end}")).get("values", [])
+        # BY SHAPE, NOT BY POSITION. This read the OLD layout's indices (id at
+        # 9, Moved at 10) through a range derived from the NEW headers (A:I, so
+        # 9 cells), which made `len(r) >= 10` unsatisfiable — `archived_on`
+        # stayed empty and the fallback below restamped EVERY historical
+        # archival date with today, the exact thing the comment above says it
+        # prevents. The id is whatever cell looks like a UUID and the Moved date
+        # is the ISO date beside it; both are true in every layout this tab has
+        # had. [2026-08-09 code review, #13]
         for r in raw:
-            # Read by POSITION from the OLD layout (id was column J, 10th).
-            if len(r) >= 10 and str(r[9]).strip():
-                archived_on[str(r[9]).strip()] = str(r[10]).strip() if len(r) > 10 else ""
+            cells = [str(c).strip() for c in r]
+            uid = next((c for c in cells if _UUID.match(c)), "")
+            if not uid:
+                continue
+            moved = next((c for c in cells
+                          if re.fullmatch(r"\d{4}-\d{2}-\d{2}", c)), "")
+            archived_on[uid] = moved
     except Exception as e:                                      # noqa: BLE001
         print(f"    [ .. ] could not read the existing Moved dates ({e}) — "
               "archived rows will be stamped today")
