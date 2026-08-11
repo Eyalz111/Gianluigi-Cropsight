@@ -5872,6 +5872,7 @@ class SupabaseClient:
         participants: list[str] | None = None,
         label: str = "",
         status: str = "not_scheduled",
+        priority: str = "",
     ) -> dict | None:
         """Create a hand-added follow-up meeting (no source meeting).
 
@@ -5879,6 +5880,17 @@ class SupabaseClient:
         straight into the Sheet simply has no source. approval_status is
         'approved' immediately — a human typing it IS the approval, the same
         reasoning debrief items use.
+
+        `priority` was NOT forwarded until 2026-08-11: the Meetings tab has a
+        Priority column, but a value typed on a NEW row never reached the
+        insert, so the DB default 'M' overwrote it within 30 minutes — in the
+        cell she had just typed. That is defect #3 of the 2026-08-09 review,
+        which was fixed for tasks and missed here. It is stamped MANUAL for the
+        same reason the task path stamps it: a human typing a priority is a
+        decision, and Rule 2 has to know that so inference cannot walk it back.
+        An untouched (blank) cell is left alone — an unset default is not a
+        decision, and claiming it as one is what stamped 'M' across 122
+        meetings in the morning of 2026-08-09.
         """
         try:
             data = {
@@ -5890,6 +5902,9 @@ class SupabaseClient:
                 "status": status or "not_scheduled",
                 "approval_status": "approved",
             }
+            if str(priority or "").strip():
+                data["priority"] = str(priority).strip()
+                data["manual_priority"] = True
             result = self.client.table("follow_up_meetings").insert(data).execute()
             if result.data:
                 logger.info(f"Created manual follow-up meeting: {title}")

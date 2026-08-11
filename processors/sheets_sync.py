@@ -1516,6 +1516,12 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                     participants=_meeting_participants_to_list(sm.get("participants")),
                     label=sm.get("label") or "",
                     status=(sm.get("status") or "not_scheduled").strip().lower(),
+                    # Already the canonical DB letter — the read path maps the
+                    # sheet's 'Urgent' to 'U'. Forwarding it at all is the fix:
+                    # a priority typed on a NEW meeting row never reached the
+                    # insert, so the default 'M' overwrote it within 30 minutes.
+                    # [2026-08-11]
+                    priority=sm.get("priority") or "",
                 )
                 if not created:
                     continue
