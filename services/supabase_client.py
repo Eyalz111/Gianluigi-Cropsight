@@ -5438,6 +5438,7 @@ class SupabaseClient:
         entity_type: str = "task",
         notes: str | None = None,
         sheet_tab: str | None = None,
+        objective: str | None = None,
     ) -> bool:
         """Write/refresh the current snapshot row for a task (one per SURFACE).
 
@@ -5451,6 +5452,10 @@ class SupabaseClient:
         PARTIAL indexes on the same `task_id`, so the two coexist. Sharing one
         base would make an edit on either surface read as a divergence on the
         other. [2026-08-07]
+
+        `objective` is LAST on purpose. Several callers still pass the first
+        eight arguments positionally, so a new parameter inserted anywhere
+        earlier would silently re-bind their values. [2026-08-11]
         """
         try:
             from datetime import datetime, timezone

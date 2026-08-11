@@ -11,7 +11,7 @@ bad read, a bulk delete, a 200-row paste. Those are the cases where a merge
 engine does real damage, and they are the ones nobody exercises by hand.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
@@ -1799,3 +1799,84 @@ class TestProvenanceTellsTheTruth:
         row = action_row_values({"id": "t1", "title": "Typed"}, "p1",
                                 marker="[auto - anything at all]")
         assert "[" not in row[ALL_HEADERS.index(COL_ACTION)]
+
+
+class TestTheSnapshotWriteActuallyLands:
+    """Step 4.5 advances the merge base, and it is best-effort by design: a
+    failure there is a warning, never an error. That is correct — a snapshot we
+    could not write must not fail the cycle — but it means a BROKEN call is
+    indistinguishable from a quiet one.
+
+    It broke. `80e56f6` added `objective=` to the ps_action call site without
+    adding the parameter to `upsert_sheet_snapshot`, so every action snapshot
+    write raised TypeError into that except for 44 hours. All 68 froze at
+    2026-08-09 21:45 while ps_project and task advanced normally.
+
+    Nothing caught it because every existing test stubs the client with
+    `lambda *a, **k:`, which accepts arguments the real method never declared.
+    These use `create_autospec`, so the stub is bound by the REAL signature and
+    the test fails the moment the two sides disagree again. [2026-08-11]
+    """
+
+    @staticmethod
+    def _sc_with_real_signature():
+        """A client stub whose snapshot methods enforce the real signatures."""
+        from services.supabase_client import supabase_client as real
+        sc = MagicMock()
+        sc.upsert_sheet_snapshot = create_autospec(
+            real.upsert_sheet_snapshot, return_value=True)
+        sc.upsert_ps_project_snapshot = create_autospec(
+            real.upsert_ps_project_snapshot, return_value=True)
+        return sc
+
+    @staticmethod
+    def _plan_with_one_snapshot(kind, row_id):
+        """A plan carrying nothing but one snapshot, so `_apply` runs 4.5 alone."""
+        plan = psr.Plan()
+        plan.snapshots.append((kind, row_id, TAB, 7, {
+            "status": "done", "deadline": None, "priority": "H",
+            "assignee": "Eyal", "title": "Ship the API", "label": "API",
+            "notes": "", "objective": "A working API",
+            "target_date": None, "owner": "Eyal",
+        }))
+        return plan
+
+    @pytest.mark.asyncio
+    async def test_an_action_snapshot_reaches_the_client(self, monkeypatch):
+        sc = self._sc_with_real_signature()
+        monkeypatch.setattr(psr, "supabase_client", sc)
+        plan = self._plan_with_one_snapshot("task", "t1")
+
+        await psr._apply(plan, "sid")
+
+        # Under the bug this is 0: autospec rejects the undeclared keyword and
+        # 4.5's `except` swallows it exactly as production did.
+        assert sc.upsert_sheet_snapshot.call_count == 1
+        kwargs = sc.upsert_sheet_snapshot.call_args.kwargs
+        assert kwargs["entity_type"] == "ps_action"
+        assert kwargs["status"] == "done"
+        assert kwargs["objective"] == "A working API"
+
+    @pytest.mark.asyncio
+    async def test_a_project_snapshot_reaches_the_client(self, monkeypatch):
+        """The rail that kept working — pinned so a fix to one cannot break it."""
+        sc = self._sc_with_real_signature()
+        monkeypatch.setattr(psr, "supabase_client", sc)
+        plan = self._plan_with_one_snapshot("project", "p1")
+
+        await psr._apply(plan, "sid")
+
+        assert sc.upsert_ps_project_snapshot.call_count == 1
+        assert sc.upsert_ps_project_snapshot.call_args.kwargs["objective"] == (
+            "A working API")
+
+    def test_objective_is_last_so_positional_callers_keep_their_meaning(self):
+        """Several callers still pass the first eight arguments positionally
+        (`sheets_sync`, the backfill scripts). A parameter inserted before
+        `sheet_tab` would silently re-bind their values rather than fail."""
+        import inspect
+        from services.supabase_client import supabase_client as real
+        names = list(inspect.signature(real.upsert_sheet_snapshot).parameters)
+        assert names[:8] == ["task_id", "sheet_row", "status", "deadline",
+                             "priority", "assignee", "title", "label"]
+        assert names[-1] == "objective"
