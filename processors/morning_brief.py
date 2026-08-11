@@ -18,6 +18,8 @@ from config.settings import settings
 from config.team import SENSITIVE_KEYWORDS
 from services.supabase_client import supabase_client
 
+from models.schemas import task_display_name
+
 logger = logging.getLogger(__name__)
 
 # Telegram-message length budget for the brief (matches the historical 3800 cap).
@@ -676,7 +678,7 @@ def _gather_task_urgency_items(all_tasks: list[dict], today_str: str) -> list[di
         ))
         return [
             {
-                "title": t.get("title", "")[:80],
+                "title": task_display_name(t, 80),
                 "assignee": t.get("assignee", ""),
                 "deadline": t.get("deadline", ""),
                 "deadline_confidence": t.get("deadline_confidence", "NONE"),
@@ -695,7 +697,7 @@ def _gather_task_urgency_items(all_tasks: list[dict], today_str: str) -> list[di
     ][:3]
     return [
         {
-            "title": t.get("title", "")[:80],
+            "title": task_display_name(t, 80),
             "assignee": t.get("assignee", ""),
             "deadline": t.get("deadline", ""),
             "deadline_confidence": t.get("deadline_confidence", "NONE"),

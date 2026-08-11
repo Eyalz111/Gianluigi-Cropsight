@@ -46,6 +46,8 @@ from config.team import TEAM_MEMBERS, get_team_member
 from core.retry import retry
 from services.conversation_memory import conversation_memory
 
+from models.schemas import task_display_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -305,7 +307,7 @@ def format_summary_teaser(
         parts.append("<b>Top action items:</b>")
         for t in sorted_tasks[:5]:
             assignee = esc(t.get("assignee", "TBD"))
-            title_text = esc(t.get("title", ""))
+            title_text = esc(task_display_name(t))
             if len(title_text) > 60:
                 title_text = title_text[:57] + "..."
             deadline = esc(t.get("deadline") or "no deadline")
@@ -1602,7 +1604,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
             # Prose format for small lists
             parts = [f"You have {total} open task{'s' if total != 1 else ''}."]
             for task in tasks:
-                title = _escape_html(task.get("title", "Untitled"))
+                title = _escape_html(task_display_name(task) or "Untitled")
                 assignee = _escape_html(task.get("assignee", "Unassigned"))
                 deadline = task.get("deadline", "")
                 deadline_str = f" — due {deadline}" if deadline else ""
@@ -1621,7 +1623,7 @@ Reply with "done" when completed, or "postpone [date]" to update the deadline.
                 # the exact inverse of what the marker is for.
                 indicator = {"U": "!!! ", "H": "!! ", "M": "", "L": "~ "}.get(
                     str(priority or "").strip().upper(), "")
-                title = _escape_html(task.get("title", "Untitled"))
+                title = _escape_html(task_display_name(task) or "Untitled")
                 assignee = _escape_html(task.get("assignee", ""))
                 deadline = task.get("deadline", "")
                 suffix_parts = []

@@ -3767,6 +3767,30 @@ class GoogleSheetsService:
                 "format": {"backgroundColor": _hex_color("#F4CCCC")}}}}})
         idx += 1
 
+        # A STATUS THAT CLAIMS A DATE, WITH NO DATE. `scheduled` and `held` both
+        # assert the meeting is or was real at a point in time, and nothing will
+        # ever remind anyone about a date that does not exist — the pool exists
+        # to get things into the calendar. `not_scheduled` and `parked` are
+        # legitimately undated, and `recurring` has no single date by
+        # definition, so none of those is flagged.
+        #
+        # It warns rather than blocks: you often set the status the moment a
+        # meeting is agreed and fill the date once it is confirmed. The point is
+        # that the gap is VISIBLE while it lasts, not that it is forbidden.
+        # Eyal: "it will not make any error, but it will show it properly".
+        # [2026-08-10]
+        reqs.append({"addConditionalFormatRule": {"index": idx, "rule": {
+            "ranges": [{"sheetId": sid, "startRowIndex": b - 1,
+                        "startColumnIndex": MEETING_COL_INDEX["proposed_date"],
+                        "endColumnIndex": MEETING_COL_INDEX["proposed_date"] + 1}],
+            "booleanRule": {
+                "condition": {"type": "CUSTOM_FORMULA", "values": [
+                    {"userEnteredValue":
+                     f'=AND(${d}{b}="",OR(${st}{b}="scheduled",'
+                     f'${st}{b}="held"))'}]},
+                "format": {"backgroundColor": _hex_color("#F9CB9C")}}}}})
+        idx += 1
+
         # Project: the canonical vocabulary, as a dropdown. strict=False so
         # anything else warns rather than being refused — and the reconcile
         # declines to store it, so a typo cannot reach the database either way.

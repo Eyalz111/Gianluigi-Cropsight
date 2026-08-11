@@ -65,6 +65,31 @@ PRIORITY_RANK = {"U": 0, "H": 1, "M": 2, "L": 3}
 PRIORITY_RANK_DEFAULT = PRIORITY_RANK["M"]
 
 
+def task_display_name(task: dict, limit: int | None = None) -> str:
+    """How a task should read OUTSIDE the Project Status sheet.
+
+    On the sheet, `Action` is a ROLLING field — Eyal rewrites it to the next
+    step as an item progresses, while `Topic` holds the stable identity of the
+    thing (a person, a client, a workstream) and `To do` holds the objective.
+    That works because all three columns are visible at once.
+
+    Everywhere else only the title travels, and the title is `Action`. So three
+    investor rows all read "Yoram to reach out - Eyal to articulate a message
+    for him" with nothing to tell Gadi from Eilon from Haim, and a row rewritten
+    to "Reached out - will follow up with his boss" loses what it was about.
+
+    Prefixing the topic restores the identity the sheet gets from its layout,
+    without asking anyone to work differently. [2026-08-10]
+    """
+    title = str(task.get("title") or "").strip()
+    topic = str(task.get("label") or "").strip()
+    # Not when the topic is already how the title starts — "Italy — Italy
+    # consortium outreach" reads worse than either half alone.
+    if topic and not title.lower().startswith(topic.lower()):
+        title = f"{topic} — {title}"
+    return title[:limit] if limit else title
+
+
 def priority_rank(value) -> int:
     """Sort weight for a task priority, tolerant of blanks and casing."""
     return PRIORITY_RANK.get(str(value or "").strip().upper(),
