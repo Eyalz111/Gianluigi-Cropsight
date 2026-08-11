@@ -43,6 +43,12 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+# Above this max_tokens, send the request as a STREAM. A non-streaming call
+# with a large budget risks an HTTP timeout, and the SDK refuses the ones it
+# estimates will run past ~10 minutes. Only extraction is above it today.
+# [2026-08-11]
+_STREAM_ABOVE_MAX_TOKENS = 16000
+
 # Singleton client — reuses HTTP connections across all calls
 _client: Anthropic | None = None
 
@@ -176,20 +182,38 @@ def call_llm(
         ]
 
     try:
-        response = client.messages.create(**kwargs)
+        # STREAM above the threshold. A non-streaming request with a large
+        # max_tokens risks an HTTP timeout, and the SDK refuses outright the
+        # ones it estimates will run past ~10 minutes. Streaming and taking the
+        # final message keeps the call shape identical to the caller.
+        if max_tokens > _STREAM_ABOVE_MAX_TOKENS:
+            with client.messages.stream(**kwargs) as _stream:
+                response = _stream.get_final_message()
+        else:
+            response = client.messages.create(**kwargs)
     except Exception as e:
         if _is_credit_error(e):
             _note_anthropic_credit_exhausted(e)
         raise
-    # Guard against an empty/truncated content block (an overloaded or truncated
-    # response can return content=[]) — a bare content[0].text raises a confusing
-    # IndexError out of call_llm instead of a clean, retryable error. [audit P6-08]
-    if response.content and hasattr(response.content[0], "text"):
-        response_text = response.content[0].text
-    else:
+
+    # THE FIRST BLOCK IS NOT ALWAYS THE TEXT. On models that think — which is
+    # every 5-series model BY DEFAULT, with no `thinking` parameter set —
+    # content[0] is a thinking block and `content[0].text` raises. Reading
+    # position 0 worked only because Opus 4.6 and Sonnet 4.6 do not think
+    # unless asked. Find the text block by TYPE. [2026-08-11]
+    response_text = next(
+        (b.text for b in (response.content or [])
+         if getattr(b, "type", None) == "text" and getattr(b, "text", "")),
+        None,
+    )
+    if not response_text:
+        # stop_reason='max_tokens' with no text means thinking consumed the
+        # whole budget before any answer was written — raise `max_tokens` for
+        # this call site rather than retrying, which would fail identically.
         raise RuntimeError(
             f"Claude API returned no text content (stop_reason="
-            f"{getattr(response, 'stop_reason', '?')})"
+            f"{getattr(response, 'stop_reason', '?')}, "
+            f"blocks={[getattr(b, 'type', '?') for b in (response.content or [])]})"
         )
 
     # Extract usage info

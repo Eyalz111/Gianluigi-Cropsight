@@ -55,7 +55,7 @@ class TestCallLlm:
             cache_creation_input_tokens=0,
         )
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Hello world")]
+        mock_response.content = [MagicMock(type="text", text="Hello world")]
         mock_response.usage = mock_usage
 
         import core.llm as llm_module
@@ -93,7 +93,7 @@ class TestCallLlm:
             cache_creation_input_tokens=0,
         )
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="result")]
+        mock_response.content = [MagicMock(type="text", text="result")]
         mock_response.usage = mock_usage
 
         import core.llm as llm_module
@@ -133,7 +133,7 @@ class TestCallLlm:
             cache_read_input_tokens=0, cache_creation_input_tokens=0,
         )
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="result")]
+        mock_response.content = [MagicMock(type="text", text="result")]
         mock_response.usage = mock_usage
 
         import core.llm as llm_module
@@ -166,7 +166,7 @@ class TestCallLlm:
             cache_read_input_tokens=0, cache_creation_input_tokens=0,
         )
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="result")]
+        mock_response.content = [MagicMock(type="text", text="result")]
         mock_response.usage = mock_usage
 
         import core.llm as llm_module
@@ -520,3 +520,77 @@ class TestCostCommand:
 
             msg = bot.send_message.call_args[0][1]
             assert "No API usage recorded" in msg
+
+
+class TestTextBlockIsFoundByType:
+    """`content[0].text` worked only because Opus 4.6 and Sonnet 4.6 do not
+    think unless asked. Every 5-series model thinks BY DEFAULT with no
+    `thinking` parameter set, so content[0] is a THINKING block and reading
+    position 0 raises — or, worse, returns a thinking block's empty text.
+
+    On a 197k-character transcript, Opus 5's thinking also consumed the entire
+    16384 max_tokens before writing any JSON: stop_reason='max_tokens', no text,
+    and the retry loop turned that into a silently empty extraction — zero
+    decisions, zero tasks, no error. [2026-08-11]
+    """
+
+    def _client(self, blocks):
+        resp = MagicMock()
+        resp.content = blocks
+        resp.stop_reason = "end_turn"
+        resp.usage = MagicMock(input_tokens=1, output_tokens=1,
+                               cache_read_input_tokens=0,
+                               cache_creation_input_tokens=0)
+        client = MagicMock()
+        client.messages.create.return_value = resp
+        return client
+
+    def _call(self, client, **kw):
+        from core.llm import call_llm
+        with patch("core.llm.get_client", return_value=client), \
+             patch("core.llm._log_usage"):
+            return call_llm(prompt="p", model="m", max_tokens=1024,
+                            call_site="t", **kw)
+
+    def test_a_leading_thinking_block_is_skipped(self):
+        blocks = [MagicMock(type="thinking", thinking="pondering"),
+                  MagicMock(type="text", text="the answer")]
+        text, _ = self._call(self._client(blocks))
+        assert text == "the answer"
+
+    def test_text_only_still_works(self):
+        text, _ = self._call(self._client([MagicMock(type="text", text="hi")]))
+        assert text == "hi"
+
+    def test_thinking_only_raises_with_the_stop_reason(self):
+        """Thinking ate the whole budget — the error must say so, not return ''."""
+        import pytest
+        resp_client = self._client([MagicMock(type="thinking", thinking="...")])
+        resp_client.messages.create.return_value.stop_reason = "max_tokens"
+        with pytest.raises(RuntimeError, match="max_tokens"):
+            self._call(resp_client)
+
+    def test_large_budgets_stream(self):
+        """Non-streaming with a big budget risks an HTTP timeout, and the SDK
+        refuses the ones it thinks will run past ~10 minutes."""
+        from core.llm import _STREAM_ABOVE_MAX_TOKENS
+        client = self._client([MagicMock(type="text", text="streamed")])
+        stream_ctx = MagicMock()
+        stream_ctx.__enter__ = lambda s: MagicMock(
+            get_final_message=lambda: client.messages.create.return_value)
+        stream_ctx.__exit__ = lambda s, *a: False
+        client.messages.stream.return_value = stream_ctx
+
+        text, _ = self._call(client, )  # small budget -> create
+        assert client.messages.create.called
+        assert not client.messages.stream.called
+
+        client.messages.create.reset_mock()
+        from core.llm import call_llm
+        with patch("core.llm.get_client", return_value=client), \
+             patch("core.llm._log_usage"):
+            call_llm(prompt="p", model="m",
+                     max_tokens=_STREAM_ABOVE_MAX_TOKENS + 1,
+                     call_site="t")
+        assert client.messages.stream.called
+        assert not client.messages.create.called

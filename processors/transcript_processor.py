@@ -939,10 +939,18 @@ Apply all tone guardrails: no emotional characterizations, professional language
 
     for attempt in range(max_retries):
         try:
+            # 16384 was enough while the extraction model did not think. Every
+            # 5-series model thinks BY DEFAULT, and max_tokens caps thinking
+            # AND the answer together — on a 197k-character transcript the
+            # thinking consumed the entire old budget and the call came back
+            # with stop_reason='max_tokens' and NO text, which the retry loop
+            # turned into a silently empty extraction: zero decisions, zero
+            # tasks, no error. Raised so both fit; call_llm streams above
+            # 16000. [2026-08-11]
             response_text, _ = call_llm(
                 prompt=prompt,
                 model=settings.model_extraction,
-                max_tokens=16384,
+                max_tokens=32000,
                 system=extraction_system,
                 call_site="transcript_extraction",
             )
