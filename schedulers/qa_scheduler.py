@@ -38,9 +38,18 @@ _DISTRIBUTION_WINDOW_DAYS = 7  # Check last 7 days of approvals
 _SCHEDULER_ENABLE_FLAG = {
     "transcript_watcher": "TRANSCRIPT_WATCHER_ENABLED",
     "task_reminder": "TASK_REMINDER_ENABLED",
+    # meeting_prep had no gate until 2026-08-11, so it never needed an entry
+    # here. The moment it got one and was switched off, its heartbeat went
+    # stale and this check would have reported it every day forever — a
+    # disabled scheduler alarming is exactly the noise Eyal asked us to remove.
+    "meeting_prep": "MEETING_PREP_ENABLED",
     "prep_ping": "PREP_PING_ENABLED",
     "weekly_review": "WEEKLY_REVIEW_ENABLED",
-    "weekly_digest": "WEEKLY_DIGEST_ENABLED",
+    # weekly_digest has NO gate — main.py starts it whenever Calendar is
+    # available, and it self-skips when a review session exists. The entry here
+    # named WEEKLY_DIGEST_ENABLED, which does not exist in settings, so
+    # `getattr(settings, flag, True)` fell through to True. Same behaviour,
+    # but the map no longer claims a switch nobody can throw. [2026-08-11]
     "weekly_pulse": "WEEKLY_PULSE_ENABLED",
     "cost_report": "COST_REPORT_ENABLED",
     "rollout": "ROLLOUT_SCHEDULER_ENABLED",
