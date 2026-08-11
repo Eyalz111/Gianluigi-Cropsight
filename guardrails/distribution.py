@@ -44,8 +44,34 @@ def band_for_sensitivity(sensitivity: str | None) -> str:
 
 
 def level_for_band(band: str) -> int:
-    """Clearance level for a band name (defaults to Founders=3)."""
-    return BAND_LEVEL.get((band or "founders").lower(), 3)
+    """Clearance level for a band name (defaults to Founders=3).
+
+    A SENSITIVITY value passed here is resolved to its band rather than
+    silently falling through to the default. The two vocabularies overlap on
+    'ceo' and 'founders' but diverge exactly where it costs: sensitivity 'team'
+    and 'public' both distribute as band 'company', and neither is a key in
+    BAND_LEVEL — so `level_for_band("team")` used to return 3 (Founders) and
+    `recipients_for_band("team")` quietly addressed six people instead of nine.
+    No error, no log, just a narrower audience than the caller asked for.
+
+    Every caller in the tree today passes a real band, so this changes nothing
+    now — it exists so the next one to reach for the obvious-looking string
+    gets the right answer and a warning instead of a silent under-send.
+    [2026-08-11]
+    """
+    key = (band or "founders").lower()
+    if key in BAND_LEVEL:
+        return BAND_LEVEL[key]
+    if key in _SENSITIVITY_TO_BAND:
+        resolved = _SENSITIVITY_TO_BAND[key]
+        logger.warning(
+            f"level_for_band({band!r}) was given a SENSITIVITY, not a band — "
+            f"resolving to '{resolved}'. Call band_for_sensitivity() first.")
+        return BAND_LEVEL[resolved]
+    logger.warning(
+        f"level_for_band({band!r}) is not a band or a sensitivity — "
+        f"defaulting to founders. Valid bands: {sorted(BAND_LEVEL)}")
+    return BAND_LEVEL["founders"]
 
 
 def level_for_sensitivity(sensitivity: str | None) -> int:

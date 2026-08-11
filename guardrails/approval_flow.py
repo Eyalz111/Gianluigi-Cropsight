@@ -2025,15 +2025,19 @@ Return ONLY the JSON object, no other text."""
             for _old_id in t_plan["deletes"]:
                 supabase_client.client.table("tasks").delete().eq("id", _old_id).execute()
             if t_plan["creates"]:
+                # `or` throughout: the model emits explicit nulls, and a `.get`
+                # default only covers a MISSING key. `status` and `priority`
+                # especially — a null there reaches a NOT NULL column with a
+                # CHECK constraint. [2026-08-11]
                 supabase_client.create_tasks_batch(meeting_id, [
                     {
-                        "title": _it.get("title", ""),
-                        "assignee": _it.get("assignee", ""),
-                        "priority": _it.get("priority", "M"),
+                        "title": _it.get("title") or "",
+                        "assignee": _it.get("assignee") or "",
+                        "priority": _it.get("priority") or "M",
                         "deadline": _it.get("deadline"),
-                        "category": _it.get("category", ""),
-                        "label": _it.get("label", ""),
-                        "status": _it.get("status", "pending"),
+                        "category": _it.get("category") or "",
+                        "label": _it.get("label") or "",
+                        "status": _it.get("status") or "pending",
                     }
                     for _it in t_plan["creates"]
                 ])
@@ -2041,12 +2045,13 @@ Return ONLY the JSON object, no other text."""
             # --- Decisions (UUID = Sheet col-H identity + supersession chain) ---
             d_plan = reconcile_children(
                 decisions, edited.get("decisions", []),
-                text_of=lambda d: d.get("description", ""),
+                text_of=lambda d: d.get("description") or "",
                 char_threshold=_ct, token_threshold=_tt,
             )
             for _old_id, _it in d_plan["updates"]:
                 try:
-                    supabase_client.update_decision(_old_id, description=_it.get("description", ""))
+                    supabase_client.update_decision(
+                        _old_id, description=_it.get("description") or "")
                 except Exception as ue:
                     logger.warning(f"apply_edits: decision in-place update failed for {_old_id}: {ue}")
             for _old_id in d_plan["deletes"]:
@@ -2057,7 +2062,7 @@ Return ONLY the JSON object, no other text."""
             if d_plan["creates"]:
                 supabase_client.create_decisions_batch(
                     meeting_id,
-                    [{"description": _it.get("description", "")} for _it in d_plan["creates"]],
+                    [{"description": _it.get("description") or ""} for _it in d_plan["creates"]],
                 )
 
             # --- Follow-up meetings (in place now — keeps the UUID) ---
@@ -2092,21 +2097,22 @@ Return ONLY the JSON object, no other text."""
             # different people is two distinct rows, not a duplicate.
             q_plan = reconcile_children(
                 open_questions, edited.get("open_questions", []),
-                text_of=lambda q: q.get("question", ""),
-                secondary_of=lambda q: q.get("raised_by", ""),
+                text_of=lambda q: q.get("question") or "",
+                secondary_of=lambda q: q.get("raised_by") or "",
                 char_threshold=_ct, token_threshold=_tt,
             )
             for _old_id, _it in q_plan["updates"]:
                 supabase_client.client.table("open_questions").update(
-                    {"question": _it.get("question", ""), "raised_by": _it.get("raised_by", "")}
+                    {"question": _it.get("question") or "",
+                     "raised_by": _it.get("raised_by") or ""}
                 ).eq("id", _old_id).execute()
             for _old_id in q_plan["deletes"]:
                 supabase_client.client.table("open_questions").delete().eq("id", _old_id).execute()
             for _it in q_plan["creates"]:
                 supabase_client.create_open_question(
                     meeting_id=meeting_id,
-                    question=_it.get("question", ""),
-                    raised_by=_it.get("raised_by", ""),
+                    question=_it.get("question") or "",
+                    raised_by=_it.get("raised_by") or "",
                 )
 
             # Surface any section the empty-section guard preserved (the LLM

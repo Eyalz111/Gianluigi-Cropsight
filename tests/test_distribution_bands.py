@@ -190,3 +190,44 @@ async def test_distribute_honors_custom_selection_and_caps():
     titles = [t.get("title") for t in kw.get("tasks", [])]
     assert "founders task" not in titles  # capped to level 2 (Company)
     assert "team task" in titles
+
+
+class TestBandAndSensitivityVocabulariesDoNotCollide:
+    """Sensitivity values are ceo/founders/team/public; bands are
+    ceo/founders/company. They overlap on two names and diverge on the two that
+    matter, and BAND_LEVEL has no 'team' key — so `recipients_for_band("team")`
+    silently returned the FOUNDERS list, six people instead of nine, with no
+    error and no log. It caught the author of this test in live use.
+
+    Every caller in the tree passes a real band, so resolving the alias changes
+    no current behaviour. These tests exist so it stays that way.
+    """
+
+    def test_team_sensitivity_resolves_to_the_company_level(self):
+        assert D.level_for_band("team") == D.BAND_LEVEL["company"]
+        assert D.level_for_band("public") == D.BAND_LEVEL["company"]
+
+    def test_real_band_names_are_unchanged(self):
+        for band, lvl in D.BAND_LEVEL.items():
+            assert D.level_for_band(band) == lvl
+
+    def test_shared_names_mean_the_same_thing_in_both_vocabularies(self):
+        for shared in ("ceo", "founders"):
+            assert D.level_for_band(shared) == D.BAND_LEVEL[shared]
+            assert D.level_for_sensitivity(shared) == D.BAND_LEVEL[shared]
+
+    def test_nonsense_falls_back_to_founders_not_company(self):
+        """The safe direction is NARROWER. An unknown string must never widen
+        the audience to everyone."""
+        assert D.level_for_band("wat") == D.BAND_LEVEL["founders"]
+        assert D.level_for_band("") == D.BAND_LEVEL["founders"]
+        assert D.level_for_band(None) == D.BAND_LEVEL["founders"]
+
+    def test_every_sensitivity_maps_to_a_real_band(self):
+        for sens, band in D._SENSITIVITY_TO_BAND.items():
+            assert band in D.BAND_LEVEL, f"{sens} -> {band} is not a band"
+
+    def test_recipients_agree_whichever_vocabulary_is_used(self, prod, monkeypatch):
+        _roster(monkeypatch, POST_SEED)
+        assert (set(D.recipients_for_band("company"))
+                == set(D.recipients_for_band(D.band_for_sensitivity("team"))))

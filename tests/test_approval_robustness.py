@@ -674,3 +674,45 @@ class TestTitleDecorationDoesNotReachTelegram:
             participants=[],
         )
         assert captured["title"] == "CropSight Meeting with Eyal Zamir"
+
+
+class TestExplicitNullSweep:
+    """The `led_by` incident was one instance of a class, not a one-off. These
+    pin the places the sweep hardened. Every case uses a key that is PRESENT
+    and null — a missing key passes against the broken code and proves nothing.
+    """
+
+    def test_reconcile_children_tolerates_a_null_text_field(self):
+        """The accessors are written `lambda d: d.get("title", "")` in about
+        thirty places across two modules. Coerced inside reconcile_children so
+        none of them has to remember."""
+        from guardrails.edit_reconcile import reconcile_children
+        plan = reconcile_children(
+            [{"id": "a", "title": "Ship the API"}],
+            [{"index": 1, "title": None}],
+            text_of=lambda d: d.get("title", ""),
+        )
+        assert not plan.get("protected_empty")
+        assert [oid for oid, _ in plan["updates"]] == ["a"]
+
+    def test_reconcile_children_tolerates_a_null_secondary_guard(self):
+        from guardrails.edit_reconcile import reconcile_children
+        plan = reconcile_children(
+            [{"id": "a", "title": "Call Ido", "led_by": "Roye Tadmor"}],
+            [{"index": 1, "title": "Call Ido", "led_by": None}],
+            text_of=lambda d: d.get("title", ""),
+            secondary_of=lambda d: d.get("led_by", ""),
+        )
+        assert isinstance(plan["updates"], list)
+
+    def test_gmail_escape_renders_nothing_not_the_word_none(self):
+        """`str(None)` is 'None', so a null used to reach the team as the
+        literal word in the middle of an email."""
+        from services.gmail import _html_escape
+        assert _html_escape(None) == ""
+        assert _html_escape("a & b") == "a &amp; b"
+
+    def test_meeting_prep_escape_renders_nothing_not_the_word_none(self):
+        from processors.meeting_prep import _html_escape
+        assert _html_escape(None) == ""
+        assert _html_escape("<b>") == "&lt;b&gt;"

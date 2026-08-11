@@ -924,10 +924,14 @@ Return a JSON array of strings only. No explanation.
         return [f"Review {s['name']}" for s in sections if s["status"] == "ok"]
 
 
-def _html_escape(text: str) -> str:
-    """Escape HTML special characters for Telegram HTML parse mode."""
+def _html_escape(text: str | None) -> str:
+    """Escape HTML special characters for Telegram HTML parse mode.
+
+    None becomes "", not "None" — `str(None)` would put the literal word into a
+    prep document where it reads as content. [2026-08-11]
+    """
     return (
-        str(text)
+        ("" if text is None else str(text))
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")

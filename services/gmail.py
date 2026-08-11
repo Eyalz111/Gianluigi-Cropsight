@@ -100,9 +100,15 @@ def extract_quoted_text(body: str) -> str:
 logger = logging.getLogger(__name__)
 
 
-def _html_escape(text: str) -> str:
-    """Escape HTML special characters for safe embedding in email HTML."""
-    return html_lib.escape(str(text))
+def _html_escape(text: str | None) -> str:
+    """Escape HTML special characters for safe embedding in email HTML.
+
+    None becomes "", not "None". `str(None)` is the string "None", so a field
+    the model left null used to reach the team as the literal word None in the
+    middle of an email — quieter than a crash and worse, because it looks like
+    content. [2026-08-11]
+    """
+    return html_lib.escape("" if text is None else str(text))
 
 
 class GmailService:

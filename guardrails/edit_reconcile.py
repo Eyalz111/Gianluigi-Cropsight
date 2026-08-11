@@ -250,6 +250,26 @@ def reconcile_children(
     if not edited_items and old_rows:
         return {"updates": [], "creates": [], "deletes": [], "protected_empty": True}
 
+    # Every caller writes its accessor as `lambda d: d.get("title", "")`, which
+    # returns None whenever the model emitted the key with a null value — a
+    # default only applies to a MISSING key. Everything downstream then does
+    # string work on it. Wrapped HERE, at the one place all of them pass
+    # through, rather than trusting thirty lambdas across two modules to each
+    # remember `or ""`. The same explicit-null shape took down every edit of a
+    # meeting for two days via `led_by`. [2026-08-11]
+    # The originals are captured under DIFFERENT names before rebinding: a
+    # wrapper that closes over `text_of` and is then assigned to `text_of`
+    # calls itself forever.
+    _raw_text_of = text_of
+    _raw_secondary_of = secondary_of
+
+    def text_of(d):                                    # noqa: F811
+        return _raw_text_of(d) or ""
+
+    if _raw_secondary_of is not None:
+        def secondary_of(d):                           # noqa: F811
+            return _raw_secondary_of(d) or ""
+
     old_by_index = {i + 1: r for i, r in enumerate(old_rows)}
 
     accepted = dedup_llm_output(
