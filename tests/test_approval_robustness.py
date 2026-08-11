@@ -538,3 +538,139 @@ class TestExpandIdent:
         from services.telegram_callback_ids import build_callback_data, expand_payload
         payload = build_callback_data("prep_settype", full, extra="one_on_one").split(":", 1)[1]
         assert expand_payload("prep_settype", payload) == f"{full}:one_on_one"
+
+
+class TestExplicitNullFromTheModel:
+    """The 2026-08-10/11 incident: four edits of one meeting failed over two
+    days, each reporting a DIFFERENT error, and the summary never updated.
+
+    Eyal asked to add "Follow up meeting next week with Ido". The model emitted
+    that follow-up with `led_by: null` — a key that is PRESENT and null, which
+    `d.get("led_by", "TBD")` returns as None because a default only applies to
+    a MISSING key. One null then broke two layers:
+
+      1. `follow_up_meetings.led_by` is NOT NULL -> 23502 on insert.
+      2. the approval card called `_escape_html(None)` -> 'NoneType' object has
+         no attribute 'replace', which crashed the edit AFTER the DB error and
+         reported itself instead, hiding the real cause.
+
+    Everything here uses an EXPLICIT null, never a missing key — a test with a
+    missing key passes against the broken code and proves nothing.
+    """
+
+    def test_escape_html_survives_none(self):
+        from services.telegram_bot import _escape_html
+        assert _escape_html(None) == ""
+        assert _escape_html("a & b") == "a &amp; b"
+        assert _escape_html(7) == "7"          # non-str must not raise either
+
+    def test_escape_markdown_survives_none(self):
+        from services.telegram_bot import _escape_markdown
+        assert _escape_markdown(None) == ""
+        assert _escape_markdown("a_b") == "a\_b"
+
+    def test_follow_up_card_line_renders_with_null_leader(self):
+        """The exact dict shape that crashed the card."""
+        from services.telegram_bot import _escape_html
+        f = {"title": "Follow up meeting next week with Ido", "led_by": None}
+        # `.get(k, default)` is the broken idiom — assert the value it yields
+        # is what used to blow up, so this test pins the reason for `or`.
+        assert f.get("led_by", "TBD") is None
+        assert _escape_html(f.get("led_by") or "TBD") == "TBD"
+
+    def test_create_follow_up_meeting_never_writes_null_led_by(self):
+        """Coerced at the choke point, so no caller can reintroduce it."""
+        from services.supabase_client import SupabaseClient
+        captured = {}
+
+        class _Tbl:
+            def insert(self, data):
+                captured.update(data)
+                return self
+
+            def execute(self):
+                return SimpleNamespace(data=[{"id": "f1"}])
+
+        sc = SupabaseClient.__new__(SupabaseClient)
+        sc._client = SimpleNamespace(table=lambda _n: _Tbl())
+        sc.create_follow_up_meeting(
+            source_meeting_id="m1",
+            title="Follow up meeting next week with Ido",
+            led_by=None,
+        )
+        assert captured["led_by"] == ""
+
+    def test_create_follow_ups_batch_never_writes_null_led_by(self):
+        from services.supabase_client import SupabaseClient
+        captured = {}
+
+        class _Tbl:
+            def insert(self, data):
+                captured["rows"] = data
+                return self
+
+            def execute(self):
+                return SimpleNamespace(data=[{"id": "f1"}, {"id": "f2"}])
+
+        sc = SupabaseClient.__new__(SupabaseClient)
+        sc._client = SimpleNamespace(table=lambda _n: _Tbl())
+        sc._serialize_datetime = lambda v: None
+        sc.create_follow_ups_batch("m1", [
+            {"title": "explicit null", "led_by": None},
+            {"title": "missing key"},
+        ])
+        assert [r["led_by"] for r in captured["rows"]] == ["", ""]
+
+
+class TestTitleDecorationDoesNotReachTelegram:
+    """`_CropSight Meeting with Eyal Zamir__.txt` was dropped into Drive, and
+    the filename's underscores became the meeting title. Telegram read the
+    leading `_` as an unterminated italic entity and refused to parse every
+    card for that meeting, so each send fell back to unformatted plain text.
+    """
+
+    def test_edges_are_stripped(self):
+        from services.supabase_client import clean_title
+        assert clean_title("_CropSight Meeting with Eyal Zamir__") == (
+            "CropSight Meeting with Eyal Zamir")
+        assert clean_title("  *Weekly Sync*  ") == "Weekly Sync"
+        assert clean_title("### Board Review") == "Board Review"
+
+    def test_the_middle_is_left_alone(self):
+        """`budget_v2_final` is a filename, not italics."""
+        from services.supabase_client import clean_title
+        assert clean_title("Review budget_v2_final") == "Review budget_v2_final"
+        assert clean_title("A * B pricing") == "A * B pricing"
+
+    def test_none_and_empty_are_safe(self):
+        from services.supabase_client import clean_title
+        assert clean_title(None) == ""
+        assert clean_title("   ") == ""
+
+    def test_a_title_that_is_only_decoration_keeps_its_text(self):
+        """Unreadable beats blank — never return an empty title."""
+        from services.supabase_client import clean_title
+        assert clean_title("___") == "___"
+
+    def test_create_meeting_cleans_the_title(self):
+        from datetime import datetime
+        from services.supabase_client import SupabaseClient
+        captured = {}
+
+        class _Tbl:
+            def insert(self, data):
+                captured.update(data)
+                return self
+
+            def execute(self):
+                return SimpleNamespace(data=[{"id": "m1"}])
+
+        sc = SupabaseClient.__new__(SupabaseClient)
+        sc._client = SimpleNamespace(table=lambda _n: _Tbl())
+        sc._serialize_datetime = lambda v: None
+        sc.create_meeting(
+            date=datetime(2026, 8, 10),
+            title="_CropSight Meeting with Eyal Zamir__",
+            participants=[],
+        )
+        assert captured["title"] == "CropSight Meeting with Eyal Zamir"

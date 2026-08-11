@@ -60,8 +60,17 @@ from services.telegram_callback_ids import (  # noqa: E402
 )
 
 
-def _escape_html(text: str) -> str:
-    """Escape HTML special characters for Telegram HTML parse mode."""
+def _escape_html(text: str | None) -> str:
+    """Escape HTML special characters for Telegram HTML parse mode.
+
+    Coerces None and non-strings rather than raising. Callers reach this with
+    LLM-shaped dicts, where `d.get("k", "default")` returns None whenever the
+    key is PRESENT and null — which is exactly what a model emits for a field
+    it has no value for. That produced `'NoneType' object has no attribute
+    'replace'` from here, and because it fired while rendering the approval
+    card it masked the real error underneath it. [2026-08-11]
+    """
+    text = "" if text is None else str(text)
     return (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -69,8 +78,9 @@ def _escape_html(text: str) -> str:
     )
 
 
-def _escape_markdown(text: str) -> str:
+def _escape_markdown(text: str | None) -> str:
     """Escape Markdown special characters for Telegram Markdown parse mode."""
+    text = "" if text is None else str(text)
     for ch in ("*", "_", "`", "["):
         text = text.replace(ch, f"\\{ch}")
     return text
@@ -902,7 +912,10 @@ class TelegramBot:
             for f in follow_ups:
                 label = f.get("label", "")
                 title = _escape_html(f.get("title", ""))
-                led_by = _escape_html(f.get("led_by", "TBD"))  # untrusted — escape [audit P5-03]
+                # `or "TBD"`, never `.get(k, "TBD")`: the model emits an
+                # explicit null for a follow-up with no named leader, and a
+                # default only applies to a MISSING key. [2026-08-11]
+                led_by = _escape_html(f.get("led_by") or "TBD")  # untrusted — escape [audit P5-03]
                 label_prefix = f"<b>{_escape_html(label)}</b>: " if label else ""
                 lines.append(f"  - {label_prefix}{title} (led by {led_by})")
             lines.append("")

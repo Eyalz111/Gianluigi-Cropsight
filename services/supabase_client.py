@@ -34,6 +34,30 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 
+# Markdown decoration that a filename or a model can leave on the EDGE of a
+# title. Not stripped from the middle: `budget_v2_final` is a filename, not
+# italics — the same distinction the Telegram markup fallback makes.
+_TITLE_EDGE_CHARS = " \t\r\n_*`~#"
+
+
+def clean_title(title: str | None) -> str:
+    """Strip Markdown decoration off the edges of a meeting title.
+
+    The 2026-08-10 transcript was dropped into Drive as
+    `_CropSight Meeting with Eyal Zamir__.txt` and the underscores rode
+    straight into `meetings.title`. Telegram then read the leading `_` as an
+    unterminated italic entity and refused to parse EVERY card for that
+    meeting ("Can't parse entities: can't find end of the entity starting at
+    byte offset 18"), so each send silently degraded to unformatted plain text.
+
+    A title that is nothing BUT decoration keeps its original text rather than
+    becoming empty — an unreadable title still beats a blank one.
+    """
+    raw = (title or "").strip()
+    cleaned = raw.strip(_TITLE_EDGE_CHARS).strip()
+    return cleaned or raw
+
+
 class SupabaseClient:
     """
     Client for all Supabase database operations.
@@ -211,7 +235,10 @@ class SupabaseClient:
         """
         data = {
             "date": self._serialize_datetime(date),
-            "title": title,
+            # Cleaned at the one place every meeting is created, so a decorated
+            # FILENAME cannot become a title Telegram refuses to render.
+            # [2026-08-11]
+            "title": clean_title(title),
             "participants": participants,
             "raw_transcript": raw_transcript,
             "summary": summary,
@@ -1616,7 +1643,11 @@ class SupabaseClient:
         data = {
             "source_meeting_id": source_meeting_id,
             "title": title,
-            "led_by": led_by,
+            # NOT NULL in the schema, and a follow-up genuinely may have no
+            # named leader — the model emits null for it. Coerced HERE, at the
+            # one place every caller passes through, rather than trusting each
+            # of them to have used `or ""`. [2026-08-11]
+            "led_by": led_by or "",
             "proposed_date": self._serialize_datetime(proposed_date),
             "participants": participants,
             "agenda_items": agenda_items,
@@ -1651,7 +1682,9 @@ class SupabaseClient:
             {
                 "source_meeting_id": source_meeting_id,
                 "title": f.get("title"),
-                "led_by": f.get("led_by"),
+                # NOT NULL — and `f.get("led_by")` is None both when the key is
+                # missing and when the model set it null. [2026-08-11]
+                "led_by": f.get("led_by") or "",
                 "proposed_date": self._serialize_datetime(f.get("proposed_date")),
                 "participants": f.get("participants"),
                 "agenda_items": f.get("agenda_items"),

@@ -1580,6 +1580,12 @@ async def process_response(
                     "next_step": f"Edit failed: {updated_content['error']}. The summary is back to pending — try again.",
                 }
 
+            # A DB sync failure leaves valid content that did NOT reach the
+            # tables. Popped before the content is persisted or re-sent, and
+            # reported in the reply — an alert alone is not where Eyal is
+            # looking when he is waiting on an edit. [2026-08-11]
+            db_sync_error = updated_content.pop("_db_sync_error", None)
+
             # Track edit version for audit trail
             prev_version = 0
             if pending_info and pending_info.get("content"):
@@ -1614,7 +1620,15 @@ async def process_response(
                 "action": "edit_requested",
                 "resubmitted": True,  # apply_edits + submit_for_approval succeeded — a new card was sent
                 "edits": edits,
-                "next_step": "Edits applied, resubmitted for approval",
+                "db_sync_error": db_sync_error,
+                "next_step": (
+                    "Edits applied, resubmitted for approval"
+                    if not db_sync_error else
+                    f"Edits applied to the summary and resubmitted, but saving "
+                    f"them to the database FAILED ({db_sync_error}). The card is "
+                    f"correct; the underlying records are not. Run /reprocess "
+                    f"before distributing."
+                ),
             }
         except Exception as edit_err:
             logger.error(f"Edit flow crashed for {meeting_id}: {edit_err}")
@@ -1957,6 +1971,7 @@ Return ONLY the JSON object, no other text."""
 
         # Sync edited structured data back to DB tables.
         # This ensures DB, pending_approvals, distribution, and Sheets stay consistent.
+        _db_sync_error: str | None = None
         try:
             # Every child type is reconciled through guardrails/edit_reconcile:
             # a precision-first cascade (exact index -> exact normalized text ->
@@ -2054,17 +2069,22 @@ Return ONLY the JSON object, no other text."""
                 secondary_of=lambda f: f.get("led_by", ""),
                 char_threshold=_ct, token_threshold=_tt,
             )
+            # `or ""` throughout, NOT `.get(k, "")`: a default only applies to a
+            # MISSING key, and the model emits an explicit null for a follow-up
+            # it has no leader for. `led_by` is NOT NULL, so that null took down
+            # every edit of this meeting for two days. [2026-08-11]
             for _old_id, _it in f_plan["updates"]:
                 supabase_client.client.table("follow_up_meetings").update(
-                    {"title": _it.get("title", ""), "led_by": _it.get("led_by", "")}
+                    {"title": _it.get("title") or "",
+                     "led_by": _it.get("led_by") or ""}
                 ).eq("id", _old_id).execute()
             for _old_id in f_plan["deletes"]:
                 supabase_client.client.table("follow_up_meetings").delete().eq("id", _old_id).execute()
             for _it in f_plan["creates"]:
                 supabase_client.create_follow_up_meeting(
                     source_meeting_id=meeting_id,
-                    title=_it.get("title", ""),
-                    led_by=_it.get("led_by", ""),
+                    title=_it.get("title") or "",
+                    led_by=_it.get("led_by") or "",
                 )
 
             # --- Open questions (in place now — questions carry downstream identity) ---
@@ -2112,6 +2132,7 @@ Return ONLY the JSON object, no other text."""
             logger.info(f"Synced edited data to DB for meeting {meeting_id}")
         except Exception as e:
             logger.error(f"Failed to sync edited data to DB: {e}")
+            _db_sync_error = str(e)
             # T1.8: DB sync failure silently left the DB inconsistent with
             # pending_approvals. Alert loudly so Eyal can run /reprocess or
             # investigate before the next distribution.
@@ -2128,7 +2149,7 @@ Return ONLY the JSON object, no other text."""
             except Exception as alert_err:
                 logger.error(f"Alert on DB sync failure also failed: {alert_err}")
 
-        return {
+        out = {
             "title": meeting.get("title"),
             "summary": updated_summary,
             "date": meeting.get("date"),
@@ -2137,6 +2158,15 @@ Return ONLY the JSON object, no other text."""
             "follow_ups": edited_follow_ups,
             "open_questions": edited_questions,
         }
+        # The card renders from the returned content, so a failed DB sync used
+        # to reach Eyal as "Edits applied" with a CRITICAL alert filed
+        # somewhere he was not looking. Hand the caller the failure so it can
+        # say so in the reply. NOT the "error" key — the content itself is
+        # valid and must still be shown. The caller pops this before the
+        # content is persisted. [2026-08-11]
+        if _db_sync_error:
+            out["_db_sync_error"] = _db_sync_error
+        return out
 
     except Exception as e:
         logger.error(f"Error applying edits: {e}")
