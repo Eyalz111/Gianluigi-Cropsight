@@ -82,7 +82,15 @@ HOWTO_TAB = "How to use"
 # forever, and an alarm that always fires is an alarm nobody reads. Named
 # explicitly instead: the meetings pool moved in here on 2026-08-09 and is a
 # legitimate resident, not a malformed area tab.
-NON_AREA_TABS = frozenset({HOWTO_TAB, "Meetings", "Past Meetings"})
+# `Focus` and `Focus data` joined them on 2026-08-11 and are DERIVED — nothing
+# on either is a source of truth, so the reconcile must neither read them as
+# area tabs nor let the formatting pass wipe their rules. IMPORTED rather than
+# spelled again: two copies of a tab name is how one of them ends up renamed
+# alone, and the failure would be this engine quietly parsing the view.
+from processors.focus_view import FOCUS_DATA_TAB, FOCUS_TAB  # noqa: E402
+
+NON_AREA_TABS = frozenset({HOWTO_TAB, "Meetings", "Past Meetings",
+                           FOCUS_TAB, FOCUS_DATA_TAB})
 
 # Sheet column -> the DB field it maps to, per entity.
 _ACTION_FIELDS = {COL_DATE: "deadline", COL_RESP: "assignee",

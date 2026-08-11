@@ -167,6 +167,16 @@ class Settings(BaseSettings):
     # because the Tasks tab pulled a stale cell over a value Project Status had
     # just written. [2026-08-08]
     TASKS_TAB_READ_ONLY: bool = Field(default=False, description="Tasks tab is a read-only mirror; Project Status is the only editable task surface")
+    # ONE re-sliceable view tab, for Nechama working the list daily: open tasks
+    # AND open meetings in one place, grouped by due date / owner / project /
+    # area / priority. The server writes a hidden data tab; the visible tab is
+    # formulas over it, so changing a dropdown re-renders instantly instead of
+    # waiting for the next 30-minute cycle. Both tabs are DERIVED — they are in
+    # NON_AREA_TABS so the reconcile never parses them as area tabs, and the
+    # visible one is protected because an edit there would be silently
+    # discarded on the next refresh. [2026-08-11]
+    FOCUS_VIEW_ENABLED: bool = Field(default=False, description="Build the Focus tab (one re-sliceable view of everything open)")
+    FOCUS_STALE_DAYS: int = Field(default=90, description="Age at which an open item is flagged stale on the Focus tab")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")

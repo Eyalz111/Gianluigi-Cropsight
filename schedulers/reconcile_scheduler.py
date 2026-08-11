@@ -278,6 +278,16 @@ class ReconcileScheduler:
                         views = await refresh_workspace_views()
                     except Exception as ve:
                         logger.warning(f"Workspace views refresh failed (non-fatal): {ve}")
+                # The Focus tab. Also last, and also non-fatal: it is a VIEW, so
+                # a failure here costs a stale read and must never take down the
+                # reconcile that owns the actual data. [2026-08-11]
+                focus = None
+                if getattr(settings, "FOCUS_VIEW_ENABLED", False):
+                    try:
+                        from services.focus_sheet import refresh_focus
+                        focus = await refresh_focus()
+                    except Exception as fe:
+                        logger.warning(f"Focus view refresh failed (non-fatal): {fe}")
                 supabase_client.upsert_scheduler_heartbeat(
                     "reconcile",
                     details={"slot": slot,
@@ -286,7 +296,8 @@ class ReconcileScheduler:
                              "meetings": meet_summary if isinstance(meet_summary, dict) else None,
                              "projects": proj_summary if isinstance(proj_summary, dict) else None,
                              "project_status": ps_summary,
-                             "views": views},
+                             "views": views,
+                             "focus": focus},
                 )
                 # Close the human->machine loop: after an auto-sync that actually
                 # applied edits, tell the group what landed (and any value the

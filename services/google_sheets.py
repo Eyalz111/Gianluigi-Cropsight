@@ -3220,7 +3220,7 @@ class GoogleSheetsService:
 
     async def _rebuild_readonly_tab(
         self, tab_name: str, headers: list[str], rows: list[list],
-        force_empty: bool = False,
+        force_empty: bool = False, spreadsheet_id: str | None = None,
     ) -> bool:
         """Clear + rewrite a generated tab, then lock it.
 
@@ -3228,8 +3228,17 @@ class GoogleSheetsService:
         rebuild_tasks_sheet: a transient Supabase read returning [] must never
         clear a populated tab. That is precisely how the Tasks sheet was wiped
         in April 2026.
+
+        `spreadsheet_id` is threaded through EVERY call below, not just the
+        create. `_ensure_tab` already took a workbook argument while the clear,
+        the write and the formatting were pinned to TASK_TRACKER_SHEET_ID — so
+        a caller passing another workbook would have created the tab in one
+        book and written the rows into another. Parameterising a read without
+        its write is the exact shape of four defects in the 2026-08-09 review.
+        [2026-08-11]
         """
-        if not settings.TASK_TRACKER_SHEET_ID:
+        ssid = spreadsheet_id or settings.TASK_TRACKER_SHEET_ID
+        if not ssid:
             return False
         if not rows and not force_empty:
             logger.error(
@@ -3238,13 +3247,13 @@ class GoogleSheetsService:
             )
             return False
         try:
-            sid = await self._ensure_tab(tab_name, headers)
+            sid = await self._ensure_tab(tab_name, headers, spreadsheet_id=ssid)
             if sid is None:
                 return False
             end_col = chr(ord("A") + len(headers) - 1)
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().values().clear(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=ssid,
                     range=f"'{tab_name}'!A2:{end_col}",
                     body={},
                 )
@@ -3252,21 +3261,24 @@ class GoogleSheetsService:
             if rows:
                 self._execute_with_retry(
                     lambda: self.service.spreadsheets().values().update(
-                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        spreadsheetId=ssid,
                         range=f"'{tab_name}'!A2:{end_col}{len(rows) + 1}",
                         valueInputOption="RAW",
                         body={"values": rows},
                     )
                 )
-            await self._format_readonly_tab(sid, tab_name, len(headers))
+            await self._format_readonly_tab(sid, tab_name, len(headers),
+                                            spreadsheet_id=ssid)
             logger.info(f"Rebuilt {tab_name}: {len(rows)} row(s)")
             return True
         except Exception as e:
             logger.error(f"Error rebuilding {tab_name}: {e}")
             return False
 
-    async def _format_readonly_tab(self, sid: int, tab_name: str, n_cols: int) -> bool:
+    async def _format_readonly_tab(self, sid: int, tab_name: str, n_cols: int,
+                                   spreadsheet_id: str | None = None) -> bool:
         """Header styling, widths, banding, and a whole-tab protected range."""
+        ssid = spreadsheet_id or settings.TASK_TRACKER_SHEET_ID
         try:
             desc = f"Gianluigi: {tab_name} is generated — edits are overwritten"
             requests: list[dict] = [
@@ -3288,7 +3300,7 @@ class GoogleSheetsService:
             try:
                 pmeta = self._execute_with_retry(
                     lambda: self.service.spreadsheets().get(
-                        spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                        spreadsheetId=ssid,
                         fields="sheets(properties.sheetId,protectedRanges)",
                     )
                 )
@@ -3310,7 +3322,7 @@ class GoogleSheetsService:
             }}})
             self._execute_with_retry(
                 lambda: self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=settings.TASK_TRACKER_SHEET_ID,
+                    spreadsheetId=ssid,
                     body={"requests": requests},
                 )
             )
