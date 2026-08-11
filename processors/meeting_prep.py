@@ -274,6 +274,52 @@ async def find_relevant_decisions(
     return combined[:limit]
 
 
+def participant_names_from_attendees(attendees: list[dict]) -> list[str]:
+    """Calendar attendees -> CANONICAL roster names.
+
+    THIS IS WHY THE PREP WAS EMPTY. It used to take
+    `displayName or email.split("@")[0]`, and Google returns an empty
+    displayName for our own people — so it asked the database for "nechama"
+    and "eyal.zror" while every assignee is stored canonically as "Nechama
+    Tik" and "Eyal Zror". `get_tasks` matches assignee with `ilike` and no
+    wildcards, so those names could NEVER match. On 2026-08-11 the two
+    attendees of tomorrow's meeting had 29 open tasks between them and the
+    prep found zero — every section rendered empty while reporting "ok", which
+    is what made the prep read as disconnected from the system.
+
+    The EMAIL is the reliable identity in a calendar event, and the roster
+    carries `identities` for exactly this lookup. displayName is only a
+    fallback, and `resolve_assignee` cannot rescue "eyal.zror" on its own —
+    it is neither a roster name nor a first name, so it comes back unchanged.
+
+    Attendees who are not on the roster are dropped: they have no tasks here,
+    and querying for them is a round trip that can only return nothing.
+    [2026-08-11]
+    """
+    from config.team import get_team_member_by_email, get_team_member_names
+
+    roster = {n for n in (get_team_member_names() or []) if n}
+    names: list[str] = []
+    seen: set[str] = set()
+    for a in attendees or []:
+        member = get_team_member_by_email((a.get("email") or "").strip())
+        name = ""
+        if member:
+            name = member.get("name") or ""
+        elif (a.get("displayName") or "").strip():
+            # Only if it resolves to somebody we actually have. `resolve_assignee`
+            # returns unknown input UNCHANGED by design (it must never destroy
+            # what a human typed), so without this check an external guest's
+            # display name becomes a "participant" we then query tasks for.
+            candidate = supabase_client.resolve_assignee(a["displayName"].strip())
+            if candidate in roster:
+                name = candidate
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 async def find_participant_tasks(
     participants: list[str],
     max_sensitivity_level: int = 3,
@@ -281,22 +327,38 @@ async def find_participant_tasks(
     """
     Find open and overdue tasks for meeting participants.
 
-    Queries Supabase for each participant's pending tasks.
+    OPEN means open: this asked for `status="pending"` only, so a participant's
+    in-progress work was invisible in their own prep — 28 of Eyal's 39 open
+    tasks on 2026-08-11. The section is called "All Open Tasks"; it now returns
+    all of them. Lateness is not a status any more, so overdue rows arrive
+    through the same set. [2026-08-11]
 
     Args:
-        participants: List of participant names.
+        participants: CANONICAL roster names — see participant_names_from_attendees.
 
     Returns:
         Dict mapping participant names to their task lists.
     """
+    from models.schemas import OPEN_TASK_STATUSES
+
     tasks_by_participant: dict[str, list[dict]] = {}
 
     for participant in participants:
         try:
-            tasks = filter_by_sensitivity(
-                supabase_client.get_tasks(assignee=participant, status="pending"),
-                max_sensitivity_level,
-            )
+            rows: list[dict] = []
+            for st in sorted(OPEN_TASK_STATUSES):
+                rows.extend(supabase_client.get_tasks(
+                    assignee=participant, status=st) or [])
+            seen: set = set()
+            deduped = []
+            for t in rows:
+                tid = t.get("id")
+                if tid is not None and tid in seen:
+                    continue
+                if tid is not None:
+                    seen.add(tid)
+                deduped.append(t)
+            tasks = filter_by_sensitivity(deduped, max_sensitivity_level)
             if tasks:
                 tasks_by_participant[participant] = tasks
         except Exception as e:
@@ -738,10 +800,7 @@ async def generate_prep_outline(event: dict, meeting_type: str) -> dict:
     template = get_template(meeting_type)
     topic = event.get("title", "Untitled Meeting")
     attendees = event.get("attendees", [])
-    participant_names = [
-        a.get("displayName") or a.get("email", "").split("@")[0]
-        for a in attendees
-    ]
+    participant_names = participant_names_from_attendees(attendees)
 
     sections = []
     for query in template.get("data_queries", []):

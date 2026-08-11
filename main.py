@@ -266,13 +266,20 @@ async def start_services() -> None:
         logger.warning("  Transcript watcher disabled (Google Drive not available)")
         logger.warning("  Document watcher disabled (Google Drive not available)")
 
-    # Start meeting prep scheduler (only if Calendar is available)
-    if init_status.get("google_calendar"):
+    # Start meeting prep scheduler (only if Calendar is available AND enabled).
+    # It had NO kill switch until 2026-08-11 — it was the one push that could
+    # not be silenced without a code change, and it fired per meeting. Eyal
+    # turned it off: the outlines were arriving with every section empty (the
+    # participant-name bug, fixed the same day) and he does not use them. The
+    # /prep command still generates one ON DEMAND — this only stops the push.
+    if init_status.get("google_calendar") and settings.MEETING_PREP_ENABLED:
         _prep = active_prep_scheduler()
         logger.info("  Starting meeting prep scheduler (%s)...",
                     "ping" if settings.PREP_PING_ENABLED else "outline")
         prep_task = asyncio.create_task(_prep.start(), name="meeting_prep_scheduler")
         tasks.append(prep_task)
+    elif not settings.MEETING_PREP_ENABLED:
+        logger.info("  Meeting prep scheduler disabled (MEETING_PREP_ENABLED=false)")
     else:
         logger.warning("  Meeting prep scheduler disabled (Google Calendar not available)")
 
@@ -521,12 +528,16 @@ async def start_services() -> None:
 
     # NOTE: reconstruct_prep_timers() now runs inside start() before the main loop.
     # This external call is kept as a safety net but is effectively a no-op.
-    try:
-        prep_reconstructed = await active_prep_scheduler().reconstruct_prep_timers()
-        if prep_reconstructed:
-            logger.info(f"  Reconstructed {prep_reconstructed} additional prep timer(s)")
-    except Exception as e:
-        logger.warning(f"  Prep timer reconstruction failed (non-fatal): {e}")
+    # GATED with the scheduler: rebuilding the timers re-arms the sends, so
+    # leaving this un-gated would keep pushing prep outlines from a scheduler
+    # that is switched off — the restart path quietly undoing the flag.
+    if settings.MEETING_PREP_ENABLED:
+        try:
+            prep_reconstructed = await active_prep_scheduler().reconstruct_prep_timers()
+            if prep_reconstructed:
+                logger.info(f"  Reconstructed {prep_reconstructed} additional prep timer(s)")
+        except Exception as e:
+            logger.warning(f"  Prep timer reconstruction failed (non-fatal): {e}")
 
     # Reconstruct interactive session stack from persistent state (Phase 6)
     try:

@@ -1093,6 +1093,19 @@ class Settings(BaseSettings):
     # Push-first ping + on-demand brief, replacing the old outline/Drive-doc prep.
     # When ON, main.py starts prep_ping_scheduler INSTEAD of the old one.
     # ==========================================================================
+    # The kill switch meeting prep never had. Until 2026-08-11 the prep
+    # scheduler started unconditionally whenever Calendar was available — the
+    # one Telegram push that could not be silenced without a code change, and
+    # it fired per meeting. Turned OFF at Eyal's request: he does not use the
+    # outlines, and they were arriving with every section empty because
+    # participants were resolved from the email local-part and could never
+    # match a canonical assignee name. The /prep command still works ON
+    # DEMAND; this gates only the automatic push and its restart-time timer
+    # reconstruction.
+    MEETING_PREP_ENABLED: bool = Field(
+        default=False,
+        description="Push a prep outline before each calendar meeting. OFF = /prep on demand only."
+    )
     PREP_PING_ENABLED: bool = Field(
         default=False,
         description="Use the new push-first meeting-prep: a deterministic ping ~LEAD min before each meeting (participant-anchored, topic-enriched) + an on-demand 'Prepare me' brief. OFF = the old outline/Drive-doc prep scheduler."

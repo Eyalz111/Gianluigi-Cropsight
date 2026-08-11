@@ -267,13 +267,17 @@ class TestFindParticipantTasks:
     @pytest.mark.asyncio
     async def test_handles_error_gracefully(self):
         """Should not crash if get_tasks raises for one participant."""
+        # Keyed on the ASSIGNEE, not on call order: find_participant_tasks asks
+        # once per OPEN status now, so a positional side_effect sequence would
+        # hand the exception to the wrong participant. [2026-08-11]
+        def _get_tasks(assignee=None, status=None, **kw):
+            if assignee == "Roye":
+                raise Exception("DB error")
+            return ([{"id": "t-1", "title": "Task 1", "status": "pending"}]
+                    if status == "pending" else [])
+
         with patch("processors.meeting_prep.supabase_client") as mock_db:
-            mock_db.get_tasks = MagicMock(
-                side_effect=[
-                    [{"id": "t-1", "title": "Task 1", "status": "pending"}],
-                    Exception("DB error"),
-                ]
-            )
+            mock_db.get_tasks = MagicMock(side_effect=_get_tasks)
 
             from processors.meeting_prep import find_participant_tasks
 
