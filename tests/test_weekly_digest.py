@@ -138,6 +138,22 @@ SAMPLE_UPCOMING_EVENTS = [
 # 1. get_meetings_for_week
 # ============================================================================
 
+def _by_status(table: dict):
+    """side_effect for `get_tasks`.
+
+    A call with NO status returns everything, because that is what the digest
+    now does: it asks for all tasks and decides lateness from the deadline via
+    `is_overdue`, rather than trusting `status='overdue'` — a field nothing
+    maintains any more. Status-specific calls behave as before. [2026-08-11]
+    """
+    def _fn(**kw):
+        st = kw.get("status")
+        if st is None:
+            return [t for rows in table.values() for t in rows]
+        return table.get(st, [])
+    return _fn
+
+
 class TestGetMeetingsForWeek:
     """Tests for get_meetings_for_week — verifies date range query."""
 
@@ -250,11 +266,11 @@ class TestGetTaskSummary:
     async def test_categorises_completed_tasks(self):
         """Should include done tasks in completed_this_week."""
         with patch("processors.weekly_digest.supabase_client") as mock_db:
-            mock_db.get_tasks = MagicMock(side_effect=lambda **kw: {
+            mock_db.get_tasks = MagicMock(side_effect=_by_status({
                 "done": SAMPLE_DONE_TASKS,
                 "overdue": [],
                 "pending": [],
-            }.get(kw.get("status"), []))
+            }))
 
             from processors.weekly_digest import get_task_summary
 
@@ -266,11 +282,11 @@ class TestGetTaskSummary:
     async def test_categorises_overdue_tasks(self):
         """Should include overdue tasks."""
         with patch("processors.weekly_digest.supabase_client") as mock_db:
-            mock_db.get_tasks = MagicMock(side_effect=lambda **kw: {
+            mock_db.get_tasks = MagicMock(side_effect=_by_status({
                 "done": [],
                 "overdue": SAMPLE_OVERDUE_TASKS,
                 "pending": [],
-            }.get(kw.get("status"), []))
+            }))
 
             from processors.weekly_digest import get_task_summary
 
@@ -282,11 +298,11 @@ class TestGetTaskSummary:
     async def test_categorises_due_next_week(self):
         """Should include pending tasks with deadlines in the next 7 days."""
         with patch("processors.weekly_digest.supabase_client") as mock_db:
-            mock_db.get_tasks = MagicMock(side_effect=lambda **kw: {
+            mock_db.get_tasks = MagicMock(side_effect=_by_status({
                 "done": [],
                 "overdue": [],
                 "pending": SAMPLE_PENDING_TASKS,
-            }.get(kw.get("status"), []))
+            }))
 
             from processors.weekly_digest import get_task_summary
 
@@ -585,11 +601,11 @@ class TestGenerateWeeklyDigest:
             # Configure mock returns
             mock_db.list_meetings = MagicMock(return_value=SAMPLE_MEETINGS)
             mock_db.list_decisions = MagicMock(return_value=SAMPLE_DECISIONS)
-            mock_db.get_tasks = MagicMock(side_effect=lambda **kw: {
+            mock_db.get_tasks = MagicMock(side_effect=_by_status({
                 "done": SAMPLE_DONE_TASKS,
                 "overdue": SAMPLE_OVERDUE_TASKS,
                 "pending": SAMPLE_PENDING_TASKS,
-            }.get(kw.get("status"), []))
+            }))
             mock_db.get_open_questions = MagicMock(
                 return_value=SAMPLE_OPEN_QUESTIONS
             )
@@ -639,11 +655,11 @@ class TestGenerateWeeklyDigest:
 
             mock_db.list_meetings = MagicMock(return_value=SAMPLE_MEETINGS)
             mock_db.list_decisions = MagicMock(return_value=[SAMPLE_DECISIONS[0]])
-            mock_db.get_tasks = MagicMock(side_effect=lambda **kw: {
+            mock_db.get_tasks = MagicMock(side_effect=_by_status({
                 "done": SAMPLE_DONE_TASKS,
                 "overdue": SAMPLE_OVERDUE_TASKS,
                 "pending": [],
-            }.get(kw.get("status"), []))
+            }))
             mock_db.get_open_questions = MagicMock(return_value=[])
             mock_cal.get_upcoming_events = AsyncMock(return_value=[])
 

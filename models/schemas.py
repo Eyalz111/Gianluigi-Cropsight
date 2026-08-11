@@ -31,7 +31,17 @@ from pydantic import BaseModel, Field
 # =============================================================================
 
 class TaskStatus(str, Enum):
-    """Status of a task."""
+    """Status of a task — its PROGRESS, and only its progress.
+
+    OVERDUE is deprecated as a value to WRITE. Lateness is a property of the
+    deadline, not a stage of work, and storing it here conflates two
+    independent things: a task can be in progress AND late, which this
+    vocabulary cannot express, so stamping 'overdue' destroys the progress
+    state. Use `is_overdue()` to ask the question and leave status alone.
+
+    The member stays because rows still carry it and it must keep round-
+    tripping; `OPEN_TASK_STATUSES` counts it as open. [2026-08-11]
+    """
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     DONE = "done"
@@ -41,6 +51,44 @@ class TaskStatus(str, Enum):
     # citations, move to the Archive tab in the tracker sheet, and are excluded
     # from briefs, digests, reminders, and the reconcile re-add path.
     ARCHIVED = "archived"
+
+
+# A task in one of these is finished with, however it got there.
+CLOSED_TASK_STATUSES = frozenset({"done", "archived", "cancelled", "superseded"})
+# Still outstanding. 'overdue' is here because rows carry it historically.
+OPEN_TASK_STATUSES = frozenset({"pending", "in_progress", "overdue"})
+
+
+def is_overdue(task: dict, today=None) -> bool:
+    """Is this task past its deadline and still outstanding?
+
+    COMPUTED, never read from `status`. On 2026-08-11 eighteen open tasks were
+    past their deadline while five carried `status='overdue'` — the two
+    schedulers that used to stamp it (TASK_REMINDER_ENABLED,
+    ALERT_SCHEDULER_ENABLED) are both switched off, so the field had simply
+    stopped being maintained while readers went on trusting it.
+
+    `weekly_digest` and `meeting_prep` had already grown their own
+    `status == "overdue" or past-deadline` clauses; `proactive_alerts` had not,
+    and saw five of eighteen. This is that clause, in one place.
+
+    A task with no deadline is never late — it is unscheduled, which is a
+    different problem and one the Focus tab surfaces separately.
+    """
+    if (task.get("status") or "").lower() in CLOSED_TASK_STATUSES:
+        return False
+    raw = task.get("deadline")
+    if not raw:
+        return False
+    from datetime import datetime, timedelta, timezone
+    if today is None:
+        today = datetime.now(timezone(timedelta(hours=3))).date()
+    try:
+        return datetime.fromisoformat(str(raw)[:10]).date() < today
+    except (ValueError, TypeError):
+        # An unparseable deadline is a data problem, not a late task. Saying
+        # "late" here would put it in a list nobody can action.
+        return False
 
 
 class TaskPriority(str, Enum):

@@ -26,6 +26,31 @@ from services.supabase_client import supabase_client
 logger = logging.getLogger(__name__)
 
 
+
+def _overdue_tasks() -> list[dict]:
+    """Every task past its deadline — COMPUTED, not the `status` field.
+
+    `get_tasks(status="overdue")` returned only rows someone had stamped, and
+    nothing stamps them any more: TASK_REMINDER_ENABLED and
+    ALERT_SCHEDULER_ENABLED are both off. On 2026-08-11 that was 5 rows out of
+    18 genuinely late, so every alert in this module was firing on a quarter of
+    its input. [2026-08-11]
+
+    ONE query, no status filter: `is_overdue` already rejects the closed
+    statuses, so asking per-status only risked returning the same row several
+    times. The first version of this did exactly that and de-duped on `id` —
+    which silently DROPPED any row without one.
+
+    `limit` applies before this filter, but `get_tasks` orders by deadline
+    ascending with NULLs last, so past deadlines sort first and a late task
+    cannot fall outside the window.
+    """
+    from models.schemas import is_overdue
+
+    return [t for t in (supabase_client.get_tasks(limit=1000) or [])
+            if is_overdue(t)]
+
+
 def _within_lookback(record: dict, days: int, date_field: str = "created_at") -> bool:
     """Check if a record's date field is within the lookback window."""
     date_str = record.get(date_field, "")
@@ -193,7 +218,7 @@ def _check_overdue_clusters() -> list[dict]:
         List of alerts for overdue task clusters.
     """
     alerts = []
-    overdue_tasks = supabase_client.get_tasks(status="overdue")
+    overdue_tasks = _overdue_tasks()
     overdue_tasks = [t for t in overdue_tasks if _within_lookback(t, settings.ALERT_LOOKBACK_DAYS)]
     # v2.3: only cluster-alert on deadlines explicitly committed to.
     # INFERRED deadlines are LLM guesses — don't escalate "3 overdue" when
@@ -244,7 +269,7 @@ def _check_overdue_escalation() -> list[dict]:
     from config.escalation import classify_overdue_tier
 
     alerts = []
-    overdue_tasks = supabase_client.get_tasks(status="overdue")
+    overdue_tasks = _overdue_tasks()
     overdue_tasks = [t for t in overdue_tasks if _within_lookback(t, settings.ALERT_LOOKBACK_DAYS)]
     # v2.3: only escalate individual tasks with an EXPLICIT deadline.
     overdue_tasks = [t for t in overdue_tasks if t.get("deadline_confidence") == "EXPLICIT"]
@@ -307,7 +332,7 @@ def get_escalation_items() -> list[dict]:
     from config.escalation import classify_overdue_tier
 
     items = []
-    overdue_tasks = supabase_client.get_tasks(status="overdue")
+    overdue_tasks = _overdue_tasks()
 
     if not overdue_tasks:
         return items

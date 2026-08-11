@@ -26,14 +26,20 @@ class TestWeeklyDigestTierCap:
     async def test_get_task_summary_tier_cap_drops_ceo_from_lists_and_rollup(self):
         import processors.weekly_digest as wd
 
+        # Overdue is COMPUTED from the deadline now, so the late rows carry a
+        # past date and come back from the no-status call.
+        _late = [
+            {"title": _SECRET, "sensitivity": "ceo", "category": "A",
+             "urgency": "H", "deadline": "2020-01-01", "status": "pending"},
+            {"title": "team task", "sensitivity": "team", "category": "B",
+             "urgency": "L", "deadline": "2020-01-01", "status": "pending"},
+        ]
+
         def _get_tasks(status=None, **kw):
             if status == "done":
                 return [{"title": "ship docs", "sensitivity": "founders", "category": "A", "urgency": "M"}]
-            if status == "overdue":
-                return [
-                    {"title": _SECRET, "sensitivity": "ceo", "category": "A", "urgency": "H"},
-                    {"title": "team task", "sensitivity": "team", "category": "B", "urgency": "L"},
-                ]
+            if status is None:
+                return list(_late)
             return []  # pending
 
         with patch.object(wd, "supabase_client") as mock_sc, \

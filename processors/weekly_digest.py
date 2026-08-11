@@ -239,8 +239,13 @@ async def get_task_summary(tier_cap: int | None = None) -> dict:
         done_tasks = supabase_client.get_tasks(status="done")
         result["completed_this_week"] = done_tasks
 
-        # Get overdue tasks
-        overdue_tasks = supabase_client.get_tasks(status="overdue")
+        # Overdue is COMPUTED from the deadline. This docstring has claimed
+        # "status='overdue' or pending past deadline" since it was written, but
+        # the code only ever asked for the stamped rows — and nothing stamps
+        # them any more, so the digest was reporting 5 of 18. [2026-08-11]
+        from models.schemas import is_overdue
+        overdue_tasks = [t for t in (supabase_client.get_tasks(limit=1000) or [])
+                         if is_overdue(t)]
         result["overdue"] = overdue_tasks
 
         # Get tasks due in next 7 days (pending tasks, filter by deadline)

@@ -172,14 +172,22 @@ class TestReminderSuffix:
 # weekly digest — get_task_summary rollups
 # ---------------------------------------------------------------------------
 class TestDigestRollups:
+    # Overdue is now COMPUTED: the digest asks for every task and filters on
+    # the deadline, so the late row needs a real past date and the no-status
+    # call has to return it. A row with no deadline cannot be late.
+    _LATE = "2020-01-01"
+
     def _mock_tasks(self, status):
-        if status == "overdue":
-            return [{"urgency": "H", "category": "PRODUCT & TECHNOLOGY"}]
+        overdue = [{"urgency": "H", "category": "PRODUCT & TECHNOLOGY",
+                    "deadline": self._LATE, "status": "pending"}]
+        pending = [
+            {"urgency": "M", "category": "PRODUCT & TECHNOLOGY", "deadline": None},
+            {"urgency": "L", "category": None, "deadline": None},  # → "General"
+        ]
+        if status is None:
+            return overdue + pending
         if status == "pending":
-            return [
-                {"urgency": "M", "category": "PRODUCT & TECHNOLOGY", "deadline": None},
-                {"urgency": "L", "category": None, "deadline": None},  # → "General"
-            ]
+            return pending
         return []
 
     @patch.object(wd, "supabase_client")

@@ -383,10 +383,12 @@ async def synthesize_prep_insights(
 
     if participant_tasks:
         for name, tasks in participant_tasks.items():
-            overdue = [t for t in tasks if t.get("status") == "overdue" or (
-                t.get("deadline") and t["deadline"] < datetime.now().strftime("%Y-%m-%d")
-                and t.get("status") != "completed"
-            )]
+            # `is_overdue` rather than a local clause. The clause here excluded
+            # status "completed", which is not a value TaskStatus has — the
+            # enum says "done" — so every finished task with a past deadline
+            # was being read out as overdue in the prep. [2026-08-11]
+            from models.schemas import is_overdue
+            overdue = [t for t in tasks if is_overdue(t)]
             if overdue:
                 task_list = "\n".join(f"  - {t.get('title', '')} (due: {t.get('deadline', '?')})" for t in overdue)
                 context_parts.append(f"{name}'s overdue tasks:\n{task_list}")
