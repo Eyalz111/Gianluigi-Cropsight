@@ -366,11 +366,12 @@ formatting pass strips them — precisely what happened to the meetings pool
 Each phase is independently shippable, flag-gated, and reversible. Order is
 chosen so nothing writes a live surface until the data underneath is trusted.
 
-**Status, 2026-08-12.** Phases 0 and 2 are built and merged — Phase 2 now
+**Status, 2026-08-12.** Phases 0, 2 and 3 are built and merged — Phase 2
 including the legacy archive block (decision 7). Phase 1's 22 proposals are
 emitted and waiting on Eyal, and they gate everything visible: until a start
-date is approved the live half of the Timeline draws **zero bars**. Phases 1b
-and 3–5 are not started.
+date is approved the live half of the Timeline draws **zero bars**. Phase 3
+needs its migration run before it can propose. Phases 1b, 4 and 5 are not
+started.
 
 ### Phase 0 — Extract and archive *(no user-visible change)* — **DONE**
 - Promote `gantt_extract.py` to `scripts/extract_legacy_gantt.py`
@@ -499,12 +500,51 @@ Fixed:
    `updateSheetProperties` before the first ranged write makes it a stated
    invariant.
 
-### Phase 3 — Milestones
-- Run Migration B
-- Seed from the `Company OKRs` bars and the ★ rows, again as proposals
-- CEO tab renders milestones + the manual management block
-- **Exit criterion:** the slipped "Signing #1 MVP client" renders with both its
-  original and current date
+### Phase 3 — Milestones — **BUILT, FLAG OFF, MIGRATION NOT RUN**
+
+`scripts/migrate_milestones.sql` + `processors/milestones.py` (collapse, propose,
+apply, move) + `services/ceo_sheet.py` (the tab), behind `CEO_TAB_ENABLED`
+(default off) and `MILESTONE_SEEDING_ENABLED` (default on, but silent until the
+migration exists). Seeding rides the daily QA — wired from the start, because
+Phase 1 shipped a proposer with no caller.
+
+**Exit criterion met on real data.** 392 archived bars collapse to **16
+milestones**, and `Signing #1 MVP client` renders with both its dates: it is
+written at 2026-06-01 and again as `- postponed here` at 2026-07-06, in *two*
+lanes — four bars for one commitment and one move. Grouping on the row rather
+than the DATE would have recorded three moves for one postponement.
+
+Where they actually live — not the empty `STRATEGIC MILESTONE` section, and the
+board's own glyphs turn out to carry the kind:
+
+```
+★  Technology     product      MVP Product Delivery, Product V1 Target
+●  Commercial     commercial   First MVP Delivery, 1st Paying Client, Q-goals
+◆  Funding        funding      Pre-Seed Round timing
+   Company OKRs   by title     Q1 OKR, Investor's Package, Signing #1
+```
+
+`Strategy & Decisions` is deliberately **not** a source: a monthly investor
+update repeating to 2027-11, an annual offsite, two decisions. That is
+recurrence and decision history, and the Meetings pool already models
+recurrence.
+
+Two things worth carrying forward:
+
+*The management block is hand-maintained on a tab that regenerates every 30
+minutes.* The refresh reads the block back and re-emits it below the milestones,
+so it moves as the list grows instead of being clipped by a fixed boundary — and
+if that read fails the write is **abandoned**, because a stale tab is
+recoverable and a person's own words are not. Only the generated half is
+protected; protecting the whole tab would make the block read-only and the
+design pointless.
+
+*The history cell says "moved 1 Jun → 6 Jul", never "SLIPPED".* A test asserts
+no verdict word appears in it at all. Whether a move was a slip or a re-plan is
+Eyal's read.
+
+**Remaining before it can render:** run the migration, approve the 16 proposals,
+flip `CEO_TAB_ENABLED`.
 
 ### Phase 4 — Bidirectional edit
 - Dragging a bar is *not* supported; editing dates in cells is

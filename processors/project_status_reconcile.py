@@ -89,9 +89,10 @@ HOWTO_TAB = "How to use"
 # alone, and the failure would be this engine quietly parsing the view.
 from processors.focus_view import FOCUS_DATA_TAB, FOCUS_TAB  # noqa: E402
 from processors.timeline_view import TIMELINE_TAB  # noqa: E402
+from processors.milestones import CEO_TAB  # noqa: E402
 
 NON_AREA_TABS = frozenset({HOWTO_TAB, "Meetings", "Past Meetings",
-                           FOCUS_TAB, FOCUS_DATA_TAB, TIMELINE_TAB})
+                           FOCUS_TAB, FOCUS_DATA_TAB, TIMELINE_TAB, CEO_TAB})
 
 # Sheet column -> the DB field it maps to, per entity.
 _ACTION_FIELDS = {COL_DATE: "deadline", COL_RESP: "assignee",

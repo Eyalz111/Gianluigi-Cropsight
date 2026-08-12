@@ -191,6 +191,13 @@ class Settings(BaseSettings):
     # and does not see what he approved. Turn this off if the block reads as
     # clutter; nothing else depends on it. [2026-08-12]
     TIMELINE_LEGACY_OVERLAY_ENABLED: bool = Field(default=True, description="Draw the old board's archived plan as a collapsed block on the Timeline")
+    # Phase 3: the CEO tab — DB-backed milestones above a hand-maintained
+    # management block. Default OFF like the Timeline was: it writes a new tab
+    # into the live Project Status workbook, and the milestones table has to
+    # exist (scripts/migrate_milestones.sql) before it has anything to show.
+    # [2026-08-12]
+    CEO_TAB_ENABLED: bool = Field(default=False, description="Build the CEO tab (milestones + the manual management block)")
+    MILESTONE_SEEDING_ENABLED: bool = Field(default=True, description="Propose milestones found on the archived board (proposal only, never auto-created)")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")

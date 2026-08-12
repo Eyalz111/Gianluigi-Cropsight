@@ -707,6 +707,8 @@ class MCPServer:
                 elif type == "project":
                     types = ("project_new", "topic_project_link",
                              "project_start_proposal")
+                elif type == "milestone":
+                    types = ("milestone_proposal",)
                 elif type == "meeting":
                     types = ("task_is_a_meeting",)
                 elif type == "question":
@@ -812,9 +814,13 @@ class MCPServer:
                 # --- new canonical project (auto-learn) / question closure ---
                 if content_type in ("project_new", "topic_project_link",
                                     "question_resolved", "task_is_a_meeting",
-                                    "project_start_proposal"):
+                                    "project_start_proposal", "milestone_proposal"):
                     if content_type == "project_new":
                         from processors.project_learning import apply_project_proposal as _apply
+                    elif content_type == "milestone_proposal":
+                        # A company-level dated commitment recovered from the old
+                        # board, with its move history. See GANTT_V2_PLAN Phase 3.
+                        from processors.milestones import apply_milestone as _apply
                     elif content_type == "project_start_proposal":
                         # Freezes a start date onto the project so a Gantt bar
                         # has a left edge. See docs/GANTT_V2_PLAN.md Phase 1.

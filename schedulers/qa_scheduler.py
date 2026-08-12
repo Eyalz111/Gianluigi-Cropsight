@@ -113,6 +113,7 @@ def run_qa_check() -> dict:
     report["checks"]["project_learning"] = _run_project_learning(report["issues"])
     report["checks"]["meeting_shaped_tasks"] = _run_meeting_shaped_tasks(report["issues"])
     report["checks"]["project_start_dates"] = _run_project_start_dates(report["issues"])
+    report["checks"]["milestones"] = _run_milestone_seeding(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -736,6 +737,33 @@ def _run_project_start_dates(issues: list[str]) -> dict:
             )
     except Exception as e:                                   # noqa: BLE001
         logger.warning(f"Project start dates failed: {e}")
+    return result
+
+
+def _run_milestone_seeding(issues: list[str]) -> dict:
+    """Propose milestones read off the archived board. [2026-08-12]
+
+    Phase 3 of docs/GANTT_V2_PLAN.md. Wired from the start, because Phase 1
+    shipped a proposer with no caller and nobody noticed for a day.
+
+    Silent until `scripts/migrate_milestones.sql` has been run: the proposer
+    checks the table first and declines rather than queueing cards that could
+    not be actioned if approved.
+    """
+    result: dict = {"proposed": 0}
+    if not getattr(settings, "MILESTONE_SEEDING_ENABLED", False):
+        return {"skipped": "disabled"}
+    try:
+        from processors.milestones import propose_milestones
+
+        result.update(propose_milestones())
+        if result.get("proposed"):
+            issues.append(
+                f"{result['proposed']} milestone(s) recovered from the old board, "
+                "awaiting your approval"
+            )
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"Milestone seeding failed: {e}")
     return result
 
 

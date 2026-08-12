@@ -70,11 +70,17 @@ def _label(content_type: str, c: dict) -> str:
         )
     if content_type == "project_start_proposal":
         rec, gantt = c.get("recommended"), c.get("gantt_date")
+        # The source is NOT always the earliest task. A project with an archived
+        # bar and no tasks is recommended from the board instead, and saying
+        # "its earliest task" there would name a source that does not exist.
+        source = c.get("recommended_source")
+        origin = ("the old Gantt board" if source == "gantt_bar"
+                  else "its earliest task")
         lines = [
             f"Set the start date for <b>\"{c.get('project_name', '?')}\"</b>?",
-            f"<b>{rec or '—'}</b>  <i>(its earliest task)</i>",
+            f"<b>{rec or '—'}</b>  <i>({origin})</i>",
         ]
-        if gantt:
+        if gantt and source != "gantt_bar":
             # Shown as evidence, never as the recommendation: matching board
             # labels to projects by name is confidently wrong often enough that
             # Eyal has to be the one who reads it.
@@ -83,6 +89,23 @@ def _label(content_type: str, c: dict) -> str:
                 f"\"{(c.get('gantt_label') or '')[:60]}\" — if that is the same "
                 f"work, reject this and set the date by hand.</i>"
             )
+        return "\n".join(lines)
+    if content_type == "milestone_proposal":
+        moves = c.get("moves") or []
+        lines = [
+            f"Add <b>\"{c.get('title', '?')}\"</b> as a company milestone?",
+            f"<b>{c.get('target_date') or '—'}</b>  <i>({c.get('kind') or 'unclassified'})</i>",
+        ]
+        if moves:
+            # The board already recorded this move; approving preserves it
+            # rather than quietly adopting the later date as if it were the
+            # only one there had ever been.
+            first = c.get("original_date")
+            lines.append(
+                f"<i>The old board moved this: <b>{first}</b> → "
+                f"<b>{c.get('target_date')}</b>. Both dates are kept.</i>"
+            )
+        lines.append(f"<i>from: \"{(c.get('source_label') or '')[:70]}\"</i>")
         return "\n".join(lines)
     if content_type == "question_resolved":
         return (
@@ -146,13 +169,16 @@ def apply_proposal_decision(proposal_id: str, decision: str) -> dict:
         )
         return {"status": "ok", "decision": "approved" if approve else "rejected", "result": result}
 
-    if content_type in ("project_new", "question_resolved", "project_start_proposal"):
+    if content_type in ("project_new", "question_resolved", "project_start_proposal",
+                        "milestone_proposal"):
         result = None
         if approve:
             if content_type == "project_new":
                 from processors.project_learning import apply_project_proposal as _apply
             elif content_type == "project_start_proposal":
                 from processors.project_start_dates import apply_project_start as _apply
+            elif content_type == "milestone_proposal":
+                from processors.milestones import apply_milestone as _apply
             else:
                 from processors.question_lifecycle import apply_question_resolution as _apply
             result = _apply(content)

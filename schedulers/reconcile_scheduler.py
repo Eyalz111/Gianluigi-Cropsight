@@ -297,6 +297,17 @@ class ReconcileScheduler:
                         timeline = await refresh_timeline()
                     except Exception as te:
                         logger.warning(f"Timeline refresh failed (non-fatal): {te}")
+                # The CEO tab. Same rule again: a view, so a failure costs a
+                # stale render and nothing else. It carries Eyal's hand-written
+                # management block across each rebuild and abandons the write
+                # if it cannot read that block back. [2026-08-12]
+                ceo = None
+                if getattr(settings, "CEO_TAB_ENABLED", False):
+                    try:
+                        from services.ceo_sheet import refresh_ceo_tab
+                        ceo = await refresh_ceo_tab()
+                    except Exception as ce:
+                        logger.warning(f"CEO tab refresh failed (non-fatal): {ce}")
                 supabase_client.upsert_scheduler_heartbeat(
                     "reconcile",
                     details={"slot": slot,
@@ -307,7 +318,8 @@ class ReconcileScheduler:
                              "project_status": ps_summary,
                              "views": views,
                              "focus": focus,
-                             "timeline": timeline},
+                             "timeline": timeline,
+                             "ceo": ceo},
                 )
                 # Close the human->machine loop: after an auto-sync that actually
                 # applied edits, tell the group what landed (and any value the
