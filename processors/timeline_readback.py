@@ -36,6 +36,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from config.settings import settings
+from processors.sheet_format import display_date
 from processors.timeline_view import (
     HEADERS, HIDDEN_HEADERS, N_HIDDEN, N_LABEL_COLS, ROW_PROJECT, TIMELINE_TAB,
 )
@@ -217,17 +218,26 @@ def build_plan(grid: list[list], projects: dict, snaps: dict,
                 plan.manual_marks.append((uid, field))
                 plan.bump("pulled")
                 settled[field] = sheet_cmp
-                # Canonicalise in the SAME cycle, so "12/8" becomes 2026-08-12
+                # Canonicalise in the SAME cycle, so "12/8" becomes 12/08/2026
                 # now rather than looking unrecognised for 30 minutes.
-                if field in _DATE_FIELDS and raw != sheet_cmp:
-                    plan.cell_writes.append((row_number, col, sheet_cmp))
-                    plan.bump("normalized")
+                #
+                # Compared against the DISPLAY form, not the ISO comparison
+                # form: cells render as DD/MM/YYYY, so measuring against ISO
+                # would mark every correctly-typed date as needing a rewrite
+                # and churn a cell on every single cycle.
+                if field in _DATE_FIELDS:
+                    shown = display_date(sheet_cmp)
+                    if raw != shown:
+                        plan.cell_writes.append((row_number, col, shown))
+                        plan.bump("normalized")
             elif sheet_cmp != db_val:
                 if db_row.get(f"manual_{field}"):
                     plan.bump("manual_held")                # Rule 2
                     settled[field] = sheet_cmp
                 else:
-                    plan.cell_writes.append((row_number, col, db_val))
+                    plan.cell_writes.append(
+                        (row_number, col,
+                         display_date(db_val) if field in _DATE_FIELDS else db_val))
                     plan.bump("pushed")                     # Rule 4
                     settled[field] = db_val
             else:

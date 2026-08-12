@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 
 from config.settings import settings
 from processors.milestones import CEO_TAB, list_milestones
+from processors.sheet_format import centre_and_wrap, display_date, left_align
 from services.google_sheets import sheets_service
 
 logger = logging.getLogger(__name__)
@@ -76,16 +77,13 @@ _PROTECT_DESC = "Gianluigi: milestones are generated — the management block be
 
 
 def _fmt(d) -> str:
-    """1 Jun — short, because these are read at a glance."""
-    if not d:
-        return ""
-    try:
-        return datetime.fromisoformat(str(d)[:10]).strftime("%-d %b %Y")
-    except (ValueError, TypeError):
-        try:
-            return datetime.fromisoformat(str(d)[:10]).strftime("%d %b %Y").lstrip("0")
-        except (ValueError, TypeError):
-            return str(d)[:10]
+    """Dates here look like dates everywhere else.
+
+    An earlier draft rendered "1 Jun 2026", which reads nicely on its own and
+    badly next to the area tabs. Consistency across the workbook beats elegance
+    on one tab — see processors/sheet_format.
+    """
+    return display_date(d)
 
 
 def history_cell(milestone: dict) -> str:
@@ -269,6 +267,8 @@ def _format_requests(sid, n_rows, marker_row, milestone_rows, ssid) -> list[dict
             "textFormat": {"bold": True, "foregroundColor": _INK}}},
         "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
 
+    reqs.append(left_align(sid, 2, max(n_rows, 3), 0, 1))
+    reqs.append(centre_and_wrap(sid, 2, max(n_rows, 3), 1, N_COLS))
     for i, px in enumerate([420, 110, 120, 240, 90]):
         reqs.append({"updateDimensionProperties": {
             "range": {"sheetId": sid, "dimension": "COLUMNS",

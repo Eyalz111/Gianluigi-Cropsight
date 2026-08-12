@@ -13,6 +13,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 
 from config.settings import settings
+from processors.sheet_format import centre_and_wrap, display_date, left_align
 from processors.timeline_view import (
     GHOST_BG, HEADERS, HIDDEN_HEADERS, N_HIDDEN, N_LABEL_COLS, OPEN_END_BG,
     ROW_ARCHIVE, ROW_AREA, ROW_CHROME, ROW_PROJECT, ROW_TASK, STATUS_BG,
@@ -138,8 +139,8 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
             line = _row(ROW_PROJECT, proj["project_id"])
             line[0] = f"    {proj['name']}"
             line[1] = proj["owner"]
-            line[2] = str(proj["start"] or "")
-            line[3] = str(proj["target"] or "")
+            line[2] = display_date(proj["start"])
+            line[3] = display_date(proj["target"])
             line[4] = "retired" if proj["retired"] else ""
             grid.append(line)
             # The merge base is written HERE, by the render, because this is the
@@ -182,7 +183,7 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
                 trow = _row(ROW_TASK, proj["project_id"])
                 trow[0] = f"        └ {t['title'][:70]}"
                 trow[1] = t["assignee"]
-                trow[3] = str(t["deadline"] or "")
+                trow[3] = display_date(t["deadline"])
                 trow[4] = t["priority"]
                 grid.append(trow)
             if len(grid) > first_task_row:
@@ -428,6 +429,16 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
         "range": {"sheetId": sid, "dimension": "COLUMNS",
                   "startIndex": N_LABEL_COLS, "endIndex": n_week_end},
         "properties": {"pixelSize": 21}, "fields": "pixelSize"}})
+
+    # Alignment and wrap, from the one module that answers that question.
+    # Column 0 holds project and task titles and stays LEFT: a column of centred
+    # sentences has ragged edges on both sides and no vertical line for the eye
+    # to follow, which reads worse than the overflow it was meant to fix.
+    reqs.append(left_align(sid, FIRST_BODY_ROW, max(n_rows, FIRST_BODY_ROW + 1),
+                           0, 1))
+    reqs.append(centre_and_wrap(sid, FIRST_BODY_ROW,
+                                max(n_rows, FIRST_BODY_ROW + 1), 1, N_LABEL_COLS))
+    reqs.append(centre_and_wrap(sid, WEEK_ROW, WEEK_ROW + 1, 0, n_week_end))
 
     # The identity columns: narrow, hidden, and white-on-white so that unhiding
     # them still shows nothing useful — the same treatment project_status_sheet

@@ -771,9 +771,59 @@ nobody maintains.
    link. Collapsed by default, so "it doubles what is on screen" is answered:
    it does not, until asked. `TIMELINE_LEGACY_OVERLAY_ENABLED`, default on.
 
+8. **The board must not grow with finished work.** Eyal, reviewing the live tab:
+   *"once we will add more and more projects, it will be too big… in the
+   previous format we just had the certain weeks that the project is there, and
+   then once it finished the timeline keeps on going and we kind of get rid of
+   it."*
+
+   He is right, and it is a real flaw in Phase 2. The old board never grew
+   because its rows were **lanes** and work flowed through them; project-per-row
+   makes every project a permanent row — 27 today, ~60 in eighteen months, and
+   closing one *adds* to the pile instead of removing from it.
+
+   Two layouts were mocked against live data. **Option A chosen:** projects stay
+   the rows, and completed work folds into one collapsed line per area, so
+   visible height tracks OPEN work rather than cumulative work.
+
+   ```
+   visible rows        today (27)   ~18 months (60)
+   Phase 2 as built        33            66
+   Option A                35            42
+   Option B (lanes)        30            30
+   ```
+
+   Option B's flat line was the honest attraction and it is what the old board
+   did well. It was rejected because a lane has no identity: nothing can say
+   which project a bar is, which is exactly why the old board ended up detached
+   — `Own`/`Due` empty on all 1018 rows, 0 of 82 linked to a topic, hand
+   maintained until it drifted. That trade is the one this whole plan exists to
+   stop making.
+
+   Settled with it:
+   - **A month's grace.** A project leaves the main list a month after it is
+     marked done, so recent wins are still visible where you work.
+   - **The fold is collapsed by default** and completed bars **keep their
+     historical span**, so "what did we ship this year" stays answerable.
+   - **The bar's end is the PROJECT's end, not its tasks'.** Eyal: *"the ending
+     is judged by the ending of the project (not the tasks)."* Consistent with
+     decision 1 — a derived end moves whenever a task is re-dated.
+   - **Bars carry text** — the project's nearest concrete action, so a row says
+     what is happening rather than only that something is.
+   - **One meetings lane per area.** Recurring meetings draw as a faint
+     continuous band (a cadence, not events); one-offs are single markers. Six
+     rows for the company, not six hundred.
+   - **A management band** at the top: milestones, and OKRs/KPIs.
+
+9. **`status` must be DECLARED, not counted.** Required by 8: today a project is
+   `active` or `retired`, and one whose work is simply finished falls through to
+   `planned` — the same colour as one that has not started. Needs
+   `active | done | blocked | retired`, declared the way `kind` is on Project
+   Status, because the fold keys on it.
+
 ### Still open
 
-*(nothing — 1 through 7 are settled)*
+*(nothing — 1 through 9 are settled)*
 
 ---
 

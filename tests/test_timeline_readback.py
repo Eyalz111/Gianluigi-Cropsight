@@ -102,8 +102,18 @@ class TestRule1Pull:
         minutes after the question."""
         grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal", start="5/5/2026"))
         plan = build_plan(grid, _project(), _snap())
+        # The DATABASE takes ISO; the CELL takes the format the area tabs use.
         assert plan.updates == [("p1", {"start_date": "2026-05-05"})]
-        assert plan.cell_writes == [(5, 2, "2026-05-05")]
+        assert plan.cell_writes == [(5, 2, "05/05/2026")]
+
+    def test_a_correctly_typed_date_is_not_rewritten_every_cycle(self):
+        """The normalisation check compares against the DISPLAY form. Measuring
+        against ISO instead would mark every correctly-typed DD/MM date as
+        needing a rewrite and churn the cell on every single cycle."""
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal", start="05/05/2026"))
+        plan = build_plan(grid, _project(), _snap())
+        assert plan.updates == [("p1", {"start_date": "2026-05-05"})]
+        assert plan.cell_writes == [], "the cell was already correct"
 
 
 class TestNoMergeBaseNoEdit:
@@ -170,9 +180,10 @@ class TestRule4Push:
         grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal", start="2026-03-02"))
         projects = _project(start_date="2026-04-01")
         plan = build_plan(grid, projects, _snap(start_date="2026-03-02"))
-        # sheet == snapshot, so no human edit; the DB moved and wins.
+        # sheet == snapshot, so no human edit; the DB moved and wins — and it
+        # arrives in the cell as DD/MM/YYYY, not as the ISO the database holds.
         assert plan.updates == []
-        assert (5, 2, "2026-04-01") in plan.cell_writes
+        assert (5, 2, "01/04/2026") in plan.cell_writes
 
 
 class TestConflictsAreReported:

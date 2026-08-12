@@ -130,7 +130,11 @@ class TestHistoryCell:
                             "target_date": "2026-07-06",
                             "moves": [{"from_date": "2026-06-01",
                                        "to_date": "2026-07-06"}]})
-        assert "moved" in out and "Jun" in out and "Jul" in out
+        # DD/MM/YYYY, the format the area tabs use. An earlier draft rendered
+        # "1 Jun 2026", which reads nicely alone and badly beside every other
+        # tab in the workbook.
+        assert "moved" in out
+        assert "01/06/2026" in out and "06/07/2026" in out
 
     def test_no_verdict_language_anywhere(self):
         """A move can be a slip or a deliberate re-plan and nothing here can
