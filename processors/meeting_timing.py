@@ -55,6 +55,11 @@ _MONTHS = {m: i for i, m in enumerate(
 _DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d.%m.%Y", "%d-%m-%Y",
                  "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y")
 
+# How far a `29-2/9` style range may reach back into the previous month. See
+# `_day_range`: that reading only makes sense for a week or so straddling a
+# month end, and it has to refuse the long spans it would otherwise invent.
+_MAX_STRADDLE_DAYS = 14
+
 
 def _month_index(word: str) -> "int | None":
     return _MONTHS.get((word or "")[:3].lower())
@@ -91,6 +96,68 @@ def parse_single_date(text: str) -> "str | None":
                 if cand >= today or year != today.year:
                     return cand.isoformat()
     return None
+
+
+def _day_range(d1: str, d2: str, mo: str, yr: "str | None",
+               today: date) -> "tuple[str, str] | None":
+    """`23-29/8/2026` -> the two ISO dates it bounds, or None if it is not one.
+
+    The month and year belong to the SECOND day, because that is where they are
+    written. When the first day is the larger one — `29-2/9/2026`, a week
+    straddling a month end — the range starts in the PREVIOUS month. Eyal writes
+    weeks, and weeks cross months; reading it any other way produces a window
+    that ends before it begins.
+
+    Returns None rather than guessing whenever the numbers do not make a real
+    pair of dates. The caller then leaves the text unstructured, which is the
+    honest outcome and costs only the sorting.
+    """
+    try:
+        day1, day2, month = int(d1), int(d2), int(mo)
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= month <= 12:
+        return None
+
+    if yr:
+        year = int(yr)
+        if year < 100:
+            year += 2000
+    else:
+        # Anchored on the END, the same "this year unless it has passed" rule
+        # parse_single_date uses for a bare "15/9".
+        try:
+            year = today.year if date(today.year, month, day2) >= today \
+                else today.year + 1
+        except ValueError:
+            return None
+
+    try:
+        end = date(year, month, day2)
+    except ValueError:
+        return None
+
+    if day1 <= day2:
+        try:
+            start = date(year, month, day1)
+        except ValueError:
+            return None
+    else:
+        prev_month = 12 if month == 1 else month - 1
+        prev_year = year - 1 if month == 1 else year
+        try:
+            start = date(prev_year, prev_month, day1)
+        except ValueError:
+            return None
+        # A month-straddling WEEK, which is the only thing this reading is for.
+        # `29-2/9` is five days and obvious; `2-1/9` would be thirty, and a
+        # month-long "window" dressed as a week is worse than no window at all —
+        # it would sort and schedule as if somebody had committed to something.
+        # Two weeks is generous cover for a fortnight over a month end.
+        if (end - start).days > _MAX_STRADDLE_DAYS:
+            return None
+
+    return start.isoformat(), end.isoformat()
 
 
 def parse_timing(text, today: "date | None" = None) -> dict:
@@ -132,6 +199,28 @@ def parse_timing(text, today: "date | None" = None) -> dict:
         a, b = parse_single_date(m.group(1)), parse_single_date(m.group(2))
         if a and b:
             out.update(kind="window", window_start=min(a, b), window_end=max(a, b))
+            return out
+
+    # "23-29/8/2026" — a DAY RANGE inside one month, which is how Eyal actually
+    # writes a week. The generic branch above needs a month on BOTH sides, so
+    # this form fell through to `unknown`: stored verbatim, no window, invisible
+    # to anything that sorts or schedules. It appeared in the production log ten
+    # times in a single cycle. [2026-08-13]
+    #
+    # It runs AFTER the generic branch on purpose. Given "10/9 - 20/9" this
+    # pattern would otherwise match the tail "9 - 20/9" and read the start as
+    # the 9th instead of the 10th — off by a day, and plausible enough to go
+    # unnoticed. The lookbehind refuses a day glued to a "/" for the same
+    # reason, so the two branches cannot both claim one string.
+    m = re.search(r"(?<![\d/.])(\d{1,2})\s*(?:-|–|—|to|until|till)\s*"
+                  r"(\d{1,2})\s*[/.]\s*(\d{1,2})"
+                  r"(?:\s*[/.]\s*(\d{2,4}))?(?![\d/.])", low)
+    if m:
+        window = _day_range(m.group(1), m.group(2), m.group(3), m.group(4),
+                            today)
+        if window:
+            out.update(kind="window", window_start=window[0],
+                       window_end=window[1])
             return out
 
     # "week of 15/9"

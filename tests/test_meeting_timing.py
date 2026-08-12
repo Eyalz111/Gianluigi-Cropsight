@@ -108,6 +108,100 @@ class TestWindows:
         assert out["window_end"] == "2026-12-31"
 
 
+class TestTheDayRangeEyalActuallyWrites:
+    """`23-29/8/2026` — a bare day, then the range's end carrying the month.
+
+    The generic range branch needs a month on BOTH sides, so this form fell
+    through to `unknown`: kept verbatim, no window, invisible to anything that
+    sorts or schedules. It is not hypothetical — it appeared in the production
+    log ten times in a single reconcile cycle. [2026-08-13]
+    """
+
+    def test_the_live_example(self):
+        out = parse_timing("23-29/8/2026", TODAY)
+        assert out["kind"] == "window"
+        assert (out["window_start"], out["window_end"]) == ("2026-08-23",
+                                                            "2026-08-29")
+
+    def test_the_other_live_example(self):
+        out = parse_timing("16-22/8/2026", TODAY)
+        assert (out["window_start"], out["window_end"]) == ("2026-08-16",
+                                                            "2026-08-22")
+
+    def test_the_year_may_be_left_off(self):
+        out = parse_timing("23-29/8", TODAY)
+        assert (out["window_start"], out["window_end"]) == ("2026-08-23",
+                                                            "2026-08-29")
+
+    def test_a_two_digit_year(self):
+        out = parse_timing("1-5/9/26", TODAY)
+        assert (out["window_start"], out["window_end"]) == ("2026-09-01",
+                                                            "2026-09-05")
+
+    @pytest.mark.parametrize("sep", ["-", "–", "—", " to ", " until "])
+    def test_the_separators_people_type(self, sep):
+        out = parse_timing(f"23{sep}29/8/2026", TODAY)
+        assert out["window_start"] == "2026-08-23"
+
+    def test_a_month_already_past_means_next_year(self):
+        """Anchored on the END, the same rule a bare `15/9` already follows."""
+        out = parse_timing("1-5/2", TODAY)
+        assert out["window_start"] == "2027-02-01"
+
+    def test_a_week_straddling_a_month_end(self):
+        """Eyal writes WEEKS, and weeks cross months. The month belongs to the
+        second day, so a larger first day means the range starts in the month
+        before — reading it any other way ends the window before it begins."""
+        out = parse_timing("29-2/9/2026", TODAY)
+        assert (out["window_start"], out["window_end"]) == ("2026-08-29",
+                                                            "2026-09-02")
+
+    def test_a_week_straddling_a_YEAR_end(self):
+        out = parse_timing("29-2/1/2027", TODAY)
+        assert (out["window_start"], out["window_end"]) == ("2026-12-29",
+                                                            "2027-01-02")
+
+    def test_an_impossible_day_is_refused_not_guessed(self):
+        """Unstructured is the honest outcome, and it costs only the sorting."""
+        assert parse_timing("31-45/8/2026", TODAY)["kind"] == "unknown"
+        assert parse_timing("10-11/13/2026", TODAY)["kind"] == "unknown"
+        assert parse_timing("30-31/2/2026", TODAY)["kind"] == "unknown"
+
+    def test_a_long_straddle_is_refused(self):
+        """`2-1/9` would otherwise read as 2 Aug -> 1 Sep. A month-long 'window'
+        dressed as a week is worse than no window at all: it would sort and
+        schedule as if somebody had committed to something."""
+        assert parse_timing("2-1/9/2026", TODAY)["kind"] == "unknown"
+
+    def test_a_fortnight_over_a_month_end_still_reads(self):
+        """The cap is generous on purpose — refusing a real range is the more
+        expensive mistake here, because the text is all that is left."""
+        out = parse_timing("22-3/9/2026", TODAY)
+        assert (out["window_start"], out["window_end"]) == ("2026-08-22",
+                                                            "2026-09-03")
+
+    def test_it_does_not_steal_the_generic_range(self):
+        """THE ORDERING TEST. Given `10/9 - 20/9` this pattern would match the
+        tail `9 - 20/9` and read the start as the 9th instead of the 10th — off
+        by one day, and plausible enough to go unnoticed forever."""
+        out = parse_timing("10/9 - 20/9", TODAY)
+        assert out["window_start"] == "2026-09-10", "the 10th, not the 9th"
+        assert out["window_end"] == "2026-09-20"
+
+    def test_a_plain_date_is_still_a_date(self):
+        assert parse_timing("15/9", TODAY)["kind"] == "date"
+
+    def test_a_recurrence_still_wins(self):
+        """A cadence outranks any date inside it."""
+        assert parse_timing("every week 23-29/8/2026", TODAY)["kind"] == "recurrence"
+
+    def test_the_words_are_kept_verbatim_either_way(self):
+        """The rule the whole module exists for: an unreadable cell costs the
+        CELL, never the row — and the text is never parsed away."""
+        for text in ("23-29/8/2026", "31-45/8/2026"):
+            assert parse_timing(text, TODAY)["text"] == text
+
+
 class TestSorting:
     def test_a_recurrence_sorts_first_not_as_undated(self):
         """A weekly meeting has no single date, but it is the most live thing on
