@@ -283,3 +283,81 @@ class TestShadowMode:
         out, db_writes, sheet_writes, _ = await self._run(False, [])
         assert out == {"skipped": "empty read"}
         assert db_writes == [] and sheet_writes == []
+
+
+class TestTheMergeBaseIsBootstrapped:
+    """The readback only writes snapshots on its LIVE path, so in shadow mode no
+    base would ever exist — "no merge base means no edit" would refuse every
+    typed value, a shadow week would show nothing happening and prove nothing,
+    and the first real edit would vanish. The RENDER writes the base instead,
+    because that is the one moment sheet and database agree by construction."""
+
+    async def _render(self, readback_on):
+        import services.timeline_sheet as ts
+        from datetime import date
+        from processors.timeline_view import week_starts
+
+        svc = MagicMock()
+        svc._execute_with_retry.side_effect = lambda f: f()
+
+        async def _ensure(*a, **kw):
+            return 7
+        svc._ensure_tab = _ensure
+        sheets = svc.service.spreadsheets.return_value
+        sheets.get.side_effect = lambda **kw: {"sheets": []}
+        sheets.batchUpdate.side_effect = lambda **kw: MagicMock()
+        sheets.values.return_value.update.side_effect = lambda **kw: MagicMock()
+        sheets.values.return_value.clear.side_effect = lambda **kw: MagicMock()
+
+        data = {
+            "weeks": week_starts(),
+            "areas": {"AREA": [{
+                "project_id": "p1", "name": "Legal", "owner": "Eyal",
+                "start": date(2026, 3, 2), "target": date(2026, 4, 6),
+                "first_col": 0, "last_col": 5, "open_ended": False,
+                "status": "active", "retired": False, "tasks": []}]},
+            "archive": [], "stats": {},
+        }
+        written = []
+        with patch.object(ts, "build_timeline", return_value=data), \
+             patch.object(ts, "sheets_service", svc), \
+             patch.object(ts.settings, "PROJECT_STATUS_SHEET_ID", "ssid"), \
+             patch.object(ts.settings, "TIMELINE_READBACK_ENABLED", readback_on), \
+             patch("services.supabase_client.supabase_client"
+                   ".upsert_timeline_snapshot",
+                   side_effect=lambda **kw: written.append(kw) or True):
+            out = await ts.refresh_timeline()
+        return out, written
+
+    async def test_the_render_writes_the_base_when_readback_is_on(self):
+        out, written = await self._render(True)
+        assert out["snapshots"] == 1
+        assert written[0]["project_id"] == "p1"
+        assert written[0]["start_date"] == "2026-03-02"
+        assert written[0]["target_date"] == "2026-04-06"
+
+    async def test_the_base_records_the_row_the_project_was_rendered_on(self):
+        """A wrong row number would point the next cycle at another project."""
+        _, written = await self._render(True)
+        assert written[0]["sheet_row"] >= 5      # after the four chrome rows
+
+    async def test_nothing_is_written_when_the_tab_is_read_only(self):
+        """With no readback these rows are never consulted, so writing them is
+        pure noise against the database every thirty minutes."""
+        out, written = await self._render(False)
+        assert written == []
+        assert out["snapshots"] == 0
+
+    async def test_a_base_written_by_the_render_makes_the_next_edit_visible(self):
+        """The end-to-end point: render establishes the base, a person types,
+        and the readback now recognises it as an edit rather than refusing it."""
+        _, written = await self._render(True)
+        snap = {"p1": {"canonical_project_id": "p1",
+                       "start_date": written[0]["start_date"],
+                       "target_date": written[0]["target_date"],
+                       "owner": written[0]["owner"]}}
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal",
+                          start="2026-05-05", target="2026-04-06"))
+        projects = _project(target_date="2026-04-06")
+        plan = build_plan(grid, projects, snap)
+        assert plan.updates == [("p1", {"start_date": "2026-05-05"})]

@@ -124,6 +124,7 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
     fills: list[dict] = []          # (row, col_from, col_to, colour)
     area_rows: list[int] = []
     group_spans: list[tuple[int, int]] = []   # task rows to collapse
+    snapshot_rows: list[tuple] = []           # (project_id, row, start, target, owner)
 
     for area in sorted(areas):
         area_rows.append(len(grid))
@@ -141,6 +142,19 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
             line[3] = str(proj["target"] or "")
             line[4] = "retired" if proj["retired"] else ""
             grid.append(line)
+            # The merge base is written HERE, by the render, because this is the
+            # one moment the sheet and the database agree by construction.
+            #
+            # Without it the readback has no base at all: "no merge base means
+            # no edit" would refuse every typed value, and since the readback
+            # only writes snapshots on its LIVE path, shadow mode would never
+            # create one either. A shadow week would show nothing happening and
+            # prove nothing, and the first real edit would vanish. Found before
+            # anyone typed a date. [2026-08-12]
+            snapshot_rows.append((proj["project_id"], row + 1,
+                                  str(proj["start"] or ""),
+                                  str(proj["target"] or ""),
+                                  proj["owner"] or ""))
 
             if proj["first_col"] >= 0:
                 a = N_LABEL_COLS + proj["first_col"]
@@ -257,7 +271,22 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
             lambda: sheets_service.service.spreadsheets().batchUpdate(
                 spreadsheetId=ssid, body={"requests": reqs}))
 
-    out = {"rows": len(grid), "weeks": len(weeks), **data["stats"]}
+    # Merge base LAST, and only after the write succeeded — recording what the
+    # sheet shows before it actually shows it would make the next cycle compare
+    # against a row that was never rendered. Only when the readback is on: with
+    # a read-only tab these rows are never consulted.
+    snapped = 0
+    if getattr(settings, "TIMELINE_READBACK_ENABLED", False):
+        from services.supabase_client import supabase_client
+        for project_id, row_number, start, target, owner in snapshot_rows:
+            if supabase_client.upsert_timeline_snapshot(
+                    project_id=project_id, sheet_row=row_number,
+                    start_date=start or None, target_date=target or None,
+                    owner=owner or None):
+                snapped += 1
+
+    out = {"rows": len(grid), "weeks": len(weeks), "snapshots": snapped,
+           **data["stats"]}
     logger.info(f"[timeline] {out}")
     return out
 
