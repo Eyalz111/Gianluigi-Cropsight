@@ -111,9 +111,12 @@ def propose_project_starts() -> dict:
     passes through.
     """
     c = supabase_client.client
-    projects = [p for p in (c.table("canonical_projects").select("*")
-                            .execute()).data or []
-                if (p.get("status") or "active") != "retired"]
+    # RETIRED PROJECTS ARE INCLUDED. Eyal asked for them to stay on the
+    # Timeline in the Completed colour, and a bar needs a left edge like any
+    # other — skipping them meant they could never be drawn at all. They are
+    # also the case where the archived board is the ONLY possible source: a
+    # retired project typically has no open tasks to derive from. [2026-08-12]
+    projects = (c.table("canonical_projects").select("*").execute()).data or []
     areas = {a["id"]: a["name"] for a in
              (c.table("areas").select("id,name").execute()).data or []}
     tasks = (c.table("tasks").select("id,project_id,created_at")

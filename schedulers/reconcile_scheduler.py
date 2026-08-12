@@ -288,6 +288,15 @@ class ReconcileScheduler:
                         focus = await refresh_focus()
                     except Exception as fe:
                         logger.warning(f"Focus view refresh failed (non-fatal): {fe}")
+                # The Timeline tab. Same rule as the two above: a view, so a
+                # failure costs a stale render and nothing else. [2026-08-12]
+                timeline = None
+                if getattr(settings, "TIMELINE_VIEW_ENABLED", False):
+                    try:
+                        from services.timeline_sheet import refresh_timeline
+                        timeline = await refresh_timeline()
+                    except Exception as te:
+                        logger.warning(f"Timeline refresh failed (non-fatal): {te}")
                 supabase_client.upsert_scheduler_heartbeat(
                     "reconcile",
                     details={"slot": slot,
@@ -297,7 +306,8 @@ class ReconcileScheduler:
                              "projects": proj_summary if isinstance(proj_summary, dict) else None,
                              "project_status": ps_summary,
                              "views": views,
-                             "focus": focus},
+                             "focus": focus,
+                             "timeline": timeline},
                 )
                 # Close the human->machine loop: after an auto-sync that actually
                 # applied edits, tell the group what landed (and any value the

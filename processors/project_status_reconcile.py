@@ -88,9 +88,10 @@ HOWTO_TAB = "How to use"
 # spelled again: two copies of a tab name is how one of them ends up renamed
 # alone, and the failure would be this engine quietly parsing the view.
 from processors.focus_view import FOCUS_DATA_TAB, FOCUS_TAB  # noqa: E402
+from processors.timeline_view import TIMELINE_TAB  # noqa: E402
 
 NON_AREA_TABS = frozenset({HOWTO_TAB, "Meetings", "Past Meetings",
-                           FOCUS_TAB, FOCUS_DATA_TAB})
+                           FOCUS_TAB, FOCUS_DATA_TAB, TIMELINE_TAB})
 
 # Sheet column -> the DB field it maps to, per entity.
 _ACTION_FIELDS = {COL_DATE: "deadline", COL_RESP: "assignee",

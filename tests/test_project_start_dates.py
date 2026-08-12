@@ -154,3 +154,30 @@ class TestWiring:
                       {"project_name": "Cloud", "recommended": "2026-07-22"})
         assert "Cloud" in card
         assert "old Gantt" not in card
+
+
+class TestRetiredProjectsAreProposedToo:
+    """Eyal asked for retired projects to stay on the Timeline in the Completed
+    colour. A bar still needs a left edge, so skipping them at proposal time
+    meant they could never be drawn at all — they would sit as dotted lines
+    forever. They are also the case where the archived board is the only
+    possible source, since a retired project usually has no open tasks.
+    """
+
+    def test_the_proposal_query_does_not_filter_out_retired(self):
+        import ast
+        import pathlib
+
+        src = pathlib.Path("processors/project_start_dates.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "propose_project_starts")
+        # No comparison against the literal "retired" anywhere in the function:
+        # that is what excluded them.
+        literals = {n.value for n in ast.walk(fn)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        assert "retired" not in literals, (
+            "propose_project_starts is filtering on status again — retired "
+            "projects would lose their bars")

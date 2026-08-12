@@ -177,6 +177,12 @@ class Settings(BaseSettings):
     # discarded on the next refresh. [2026-08-11]
     FOCUS_VIEW_ENABLED: bool = Field(default=False, description="Build the Focus tab (one re-sliceable view of everything open)")
     FOCUS_STALE_DAYS: int = Field(default=90, description="Age at which an open item is flagged stale on the Focus tab")
+    # The Timeline tab — the Gantt rebuilt on project rows over a 96-week grid
+    # (docs/GANTT_V2_PLAN.md). Phase 2 is RENDER ONLY: nothing is read back, and
+    # the tab is protected, because an edit there would vanish on the next
+    # refresh. Reading edits back is phase 4 and ships in shadow mode first.
+    # [2026-08-12]
+    TIMELINE_VIEW_ENABLED: bool = Field(default=False, description="Build the Timeline tab (projects on a weekly grid)")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")
