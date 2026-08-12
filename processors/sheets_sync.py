@@ -1339,7 +1339,14 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
     _drop_days = int(getattr(settings, "TASK_ARCHIVAL_DAYS", 60) or 60)
     _drop_cutoff = datetime.now(timezone.utc) - timedelta(days=_drop_days)
 
-    def _aged_out(iso) -> bool:
+    # HELD MEETINGS LEAVE AFTER TWO WEEKS — Eyal's number. Its own timer, not
+    # the 60-day dropped one: a meeting that happened is history worth glancing
+    # at for a fortnight, whereas an abandoned one is kept mainly so a deletion
+    # can be noticed and undone. [2026-08-13]
+    _held_days = int(getattr(settings, "MEETING_HELD_ARCHIVE_DAYS", 14) or 14)
+    _held_cutoff = datetime.now(timezone.utc) - timedelta(days=_held_days)
+
+    def _older_than(iso, cutoff) -> bool:
         if not iso:
             return False
         try:
@@ -1348,7 +1355,32 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                 d = d.replace(tzinfo=timezone.utc)
         except Exception:
             return False
-        return d < _drop_cutoff
+        return d < cutoff
+
+    def _aged_out(iso) -> bool:
+        return _older_than(iso, _drop_cutoff)
+
+    def _held_aged_out(dm: dict) -> bool:
+        """Two weeks since the meeting became HELD — measured from `held_at`.
+
+        Never from `updated_at`. That moves on every edit, and the reconcile
+        edits rows: both held meetings on the live tab carry the timestamp of
+        last night's sync rather than of the day they happened. Keyed on it,
+        renaming a held meeting would silently restart its fortnight and a
+        tab-wide write would restart everyone's at once.
+
+        `held_at` is stamped by a database trigger on the transition into held
+        (scripts/migrate_meeting_held_at.sql) and is not touched while the
+        meeting stays held.
+
+        A MISSING held_at MEANS "DO NOT ARCHIVE". Before the migration runs every
+        held row reads None, and `_older_than` returns False for it — the safe
+        reading of "nobody knows when this happened" is to leave it where it is.
+        The inverse, treating an absent timestamp as infinitely old, would sweep
+        every held meeting off the tab the first time this ran against an
+        unmigrated database.
+        """
+        return _older_than(dm.get("held_at"), _held_cutoff)
 
     def _cell(col_key, row, value):
         if row:
@@ -1547,11 +1579,27 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         # Only age-out a meeting that was ALREADY 'dropped' in the DB before this
         # sync: the drop edit is itself a "touch", so a just-dropped meeting gets
         # the full window, not immediate archival on the same reconcile. [review #14]
-        if (_normalize(final.get("status")) == "dropped"
-                and _normalize(dm.get("status")) == "dropped"
+        # HELD sinks first and leaves second. MEETING_DISPLAY_ORDER already puts
+        # held second-from-last, so the sinking needs no code; what was missing
+        # was the leaving. Two weeks after it became held, the row moves to Past
+        # Meetings — where nothing is lost: the move is append-then-delete,
+        # idempotent by UUID, and the follow_up_meetings row keeps its status
+        # untouched. [2026-08-13]
+        _final_st = _normalize(final.get("status"))
+        _db_st = _normalize(dm.get("status"))
+        # Both halves of each pair, for the same reason the dropped branch has
+        # always required them: the edit that marks a meeting held is itself a
+        # touch, so a meeting held in THIS cycle must get its full window rather
+        # than be archived out from under the person who just marked it.
+        if (_final_st == "dropped" and _db_st == "dropped"
                 and _aged_out(dm.get("updated_at"))):
             archive_moves.append({**sm, "status": final.get("status")})
             summary["archived"] = summary.get("archived", 0) + 1
+        elif (_final_st == "held" and _db_st == "held"
+                and _held_aged_out(dm)):
+            archive_moves.append({**sm, "status": final.get("status")})
+            summary["archived"] = summary.get("archived", 0) + 1
+            summary["archived_held"] = summary.get("archived_held", 0) + 1
         else:
             snapshot_writes.append((
                 mid, row, final.get("title"), final.get("label"), final.get("led_by"),

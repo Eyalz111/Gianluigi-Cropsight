@@ -310,6 +310,62 @@ class TestToScheduleRename:
                 f"{sorted(set(table) ^ set(MEETING_STATUSES))} out of step")
 
 
+class TestTheSortHonoursTheAliases:
+    """An alias table the reader honours and the sort does not is two different
+    answers to "what status is this". [2026-08-13]
+
+    `MEETING_DISPLAY_ORDER.get(status, 1)` is keyed on the current spellings, so
+    a row still reading `not_scheduled` matched no key and inherited the default
+    — rank 1, which is `scheduled`'s. Three unbooked meetings therefore sorted
+    among the booked ones and above seventeen parked ones, on the tab whose
+    entire job is to show what needs booking.
+    """
+
+    # THE TITLES ARE CHOSEN SO THE ASSERTION CAN FAIL. Ranks 1 and 2 tie-break on
+    # title, so naming the pre-rename row last alphabetically makes the broken
+    # order and the correct order IDENTICAL — the test would have passed against
+    # the defect it exists to catch. `a_...` sorts first, so only the rank can
+    # put it second.
+    def test_an_old_spelling_ranks_where_to_schedule_ranks(self):
+        from services.google_sheets import _sorted_meetings
+        rows = [
+            {"status": "parked", "title": "m_parked"},
+            {"status": "not_scheduled", "title": "a_pre_rename"},
+            {"status": "scheduled", "title": "z_booked"},
+        ]
+        assert [m["title"] for m in _sorted_meetings(rows)] == [
+            "z_booked", "a_pre_rename", "m_parked"]
+
+    def test_the_old_spelling_no_longer_ties_with_scheduled(self):
+        """The specific defect: the default rank IS scheduled's rank, so a tie
+        with `scheduled` was the whole bug and nothing else showed it."""
+        from services.google_sheets import _sorted_meetings, MEETING_DISPLAY_ORDER
+        ordered = _sorted_meetings([
+            {"status": "not_scheduled", "title": "a_pre_rename"},
+            {"status": "scheduled", "title": "z_booked"},
+        ])
+        assert [m["title"] for m in ordered] == ["z_booked", "a_pre_rename"]
+        assert MEETING_DISPLAY_ORDER["scheduled"] != MEETING_DISPLAY_ORDER["to_schedule"]
+
+    def test_held_sorts_below_everything_still_live(self):
+        """Eyal: held sinks to the bottom. It already did — this pins it, because
+        the two-week archival built on top assumes it."""
+        from services.google_sheets import MEETING_DISPLAY_ORDER as D
+        for live in ("recurring", "scheduled", "to_schedule", "parked"):
+            assert D[live] < D["held"], f"{live} must sit above held"
+
+    def test_the_tab_sort_key_agrees_with_the_row_sort(self):
+        """Two sorts over one tab — the daily re-sort reads cells, the rebuild
+        reads dicts. They must not disagree about an old spelling."""
+        from services.google_sheets import (
+            MEETING_COL_INDEX, MEETING_DISPLAY_ORDER, canonical_meeting_status)
+        row = [""] * (max(MEETING_COL_INDEX.values()) + 1)
+        row[MEETING_COL_INDEX["status"]] = "not_scheduled"
+        rank = MEETING_DISPLAY_ORDER.get(
+            canonical_meeting_status(row[MEETING_COL_INDEX["status"]]) or "to_schedule", 1)
+        assert rank == MEETING_DISPLAY_ORDER["to_schedule"]
+
+
 class TestFocusShowsOnlyWhatNeedsAction:
     """Eyal: "only the scheduled and to schedule ones, not the park and held"."""
 

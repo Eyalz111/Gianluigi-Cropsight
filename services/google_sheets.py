@@ -755,8 +755,14 @@ def _sorted_meetings(meetings: list[dict]) -> list[dict]:
     first. Uses MEETING_DISPLAY_ORDER, not the progression order. [2026-07-24]
     """
     def _key(m: dict):
+        # Canonicalise before ranking. MEETING_DISPLAY_ORDER is keyed on the
+        # current spellings, so a row still reading `not_scheduled` missed every
+        # key and fell to the default 1 — the SAME rank as `scheduled`, which put
+        # three unbooked meetings above seventeen parked ones and among the
+        # booked. An alias table that the reader honours and the sort does not is
+        # two different answers to "what status is this". [2026-08-13]
         order = MEETING_DISPLAY_ORDER.get(
-            (m.get("status") or "to_schedule").strip().lower(), 1
+            canonical_meeting_status(m.get("status")) or "to_schedule", 1
         )
         return (order, str(m.get("proposed_date") or "9999"), m.get("title") or "")
     return sorted(meetings, key=_key)
@@ -1579,8 +1585,10 @@ class GoogleSheetsService:
             def _c(k):
                 i = MEETING_COL_INDEX.get(k)
                 return (row[i].strip() if i is not None and i < len(row) else "")
-            st = _c("status").lower()
-            rank = MEETING_DISPLAY_ORDER.get(st, 1)
+            # Canonicalised for the same reason as _sorted_meetings: an old
+            # spelling missed every key and inherited `scheduled`'s rank.
+            rank = MEETING_DISPLAY_ORDER.get(
+                canonical_meeting_status(_c("status")) or "to_schedule", 1)
             d = parse_human_date(_c("proposed_date"))
             return (rank, 0 if d else 1, d or "9999-99-99", _c("title").lower())
         return await self._resort_tab(MEETING_TAB_NAME, MEETING_TRACKER_HEADERS, _key,

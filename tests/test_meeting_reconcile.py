@@ -411,6 +411,168 @@ class TestStatusCellCanonicalisation:
         assert calls["update"] == []
 
 
+class TestHeldMeetingsAgeOut:
+    """Held meetings sink, then leave after two weeks. Eyal's number. [2026-08-13]
+
+    The sinking was already true (MEETING_DISPLAY_ORDER puts held second-from-
+    last); the leaving needed a notion the schema did not have. `held_at` is
+    stamped by a database trigger on the transition INTO held and is not touched
+    afterwards, which is the whole point — `updated_at` moves on every edit, and
+    the reconcile edits rows, so both held meetings on the live tab carried the
+    timestamp of last night's sync rather than of the day they happened.
+    """
+
+    @staticmethod
+    def _ago(days):
+        from datetime import datetime, timezone, timedelta
+        return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    async def test_held_longer_than_two_weeks_leaves(self, monkeypatch):
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(15))]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived_held") == 1
+        assert calls["archive"][0]["id"] == "m1"
+
+    async def test_held_inside_the_window_stays(self, monkeypatch):
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(3))]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived", 0) == 0
+        assert calls["archive"] == []
+        assert len(calls["snapshot"]) == 1, "it stays, so it is snapshotted"
+
+    async def test_a_missing_held_at_NEVER_archives(self, monkeypatch):
+        """THE GUARD THAT MATTERS. Before migrate_meeting_held_at.sql runs, every
+        held row reads None. Treating an absent timestamp as infinitely old would
+        sweep every held meeting off the tab the first time this ran against an
+        unmigrated database — 48 rows, in one pass, on a deploy."""
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held")]   # no held_at key
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived", 0) == 0
+        assert calls["archive"] == []
+
+    async def test_an_explicit_null_held_at_never_archives(self, monkeypatch):
+        """A present-but-null column, not just a missing key — the distinction
+        that broke every meeting edit for two days on 2026-08-11."""
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held", held_at=None)]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived", 0) == 0
+        assert calls["archive"] == []
+
+    async def test_the_timer_is_held_at_not_updated_at(self, monkeypatch):
+        """Held long ago, edited last night. `updated_at` says "fresh" and
+        `held_at` says "a month" — the row must leave. Keyed on updated_at (the
+        way the dropped timer is) a rename would silently restart the fortnight."""
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(30), updated_at=self._ago(0))]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived_held") == 1
+
+    async def test_an_ancient_updated_at_does_not_drag_a_fresh_hold_out(self, monkeypatch):
+        """The converse. Held yesterday, untouched otherwise for a year."""
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(1), updated_at="2020-01-01T00:00:00+00:00")]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived", 0) == 0
+
+    async def test_held_has_its_own_window_not_the_60_day_one(self, monkeypatch):
+        """20 days is past the fortnight and nowhere near TASK_ARCHIVAL_DAYS.
+        Sharing the dropped timer would keep held meetings for two months."""
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(20))]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived_held") == 1
+
+    async def test_the_window_is_configurable(self, monkeypatch):
+        from config.settings import settings
+        monkeypatch.setattr(settings, "MEETING_HELD_ARCHIVE_DAYS", 60, raising=False)
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(20))]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived", 0) == 0
+
+    async def test_a_meeting_held_in_THIS_cycle_gets_its_full_window(self, monkeypatch):
+        """The edit that marks a meeting held is itself a touch. The DB still
+        holds the pre-hold status, so nothing may archive it out from under the
+        person who has just marked it — even with a stale held_at present."""
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="scheduled",
+                     held_at=self._ago(90))]
+        snap = {"m1": {"title": "Kickoff", "status": "scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("archived", 0) == 0
+        assert calls["update"] == [("m1", {"status": "held"})]
+
+    async def test_shadow_mode_moves_nothing(self, monkeypatch):
+        sheet = [_srow(id="m1", title="Kickoff", status="held")]
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(90))]
+        snap = {"m1": {"title": "Kickoff", "status": "held"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap, shadow=True)
+
+        await ss.reconcile_meetings()
+
+        fake.archive_meeting_rows.assert_not_called()
+
+    async def test_an_archived_held_meeting_is_not_dragged_back(self, monkeypatch):
+        """It leaves the tab, so the next cycle sees a DB-only held meeting. The
+        re-add path must read Past Meetings and leave it there, or the fortnight
+        timer becomes a row that vanishes and reappears every 30 minutes."""
+        db = [_dbrow(id="m1", title="Kickoff", status="held",
+                     held_at=self._ago(90))]
+        calls, fake = _setup(monkeypatch, [], db, {"m1": {"status": "held"}})
+        fake.archived_meeting_ids = AsyncMock(return_value={"m1"})
+
+        res = await ss.reconcile_meetings()
+
+        assert res.get("readded", 0) == 0
+        fake.add_meetings_batch_to_sheet.assert_not_called()
+
+
 class TestTerminalArchive:
     """Held meetings STAY on the tab as visible history; dropped meetings stay
     too until they've been untouched for the archival window (TASK_ARCHIVAL_DAYS),

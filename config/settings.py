@@ -743,6 +743,18 @@ class Settings(BaseSettings):
         default=60,
         description="Auto-archive done tasks (and dropped meetings) untouched this many days"
     )
+    MEETING_HELD_ARCHIVE_DAYS: int = Field(
+        default=14,
+        description=(
+            "Days a HELD meeting stays on the Meetings tab before moving to Past "
+            "Meetings. Eyal's number, 2026-08-13. Deliberately its own timer and "
+            "not TASK_ARCHIVAL_DAYS: a meeting that happened is history worth a "
+            "glance for a fortnight, while an abandoned one is kept mainly so a "
+            "deletion can be noticed and undone. Measured from follow_up_meetings"
+            ".held_at (migrate_meeting_held_at.sql), never from updated_at — a "
+            "missing held_at means 'do not archive'."
+        ),
+    )
 
     # Phase 12 A2: Continuity-aware extraction
     CONTINUITY_AUTO_APPLY_ENABLED: bool = Field(
