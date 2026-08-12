@@ -662,6 +662,63 @@ at it — the edit would vanish and never reach the DB. Ordering asserted by tes
 
 - **Exit criterion:** a clean shadow week, then `TIMELINE_SHADOW_MODE=false`
 
+### Phase 6 — the Option A rebuild — **BUILT 2026-08-13, MIGRATION NOT RUN**
+
+Decisions 8 and 9, plus 10 and 11 which settle where their loose ends land.
+`scripts/migrate_project_declared_status.sql` + the rewritten
+`processors/timeline_view.py` / `services/timeline_sheet.py`, with `status`
+added to `processors/timeline_readback.py`.
+
+**Measured on live data the moment it was built: 35 visible rows** — the exact
+figure the Option A mock predicted, against 123 for Phase 2 with its task
+waterfalls expanded.
+
+```
+6 area headers + 3 meetings lanes + 23 open projects + 3 fold lines = 35
+```
+
+What is in it:
+
+- **Status declared, not counted.** `active | blocked | done | retired`, a
+  dropdown on the Timeline. `planned` survives only as a RENDER state — an
+  active project whose start is still in the future — derived from a date
+  rather than from a task count, so it can never absorb "finished" again.
+- **The fold.** One collapsed line per area, `▸ Completed (n)`, holding the
+  finished projects with their historical spans. A month's grace for `done`
+  measured from `done_at`; `retired` folds at once, because it is not a win and
+  there is nothing to leave on show.
+- **Bars carry text** — the project's nearest concrete action, printed into the
+  bar's first cell and overflowing across its own bar, the mechanism the old
+  board used and the archive block already relies on.
+- **One meetings lane per area.** Recurring meetings are a faint continuous
+  band (a cadence, not events); booked and held one-offs are single markers,
+  several in a week collapsing to one marker with a count in its note. Six rows
+  for the company, not six hundred.
+- **The milestone band** across the top, read-only (decision 11).
+
+Three things worth carrying forward:
+
+*A missing timestamp means DO NOT FOLD.* Before the migration runs every row
+reads `done_at = None`, and treating that as infinitely old would fold every
+finished project the first time this ran. Pinned twice — a missing key and an
+explicit null — because a `.get()` default only covers the missing one, which is
+the distinction that broke every meeting edit for two days on 2026-08-11.
+
+*A folded bar is never open-ended.* An open end means "still going, end
+unknown", which is a contradiction on a project somebody declared finished, and
+it would wash the pale tint from its start to the right-hand edge — so the
+archive of what we shipped would mostly claim ongoing work.
+
+*The task waterfall was never actually collapsed.* Its comment said "collapsed
+by default" and only the archive sent the second `updateDimensionGroup` that
+closes a group. Harmless in Phase 2; fatal to Option A, because an expanded
+waterfall puts all 90 tasks back on the board and undoes exactly the height the
+fold reclaims. Every group now arrives shut.
+
+**Remaining before it renders:** run the migration, and the same Phase 1 gate as
+everything else — 0 of 27 projects have a start date, so the board still draws
+zero bars until Eyal approves the 22 proposals.
+
 ### Phase 5 — Freeze the old board *(decided 2026-08-12)*
 
 Eyal: *"dont make it run in parallel, just dont delete it."* Freeze, keep,
@@ -821,9 +878,47 @@ nobody maintains.
    `active | done | blocked | retired`, declared the way `kind` is on Project
    Status, because the fold keys on it.
 
+10. **The declared status is set on the Timeline itself.** Decision 9 says the
+    status must be declared; it did not say where. Asked and answered
+    2026-08-13: the Timeline's own column 4, which was headed `Priority` and
+    was already rendering the word "retired" into it — the header and the
+    content had disagreed since Phase 2.
+
+    It adds **no second writer**. Nothing else in the workspace sets a project's
+    status today, so the Timeline becomes the field's only editable home, the
+    same shape `start_date` already has. The alternatives were both worse: the
+    Projects tab is the natural face of `canonical_projects` but is rarely
+    visited, so a project would sit finished for weeks before anyone marked it;
+    the Project Status area tabs are visited daily but put a second writer next
+    to the fields Nechama edits all day, which is the collision family that
+    produced every cross-surface defect of 2026-08.
+
+    Declared where the consequence shows up: the fold happens on this tab, so
+    marking something done and watching it leave are the same gesture.
+    `status` joins `EDITABLE`, `NEVER_BLANK` and `_PROJECT_MANUAL_FIELDS`, and
+    a value outside the vocabulary costs the CELL and not the row — the CHECK
+    constraint would reject it and take every other edit on that row with it.
+
+11. **§5 and decision 8 contradicted each other on the management band, and
+    both survive.** §5 decided milestones belong on a separate CEO tab because
+    "its rows are a different kind of object with a different edit cadence".
+    Decision 8, written later the same day, gave the Timeline "a management
+    band at the top: milestones, and OKRs/KPIs". Resolved 2026-08-13:
+
+    **The milestones render as a read-only band on the Timeline, and the CEO
+    tab stays their editable home.** The band earns its row by being the one
+    place a commitment can be read against the work underneath it, which is
+    exactly what a separate tab cannot show. Two surfaces RENDERING the same
+    rows is fine; two surfaces WRITING them is the defect family this plan
+    exists to avoid, so the band writes nothing.
+
+    The hand-maintained OKR/escalation block does **not** move. It has no
+    database source, it is edited by a person, and the Timeline regenerates
+    every thirty minutes.
+
 ### Still open
 
-*(nothing — 1 through 9 are settled)*
+*(nothing — 1 through 11 are settled)*
 
 ---
 

@@ -145,7 +145,9 @@ class TestArchiveRendering:
                 "project_id": "p1", "name": "P", "owner": "E",
                 "start": date(2026, 3, 2), "target": date(2026, 4, 6),
                 "first_col": 0, "last_col": 5, "open_ended": False,
-                "status": "active", "retired": False, "tasks": []}]},
+                "declared": "active", "status": "active", "folded": False,
+                "action": "", "tasks": []}]},
+            "folded": {}, "lanes": {}, "milestones": [],
             "archive": archive,
             "stats": {},
         }
@@ -180,12 +182,17 @@ class TestArchiveRendering:
 
     async def test_the_span_is_painted_in_the_ghost_colour(self):
         from processors.timeline_view import N_LABEL_COLS
+        from services.timeline_sheet import FIRST_BODY_ROW
         cap = await self._render(self._archive())
+        # BODY rows only. The ghost LEGEND swatch moved into the first week
+        # column when the status legend grew to five entries and filled the
+        # label block, so a column-only filter now matches it too. [2026-08-13]
         painted = [r for r in cap["reqs"]
                    if (r.get("repeatCell") or {}).get("cell", {})
                    .get("userEnteredFormat", {}).get("backgroundColor")
                    == _rgb_of(GHOST_BG)
-                   and r["repeatCell"]["range"]["startColumnIndex"] >= N_LABEL_COLS]
+                   and r["repeatCell"]["range"]["startColumnIndex"] >= N_LABEL_COLS
+                   and r["repeatCell"]["range"]["startRowIndex"] >= FIRST_BODY_ROW]
         assert len(painted) == 1
         rng = painted[0]["repeatCell"]["range"]
         assert rng["startColumnIndex"] == N_LABEL_COLS + 2

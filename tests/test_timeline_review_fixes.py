@@ -49,7 +49,9 @@ async def _render():
             "project_id": "p1", "name": "P", "owner": "E",
             "start": date(2026, 3, 2), "target": date(2026, 4, 6),
             "first_col": 0, "last_col": 5, "open_ended": False,
-            "status": "active", "retired": False, "tasks": []}]},
+            "declared": "active", "status": "active", "folded": False,
+            "action": "", "tasks": []}]},
+        "folded": {}, "lanes": {}, "milestones": [],
         "archive": [{"section": "PRODUCT & TECHNOLOGY", "lanes": [
             {"lane": "Execution #1", "bars": [
                 {"first_col": 2, "last_col": 8, "label": "old plan",
@@ -356,9 +358,11 @@ class TestRowIdentity:
                 "project_id": "proj-uuid-1", "name": "Legal", "owner": "E",
                 "start": date(2026, 3, 2), "target": date(2026, 4, 6),
                 "first_col": 0, "last_col": 5, "open_ended": False,
-                "status": "active", "retired": False,
+                "declared": "active", "status": "active", "folded": False,
+                "action": "",
                 "tasks": [{"title": "t", "assignee": "E", "deadline": None,
                            "priority": "M"}]}]},
+            "folded": {}, "lanes": {}, "milestones": [],
             "archive": [{"section": "P&T", "lanes": [
                 {"lane": "Execution #1", "bars": [
                     {"first_col": 2, "last_col": 8, "label": "old",
@@ -443,7 +447,10 @@ class TestRowIdentity:
             rng = (r.get("repeatCell") or {}).get("range")
             if not rng or rng.get("startColumnIndex") == start:
                 continue
-            bg = r["repeatCell"]["cell"]["userEnteredFormat"].get("backgroundColor")
+            # `.get`, because not every repeatCell carries a format: the note
+            # wipe sends `{"cell": {}, "fields": "note"}`. [2026-08-13]
+            bg = (r["repeatCell"]["cell"].get("userEnteredFormat", {})
+                  .get("backgroundColor"))
             if bg and bg != white:
                 assert rng["endColumnIndex"] <= start, (
                     f"a {bg} fill reaches the identity columns: {rng}")

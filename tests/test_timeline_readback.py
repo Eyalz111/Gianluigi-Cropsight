@@ -28,9 +28,12 @@ def _header():
     return row
 
 
-def _row(kind, uid="", owner="", start="", target=""):
+# `status` defaults to the value _project()/_snap() carry, so a test that is not
+# about status generates no incidental status activity. The render always writes
+# the cell, so a blank one is the exception in production too.
+def _row(kind, uid="", owner="", start="", target="", status="active"):
     row = [""] * N_COLS
-    row[1], row[2], row[3] = owner, start, target
+    row[1], row[2], row[3], row[4] = owner, start, target, status
     row[-N_HIDDEN], row[-N_HIDDEN + 1] = uid, kind
     return row
 
@@ -43,16 +46,81 @@ def _grid(*rows):
 
 def _project(pid="p1", **kw):
     base = {"id": pid, "name": "Legal", "owner": "Eyal",
-            "start_date": "2026-03-02", "target_date": None}
+            "start_date": "2026-03-02", "target_date": None, "status": "active"}
     base.update(kw)
     return {pid: base}
 
 
 def _snap(pid="p1", **kw):
     base = {"canonical_project_id": pid, "owner": "Eyal",
-            "start_date": "2026-03-02", "target_date": None}
+            "start_date": "2026-03-02", "target_date": None, "status": "active"}
     base.update(kw)
     return {pid: base}
+
+
+class TestStatusIsEditableHere:
+    """Option A put the declared status on this tab, because the fold keys on it
+    and this is where the consequence of declaring one shows up. It is not a
+    second writer on anything: nothing else in the workspace sets it."""
+
+    def test_a_declared_status_is_pulled_and_marked_manual(self):
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal",
+                          start="02/03/2026", status="done"))
+        plan = build_plan(grid, _project(), _snap())
+        assert plan.updates == [("p1", {"status": "done"})]
+        assert ("p1", "status") in plan.manual_marks
+
+    def test_a_status_outside_the_vocabulary_costs_the_cell_not_the_row(self):
+        """The CHECK constraint would reject it and take every other edit on the
+        row down with it."""
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Nechama",
+                          start="02/03/2026", status="finished-ish"))
+        plan = build_plan(grid, _project(), _snap())
+        assert plan.updates == [("p1", {"owner": "Nechama"})], \
+            "the owner edit on the same row must still land"
+        assert plan.counters.get("unknown_enum") == 1
+        assert any("finished-ish" in c for c in plan.conflicts)
+
+    def test_a_blank_status_is_never_an_erase(self):
+        """Every project has one in the database, so a blank cell is a cleared
+        dropdown — and Rule 1 would freeze it as a manual decision, leaving the
+        project with no declared status at all."""
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal",
+                          start="02/03/2026", status=""))
+        plan = build_plan(grid, _project(), _snap())
+        assert plan.updates == []
+        assert plan.counters.get("blanks_refused") == 1
+
+    def test_case_does_not_matter(self):
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal",
+                          start="02/03/2026", status="Blocked"))
+        plan = build_plan(grid, _project(), _snap())
+        assert plan.updates == [("p1", {"status": "blocked"})]
+
+    def test_a_manual_status_is_not_walked_back(self):
+        """Rule 2. The fold keys on this field, so a status Eyal declared must
+        survive anything that would recompute one."""
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal",
+                          start="02/03/2026", status="done"))
+        plan = build_plan(grid, _project(status="active", manual_status=True),
+                          _snap(status="done"))
+        assert plan.updates == []
+        assert plan.counters.get("manual_held") == 1
+
+    def test_the_db_status_is_pushed_back_when_nobody_typed(self):
+        """Rule 4 — a status changed elsewhere refreshes the cell."""
+        grid = _grid(_row(ROW_PROJECT, "p1", owner="Eyal",
+                          start="02/03/2026", status="active"))
+        plan = build_plan(grid, _project(status="retired"), _snap())
+        assert ("status", "retired") in [
+            (list(EDITABLE.values())[list(EDITABLE).index(col)], val)
+            for _row_n, col, val in plan.cell_writes]
+
+    def test_status_is_on_the_manual_rail(self):
+        """mark_project_field_manual refuses any field outside the tuple, so a
+        pull would raise instead of sticking."""
+        from services.supabase_client import SupabaseClient
+        assert "status" in SupabaseClient._PROJECT_MANUAL_FIELDS
 
 
 class TestLayoutGate:
@@ -222,11 +290,17 @@ class TestOnlyProjectRows:
         assert plan.updates == []
         assert plan.counters.get("rows_without_uid") == 1
 
-    def test_only_three_fields_are_editable(self):
-        """Renaming a project from a Gantt row is a different decision, and
-        column 4 shows a status derived elsewhere."""
-        assert set(EDITABLE.values()) == {"owner", "start_date", "target_date"}
-        assert 0 not in EDITABLE and 4 not in EDITABLE
+    def test_only_four_fields_are_editable(self):
+        """Renaming a project from a Gantt row is a different decision, so
+        column 0 is never editable. Column 4 became `status` with Option A: the
+        fold keys on it, nothing else in the workspace sets it, and the Timeline
+        is where the consequence of declaring one shows up."""
+        assert set(EDITABLE.values()) == {"owner", "start_date", "target_date",
+                                          "status"}
+        assert 0 not in EDITABLE
+
+    def test_the_name_column_stays_shut(self):
+        assert EDITABLE.get(0) is None
 
 
 class TestShadowMode:
@@ -326,7 +400,9 @@ class TestTheMergeBaseIsBootstrapped:
                 "project_id": "p1", "name": "Legal", "owner": "Eyal",
                 "start": date(2026, 3, 2), "target": date(2026, 4, 6),
                 "first_col": 0, "last_col": 5, "open_ended": False,
-                "status": "active", "retired": False, "tasks": []}]},
+                "declared": "active", "status": "active", "folded": False,
+                "action": "", "tasks": []}]},
+            "folded": {}, "lanes": {}, "milestones": [],
             "archive": [], "stats": {},
         }
         written = []

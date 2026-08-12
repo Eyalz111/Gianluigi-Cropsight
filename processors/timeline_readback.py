@@ -38,7 +38,8 @@ from datetime import datetime, timedelta, timezone
 from config.settings import settings
 from processors.sheet_format import display_date
 from processors.timeline_view import (
-    HEADERS, HIDDEN_HEADERS, N_HIDDEN, N_LABEL_COLS, ROW_PROJECT, TIMELINE_TAB,
+    HEADERS, HIDDEN_HEADERS, N_HIDDEN, N_LABEL_COLS, PROJECT_STATUSES,
+    ROW_PROJECT, TIMELINE_TAB,
 )
 from services.supabase_client import supabase_client
 
@@ -47,17 +48,31 @@ logger = logging.getLogger(__name__)
 ISRAEL_TZ = timezone(timedelta(hours=3))
 
 # Sheet column index -> database field. Deliberately short: these are the only
-# fields the Timeline is allowed to own. Column 0 is the project name (renaming
-# a project from a Gantt row is a different decision), and column 4 shows
-# "retired", which is a status derived elsewhere.
-EDITABLE = {1: "owner", 2: "start_date", 3: "target_date"}
+# fields the Timeline is allowed to own. Column 0 is the project name — renaming
+# a project from a Gantt row is a different decision.
+#
+# Column 4 is `status`, added with Option A. It is not a second writer on
+# anything: nothing else in the workspace sets a project's status today, and the
+# Timeline is where the consequence of declaring one shows up, because the fold
+# keys on it. [2026-08-13]
+EDITABLE = {1: "owner", 2: "start_date", 3: "target_date", 4: "status"}
 _DATE_FIELDS = {"start_date", "target_date"}
+
+# Values a status cell may carry INTO the database. An unrecognised one is
+# reported and dropped rather than written: the CHECK constraint would reject it
+# anyway, and a failed update takes the whole row's edits down with it. Same
+# instinct as canonical_meeting_status refusing to guess — a status nobody
+# declared must not become one that folds a live project off the board.
+_ENUM_FIELDS = {"status": PROJECT_STATUSES}
 
 # A blank cell is never an instruction to erase. Clearing a start date would
 # remove the bar's left edge entirely, which is far more likely to be an
 # accidental deletion than a decision — and Rule 1 would then freeze the blank
 # as a manual choice.
-NEVER_BLANK = {"start_date", "target_date", "owner"}
+# `status` joins them: every project has one in the database, so a blank cell is
+# a cleared dropdown rather than a decision — and Rule 1 would freeze the blank
+# as a manual choice, leaving the project with no declared status at all.
+NEVER_BLANK = {"start_date", "target_date", "owner", "status"}
 
 
 class ReadbackPlan:
@@ -187,6 +202,18 @@ def build_plan(grid: list[list], projects: dict, snaps: dict,
                     settled[field] = _norm(field, db_row.get(field))
                     continue
                 sheet_cmp = parsed
+            elif field in _ENUM_FIELDS and raw:
+                lowered = raw.strip().lower()
+                if lowered not in _ENUM_FIELDS[field]:
+                    # Costs the CELL, never the row. The DB's CHECK would reject
+                    # it and take every other edit on this row down with it.
+                    plan.bump("unknown_enum")
+                    plan.conflicts.append(
+                        f"row {row_number}: {field} — {raw!r} is not one of "
+                        f"{'/'.join(_ENUM_FIELDS[field])}")
+                    settled[field] = _norm(field, db_row.get(field))
+                    continue
+                sheet_cmp = lowered
             else:
                 sheet_cmp = raw
 
@@ -331,7 +358,8 @@ async def reconcile_timeline(spreadsheet_id: str | None = None) -> dict:
             project_id=project_id, sheet_row=row_number,
             start_date=settled.get("start_date") or None,
             target_date=settled.get("target_date") or None,
-            owner=settled.get("owner") or None)
+            owner=settled.get("owner") or None,
+            status=settled.get("status") or None)
 
     logger.info(f"[timeline-readback] {out}")
     return out

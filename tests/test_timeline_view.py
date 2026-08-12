@@ -9,7 +9,7 @@ Two things are easy to get wrong and hard to notice on a 96-column board:
     added or re-dated, so the bar appears to change plan when nothing was
     decided.
 """
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -17,10 +17,34 @@ from processors.timeline_view import (
     GRID_END, GRID_START, OPEN_END_BG, STATUS_BG, span_columns, week_starts,
 )
 
+# A fixed "today" inside the grid. Deriving it from date.today() would make the
+# planned/started boundary drift under the tests the way test_gantt_drift's
+# day-of-week flakes already do.
+TODAY = date(2026, 8, 13)
+
 
 def _rgb_of(hex_colour: str) -> dict:
     from services.timeline_sheet import _rgb
     return _rgb(hex_colour)
+
+
+def _proj(**kw) -> dict:
+    """A rendered project row, as build_timeline emits it."""
+    base = {"project_id": "p1", "name": "P", "owner": "E",
+            "start": date(2026, 3, 2), "target": date(2026, 4, 6),
+            "first_col": 0, "last_col": 5, "open_ended": False,
+            "declared": "active", "status": "active", "folded": False,
+            "action": "", "tasks": []}
+    base.update(kw)
+    return base
+
+
+def _data(**kw) -> dict:
+    base = {"weeks": week_starts(), "areas": {"AREA": [_proj()]},
+            "folded": {}, "lanes": {}, "milestones": [], "archive": [],
+            "stats": {}}
+    base.update(kw)
+    return base
 
 
 class TestGrid:
@@ -79,7 +103,7 @@ class TestSpanColumns:
 class TestPalette:
     def test_the_status_colours_come_from_the_old_board(self):
         """Read off its own legend row so the two boards read alike."""
-        assert STATUS_BG["completed"] == "#D0D0CC"
+        assert STATUS_BG["retired"] == "#D0D0CC"
         assert STATUS_BG["active"] == "#B7D7B0"
         assert STATUS_BG["planned"] == "#CCE0F0"
         assert STATUS_BG["blocked"] == "#E85050"
@@ -88,27 +112,65 @@ class TestPalette:
         """Eyal: retired projects marked 'in color of completed or done ... as
         we had in the gantt'."""
         from processors.timeline_view import _status_of
-        assert _status_of({}, 0, True) == "completed"
-        assert STATUS_BG[_status_of({}, 0, True)] == "#D0D0CC"
+        assert _status_of({"status": "retired"}, None, TODAY) == "retired"
+        assert STATUS_BG["retired"] == "#D0D0CC"
+
+    def test_done_and_retired_are_told_apart(self):
+        """They fold alike; they do not MEAN alike. One grey labelled
+        'completed / retired' was the board refusing to say which."""
+        assert STATUS_BG["done"] != STATUS_BG["retired"]
+
+    def test_every_declared_status_has_a_colour(self):
+        """A bar whose status has no entry raises a KeyError mid-render and
+        takes the whole tab down."""
+        from processors.timeline_view import PROJECT_STATUSES
+        for s in PROJECT_STATUSES:
+            assert s in STATUS_BG
 
     def test_an_open_end_is_paler_than_a_closed_one(self):
         """It must not read as a finish at the edge of the grid."""
         assert OPEN_END_BG != STATUS_BG["active"]
 
 
-class TestStatus:
-    def test_open_work_reads_active(self):
-        from processors.timeline_view import _status_of
-        assert _status_of({}, 3, False) == "active"
+class TestStatusIsDeclaredNotCounted:
+    """Decision 9. `_status_of` used to return 'active' when a project had open
+    tasks and 'planned' when it had none, so a FINISHED project rendered in the
+    same blue as one that had never started — and the fold, which keys on
+    status, could not be built on top of that."""
 
-    def test_no_open_work_and_not_retired_reads_planned(self):
+    def test_the_declared_value_wins(self):
         from processors.timeline_view import _status_of
-        assert _status_of({}, 0, False) == "planned"
+        assert _status_of({"status": "blocked"}, date(2026, 1, 1), TODAY) == "blocked"
+        assert _status_of({"status": "done"}, date(2026, 1, 1), TODAY) == "done"
 
-    def test_retired_beats_having_open_tasks(self):
-        """A retired project with stragglers is still finished."""
+    def test_open_tasks_no_longer_decide_anything(self):
+        """The signature does not even accept a task count any more. A project
+        with no open tasks is NOT finished — on this team the summary arrives
+        before anyone writes the next action down."""
         from processors.timeline_view import _status_of
-        assert _status_of({}, 5, True) == "completed"
+        assert _status_of({"status": "active"}, date(2026, 1, 1), TODAY) == "active"
+
+    def test_planned_is_derived_from_the_date_alone(self):
+        """The one derived reading, and it is derived from a fact: an active
+        project whose start has not arrived has not started."""
+        from processors.timeline_view import _status_of
+        assert _status_of({"status": "active"}, TODAY + timedelta(days=30),
+                          TODAY) == "planned"
+
+    def test_a_finished_project_never_reads_planned(self):
+        """The exact defect: 'done' with a future start must stay done, or the
+        old confusion comes back through the derived branch."""
+        from processors.timeline_view import _status_of
+        assert _status_of({"status": "done"}, TODAY + timedelta(days=30),
+                          TODAY) == "done"
+
+    def test_an_unknown_status_falls_back_to_active_not_to_a_fold(self):
+        """Cost of showing a finished project one more day: a row. Cost of
+        folding a live one: it leaves the board people work from."""
+        from processors.timeline_view import declared_status
+        assert declared_status({"status": "banana"}) == "active"
+        assert declared_status({}) == "active"
+        assert declared_status({"status": None}) == "active"
 
 
 class TestA1Columns:
@@ -209,15 +271,7 @@ class TestAssertDontAdd:
             return MagicMock()
         sheets.batchUpdate.side_effect = _batch
 
-        data = {
-            "weeks": week_starts(),
-            "areas": {"AREA": [{
-                "project_id": "p1", "name": "P", "owner": "E",
-                "start": date(2026, 3, 2), "target": date(2026, 4, 6),
-                "first_col": 0, "last_col": 5, "open_ended": False,
-                "status": "active", "retired": False, "tasks": []}]},
-            "stats": {},
-        }
+        data = _data()
         with patch.object(ts, "build_timeline", return_value=data), \
              patch.object(ts, "sheets_service", svc), \
              patch.object(ts.settings, "PROJECT_STATUS_SHEET_ID", "ssid"):

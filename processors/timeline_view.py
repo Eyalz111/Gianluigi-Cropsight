@@ -20,6 +20,29 @@ cell cannot answer both without becoming unreadable, so the bar takes the old
 board's own status palette and priority keeps its own column with the
 Urgent/H/M/L colours already used on the Project Status tabs.
 
+THE BOARD MUST NOT GROW WITH FINISHED WORK — decision 8, after Eyal reviewed the
+live tab: *"once we will add more and more projects, it will be too big… in the
+previous format we just had the certain weeks that the project is there, and
+then once it finished the timeline keeps on going and we kind of get rid of
+it."* The old board never grew because its rows were LANES and work flowed
+through them; project-per-row makes every project a permanent row, and closing
+one ADDS to the pile instead of removing from it.
+
+Option A: projects stay the rows, and finished ones fold into a single collapsed
+line per area, so visible height tracks OPEN work rather than cumulative work.
+Measured against the live data — 33 rows today and 66 in eighteen months as
+Phase 2 was built, against 35 and 42 folded. A month's grace before a project
+leaves the main list, the fold collapsed by default, and completed bars keep
+their historical span, so "what did we ship this year" is one click away rather
+than gone.
+
+STATUS IS DECLARED, NOT COUNTED — decision 9, and the fold cannot exist without
+it. `_status_of` used to return 'active' when a project had open tasks and
+'planned' when it had none, so a finished project rendered in the same blue as
+one that had never started. Counting would also fold a project the moment its
+last task closed, which on this team happens constantly: the summary arrives
+before anyone decides the next action.
+
 THE GHOST LAYER answers "what did we plan in March?" on the same columns, as a
 collapsed block below the live rows: the old board's own sections and lanes,
 redrawn on the new grid. It is nearly free because the grid already spans
@@ -45,13 +68,31 @@ GRID_START = date(2026, 3, 2)          # Monday, matching the old board's W9
 GRID_END = date(2027, 12, 27)
 ISRAEL_TZ = timezone(timedelta(hours=3))
 
+# THE DECLARED VOCABULARY (decision 9). A human states which of these a project
+# is; nothing infers it. `planned` is deliberately absent: a project that has not
+# started is visible from its start_date being in the future, which is a fact
+# about a date rather than a claim about intent — and it was the wrong home for
+# "finished", which is the whole defect.
+PROJECT_STATUSES = ("active", "blocked", "done", "retired")
+DEFAULT_PROJECT_STATUS = "active"
+
+# The two that leave the main list. Kept, greyed, and readable inside the fold —
+# a timeline that silently drops finished work cannot answer "what did we do
+# this year".
+FOLD_STATUSES = frozenset({"done", "retired"})
+
 # Lifted from the old board's own legend so the two read alike. Eyal asked for
 # retired projects to use the Completed colour "as we had in the gantt".
+#
+# `planned` survives here as a RENDER state, never a stored one: an active
+# project whose start is still in the future. Derived from the date, so it can
+# never absorb "finished" the way the stored value did.
 STATUS_BG = {
     "blocked": "#E85050",
     "active": "#B7D7B0",
     "planned": "#CCE0F0",
-    "completed": "#D0D0CC",
+    "done": "#C6CFC4",
+    "retired": "#D0D0CC",
 }
 # An open-ended run past today is drawn in a paler active tint: it says "still
 # going, end unknown" rather than claiming a finish at the edge of the grid.
@@ -69,7 +110,13 @@ _ARCHIVE_SKIP_LANES = ("Meeting Count", "All Meetings", "Availability",
                        "Meetings", "Management Meetings")
 _ARCHIVE_SKIP_SECTIONS = ("OPERATIONAL RULES",)
 
-HEADERS = ["Area / Project", "Owner", "Start", "Target", "Priority"]
+# Column 4 was "Priority" and rendered the word "retired" into it — the header
+# and the content had already disagreed. It is now Status, a dropdown of the four
+# declared values, and it is the field's ONLY editable home: nothing else in the
+# workspace sets a project's status today, so making the Timeline its writer adds
+# no second writer to anything. Eyal declares it where he can see the fold
+# happen, which is the same place the consequence shows up.
+HEADERS = ["Area / Project", "Owner", "Start", "Target", "Status"]
 N_LABEL_COLS = len(HEADERS)
 
 # Hidden identity columns, written to the right of the week grid and hidden the
@@ -86,6 +133,15 @@ N_HIDDEN = len(HIDDEN_HEADERS)
 
 ROW_PROJECT, ROW_TASK, ROW_AREA = "project", "task", "area"
 ROW_ARCHIVE, ROW_CHROME = "archive", "chrome"
+# The fold's own header line, one per area. Its own kind so the readback can
+# refuse it explicitly rather than by failing to recognise it — a folded project
+# row underneath is still ROW_PROJECT and still editable, which is the point:
+# reopening something is done by changing its Status, and that has to be
+# reachable without hunting for another surface.
+ROW_FOLD = "fold"
+# One meetings lane per area, and the milestone band. Read-only chrome as far as
+# the readback is concerned; the CEO tab stays the milestones' editable home.
+ROW_MEETINGS, ROW_MILESTONE = "meetings", "milestone"
 
 _OPEN_TASK = ("pending", "in_progress", "overdue")
 _CLOSED_TASK = ("done", "archived", "cancelled", "superseded")
@@ -98,6 +154,17 @@ def week_starts(first: date = GRID_START, last: date = GRID_END) -> list[date]:
         out.append(cur)
         cur += timedelta(days=7)
     return out
+
+
+def _today() -> date:
+    """Today in Jerusalem, as one named seam.
+
+    A function rather than an inline `datetime.now(...)` so a test can pin it.
+    Two of this repo's standing test failures are day-of-week flakes in
+    `test_gantt_drift`, and the fold's grace month plus the planned/started
+    boundary are both exactly that shape.
+    """
+    return datetime.now(ISRAEL_TZ).date()
 
 
 def _parse(value) -> "date | None":
@@ -138,14 +205,154 @@ def span_columns(start: date | None, end: date | None,
     return first, col_of(end), False
 
 
-def _status_of(project: dict, open_tasks: int, is_retired: bool) -> str:
-    """Which legend colour this project's bar takes."""
-    if is_retired:
-        return "completed"
-    if open_tasks:
-        return "active"
-    # No open work and not retired: it is on the board but nothing is moving.
-    return "planned"
+def declared_status(project: dict) -> str:
+    """The project's own statement of where it is. Never inferred.
+
+    Anything unrecognised falls back to `active` rather than to a fold state:
+    the cost of showing a finished project for another day is a row, and the cost
+    of folding a live one is that it disappears from the board people work from.
+    """
+    s = str(project.get("status") or "").strip().lower()
+    return s if s in PROJECT_STATUSES else DEFAULT_PROJECT_STATUS
+
+
+def _status_of(project: dict, start: "date | None", today: date) -> str:
+    """Which legend colour this project's bar takes.
+
+    Declared first. `planned` is the one derived reading and it is derived from a
+    DATE, not from a task count: an active project whose start has not arrived
+    yet has not started. That is observable. "No open tasks means planned" was
+    not — it silently claimed that finished work had never begun.
+    """
+    status = declared_status(project)
+    if status == "active" and start is not None and start > today:
+        return "planned"
+    return status
+
+
+def _grace_days() -> int:
+    return int(getattr(settings, "PROJECT_FOLD_GRACE_DAYS", 30) or 30)
+
+
+def is_folded(project: dict, today: date) -> bool:
+    """Has this project left the main list?
+
+    A MONTH'S GRACE FOR `done`, none for `retired`. Eyal asked that a project
+    leave the main list a month after it is marked done, so recent wins are still
+    visible where the work happens. Retired is not a win — it is abandoned or
+    superseded — so there is nothing to leave visible and it folds at once.
+
+    The grace is measured from `done_at`, stamped by a trigger on the transition
+    into done (scripts/migrate_project_declared_status.sql). A MISSING done_at
+    keeps the project in the main list: before that migration runs every row
+    reads None, and the safe reading of "nobody knows when this finished" is to
+    leave it where people can see it. Treating an absent timestamp as infinitely
+    old would fold every finished project the first time this ran.
+    """
+    status = declared_status(project)
+    if status not in FOLD_STATUSES:
+        return False
+    if status == "retired":
+        return True
+    done_at = _parse(project.get("done_at"))
+    if done_at is None:
+        return False
+    return done_at <= today - timedelta(days=_grace_days())
+
+
+def nearest_action(tasks: list[dict]) -> str:
+    """The project's nearest concrete step, for printing on the bar.
+
+    Decision 8: *bars carry text*, so a row says what is happening rather than
+    only that something is. `tasks` arrives already sorted by deadline with the
+    undated ones last, so the first entry IS the nearest — an undated task is
+    still the nearest concrete step when it is the only one, and printing it
+    beats printing nothing.
+    """
+    return (tasks[0]["title"] if tasks else "")
+
+
+# Which meetings a lane draws. `recurring` is a CADENCE — permanently live,
+# never reaching a terminal state — so it draws as a continuous band rather than
+# as events. `scheduled` and `held` are events that are booked or happened, so
+# they are single markers. `parked`, `to_schedule` and `dropped` draw nothing:
+# they have no agreed date, and a marker is a claim that something occurs in a
+# particular week.
+_LANE_BAND_STATUS = "recurring"
+_LANE_MARKER_STATUSES = frozenset({"scheduled", "held"})
+
+
+def meetings_lanes(meetings: list[dict], area_of_project: dict,
+                   weeks: list[date]) -> dict:
+    """One lane per area: a recurring band, and a marker per dated one-off.
+
+    SIX ROWS FOR THE COMPANY, NOT SIX HUNDRED (decision 8). A row per meeting
+    would reproduce the growth problem the fold exists to solve, one level down —
+    and the question a Gantt answers about meetings is "how often does this area
+    meet", not "which Tuesday was the third sync".
+
+    A meeting whose label names no known project contributes to no lane. That is
+    deliberate: guessing an area from a free-text label is the same name matching
+    that drew 2 correct ghosts out of 27 attempts, and a meeting drawn under the
+    wrong area is worse than one drawn nowhere.
+    """
+    from services.google_sheets import canonical_meeting_status
+
+    lanes: dict[str, dict] = defaultdict(
+        lambda: {"recurring": 0, "markers": {}})
+    for m in meetings:
+        area = area_of_project.get((m.get("label") or "").strip().lower())
+        if not area:
+            continue
+        status = canonical_meeting_status(m.get("status"))
+        if status == _LANE_BAND_STATUS:
+            lanes[area]["recurring"] += 1
+            continue
+        if status not in _LANE_MARKER_STATUSES:
+            continue
+        when = _parse(m.get("proposed_date"))
+        if when is None:
+            continue
+        first, _last, _open = span_columns(when, when, weeks)
+        if first < 0:
+            continue
+        # Several meetings in one week collapse to one marker with a count. Two
+        # markers cannot share a cell, and the alternative — dropping all but one
+        # — would quietly under-report a busy week.
+        cell = lanes[area]["markers"]
+        cell[first] = cell.get(first, 0) + 1
+    return dict(lanes)
+
+
+def milestone_band(milestones: list[dict], weeks: list[date]) -> list[dict]:
+    """Company milestones as markers on the same week columns.
+
+    READ-ONLY HERE. The CEO tab stays their editable home — this band exists so a
+    milestone can be read against the project bars underneath it, which is the
+    one thing a separate tab cannot show. Two surfaces rendering the same rows is
+    fine; two surfaces WRITING them is the defect family this plan avoids.
+
+    A milestone with no target_date draws nothing rather than landing at the
+    edge of the grid: an undated commitment is not a commitment in a week.
+    """
+    out = []
+    for ms in milestones:
+        when = _parse(ms.get("target_date"))
+        if when is None:
+            continue
+        col, _last, _open = span_columns(when, when, weeks)
+        if col < 0:
+            continue
+        out.append({
+            "col": col,
+            "title": (ms.get("title") or "").strip(),
+            "status": (ms.get("status") or "open").strip().lower(),
+            "moved": bool(ms.get("original_date")
+                          and _parse(ms.get("original_date")) != when),
+            "original": _parse(ms.get("original_date")),
+            "target": when,
+        })
+    return sorted(out, key=lambda m: m["col"])
 
 
 def legacy_archive(bars: list[dict], weeks: list[date]) -> list[dict]:
@@ -198,12 +405,13 @@ def legacy_archive(bars: list[dict], weeks: list[date]) -> list[dict]:
 def build_timeline() -> dict:
     """Areas -> ordered project rows, each with its span and colour.
 
-    Retired projects are INCLUDED, greyed, because Eyal asked to keep seeing
-    them: a timeline that silently drops finished work cannot answer "what did
-    we do this year".
+    Finished projects are INCLUDED but FOLDED — kept, greyed, one collapsed line
+    per area. Eyal asked to keep seeing them and also asked that they stop taking
+    up the board; the fold is how both are true at once.
     """
     c = supabase_client.client
     weeks = week_starts()
+    today = _today()
 
     areas = {a["id"]: a["name"] for a in
              (c.table("areas").select("id,name").order("name").execute()).data or []}
@@ -212,6 +420,21 @@ def build_timeline() -> dict:
     tasks = (c.table("tasks").select(
         "id,project_id,title,assignee,deadline,status,priority,approval_status")
         .limit(5000).execute()).data or []
+
+    # Both of these are additions to the board, so neither may take it down. A
+    # timeline with no meetings lane is a smaller loss than no timeline.
+    meetings: list[dict] = []
+    try:
+        meetings = supabase_client.list_follow_up_meetings(
+            limit=2000, include_pending=True) or []
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"[timeline] meetings unavailable: {e}")
+    milestones: list[dict] = []
+    try:
+        milestones = (c.table("milestones").select("*")
+                      .limit(500).execute()).data or []
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"[timeline] milestones unavailable: {e}")
 
     bars = []
     if settings.TIMELINE_LEGACY_OVERLAY_ENABLED:
@@ -232,24 +455,36 @@ def build_timeline() -> dict:
             open_by_project[t["project_id"]].append(t)
 
     by_area: dict[str, list] = defaultdict(list)
-    stats = {"projects": 0, "retired": 0, "no_start": 0, "open_ended": 0}
+    folded_by_area: dict[str, list] = defaultdict(list)
+    area_of_project: dict[str, str] = {}
+    stats = {"projects": 0, "folded": 0, "no_start": 0, "open_ended": 0}
 
     for p in projects:
-        retired = (p.get("status") or "active") == "retired"
+        area = areas.get(p.get("area_id"), "(no area)")
+        area_of_project[(p.get("name") or "").strip().lower()] = area
         start = _parse(p.get("start_date"))
         target = _parse(p.get("target_date"))
         open_tasks = open_by_project.get(p["id"], [])
         first, last, open_ended = span_columns(start, target, weeks)
+        folded = is_folded(p, today)
 
         stats["projects"] += 1
-        if retired:
-            stats["retired"] += 1
+        if folded:
+            stats["folded"] += 1
         if start is None:
             stats["no_start"] += 1
         if open_ended:
             stats["open_ended"] += 1
 
-        by_area[areas.get(p.get("area_id"), "(no area)")].append({
+        sorted_tasks = sorted(
+            ({"title": t.get("title") or "",
+              "assignee": t.get("assignee") or "",
+              "deadline": _parse(t.get("deadline")),
+              "priority": (t.get("priority") or "M")}
+             for t in open_tasks),
+            key=lambda t: (t["deadline"] is None, t["deadline"] or date.max))
+
+        row = {
             "project_id": p["id"],
             "name": p["name"],
             "owner": p.get("owner") or "",
@@ -257,21 +492,34 @@ def build_timeline() -> dict:
             "target": target,
             "first_col": first,
             "last_col": last,
-            "open_ended": open_ended,
-            "status": _status_of(p, len(open_tasks), retired),
-            "retired": retired,
-            "tasks": sorted(
-                ({"title": t.get("title") or "",
-                  "assignee": t.get("assignee") or "",
-                  "deadline": _parse(t.get("deadline")),
-                  "priority": (t.get("priority") or "M")}
-                 for t in open_tasks),
-                key=lambda t: (t["deadline"] is None, t["deadline"] or date.max)),
-        })
+            # A FOLDED BAR IS NEVER OPEN-ENDED. An open end means "still going,
+            # end unknown", which is a contradiction on a project somebody has
+            # declared finished — and it would paint the pale tint from its start
+            # to the right-hand edge of the grid, so the archive of what we
+            # shipped would be mostly a wash of colour claiming ongoing work.
+            "open_ended": open_ended and not folded,
+            "declared": declared_status(p),
+            "status": _status_of(p, start, today),
+            "folded": folded,
+            "action": nearest_action(sorted_tasks),
+            "tasks": sorted_tasks,
+        }
+        (folded_by_area if folded else by_area)[area].append(row)
+
+    # Every area with folded work needs its key present in `areas` even if all of
+    # its projects are folded, or the whole area silently vanishes from the tab.
+    for area in folded_by_area:
+        by_area.setdefault(area, [])
 
     archive = legacy_archive(bars, weeks)
     stats["archive_rows"] = sum(len(s["lanes"]) for s in archive)
     stats["archive_bars"] = sum(len(l["bars"]) for s in archive for l in s["lanes"])
 
-    return {"weeks": weeks, "areas": dict(by_area), "archive": archive,
-            "stats": stats}
+    lanes = meetings_lanes(meetings, area_of_project, weeks)
+    band = milestone_band(milestones, weeks)
+    stats["meeting_lanes"] = len(lanes)
+    stats["milestones"] = len(band)
+
+    return {"weeks": weeks, "areas": dict(by_area),
+            "folded": dict(folded_by_area), "lanes": lanes,
+            "milestones": band, "archive": archive, "stats": stats}

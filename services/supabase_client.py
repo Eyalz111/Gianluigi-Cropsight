@@ -6556,8 +6556,10 @@ class SupabaseClient:
     # `start_date` joins the rail so a start Eyal approved or typed is defended
     # from inference. Without it, Rule 2 cannot see the field and the derive-
     # then-freeze step would be free to overwrite a human's date. [2026-08-12]
+    # `status` joins the rail with Option A: the fold keys on it, so a status
+    # Eyal declared must be defended from anything that would recompute one.
     _PROJECT_MANUAL_FIELDS = ("objective", "target_date", "owner", "notes",
-                              "start_date")
+                              "start_date", "status")
 
     def get_ps_project_snapshots(self) -> dict:
         """Last-synced Project Status snapshot per project, keyed by project id."""
@@ -6652,6 +6654,7 @@ class SupabaseClient:
         start_date: str | None = None,
         target_date: str | None = None,
         owner: str | None = None,
+        status: str | None = None,
     ) -> bool:
         """Write/refresh the Timeline snapshot row for a project."""
         try:
@@ -6666,6 +6669,11 @@ class SupabaseClient:
                 "start_date": (start_date or None),
                 "target_date": (target_date or None),
                 "owner": (owner or None),
+                # The merge base for the declared status (Option A). Reuses the
+                # existing sheet_snapshots.status column the meetings rail
+                # already uses — the row is keyed by entity_type, so the two
+                # never meet.
+                "status": (status or None),
                 "snapshot_at": datetime.now(timezone.utc).isoformat(),
             }
             existing = (

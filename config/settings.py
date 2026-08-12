@@ -743,6 +743,18 @@ class Settings(BaseSettings):
         default=60,
         description="Auto-archive done tasks (and dropped meetings) untouched this many days"
     )
+    PROJECT_FOLD_GRACE_DAYS: int = Field(
+        default=30,
+        description=(
+            "Days a project marked `done` stays in the Timeline's main list "
+            "before folding into its area's collapsed Completed line. Eyal's "
+            "month of grace, so recent wins are still visible where the work "
+            "happens. Measured from canonical_projects.done_at "
+            "(migrate_project_declared_status.sql); a missing done_at keeps the "
+            "project in the main list. `retired` folds immediately — it is not a "
+            "win, so there is nothing to leave on show."
+        ),
+    )
     MEETING_HELD_ARCHIVE_DAYS: int = Field(
         default=14,
         description=(

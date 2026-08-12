@@ -16,7 +16,8 @@ from config.settings import settings
 from processors.sheet_format import centre_and_wrap, display_date, left_align
 from processors.timeline_view import (
     GHOST_BG, HEADERS, HIDDEN_HEADERS, N_HIDDEN, N_LABEL_COLS, OPEN_END_BG,
-    ROW_ARCHIVE, ROW_AREA, ROW_CHROME, ROW_PROJECT, ROW_TASK, STATUS_BG,
+    PROJECT_STATUSES, ROW_ARCHIVE, ROW_AREA, ROW_CHROME, ROW_FOLD,
+    ROW_MEETINGS, ROW_MILESTONE, ROW_PROJECT, ROW_TASK, STATUS_BG,
     TIMELINE_TAB, build_timeline,
 )
 from services.google_sheets import sheets_service
@@ -38,15 +39,29 @@ _TODAY = {"red": 0.85, "green": 0.33, "blue": 0.31}
 _PROTECT_DESC = "Gianluigi: Timeline is generated — edit projects on the area tabs"
 
 # Order matters: the swatch under column i is coloured from _LEGEND_KEYS[i].
-# These four are the STATUS legend and must stay exactly the status palette —
+# These five are the STATUS legend and must stay exactly the status palette —
 # a test asserts it, because a legend that drifts from the bars is worse than
-# no legend at all.
-_LEGEND = ("Blocked", "Active", "Planned", "Completed / retired")
-_LEGEND_KEYS = ("blocked", "active", "planned", "completed")
-# The ghost swatch is NOT a status, so it is kept out of the pair above and
-# painted into the one spare label column. The LABEL appears only when the
-# archive was drawn; the cell's fill is asserted on every run either way.
+# no legend at all. `done` and `retired` are separate entries now that status is
+# declared: they fold alike but they do not mean alike, and one grey labelled
+# "completed / retired" was the board refusing to say which.
+_LEGEND = ("Blocked", "Active", "Planned", "Done", "Retired")
+_LEGEND_KEYS = ("blocked", "active", "planned", "done", "retired")
+# The ghost swatch is NOT a status, so it is kept out of the pair above. The five
+# status entries now fill the label block exactly, so it sits in the first WEEK
+# column and its label overflows rightwards over empty cells. The LABEL appears
+# only when the archive was drawn; the cell's fill is asserted on every run
+# either way.
 _GHOST_LEGEND = "Old board"
+_GHOST_LEGEND_COL = N_LABEL_COLS
+
+# The meetings lane. A recurring meeting is a CADENCE, not an event, so it draws
+# as a faint continuous band across the whole grid rather than as 90 markers; a
+# one-off that is booked or has happened draws as a single glyph in its week.
+_LANE_BAND_BG = "#EEF3FA"
+_LANE_MARKER = "●"
+_MILESTONE_MARKER = "★"
+_MILESTONE_BG = "#FFF2CC"
+_FOLD_BG = "#EDEDEA"
 
 
 def _rgb(hex_colour: str) -> dict:
@@ -115,8 +130,8 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
     for i, label in enumerate(_LEGEND):
         grid[LEGEND_ROW][i] = label
     show_ghost = bool(data.get("archive"))
-    if show_ghost and len(_LEGEND) < N_LABEL_COLS:
-        grid[LEGEND_ROW][len(_LEGEND)] = _GHOST_LEGEND
+    if show_ghost:
+        grid[LEGEND_ROW][_GHOST_LEGEND_COL] = _GHOST_LEGEND
     grid[MONTH_ROW][N_LABEL_COLS:n_week_end] = _month_band(weeks)
     grid[WEEK_ROW][:N_LABEL_COLS] = HEADERS
     grid[WEEK_ROW][N_LABEL_COLS:n_week_end] = [w.strftime("%d/%m") for w in weeks]
@@ -124,8 +139,114 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
 
     fills: list[dict] = []          # (row, col_from, col_to, colour)
     area_rows: list[int] = []
-    group_spans: list[tuple[int, int]] = []   # task rows to collapse
-    snapshot_rows: list[tuple] = []           # (project_id, row, start, target, owner)
+    # Every group is created collapsed. The task waterfall said "collapsed by
+    # default" in its comment and was not: addDimensionGroup CREATES a group and
+    # never closes it, so only the archive — which sends the second
+    # updateDimensionGroup — actually arrived shut. With Option A that stops
+    # being cosmetic: expanded waterfalls put every task back on the board and
+    # undo the height the fold exists to reclaim. [2026-08-13]
+    group_spans: list[tuple[int, int]] = []
+    status_rows: list[int] = []               # project rows -> Status dropdown
+    fold_rows: list[int] = []                 # the "Completed (n)" header lines
+    lane_rows: list[int] = []
+    notes: list[tuple[int, int, str]] = []    # (row, col, note)
+    snapshot_rows: list[tuple] = []           # (project_id, row, start, target, owner, status)
+
+    lanes = data.get("lanes") or {}
+    folded_by_area = data.get("folded") or {}
+
+    def _project_line(proj: dict) -> int:
+        """One project row: labels, merge base, bar, bar text, task waterfall."""
+        row = len(grid)
+        line = _row(ROW_PROJECT, proj["project_id"])
+        line[0] = f"    {proj['name']}"
+        line[1] = proj["owner"]
+        line[2] = display_date(proj["start"])
+        line[3] = display_date(proj["target"])
+        line[4] = proj["declared"]
+        grid.append(line)
+        status_rows.append(row)
+        # The merge base is written HERE, by the render, because this is the
+        # one moment the sheet and the database agree by construction.
+        #
+        # Without it the readback has no base at all: "no merge base means
+        # no edit" would refuse every typed value, and since the readback
+        # only writes snapshots on its LIVE path, shadow mode would never
+        # create one either. A shadow week would show nothing happening and
+        # prove nothing, and the first real edit would vanish. Found before
+        # anyone typed a date. [2026-08-12]
+        snapshot_rows.append((proj["project_id"], row + 1,
+                              str(proj["start"] or ""),
+                              str(proj["target"] or ""),
+                              proj["owner"] or "",
+                              proj["declared"]))
+
+        if proj["first_col"] >= 0:
+            a = N_LABEL_COLS + proj["first_col"]
+            b = N_LABEL_COLS + proj["last_col"]
+            colour = STATUS_BG[proj["status"]]
+            if proj["open_ended"] and today_col is not None and today_col < b:
+                # Solid to today, pale beyond: "still going, end unknown".
+                # A project starting in the future has no solid part at all
+                # — the whole run is the pale "we don't know" tint.
+                if today_col >= a:
+                    fills.append({"row": row, "a": a, "b": today_col,
+                                  "colour": colour})
+                fills.append({"row": row, "a": max(a, today_col + 1), "b": b,
+                              "colour": OPEN_END_BG})
+            else:
+                fills.append({"row": row, "a": a, "b": b, "colour": colour})
+            # THE BAR CARRIES THE NEAREST ACTION (decision 8), so a row says
+            # what is happening rather than only that something is. It goes in
+            # the bar's FIRST cell and overflows rightwards across its own bar,
+            # stopping at the next non-empty cell — the same mechanism the old
+            # board used to label its own bars, and the same one the archive
+            # block already relies on.
+            if proj["action"]:
+                grid[row][a] = proj["action"][:80]
+
+        first_task_row = len(grid)
+        for t in proj["tasks"]:
+            # Task rows carry the PROJECT's uid so a stray edit can be
+            # attributed, but their kind marks them read-only: Phase 4 opens
+            # project rows only. tasks.deadline and tasks.assignee are edited
+            # daily on the area tabs, and a second writer on those is the
+            # collision this design exists to avoid.
+            trow = _row(ROW_TASK, proj["project_id"])
+            trow[0] = f"        └ {t['title'][:70]}"
+            trow[1] = t["assignee"]
+            trow[3] = display_date(t["deadline"])
+            trow[4] = t["priority"]
+            grid.append(trow)
+        if len(grid) > first_task_row:
+            group_spans.append((first_task_row, len(grid) - 1))
+        return row
+
+    # ---- the management band: milestones against the project bars ------------
+    # Read-only here; the CEO tab stays their editable home. Two surfaces
+    # RENDERING the same rows is fine — two surfaces WRITING them is the defect
+    # family this plan exists to avoid. The band earns its row by being the one
+    # place a commitment can be read against the work underneath it.
+    band = data.get("milestones") or []
+    milestone_row = None
+    if band:
+        milestone_row = len(grid)
+        line = _row(ROW_MILESTONE)
+        line[0] = "MILESTONES"
+        for ms in band:
+            col = N_LABEL_COLS + ms["col"]
+            line[col] = _MILESTONE_MARKER
+            note = f"{ms['title']} — {display_date(ms['target'])}"
+            if ms["moved"]:
+                # "moved 1 Jun -> 6 Jul", never "SLIPPED". Whether a move was a
+                # slip or a re-plan is Eyal's read, and the board does not put a
+                # word in his mouth.
+                note += f"  (moved {display_date(ms['original'])} → " \
+                        f"{display_date(ms['target'])})"
+            if ms["status"] and ms["status"] != "open":
+                note += f"  [{ms['status']}]"
+            notes.append((milestone_row, col, note))
+        grid.append(line)
 
     for area in sorted(areas):
         area_rows.append(len(grid))
@@ -133,61 +254,49 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
         line[0] = area
         grid.append(line)
 
+        # ---- one meetings lane per area -----------------------------------
+        # Six rows for the company, not six hundred. The question a Gantt
+        # answers about meetings is how often an area meets, not which Tuesday
+        # the third sync was.
+        lane = lanes.get(area)
+        if lane and (lane["recurring"] or lane["markers"]):
+            lrow = len(grid)
+            line = _row(ROW_MEETINGS)
+            line[0] = "        meetings"
+            for col, n in sorted(lane["markers"].items()):
+                line[N_LABEL_COLS + col] = _LANE_MARKER
+                notes.append((lrow, N_LABEL_COLS + col,
+                              f"{n} meeting{'s' if n > 1 else ''} this week"))
+            grid.append(line)
+            lane_rows.append(lrow)
+            if lane["recurring"]:
+                fills.append({"row": lrow, "a": N_LABEL_COLS,
+                              "b": n_week_end - 1, "colour": _LANE_BAND_BG})
+                notes.append((lrow, 0,
+                              f"{lane['recurring']} recurring meeting"
+                              f"{'s' if lane['recurring'] > 1 else ''}"))
+
         for proj in sorted(areas[area],
                            key=lambda p: (p["first_col"] < 0, p["first_col"])):
-            row = len(grid)
-            line = _row(ROW_PROJECT, proj["project_id"])
-            line[0] = f"    {proj['name']}"
-            line[1] = proj["owner"]
-            line[2] = display_date(proj["start"])
-            line[3] = display_date(proj["target"])
-            line[4] = "retired" if proj["retired"] else ""
+            _project_line(proj)
+
+        # ---- the fold: finished work, one collapsed line ------------------
+        # Decision 8. The board must not grow with finished work: visible height
+        # tracks OPEN work, and "what did we ship this year" is one click away
+        # rather than gone. The rows underneath are still ROW_PROJECT and still
+        # editable, so reopening something is a Status change made right here.
+        done = sorted(folded_by_area.get(area) or [],
+                      key=lambda p: (p["first_col"] < 0, p["first_col"]))
+        if done:
+            frow = len(grid)
+            line = _row(ROW_FOLD)
+            line[0] = f"    ▸ Completed ({len(done)})"
             grid.append(line)
-            # The merge base is written HERE, by the render, because this is the
-            # one moment the sheet and the database agree by construction.
-            #
-            # Without it the readback has no base at all: "no merge base means
-            # no edit" would refuse every typed value, and since the readback
-            # only writes snapshots on its LIVE path, shadow mode would never
-            # create one either. A shadow week would show nothing happening and
-            # prove nothing, and the first real edit would vanish. Found before
-            # anyone typed a date. [2026-08-12]
-            snapshot_rows.append((proj["project_id"], row + 1,
-                                  str(proj["start"] or ""),
-                                  str(proj["target"] or ""),
-                                  proj["owner"] or ""))
-
-            if proj["first_col"] >= 0:
-                a = N_LABEL_COLS + proj["first_col"]
-                b = N_LABEL_COLS + proj["last_col"]
-                colour = STATUS_BG[proj["status"]]
-                if proj["open_ended"] and today_col is not None and today_col < b:
-                    # Solid to today, pale beyond: "still going, end unknown".
-                    # A project starting in the future has no solid part at all
-                    # — the whole run is the pale "we don't know" tint.
-                    if today_col >= a:
-                        fills.append({"row": row, "a": a, "b": today_col,
-                                      "colour": colour})
-                    fills.append({"row": row, "a": max(a, today_col + 1), "b": b,
-                                  "colour": OPEN_END_BG})
-                else:
-                    fills.append({"row": row, "a": a, "b": b, "colour": colour})
-
-            first_task_row = len(grid)
-            for t in proj["tasks"]:
-                # Task rows carry the PROJECT's uid so a stray edit can be
-                # attributed, but their kind marks them read-only: Phase 4 opens
-                # project rows only. tasks.deadline and tasks.assignee are edited
-                # daily on the area tabs, and a second writer on those is the
-                # collision this design exists to avoid.
-                trow = _row(ROW_TASK, proj["project_id"])
-                trow[0] = f"        └ {t['title'][:70]}"
-                trow[1] = t["assignee"]
-                trow[3] = display_date(t["deadline"])
-                trow[4] = t["priority"]
-                grid.append(trow)
-            if len(grid) > first_task_row:
-                group_spans.append((first_task_row, len(grid) - 1))
+            fold_rows.append(frow)
+            first_folded = len(grid)
+            for proj in done:
+                _project_line(proj)
+            group_spans.append((first_folded, len(grid) - 1))
 
     # ---- the old board, redrawn on the same columns -------------------------
     # One collapsed block at the bottom rather than a ghost row per project:
@@ -266,7 +375,9 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
 
     reqs = _format_requests(sid, n_cols, len(grid), weeks, today_col,
                             fills, area_rows, group_spans, ssid, show_ghost,
-                            archive_title_row, archive_span, n_week_end)
+                            archive_title_row, archive_span, n_week_end,
+                            status_rows, fold_rows, lane_rows, milestone_row,
+                            notes)
     if reqs:
         sheets_service._execute_with_retry(
             lambda: sheets_service.service.spreadsheets().batchUpdate(
@@ -279,11 +390,11 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
     snapped = 0
     if getattr(settings, "TIMELINE_READBACK_ENABLED", False):
         from services.supabase_client import supabase_client
-        for project_id, row_number, start, target, owner in snapshot_rows:
+        for project_id, row_number, start, target, owner, status in snapshot_rows:
             if supabase_client.upsert_timeline_snapshot(
                     project_id=project_id, sheet_row=row_number,
                     start_date=start or None, target_date=target or None,
-                    owner=owner or None):
+                    owner=owner or None, status=status or None):
                 snapped += 1
 
     out = {"rows": len(grid), "weeks": len(weeks), "snapshots": snapped,
@@ -297,7 +408,12 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                      show_ghost: bool = False,
                      archive_title_row: int | None = None,
                      archive_span: tuple | None = None,
-                     n_week_end: int | None = None) -> list[dict]:
+                     n_week_end: int | None = None,
+                     status_rows: list | None = None,
+                     fold_rows: list | None = None,
+                     lane_rows: list | None = None,
+                     milestone_row: int | None = None,
+                     notes: list | None = None) -> list[dict]:
     # Everything that PAINTS stops at the visible edge; only the grid-width
     # assertion and the hidden-column treatment go past it.
     n_week_end = n_cols - N_HIDDEN if n_week_end is None else n_week_end
@@ -342,16 +458,15 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
     # no ghost layer. Writing it only when show_ghost would leave a lilac swatch
     # with no text behind forever the first time the overlay is turned off —
     # values().clear() takes the label away and never the fill.
-    if len(_LEGEND) < N_LABEL_COLS:
-        reqs.append({"repeatCell": {
-            "range": {"sheetId": sid, "startRowIndex": LEGEND_ROW,
-                      "endRowIndex": LEGEND_ROW + 1,
-                      "startColumnIndex": len(_LEGEND),
-                      "endColumnIndex": len(_LEGEND) + 1},
-            "cell": {"userEnteredFormat": {
-                "backgroundColor": _rgb(GHOST_BG) if show_ghost else _WHITE,
-                "textFormat": {"fontSize": 9, "foregroundColor": _INK}}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": LEGEND_ROW,
+                  "endRowIndex": LEGEND_ROW + 1,
+                  "startColumnIndex": _GHOST_LEGEND_COL,
+                  "endColumnIndex": _GHOST_LEGEND_COL + 1},
+        "cell": {"userEnteredFormat": {
+            "backgroundColor": _rgb(GHOST_BG) if show_ghost else _WHITE,
+            "textFormat": {"fontSize": 9, "foregroundColor": _INK}}},
+        "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
 
     # Wipe the whole body to white BEFORE painting anything. A bar that moved or
     # shortened since the last refresh leaves its old cells coloured otherwise —
@@ -374,6 +489,23 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
             "textFormat": {"bold": False, "fontSize": 10,
                            "foregroundColor": _INK}}},
         "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+
+    # ASSERT, DON'T ADD — data validation and cell notes both survive
+    # values().clear(), exactly like formatting and protected ranges. Without
+    # these two wipes a Status dropdown stays on a row that is now a task, and
+    # last week's milestone note hovers over a cell that no longer has a marker
+    # in it — stale claims attached to rows that have moved underneath them.
+    # Five of the fifteen defects in the 2026-08-09 review were this shape.
+    _wipe_to = max(n_rows, FIRST_BODY_ROW) + 200
+    reqs.append({"setDataValidation": {
+        "range": {"sheetId": sid, "startRowIndex": FIRST_BODY_ROW,
+                  "endRowIndex": _wipe_to,
+                  "startColumnIndex": 0, "endColumnIndex": n_week_end}}})
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": FIRST_BODY_ROW,
+                  "endRowIndex": _wipe_to,
+                  "startColumnIndex": 0, "endColumnIndex": n_week_end},
+        "cell": {}, "fields": "note"}})
 
     # Clear the previous today-marker before drawing this week's. updateBorders
     # is not touched by the fill wipe above — borders live outside
@@ -482,22 +614,80 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                     "textFormat": {"fontSize": 8, "foregroundColor": _INK}}},
                 "fields": "userEnteredFormat.textFormat"}})
 
-    # The task waterfall, collapsed by default: a project row is the unit, and
-    # its tasks are there when Eyal wants them.
+    # ---- the management band, the meetings lanes, and the fold headers ------
+    if milestone_row is not None:
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": milestone_row,
+                      "endRowIndex": milestone_row + 1,
+                      "startColumnIndex": 0, "endColumnIndex": n_week_end},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": _rgb(_MILESTONE_BG),
+                "horizontalAlignment": "CENTER",
+                "textFormat": {"bold": True, "foregroundColor": _INK}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat,"
+                      "horizontalAlignment)"}})
+        # The label itself reads left, like every other row-label on the tab.
+        reqs.append(left_align(sid, milestone_row, milestone_row + 1, 0, 1))
+
+    for row in (lane_rows or []):
+        # The lane's glyphs are centred in 21px cells; its label stays left.
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": row, "endRowIndex": row + 1,
+                      "startColumnIndex": N_LABEL_COLS,
+                      "endColumnIndex": n_week_end},
+            "cell": {"userEnteredFormat": {
+                "horizontalAlignment": "CENTER",
+                "textFormat": {"fontSize": 8, "foregroundColor": _INK}}},
+            "fields": "userEnteredFormat(textFormat,horizontalAlignment)"}})
+
+    for row in (fold_rows or []):
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": row, "endRowIndex": row + 1,
+                      "startColumnIndex": 0, "endColumnIndex": n_week_end},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": _rgb(_FOLD_BG),
+                "textFormat": {"italic": True, "foregroundColor": _INK}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+
+    # ---- Status: a dropdown, on project rows only ---------------------------
+    # strict=False for the same reason the Meetings tab uses it: a value written
+    # by the engine must never hard-error a cell. The readback refuses anything
+    # outside the vocabulary anyway, so an unrecognised entry costs the cell and
+    # not the row.
+    for row in (status_rows or []):
+        reqs.append({"setDataValidation": {
+            "range": {"sheetId": sid, "startRowIndex": row, "endRowIndex": row + 1,
+                      "startColumnIndex": N_LABEL_COLS - 1,
+                      "endColumnIndex": N_LABEL_COLS},
+            "rule": {"condition": {
+                "type": "ONE_OF_LIST",
+                "values": [{"userEnteredValue": s} for s in PROJECT_STATUSES]},
+                "strict": False, "showCustomUi": True}}})
+
+    # ---- notes: the text a 21px cell cannot hold ----------------------------
+    # A milestone title or a meeting count printed into the grid would overflow
+    # across the next marker and make both unreadable. The glyph carries the
+    # fact; the note carries the detail, on hover.
+    for row, col, text in (notes or []):
+        reqs.append({"updateCells": {
+            "range": {"sheetId": sid, "startRowIndex": row, "endRowIndex": row + 1,
+                      "startColumnIndex": col, "endColumnIndex": col + 1},
+            "rows": [{"values": [{"note": text}]}], "fields": "note"}})
+
+    # EVERY GROUP ARRIVES COLLAPSED. addDimensionGroup only CREATES a group — it
+    # does not close it — so a second updateDimensionGroup per span is what makes
+    # "collapsed by default" true. The task waterfall claimed it in a comment and
+    # never sent this request; with the fold in place that stops being cosmetic,
+    # because an expanded waterfall puts every task back on the board and undoes
+    # exactly the height the fold reclaims. [2026-08-13]
     for a, b in group_spans:
         reqs.append({"addDimensionGroup": {
             "range": {"sheetId": sid, "dimension": "ROWS",
                       "startIndex": a, "endIndex": b + 1}}})
-
-    # The archive collapses to a single line by default. addDimensionGroup only
-    # CREATES the group — it does not close it — so the answer to "it doubles
-    # what is on screen" depends on this second request actually being sent.
-    if archive_span:
         reqs.append({"updateDimensionGroup": {
             "dimensionGroup": {
                 "range": {"sheetId": sid, "dimension": "ROWS",
-                          "startIndex": archive_span[0],
-                          "endIndex": archive_span[1] + 1},
+                          "startIndex": a, "endIndex": b + 1},
                 "depth": 1, "collapsed": True},
             "fields": "collapsed"}})
 
