@@ -1466,7 +1466,26 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             from processors.meeting_timing import parse_timing
 
             timing = parse_timing(raw_date)
-            if str(dm.get("timing_text") or "") != timing["text"]:
+            # COMPARE THE WHOLE READING, NOT JUST THE TEXT.
+            #
+            # This was keyed on `timing_text` alone, and the text is the one part
+            # that never changes — it is the cell, verbatim. So when the PARSER
+            # learned a form it had not understood before, every meeting already
+            # carrying that text was skipped and its new window was never
+            # written: three rows reading `23-29/8/2026` and `16-22/8/2026` kept
+            # a null window across the deploy that taught the parser to read
+            # them. Found in production the same evening. [2026-08-13]
+            #
+            # Same shape as the `not_scheduled` cell earlier today: a guard keyed
+            # on a field that already agrees suppresses the update of the fields
+            # that do not. Compare everything the parse produces.
+            _stored = (str(dm.get("timing_text") or ""),
+                       dm.get("recurrence") or None,
+                       str(dm.get("window_start") or "")[:10] or None,
+                       str(dm.get("window_end") or "")[:10] or None)
+            _parsed = (timing["text"], timing["recurrence"],
+                       timing["window_start"], timing["window_end"])
+            if _stored != _parsed:
                 upd["timing_text"] = timing["text"]
                 upd["recurrence"] = timing["recurrence"]
                 upd["window_start"] = timing["window_start"]

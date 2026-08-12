@@ -411,6 +411,76 @@ class TestStatusCellCanonicalisation:
         assert calls["update"] == []
 
 
+class TestTheTimingReadingIsComparedWhole:
+    """A guard keyed on the one field that never changes. [2026-08-13]
+
+    The timing block only wrote when `timing_text` differed — and `timing_text`
+    IS the cell, verbatim, so it differs exactly when the cell was edited. When
+    the PARSER learned the `23-29/8/2026` form, every meeting already carrying
+    that text was skipped and its new window was never written: three live rows
+    kept a null window across the very deploy that taught the parser to read
+    them, and the reconcile reported no work to do.
+
+    Same shape as the `not_scheduled` cell earlier the same day — a guard keyed
+    on a field that already agrees suppresses the update of the fields that do
+    not.
+    """
+
+    async def test_the_window_lands_when_only_the_window_changed(self, monkeypatch):
+        sheet = [_srow(id="m1", title="T", proposed_date_raw="23-29/8/2026")]
+        db = [_dbrow(id="m1", title="T", timing_text="23-29/8/2026",
+                     recurrence=None, window_start=None, window_end=None)]
+        snap = {"m1": {"title": "T", "status": "to_schedule"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        assert calls["update"], "the reconcile wrote nothing at all"
+        upd = calls["update"][0][1]
+        assert upd["window_start"] == "2026-08-23"
+        assert upd["window_end"] == "2026-08-29"
+
+    async def test_an_already_correct_reading_is_not_rewritten(self, monkeypatch):
+        """No churn: a row whose stored reading already matches must not be
+        updated on every 30-minute cycle."""
+        sheet = [_srow(id="m1", title="T", proposed_date_raw="23-29/8/2026")]
+        db = [_dbrow(id="m1", title="T", timing_text="23-29/8/2026",
+                     recurrence=None, window_start="2026-08-23",
+                     window_end="2026-08-29")]
+        snap = {"m1": {"title": "T", "status": "to_schedule"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        assert calls["update"] == []
+
+    async def test_a_timestamptz_shaped_window_still_compares_equal(self, monkeypatch):
+        """The column is a DATE, but a driver that hands back a full timestamp
+        must not read as a difference and rewrite the row forever."""
+        sheet = [_srow(id="m1", title="T", proposed_date_raw="23-29/8/2026")]
+        db = [_dbrow(id="m1", title="T", timing_text="23-29/8/2026",
+                     recurrence=None,
+                     window_start="2026-08-23T00:00:00+00:00",
+                     window_end="2026-08-29T00:00:00+00:00")]
+        snap = {"m1": {"title": "T", "status": "to_schedule"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        assert calls["update"] == []
+
+    async def test_a_recurrence_that_changed_also_lands(self, monkeypatch):
+        sheet = [_srow(id="m1", title="T", proposed_date_raw="Once a week")]
+        db = [_dbrow(id="m1", title="T", timing_text="Once a week",
+                     recurrence=None, window_start=None, window_end=None)]
+        snap = {"m1": {"title": "T", "status": "to_schedule"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        assert calls["update"][0][1]["recurrence"] == "weekly"
+
+
 class TestHeldMeetingsAgeOut:
     """Held meetings sink, then leave after two weeks. Eyal's number. [2026-08-13]
 
