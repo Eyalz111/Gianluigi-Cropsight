@@ -178,7 +178,13 @@ async def build_areas_view() -> dict:
 
     to_schedule: dict[str, int] = defaultdict(int)
     for m in meetings:
-        if (m.get("status") or "not_scheduled") != "not_scheduled":
+        from services.google_sheets import canonical_meeting_status
+
+        # Canonicalised: a row written before the 2026-08-12 rename still says
+        # `not_scheduled`, and a bare literal comparison would count it as zero
+        # — under-reporting the very backlog this view exists to show.
+        status = canonical_meeting_status(m.get("status")) or "to_schedule"
+        if status != "to_schedule":
             continue
         to_schedule[_area_of(m.get("label"), proj_area)] += 1
 

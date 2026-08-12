@@ -255,3 +255,80 @@ class TestTheUpdatePathAlsoKeepsTheWords:
              patch.object(supabase_client, "resolve_assignee", lambda v: v):
             with pytest.raises(Exception, match="permission denied"):
                 supabase_client.update_follow_up_meeting("m1", status="held")
+
+
+class TestToScheduleRename:
+    """`not_scheduled` -> `to_schedule`, 2026-08-12.
+
+    Eyal: "what is not schedule she is going to schedule and i think i want to
+    change the terminology to 'to schedule'". The two words describe different
+    things and the old one described the wrong one: `not_scheduled` states a
+    fact about the meeting, `to_schedule` states an instruction to Nechama.
+    Beside `parked` — deliberately not yet — the pair finally reads as a
+    decision rather than a description.
+    """
+
+    def test_the_new_value_is_canonical(self):
+        from services.google_sheets import MEETING_STATUSES
+        assert "to_schedule" in MEETING_STATUSES
+        assert "not_scheduled" not in MEETING_STATUSES
+
+    @pytest.mark.parametrize("old", [
+        "not_scheduled", "Not_Scheduled", "not scheduled", "to schedule",
+        "To Schedule", "unscheduled", "to-schedule",
+    ])
+    def test_every_old_spelling_still_resolves(self, old):
+        """A rename that invalidated 8 live rows and every historical one would
+        turn a wording change into a data migration with a failure mode."""
+        from services.google_sheets import canonical_meeting_status
+        assert canonical_meeting_status(old) == "to_schedule"
+
+    @pytest.mark.parametrize("status", [
+        "recurring", "scheduled", "parked", "held", "dropped"])
+    def test_the_other_statuses_are_untouched(self, status):
+        from services.google_sheets import canonical_meeting_status
+        assert canonical_meeting_status(status) == status
+
+    def test_an_unknown_status_is_refused_not_guessed(self):
+        """It must not silently become to_schedule — that would put a meeting
+        on Nechama's worklist that nobody asked her to book."""
+        from services.google_sheets import canonical_meeting_status
+        assert canonical_meeting_status("maybe someday") == ""
+        assert canonical_meeting_status(None) == ""
+        assert canonical_meeting_status("") == ""
+
+    def test_the_palette_and_orders_use_the_new_key(self):
+        """A legend or sort keyed on a value nothing stores renders the meeting
+        with no colour and sorts it to an arbitrary position."""
+        from services.google_sheets import (
+            MEETING_DISPLAY_ORDER, MEETING_STATUS_COLORS, MEETING_STATUS_ORDER,
+            MEETING_STATUSES,
+        )
+        for table in (MEETING_STATUS_COLORS, MEETING_STATUS_ORDER,
+                      MEETING_DISPLAY_ORDER):
+            assert set(table) == set(MEETING_STATUSES), (
+                f"{sorted(set(table) ^ set(MEETING_STATUSES))} out of step")
+
+
+class TestFocusShowsOnlyWhatNeedsAction:
+    """Eyal: "only the scheduled and to schedule ones, not the park and held"."""
+
+    def test_the_allowlist_is_exactly_those_two(self):
+        from processors.focus_view import FOCUS_MEETING_STATUSES
+        assert FOCUS_MEETING_STATUSES == {"scheduled", "to_schedule"}
+
+    def test_parked_is_excluded(self):
+        """17 of the 22 meetings on the pool are parked. Burying 5 live ones
+        under them is how a focus view stops being looked at."""
+        from processors.focus_view import FOCUS_MEETING_STATUSES
+        assert "parked" not in FOCUS_MEETING_STATUSES
+        assert "held" not in FOCUS_MEETING_STATUSES
+        assert "recurring" not in FOCUS_MEETING_STATUSES
+
+    def test_a_pre_rename_row_still_appears(self):
+        """A row written before the rename says not_scheduled. Compared as a
+        bare literal it would silently vanish from the tab that exists to stop
+        things being missed."""
+        from services.google_sheets import canonical_meeting_status
+        from processors.focus_view import FOCUS_MEETING_STATUSES
+        assert canonical_meeting_status("not_scheduled") in FOCUS_MEETING_STATUSES

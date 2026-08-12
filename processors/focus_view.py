@@ -70,6 +70,17 @@ _CLOSED_TASK = {"done", "archived", "cancelled", "superseded"}
 # A meeting that has happened or been dropped is not outstanding work.
 _CLOSED_MEETING = {"held", "dropped", "cancelled"}
 
+# Focus answers "what needs attention", so a meeting earns its place here only
+# if somebody is expected to act on it. Eyal, 2026-08-12: *"only the scheduled
+# and to schedule ones, not the park and held."*
+#
+# `parked` is the one that had to go, and it is 17 of the 22 meetings on the
+# pool. Parked means deliberately not being pursued — a decision already taken —
+# so listing them on the attention tab inverts the point: the shortest list is
+# the one people read, and burying 5 live meetings under 17 dormant ones is how
+# a focus view stops being looked at.
+FOCUS_MEETING_STATUSES = {"scheduled", "to_schedule"}
+
 
 def _parse_date(value) -> "datetime.date | None":
     if not value:
@@ -156,12 +167,16 @@ def build_rows(today=None) -> list[list]:
     meetings = (supabase_client.client.table("follow_up_meetings").select("*")
                 .eq("approval_status", "approved").limit(2000).execute().data or [])
     for m in meetings:
-        status = (m.get("status") or "").lower()
-        if status in _CLOSED_MEETING:
-            continue
+        from services.google_sheets import canonical_meeting_status
+
+        # Canonicalised so a row written before the 2026-08-12 rename still
+        # matches — otherwise every pre-rename `not_scheduled` meeting silently
+        # vanishes from the tab that exists to stop things being missed.
+        status = canonical_meeting_status(m.get("status"))
         # `recurring` has no single date by definition — it would sit in NO DATE
-        # forever and train the eye to ignore that bucket.
-        if status == "recurring":
+        # forever and train the eye to ignore that bucket. `parked` and the
+        # closed states are excluded by the allowlist above.
+        if status not in FOCUS_MEETING_STATUSES:
             continue
         due = _parse_date(m.get("proposed_date"))
         bucket, bsort = bucket_for(due, today)

@@ -2598,7 +2598,7 @@ async def distribute_approved_content(
                         m["id"], None, m.get("title"), m.get("label"),
                         m.get("led_by"), str(m.get("proposed_date") or "")[:10],
                         ", ".join(m.get("participants") or []),
-                        m.get("status") or "not_scheduled",
+                        m.get("status") or "to_schedule",
                     )
             else:
                 fu_result = False

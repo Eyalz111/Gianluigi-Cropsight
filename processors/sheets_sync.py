@@ -1480,12 +1480,19 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         #     it was silently refused with the cell snapping back inside 30
         #     minutes — the sheet arguing with the person using it. The thing
         #     actually worth protecting is history, not order. [2026-08-09] ---
-        s_status = (sm.get("status") or "").strip().lower()
-        d_status = (dm.get("status") or "not_scheduled").strip().lower()
-        snap_status = (snap.get("status") or "").strip().lower()
-        if s_status and s_status not in MEETING_STATUSES:
-            logger.warning(f"[meeting-reconcile] unknown status {s_status!r} (row {row})")
-            s_status = ""
+        # Canonicalised on the way in, so a cell still reading `not_scheduled`
+        # — or a row written before the 2026-08-12 rename — resolves to
+        # `to_schedule` instead of being rejected as unknown and silently
+        # dropped back to the database value.
+        from services.google_sheets import canonical_meeting_status
+
+        raw_s_status = (sm.get("status") or "").strip().lower()
+        s_status = canonical_meeting_status(raw_s_status)
+        d_status = canonical_meeting_status(dm.get("status")) or "to_schedule"
+        snap_status = canonical_meeting_status(snap.get("status"))
+        if raw_s_status and not s_status:
+            logger.warning(
+                f"[meeting-reconcile] unknown status {raw_s_status!r} (row {row})")
         if s_status and s_status != snap_status and s_status != d_status:
             if d_status not in MEETING_TERMINAL_STATUSES:
                 upd["status"] = s_status
@@ -1507,7 +1514,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             db_updates[mid] = upd
         # Held stays on the tab as history; dropped stays until it ages out of
         # the archival window, then moves to 'Past Meetings'. Everything else
-        # (scheduled / not_scheduled / held / recent-dropped) snapshots + stays
+        # (scheduled / to_schedule / held / recent-dropped) snapshots + stays
         # on the working tab. [2026-07-24]
         # Only age-out a meeting that was ALREADY 'dropped' in the DB before this
         # sync: the drop edit is itself a "touch", so a just-dropped meeting gets
@@ -1533,7 +1540,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                     proposed_date=(sm.get("proposed_date") or None),
                     participants=_meeting_participants_to_list(sm.get("participants")),
                     label=sm.get("label") or "",
-                    status=(sm.get("status") or "not_scheduled").strip().lower(),
+                    status=(sm.get("status") or "to_schedule").strip().lower(),
                     # Already the canonical DB letter — the read path maps the
                     # sheet's 'Urgent' to 'U'. Forwarding it at all is the fix:
                     # a priority typed on a NEW meeting row never reached the
@@ -1692,7 +1699,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                     m["id"], None, m.get("title"), m.get("label"), m.get("led_by"),
                     str(m.get("proposed_date") or "")[:10],
                     ", ".join(m.get("participants") or []),
-                    m.get("status") or "not_scheduled",
+                    m.get("status") or "to_schedule",
                 )
         summary["readded"] = len(missing)
 

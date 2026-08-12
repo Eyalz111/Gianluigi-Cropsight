@@ -463,7 +463,7 @@ MEETING_COLUMNS = {
     "led_by": "C",          # who owns making it happen
     "proposed_date": "D",   # when it was proposed for, DD/MM/YYYY
     "participants": "E",    # comma-separated
-    "status": "F",          # recurring/scheduled/not_scheduled/parked/held/dropped
+    "status": "F",          # recurring/scheduled/to_schedule/parked/held/dropped
     "priority": "G",        # Urgent / H / M / L — the tasks scale
     "id": "H",              # UUID — the reconcile identity. HIDDEN, never shown.
 }
@@ -535,7 +535,7 @@ def meetings_header_block(headers: list | None = None,
 
 # `parked` = deliberately not being pursued right now, without claiming it was
 # held or dropped. Added 2026-08-09 with the meetings pool: without it, anything
-# Eyal was not currently chasing had to sit in "not_scheduled" looking like a
+# Eyal was not currently chasing had to sit in "to_schedule" looking like a
 # booking nobody had made. Named `parked` rather than "to hold", which reads as
 # "to be held" — the opposite of the intent. `status` is TEXT with no CHECK
 # constraint, so this needed no migration.
@@ -550,8 +550,40 @@ def meetings_header_block(headers: list | None = None,
 # answer. As a status it also falls out naturally: a recurring meeting is
 # permanently live, never reaches a terminal state, and sorts to the top on its
 # own without a special case.
-MEETING_STATUSES = ("recurring", "scheduled", "not_scheduled", "parked",
+# `to_schedule` replaced `not_scheduled` on 2026-08-12. Eyal: "what is not
+# schedule she is going to schedule and i think i want to change the terminology
+# to 'to schedule'". The tab's own banner had said "Scheduled first, then to
+# schedule, parked, and held" since the pool was built — the stored value was
+# the only thing still using the old word, and it reads as a description of a
+# state rather than an instruction to Nechama.
+MEETING_STATUSES = ("recurring", "scheduled", "to_schedule", "parked",
                     "held", "dropped")
+
+# Old values keep working. A rename that invalidated 8 live rows and every
+# historical one would turn a wording change into a data migration with a
+# failure mode, and a cell somebody typed last week would stop validating.
+# Read through canonical_meeting_status(); write only MEETING_STATUSES.
+MEETING_STATUS_ALIASES = {
+    "not_scheduled": "to_schedule",
+    "not scheduled": "to_schedule",
+    "to schedule": "to_schedule",
+    "toschedule": "to_schedule",
+    "unscheduled": "to_schedule",
+}
+
+
+def canonical_meeting_status(value) -> str:
+    """Any spelling of a status -> the one this system stores.
+
+    Returns "" for anything unrecognised rather than guessing: an unknown status
+    must not silently become `to_schedule` and put a meeting back on Nechama's
+    worklist that nobody asked her to book.
+    """
+    s = str(value or "").strip().lower().replace("-", "_")
+    if s in MEETING_STATUSES:
+        return s
+    return MEETING_STATUS_ALIASES.get(s, MEETING_STATUS_ALIASES.get(
+        s.replace("_", " "), ""))
 
 # TERMINAL states. A meeting that has happened or been dropped must never be
 # walked backwards by a stale cell. `recurring` is deliberately NOT here: it is
@@ -566,7 +598,7 @@ MEETING_TERMINAL_STATUSES = frozenset({"held", "dropped"})
 MEETING_STATUS_COLORS = {
     "recurring": _hex_color("#D9E2F3"),
     "scheduled": _hex_color("#C6E0B4"),
-    "not_scheduled": _hex_color("#FFE699"),
+    "to_schedule": _hex_color("#FFE699"),
     "parked": _hex_color("#E1D5E7"),
     "held": _hex_color("#D9D9D9"),
     "dropped": _hex_color("#F4CCCC"),
@@ -607,7 +639,7 @@ def _fmt_ddmmyyyy(value) -> str:
 # — a legitimate, common decision — was silently refused and the cell snapped
 # back within 30 minutes. Only regression FROM a terminal state is blocked now.
 # Do NOT reorder these. [2026-08-09]
-MEETING_STATUS_ORDER = {"recurring": 0, "parked": 1, "not_scheduled": 2,
+MEETING_STATUS_ORDER = {"recurring": 0, "parked": 1, "to_schedule": 2,
                         "scheduled": 3, "held": 4, "dropped": 5}
 # DISPLAY order on the Meetings tab — operational importance, Eyal 2026-08-09.
 # Recurring first: those are the fixtures the week is built around, and he asked
@@ -616,7 +648,7 @@ MEETING_STATUS_ORDER = {"recurring": 0, "parked": 1, "not_scheduled": 2,
 # progression order above so the sort can differ from the state machine —
 # fusing them is how "show the booked ones first" would start meaning "a booked
 # meeting cannot be parked".
-MEETING_DISPLAY_ORDER = {"recurring": 0, "scheduled": 1, "not_scheduled": 2,
+MEETING_DISPLAY_ORDER = {"recurring": 0, "scheduled": 1, "to_schedule": 2,
                          "parked": 3, "held": 4, "dropped": 5}
 
 # ---------------------------------------------------------------------------
@@ -724,7 +756,7 @@ def _sorted_meetings(meetings: list[dict]) -> list[dict]:
     """
     def _key(m: dict):
         order = MEETING_DISPLAY_ORDER.get(
-            (m.get("status") or "not_scheduled").strip().lower(), 1
+            (m.get("status") or "to_schedule").strip().lower(), 1
         )
         return (order, str(m.get("proposed_date") or "9999"), m.get("title") or "")
     return sorted(meetings, key=_key)
@@ -2775,7 +2807,7 @@ class GoogleSheetsService:
             # value on a tab sitting beside the project blocks.
             _fmt_ddmmyyyy(m.get("proposed_date")),
             ", ".join(parts) if isinstance(parts, list) else str(parts or ""),
-            m.get("status") or "not_scheduled",
+            m.get("status") or "to_schedule",
             # Blank when unset, never a default 'M' — showing a value the
             # database does not hold makes the merge push it back every cycle.
             _MEETING_PRIORITY_TO_SHEET.get(
@@ -3720,7 +3752,7 @@ class GoogleSheetsService:
         reqs.append(_data_validation_request(
             sid, MEETING_COL_INDEX["status"], list(MEETING_STATUSES),
             start_row=MEETING_FIRST_BODY_ROW - 1))
-        # EXACT MATCH, not "contains". TEXT_CONTAINS made "not_scheduled" match
+        # EXACT MATCH, not "contains". TEXT_CONTAINS made "to_schedule" match
         # the "scheduled" rule as well, so which colour won depended on rule
         # order rather than on the value.
         idx = 0
@@ -3774,7 +3806,7 @@ class GoogleSheetsService:
             "booleanRule": {
                 "condition": {"type": "CUSTOM_FORMULA", "values": [
                     {"userEnteredValue":
-                     f'=AND(${d}{b}<>"",OR(${st}{b}="not_scheduled",'
+                     f'=AND(${d}{b}<>"",OR(${st}{b}="to_schedule",'
                      f'${st}{b}="scheduled"),IFERROR({expr}<TODAY(),FALSE))'}]},
                 "format": {"backgroundColor": _hex_color("#F4CCCC")}}}}})
         idx += 1
@@ -3782,7 +3814,7 @@ class GoogleSheetsService:
         # A STATUS THAT CLAIMS A DATE, WITH NO DATE. `scheduled` and `held` both
         # assert the meeting is or was real at a point in time, and nothing will
         # ever remind anyone about a date that does not exist — the pool exists
-        # to get things into the calendar. `not_scheduled` and `parked` are
+        # to get things into the calendar. `to_schedule` and `parked` are
         # legitimately undated, and `recurring` has no single date by
         # definition, so none of those is flagged.
         #

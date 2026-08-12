@@ -54,7 +54,7 @@ class TestRecurringIsAFirstClassStatus:
     def test_status_defaults_only_when_blank(self):
         captured = {}
         _client_capturing(captured).create_follow_up_meeting_manual(title="X", status="")
-        assert captured["status"] == "not_scheduled"
+        assert captured["status"] == "to_schedule"
 
 
 class TestPriorityOnANewRowSurvives:

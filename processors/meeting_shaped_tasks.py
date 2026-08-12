@@ -185,7 +185,7 @@ def apply_meeting_shaped_proposal(content: dict) -> dict:
             label=content.get("label") or "",
             led_by=content.get("assignee") or "",
             proposed_date=content.get("deadline") or None,
-            status="not_scheduled",
+            status="to_schedule",
         )
     except Exception as e:                                  # noqa: BLE001
         logger.error(f"[meeting-shaped] could not create the meeting: {e}")

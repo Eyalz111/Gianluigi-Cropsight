@@ -30,7 +30,7 @@ except Exception as e:  # pragma: no cover
 
 def _srow(**kw):
     base = {"id": "", "title": "", "label": "", "led_by": "", "proposed_date": "",
-            "proposed_date_raw": "", "participants": "", "status": "not_scheduled",
+            "proposed_date_raw": "", "participants": "", "status": "to_schedule",
             "agenda": "", "prep_needed": "", "source_meeting": "", "row_number": 2}
     base.update(kw)
     return base
@@ -38,7 +38,7 @@ def _srow(**kw):
 
 def _dbrow(**kw):
     base = {"id": "m1", "title": "", "label": "", "led_by": "", "proposed_date": None,
-            "participants": [], "status": "not_scheduled", "approval_status": "approved"}
+            "participants": [], "status": "to_schedule", "approval_status": "approved"}
     base.update(kw)
     return base
 
@@ -730,7 +730,7 @@ class TestOperationalOrdering:
         import services.google_sheets as gs
         order = sorted(gs.MEETING_DISPLAY_ORDER,
                        key=gs.MEETING_DISPLAY_ORDER.get)
-        assert order == ["recurring", "scheduled", "not_scheduled", "parked",
+        assert order == ["recurring", "scheduled", "to_schedule", "parked",
                          "held", "dropped"]
 
     def test_it_is_separate_from_the_state_machine(self):

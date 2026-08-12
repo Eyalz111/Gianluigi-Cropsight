@@ -5893,7 +5893,7 @@ class SupabaseClient:
         proposed_date: str | None = None,
         participants: list[str] | None = None,
         label: str = "",
-        status: str = "not_scheduled",
+        status: str = "to_schedule",
         priority: str = "",
     ) -> dict | None:
         """Create a hand-added follow-up meeting (no source meeting).
@@ -5933,7 +5933,7 @@ class SupabaseClient:
                 "proposed_date": timing["date"],
                 "participants": participants or [],
                 "label": self.resolve_label(label),
-                "status": status or "not_scheduled",
+                "status": status or "to_schedule",
                 "approval_status": "approved",
             }
             if timing["text"]:
