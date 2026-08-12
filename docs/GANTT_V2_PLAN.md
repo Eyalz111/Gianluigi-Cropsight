@@ -11,6 +11,45 @@ and not just sequences."*
 
 ---
 
+## 0. Route to live — who does what, in order
+
+Written 2026-08-12 because the phase list says what gets built and not who is
+waiting on whom. Steps 1–4 are hours of Eyal's attention and minutes of work;
+step 5 is the real remaining build.
+
+| # | Step | Whose | Result you can see |
+|---|---|---|---|
+| 1 | Approve the 22 start-date proposals | Eyal, ~5 min | **Bars appear on the Timeline** within 30 min |
+| 2 | Run `scripts/migrate_milestones.sql` | Eyal, ~2 min | seeder stops being silent |
+| 3 | Approve the 16 milestone proposals | Eyal, ~5 min | milestones exist in the DB |
+| 4 | Flip `CEO_TAB_ENABLED` | Gianluigi | **CEO tab appears**, milestones + manual block |
+| 5 | **Phase 4 — editing from the sheet** | Gianluigi, the real work | type a date on the Timeline, it reaches the DB |
+| 6 | The 3 overrides + 5 blank starts | Eyal, in the sheet | every project has a bar |
+| 7 | Phase 5 — freeze the old board | Gianluigi | one board, not two |
+
+### Why step 1 is not premature, and why it is not urgent either
+
+Approving in Claude.ai writes `start_date` to the database; the Timeline renders
+FROM the database. So the bars appear on the sheet — that direction already
+works and is worth seeing. What does not work yet is sheet → database, which is
+step 5 and the reason step 6 waits.
+
+Nothing breaks if step 1 waits for step 5 and every date is typed into the sheet
+instead. The only cost is that until then the Timeline draws nothing, so there
+is no way to judge whether the board is any good.
+
+### What is deliberately NOT being built
+
+A tool to set a start date to something other than the recommendation. It was
+started on 2026-08-12 and dropped: `start_date` would then be editable in three
+places — the approval card, a bespoke MCP tool, and the Timeline's own Start
+column once Phase 4 lands. Three writers on one field is the defect this plan
+exists to avoid. The three projects where the archived board is the better
+source, and the five with no derivable start at all, wait for step 6 and are
+typed once, in the sheet.
+
+---
+
 ## 1. What the current Gantt actually is
 
 `Cropsight operational gantt` — 6 tabs; the live one is `2026-2027`, **1018
