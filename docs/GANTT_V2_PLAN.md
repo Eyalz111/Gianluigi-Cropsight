@@ -455,6 +455,50 @@ start at all and need a hand-typed date; the area gate correctly refuses to
 borrow, for instance, Moldova Pilot's start from a bar sitting in the Sales
 section.
 
+### Review, 2026-08-12 (max) — six fixes
+
+Fifteen findings, which were five distinct defects duplicated two and three
+times: the synthesis and sweep agents died on a spend limit, so nothing merged
+them. Coverage is therefore good but not exhaustive.
+
+**The most-confident finding was wrong.** Three independent finders CONFIRMED
+that the tab must fail with a grid-limits 400, because `_ensure_tab` issues a
+bare `addSheet` (26 columns) while every range targets 101. The mechanism is
+real; the conclusion is not. Production had already rendered 160 rows across 101
+columns — `values().update` expands the grid on its way past the edge. Checked
+against the live sheet before reporting. Worth remembering that this review's
+confidence and its correctness came apart on exactly the finding it repeated
+most.
+
+Fixed:
+
+1. **`propose_project_starts` had no caller.** The proposer was correct and
+   fully tested; nothing ran it. The 22 queued proposals came from a one-off
+   manual run, and every project created afterwards would have been skipped in
+   silence — no start date, so no bar, forever. Now rides the daily QA beside
+   `_run_project_learning`, and is idempotent.
+2. **The today-marker accumulated.** `updateBorders` is not touched by a
+   `backgroundColor` wipe, so last Monday's red line stayed and a new one
+   appeared beside it every week. Now cleared with an explicit `style: "NONE"`
+   pass first, the same shape `project_status_sheet.py:441` already uses.
+3. **`values().clear()` was sized from the NEW grid** (`len(grid) + 40`), so a
+   render that shrank by more than 40 rows left the previous tail as text — and
+   since the fill wipe reaches 200 rows, it showed as rows with no bar under
+   them. Now an unbounded column range, with no arithmetic to get wrong.
+4. **The wipe skipped columns A–E.** Area headers and the archive title paint
+   across all columns, so their fills survived in the label block at whatever
+   row they last occupied. Now starts at column 0 and resets `textFormat` too,
+   because those rows are bold.
+5. **A gantt-only proposal could not be approved.** When a project had an
+   archived bar but no tasks, `recommended` was `None` and `apply_project_start`
+   refused it — an un-clearable card. The archive is now the recommendation of
+   last resort, labelled `recommended_source: gantt_bar`, with the matched
+   label still on the card.
+6. **Grid width is now asserted, not inherited.** Not a defect (see above), but
+   the tab is 101 columns only by an undocumented side effect. One
+   `updateSheetProperties` before the first ranged write makes it a stated
+   invariant.
+
 ### Phase 3 — Milestones
 - Run Migration B
 - Seed from the `Company OKRs` bars and the ★ rows, again as proposals

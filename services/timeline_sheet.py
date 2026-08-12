@@ -193,10 +193,32 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
     if sid is None:
         return {"error": "could not create the Timeline tab"}
 
-    end_a1 = f"{_a1_col(n_cols - 1)}{len(grid) + 40}"
+    # Assert the grid is wide enough BEFORE any ranged write. Not a defect —
+    # production renders all 101 columns today, because values().update expands
+    # the grid on its way past the edge. But `_ensure_tab` issues a bare
+    # `addSheet`, which allocates 26 columns, so the tab is wide only by a side
+    # effect nobody wrote down; three independent reviewers read this file and
+    # concluded it must fail. One request makes the width a stated invariant
+    # instead of an accident, and if the tab is ever recreated it no longer
+    # matters which call happens to arrive first. [2026-08-12 review]
+    sheets_service._execute_with_retry(
+        lambda: sheets_service.service.spreadsheets().batchUpdate(
+            spreadsheetId=ssid, body={"requests": [{"updateSheetProperties": {
+                "properties": {"sheetId": sid,
+                               "gridProperties": {"columnCount": n_cols}},
+                "fields": "gridProperties.columnCount"}}]}))
+
+    # Clear EVERY row of the used columns, not `len(grid) + 40`. The old bound
+    # was measured from the NEW render, so a refresh that shrank the tab by more
+    # than 40 rows left the tail of the previous one behind — and since the fill
+    # wipe below reaches 200 rows, those leftovers appeared as text with no bar
+    # under it: rows that read as real projects and lanes but correspond to
+    # nothing. An unbounded column range has no arithmetic to get wrong.
+    # [2026-08-12 review]
     sheets_service._execute_with_retry(
         lambda: sheets_service.service.spreadsheets().values().clear(
-            spreadsheetId=ssid, range=f"'{TIMELINE_TAB}'!A1:{end_a1}", body={}))
+            spreadsheetId=ssid,
+            range=f"'{TIMELINE_TAB}'!A:{_a1_col(n_cols - 1)}", body={}))
     sheets_service._execute_with_retry(
         lambda: sheets_service.service.spreadsheets().values().update(
             spreadsheetId=ssid,
@@ -273,16 +295,43 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                 "textFormat": {"fontSize": 9, "foregroundColor": _INK}}},
             "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
 
-    # Wipe the whole week grid to white BEFORE painting bars. A bar that moved
-    # or shortened since the last refresh leaves its old cells coloured
-    # otherwise — values().clear() removes text, never formatting, so the ghost
-    # of the previous plan stays on the board looking like current truth.
+    # Wipe the whole body to white BEFORE painting anything. A bar that moved or
+    # shortened since the last refresh leaves its old cells coloured otherwise —
+    # values().clear() removes text, never formatting, so the ghost of the
+    # previous plan stays on the board looking like current truth.
+    #
+    # It starts at column 0, not N_LABEL_COLS. Area headers and the archive title
+    # are painted across ALL columns, so a wipe that began at the week grid left
+    # their blue-grey and lilac fills sitting in columns A-E at whatever row they
+    # occupied last time — stray coloured bands labelling nothing. textFormat is
+    # reset for the same reason: those rows are bold, and the archive rows carry
+    # a smaller font. Everything that needs either is re-applied below.
+    # [2026-08-12 review]
     reqs.append({"repeatCell": {
         "range": {"sheetId": sid, "startRowIndex": FIRST_BODY_ROW,
                   "endRowIndex": max(n_rows, FIRST_BODY_ROW) + 200,
+                  "startColumnIndex": 0, "endColumnIndex": n_cols},
+        "cell": {"userEnteredFormat": {
+            "backgroundColor": _WHITE,
+            "textFormat": {"bold": False, "fontSize": 10,
+                           "foregroundColor": _INK}}},
+        "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+
+    # Clear the previous today-marker before drawing this week's. updateBorders
+    # is not touched by the fill wipe above — borders live outside
+    # userEnteredFormat.backgroundColor — so without this the red line from last
+    # Monday stays and a new one appears one column to its right, every week,
+    # until the tab carries a dozen lines and none of them means "today". Same
+    # explicit style:"NONE" wipe project_status_sheet.py already uses.
+    # [2026-08-12 review]
+    reqs.append({"updateBorders": {
+        "range": {"sheetId": sid, "startRowIndex": MONTH_ROW,
+                  "endRowIndex": max(n_rows, MONTH_ROW + 1),
                   "startColumnIndex": N_LABEL_COLS, "endColumnIndex": n_cols},
-        "cell": {"userEnteredFormat": {"backgroundColor": _WHITE}},
-        "fields": "userEnteredFormat.backgroundColor"}})
+        "top": {"style": "NONE"}, "bottom": {"style": "NONE"},
+        "left": {"style": "NONE"}, "right": {"style": "NONE"},
+        "innerHorizontal": {"style": "NONE"},
+        "innerVertical": {"style": "NONE"}}})
 
     for row in area_rows:
         reqs.append({"repeatCell": {

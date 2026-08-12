@@ -151,12 +151,26 @@ def propose_project_starts() -> dict:
             out["no_signal"] += 1
             continue
 
+        # `recommended` must ALWAYS carry a date, because approving is what
+        # applies it: `apply_project_start` refuses content without one, so a
+        # card recommending nothing could be approved repeatedly and never
+        # clear. When the earliest task is missing, the archived bar is the only
+        # signal there is — so it becomes the recommendation, labelled as such,
+        # rather than sitting on the card as evidence for a date that is not
+        # there. The name matching behind it is still untrusted; that is exactly
+        # what the approve gate is for, and `gantt_label` shows Eyal what
+        # matched. [2026-08-12 review]
+        if derived:
+            recommended, source = str(derived), "earliest_task"
+        else:
+            recommended, source = cand["date"], "gantt_bar"
+
         content = {
             "project_id": p["id"],
             "project_name": p["name"],
             "area": areas.get(p.get("area_id"), ""),
-            "recommended": str(derived) if derived else None,
-            "recommended_source": "earliest_task" if derived else None,
+            "recommended": recommended,
+            "recommended_source": source,
             "gantt_date": cand["date"] if cand else None,
             "gantt_label": cand["label"] if cand else None,
         }

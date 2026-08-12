@@ -112,6 +112,7 @@ def run_qa_check() -> dict:
     report["checks"]["question_aging"] = _run_question_aging(report["issues"])
     report["checks"]["project_learning"] = _run_project_learning(report["issues"])
     report["checks"]["meeting_shaped_tasks"] = _run_meeting_shaped_tasks(report["issues"])
+    report["checks"]["project_start_dates"] = _run_project_start_dates(report["issues"])
 
     # Overall score
     issue_count = len(report["issues"])
@@ -702,6 +703,39 @@ def _run_project_learning(issues: list[str]) -> dict:
             )
     except Exception as e:
         logger.warning(f"Project learning failed: {e}")
+    return result
+
+
+def _run_project_start_dates(issues: list[str]) -> dict:
+    """Propose a start date for any project that still has none. [2026-08-12]
+
+    Rides the daily QA for the same reason `_run_project_learning` does: it is a
+    cheap read over rows already being scanned, and its output is a proposal Eyal
+    reads with everything else.
+
+    IT NEEDED A CALLER AT ALL. Phase 1 shipped with `propose_project_starts`
+    reachable only by hand — the 22 proposals now queued were emitted from a
+    one-off run. Every project created afterwards (by `add_canonical_project`, an
+    approved `project_new`, or Nechama typing a row) would have been skipped in
+    silence, keeping `start_date` NULL forever, and a project with no start date
+    cannot draw a bar: `span_columns` returns (-1, -1) and it renders as a name
+    against 96 empty weeks. Found by the 2026-08-12 review.
+
+    Idempotent: the proposer skips projects that already have a start date or an
+    open proposal, so a daily run is a no-op once the backlog is cleared.
+    """
+    result: dict = {"proposed": 0}
+    try:
+        from processors.project_start_dates import propose_project_starts
+
+        result.update(propose_project_starts())
+        if result.get("proposed"):
+            issues.append(
+                f"{result['proposed']} project(s) need a start date before they "
+                "can appear on the Timeline — awaiting your approval"
+            )
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"Project start dates failed: {e}")
     return result
 
 

@@ -200,8 +200,14 @@ class TestAssertDontAdd:
         svc._ensure_tab = _ensure
         sheets = svc.service.spreadsheets.return_value
         sheets.get.side_effect = lambda **kw: {"sheets": []}
-        sheets.batchUpdate.side_effect = \
-            lambda **kw: captured.setdefault("reqs", kw["body"]["requests"])
+        # Keyed on CONTENT, not call order: refresh_timeline now sends a
+        # one-request batch to assert the grid width before the formatting
+        # batch, and `setdefault` would capture that one instead.
+        def _batch(**kw):
+            if len(kw["body"]["requests"]) > 1:
+                captured["reqs"] = kw["body"]["requests"]
+            return MagicMock()
+        sheets.batchUpdate.side_effect = _batch
 
         data = {
             "weeks": week_starts(),
@@ -218,14 +224,19 @@ class TestAssertDontAdd:
             await ts.refresh_timeline()
 
         reqs = captured["reqs"]
+        # ROW-restricted, not column-restricted. The wipe used to start at the
+        # week grid and was found by its column; since the 2026-08-12 review it
+        # starts at column 0 so it also resets area-header and archive-title
+        # shading in the label block. Keying on FIRST_BODY_ROW still excludes
+        # the legend swatches, which are painted white on the same row as the
+        # "Active" swatch and would otherwise be measured instead.
+        from services.timeline_sheet import FIRST_BODY_ROW
         white = [i for i, r in enumerate(reqs)
                  if (r.get("repeatCell") or {}).get("cell", {})
                  .get("userEnteredFormat", {}).get("backgroundColor")
                  == {"red": 1.0, "green": 1.0, "blue": 1.0}
-                 and r["repeatCell"]["range"]["startColumnIndex"] == N_LABEL_COLS]
-        # Column-restricted: the "Active" legend swatch is painted the same
-        # colour and sits in column 1, so an unrestricted filter finds it and
-        # measures the wrong thing.
+                 and r["repeatCell"]["range"]["startRowIndex"] == FIRST_BODY_ROW
+                 and r["repeatCell"]["range"]["startColumnIndex"] == 0]
         bars = [i for i, r in enumerate(reqs)
                 if (r.get("repeatCell") or {}).get("cell", {})
                 .get("userEnteredFormat", {}).get("backgroundColor")

@@ -128,8 +128,14 @@ class TestArchiveRendering:
         svc._ensure_tab = _ensure
         sheets = svc.service.spreadsheets.return_value
         sheets.get.side_effect = lambda **kw: {"sheets": []}
-        sheets.batchUpdate.side_effect = \
-            lambda **kw: captured.setdefault("reqs", kw["body"]["requests"])
+        # Keyed on CONTENT, not call order: refresh_timeline now sends a
+        # one-request batch to assert the grid width before the formatting
+        # batch, and `setdefault` would capture that one instead.
+        def _batch(**kw):
+            if len(kw["body"]["requests"]) > 1:
+                captured["reqs"] = kw["body"]["requests"]
+            return MagicMock()
+        sheets.batchUpdate.side_effect = _batch
         sheets.values.return_value.update.side_effect = \
             lambda **kw: captured.setdefault("values", kw["body"]["values"])
 
