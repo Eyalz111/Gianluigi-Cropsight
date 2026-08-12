@@ -366,13 +366,16 @@ formatting pass strips them — precisely what happened to the meetings pool
 Each phase is independently shippable, flag-gated, and reversible. Order is
 chosen so nothing writes a live surface until the data underneath is trusted.
 
-### Phase 0 — Extract and archive *(no user-visible change)*
+**Status, 2026-08-12.** Phases 0 and 2 are built and merged; Phase 1's proposals
+are emitted and waiting on Eyal. Phases 3–5 are not started.
+
+### Phase 0 — Extract and archive *(no user-visible change)* — **DONE**
 - Promote `gantt_extract.py` to `scripts/extract_legacy_gantt.py`
 - Run Migration C; persist all 174 bars to `gantt_legacy_bars`
 - **Exit criterion:** row count matches the extractor's, and spot-checking 5
   bars against the sheet agrees on both dates
 
-### Phase 1 — Start dates, proposed not applied
+### Phase 1 — Start dates, proposed not applied — **WAITING ON EYAL**
 - Run Migration A
 - `propose_project_starts()` emits one `project_start_proposal` per project
   carrying: the old-Gantt candidate (with its matched bar text), the
@@ -382,12 +385,31 @@ chosen so nothing writes a live surface until the data underneath is trusted.
 - **Exit criterion:** every active project has a start date, or is explicitly
   marked as having none
 
-### Phase 2 — Timeline tab, read-only
+### Phase 2 — Timeline tab, read-only — **BUILT, FLAG OFF**
 - Render the tab from the DB; **no readback**
 - Row grouping for the task waterfall; priority colours; today marker
 - Registered in `NON_AREA_TABS` from day one
 - **Exit criterion:** a week of the tab matching what Eyal believes is true,
   with no reconcile interference
+
+Shipped as `processors/timeline_view.py` (shape, no I/O) + `services/timeline_sheet.py`
+(Sheets only), hooked into the reconcile cycle behind `TIMELINE_VIEW_ENABLED`,
+default off. The whole tab is protected `warningOnly` because an edit there would
+vanish on the next refresh until Phase 4 lands.
+
+Two things learned building it, both worth carrying into Phase 3:
+
+*The week grid must be wiped white before any bar is painted.* `values().clear()`
+removes text and never formatting, so a bar that moved or shortened leaves its
+old cells coloured — the ghost of a previous plan sitting on the board looking
+like current truth. Pinned by a test that asserts the wipe precedes the fills.
+
+*A bar needs a left edge, which means Phase 1 gates Phase 2 completely.* The tab
+renders correctly with zero bars today because no start date is approved yet.
+Five projects — the 4 retired ones plus Others—Fundraising — have no derivable
+start at all and need a hand-typed date; the area gate correctly refuses to
+borrow, for instance, Moldova Pilot's start from a bar sitting in the Sales
+section.
 
 ### Phase 3 — Milestones
 - Run Migration B
