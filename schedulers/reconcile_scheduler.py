@@ -290,6 +290,19 @@ class ReconcileScheduler:
                         logger.warning(f"Focus view refresh failed (non-fatal): {fe}")
                 # The Timeline tab. Same rule as the two above: a view, so a
                 # failure costs a stale render and nothing else. [2026-08-12]
+                # READ BEFORE RENDER. The render rewrites every cell from the
+                # database, so a refresh that ran first would overwrite whatever
+                # Eyal typed before anyone had looked at it — the edit would
+                # vanish and never reach the DB. [2026-08-12]
+                tl_read = None
+                if (getattr(settings, "TIMELINE_VIEW_ENABLED", False)
+                        and getattr(settings, "TIMELINE_READBACK_ENABLED", False)):
+                    try:
+                        from processors.timeline_readback import reconcile_timeline
+                        tl_read = await reconcile_timeline()
+                    except Exception as re_:
+                        logger.warning(f"Timeline readback failed (non-fatal): {re_}")
+
                 timeline = None
                 if getattr(settings, "TIMELINE_VIEW_ENABLED", False):
                     try:
@@ -319,6 +332,7 @@ class ReconcileScheduler:
                              "views": views,
                              "focus": focus,
                              "timeline": timeline,
+                             "timeline_readback": tl_read,
                              "ceo": ceo},
                 )
                 # Close the human->machine loop: after an auto-sync that actually

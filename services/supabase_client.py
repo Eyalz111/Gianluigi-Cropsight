@@ -6542,6 +6542,71 @@ class SupabaseClient:
             logger.error(f"Error upserting ps_project snapshot for '{project_id}': {e}")
             return False
 
+    def get_timeline_snapshots(self) -> dict:
+        """Last-synced TIMELINE snapshot per project, keyed by project id.
+
+        A third surface alongside `project` (Projects tab) and `ps_project`
+        (Project Status workbook). All three are partial unique indexes on the
+        same `canonical_project_id`, so one project holds three independent
+        merge bases — sharing one would make an edit on any surface read as a
+        divergence on the others. [2026-08-12]
+        """
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .eq("entity_type", "gantt_project")
+                .execute()
+                .data
+                or []
+            )
+            return {r["canonical_project_id"]: r for r in rows
+                    if r.get("canonical_project_id")}
+        except Exception as e:
+            logger.error(f"Error reading timeline snapshots: {e}")
+            return {}
+
+    def upsert_timeline_snapshot(
+        self,
+        project_id: str,
+        sheet_row: int | None = None,
+        start_date: str | None = None,
+        target_date: str | None = None,
+        owner: str | None = None,
+    ) -> bool:
+        """Write/refresh the Timeline snapshot row for a project."""
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "canonical_project_id": project_id,
+                "entity_type": "gantt_project",
+                "sheet_row": sheet_row,
+                "sheet_tab": "Timeline",
+                # Empty cells come back as "" and a DATE column rejects it
+                # (22007), which is why every date here is coerced to None.
+                "start_date": (start_date or None),
+                "target_date": (target_date or None),
+                "owner": (owner or None),
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots")
+                .select("id")
+                .eq("canonical_project_id", project_id)
+                .eq("entity_type", "gantt_project")
+                .execute()
+            )
+            if existing.data:
+                self.client.table("sheet_snapshots").update(data).eq(
+                    "canonical_project_id", project_id
+                ).eq("entity_type", "gantt_project").execute()
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting timeline snapshot for '{project_id}': {e}")
+            return False
+
     def mark_project_field_manual(self, project_id: str, field: str, source: str) -> bool:
         """Flag a project field as manually set (sticky) — Rule 2 consults this."""
         if field not in self._PROJECT_MANUAL_FIELDS:

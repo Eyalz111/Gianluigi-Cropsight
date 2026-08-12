@@ -197,6 +197,13 @@ class Settings(BaseSettings):
     # exist (scripts/migrate_milestones.sql) before it has anything to show.
     # [2026-08-12]
     CEO_TAB_ENABLED: bool = Field(default=False, description="Build the CEO tab (milestones + the manual management block)")
+    # Phase 4b: read the Timeline back so a date typed there reaches the DB.
+    # Two flags, not one — the same shape Project Status v2 used. READBACK
+    # decides whether the tab is read at all; SHADOW decides whether anything is
+    # written. Shadow stays True until a clean week has been observed, because
+    # this is the phase that puts a second writer near live rows. [2026-08-12]
+    TIMELINE_READBACK_ENABLED: bool = Field(default=False, description="Read the Timeline tab back (project rows only)")
+    TIMELINE_SHADOW_MODE: bool = Field(default=True, description="Timeline readback computes and logs but writes NOTHING. Keep True until a clean shadow week.")
     MILESTONE_SEEDING_ENABLED: bool = Field(default=True, description="Propose milestones found on the archived board (proposal only, never auto-created)")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]

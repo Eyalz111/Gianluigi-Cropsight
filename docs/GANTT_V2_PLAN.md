@@ -23,7 +23,7 @@ step 5 is the real remaining build.
 | 2 | Run `scripts/migrate_milestones.sql` | Eyal, ~2 min | seeder stops being silent |
 | 3 | Approve the 16 milestone proposals | Eyal, ~5 min | milestones exist in the DB |
 | 4 | Flip `CEO_TAB_ENABLED` | Gianluigi | **CEO tab appears**, milestones + manual block |
-| 5 | **Phase 4 — editing from the sheet** | Gianluigi, the real work | type a date on the Timeline, it reaches the DB |
+| 5 | **Phase 4 — editing from the sheet** — *built, needs its migration + a shadow week* | Gianluigi | type a date on the Timeline, it reaches the DB |
 | 6 | The 3 overrides + 5 blank starts | Eyal, in the sheet | every project has a bar |
 | 7 | Phase 5 — freeze the old board | Gianluigi | one board, not two |
 
@@ -620,16 +620,47 @@ Note the grid is now **103 columns**: 5 label + 96 weeks + 2 hidden. Everything
 that paints stops at the visible edge; a fill running to the full width would
 colour the hidden cells and reveal them the moment anyone unhid the columns.
 
-#### 4b — readback and merge — **NOT STARTED**
-- Sheet cell vs snapshot: differs ⇒ human edited it ⇒ write to DB and set the
-  `manual_*` rail; matches ⇒ DB wins and the sheet is refreshed
-- **Project rows only.** `start_date`, `target_date`, `owner`. Task rows stay
-  read-only — `tasks.deadline` and `tasks.assignee` are edited daily on the area
-  tabs, and a second writer there is the collision this design exists to avoid
-- Conflict rule: same field changed on two surfaces in one cycle ⇒ write
-  neither, surface it. Two humans disagreeing is a question, not a merge
-- Ships in **shadow mode first**, exactly as Project Status v2 did
-- **Exit criterion:** a clean shadow week
+#### 4b — readback and merge — **BUILT, BOTH FLAGS SAFE**
+
+`processors/timeline_readback.py`, behind `TIMELINE_READBACK_ENABLED` (off) and
+`TIMELINE_SHADOW_MODE` (on). Two flags, the shape Project Status v2 used: the
+first decides whether the tab is read at all, the second whether anything is
+written.
+
+**The merge rule is the Project Status rule, not a new one.** Reimplementing it
+would mean two subtly different answers to "did a human change this?", and every
+cross-surface defect this month came from surfaces disagreeing.
+
+```
+Rule 1  sheet ≠ snapshot AND sheet ≠ db  → a human typed it: pull, mark manual
+Rule 2  db.manual_<field> is set          → hold; a person decided that value
+Rule 4  otherwise sheet ≠ db              → push the db value to the sheet
+```
+
+**Editable: `owner`, `start_date`, `target_date`, on project rows only.** Not
+the name — renaming a project from a Gantt row is a different decision. Not task
+rows: `tasks.deadline` and `tasks.assignee` are edited daily on the area tabs.
+
+Most of this module is refusals, and each one is a test:
+
+- **No merge base means no edit.** With no snapshot every populated cell differs
+  from `None`, so the whole row would be pulled in and frozen as human
+  decisions. This is the guard the sibling rail shipped without (2026-08-08).
+- **A blank is never an erase.** Clearing a start date removes the bar's left
+  edge — far more likely a slip than a decision, and Rule 1 would freeze it.
+- **An unreadable date is neither pulled nor blanked.** Pulling the literal
+  string poisons a DATE column; treating it as blank discards what was typed.
+  It is reported instead.
+- **Two surfaces disagreeing writes neither.** Both carry a human intention and
+  nothing here can rank them.
+- **An empty read changes nothing.** A transient read returns empty without
+  raising, and reading that as "every row was deleted" would be catastrophic.
+
+**Read before render.** The refresh rewrites every cell from the database, so a
+render that ran first would overwrite what Eyal typed before anything had looked
+at it — the edit would vanish and never reach the DB. Ordering asserted by test.
+
+- **Exit criterion:** a clean shadow week, then `TIMELINE_SHADOW_MODE=false`
 
 ### Phase 5 — Freeze the old board *(decided 2026-08-12)*
 
