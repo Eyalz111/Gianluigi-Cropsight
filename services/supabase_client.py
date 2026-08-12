@@ -1143,6 +1143,23 @@ class SupabaseClient:
             logger.info("No valid tasks to insert after filtering")
             return []
 
+        # WITHIN-MEETING DEDUP, at the one choke point every transcript passes
+        # through — the same place and the same reason as decisions. The model
+        # routinely emits one action twice in different words, and on the
+        # 2026-08-12 Greenwald meeting the two copies were filed under DIFFERENT
+        # projects, so the same work would have drawn a bar on two Gantt rows.
+        # `deduplicate_tasks` compares across meetings; nothing compared within
+        # one extraction. [2026-08-12]
+        try:
+            from processors.cross_reference import dedupe_tasks_within_meeting
+
+            valid_tasks = dedupe_tasks_within_meeting(valid_tasks)
+        except Exception as e:                               # noqa: BLE001
+            # Dedup is an improvement, not a gate. Losing it costs a duplicate
+            # row Eyal can delete; letting it abort the batch would lose the
+            # whole meeting's tasks.
+            logger.warning(f"create_tasks_batch: within-meeting dedup skipped: {e}")
+
         # Canonicalize categories at this choke point (one areas fetch per batch)
         # so every batch-creation path stores the Gantt-area taxonomy.
         _areas = self.get_areas()

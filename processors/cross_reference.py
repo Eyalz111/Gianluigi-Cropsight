@@ -851,3 +851,91 @@ def dedupe_decisions_within_meeting(decisions: list[dict], threshold: float = 0.
             f"({dropped} duplicate(s) merged)"
         )
     return kept
+
+
+_MIN_DEDUP_TOKENS = 4
+
+
+def dedupe_tasks_within_meeting(tasks: list[dict], threshold: float = 0.65) -> list[dict]:
+    """Collapse near-duplicate tasks extracted from the SAME meeting.
+
+    The decisions path got this on 2026-08-06; tasks never did, and they have
+    the same failure. From the Jonathan Greenwald meeting on 2026-08-12 the
+    model emitted one action twice, identical for 130 characters and differing
+    only in the trailing rationale:
+
+        "Run the model separately on NASA Landsat and European Copernicus data
+         sets and analyze where the two diverge — Jonathan requested this
+         analysis to assess confidence in regional coverage"
+        "...— Eyal confirmed this is wanted but has not been done yet, and it
+         affects confidence in regional coverage"
+
+    Both landed, and — worse — they were filed under DIFFERENT projects
+    (Others — Product & Technology, CropSight Accuracy Model), so the same work
+    would draw a bar on two rows of the Gantt.
+
+    `deduplicate_tasks` already compares ACROSS meetings; this is the missing
+    within-extraction pass, and it uses the same scorer the decisions path
+    needed — Jaccard plus containment, because one phrasing is routinely a
+    padded superset of the other and plain Jaccard scores that far too low.
+
+    THE LONGER TITLE WINS, and the duplicate's non-empty fields fill the
+    survivor's gaps: a shorter phrasing often carries the assignee or deadline
+    the longer one omitted, and dropping it outright would lose that. Returns a
+    new list; the input is not mutated.
+    """
+    kept: list[dict] = []
+    kept_tokens: list[set] = []
+    kept_order: list[int] = []
+    dropped = 0
+
+    # Longest first decides WHO SURVIVES; the output is restored to the caller's
+    # order at the end. Emitting in length order instead would silently reshuffle
+    # every batch — the rows arrive in the sequence the meeting discussed them,
+    # and the sheet shows them in insert order.
+    indexed = list(enumerate(tasks or []))
+    for idx, t in sorted(indexed,
+                         key=lambda p: len(str(p[1].get("title") or "")), reverse=True):
+        tokens = _decision_tokens(str(t.get("title") or ""))
+        # A MERGE NEEDS ENOUGH WORDS TO BE EVIDENCE. "T3.2 direct-delete task 1"
+        # and "...task 2" both reduce to {direct-delete, task} — the numeric
+        # suffix is below the tokeniser's length floor — so a short pair can
+        # score a perfect 1.0 while naming two different jobs. Four content
+        # words is the same floor containment already used; applying it to the
+        # whole comparison stops the cheap collisions.
+        if len(tokens) < _MIN_DEDUP_TOKENS:
+            kept.append(dict(t))
+            kept_tokens.append(set())
+            kept_order.append(idx)
+            continue
+        merged = False
+        for i, existing in enumerate(kept_tokens):
+            if len(existing) < _MIN_DEDUP_TOKENS:
+                continue
+            inter = len(tokens & existing)
+            jaccard = inter / len(tokens | existing)
+            contain = inter / min(len(tokens), len(existing))
+            overlap = max(jaccard, contain)
+            if overlap >= threshold:
+                for key, value in t.items():
+                    if value and not kept[i].get(key):
+                        kept[i][key] = value
+                dropped += 1
+                merged = True
+                logger.info(
+                    f"[task-dedup] merged duplicate (overlap {overlap:.2f}): "
+                    f"{str(t.get('title'))[:70]!r}"
+                )
+                break
+        if not merged:
+            kept.append(dict(t))
+            kept_tokens.append(tokens)
+            kept_order.append(idx)
+
+    if dropped:
+        logger.info(
+            f"[task-dedup] {len(tasks)} extracted -> {len(kept)} kept "
+            f"({dropped} duplicate(s) merged)"
+        )
+    # Back into the caller's order.
+    return [row for _, row in sorted(zip(kept_order, kept), key=lambda p: p[0])]
