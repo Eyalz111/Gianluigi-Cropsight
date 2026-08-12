@@ -235,12 +235,36 @@ second tab:
       └ Research Parquet format             ███
 ```
 
-- Bar from `start_date` to `target_date`, falling back to the latest open task
-  deadline where no target is set (19 of 23 projects have ≥1 dated open task)
 - **Priority colours** — the Urgent/H/M/L scale already on the sheet
 - A **today marker** column
 - Dynamic rows, so the old 5-lane cap disappears (Fundraising and Sales both
   have 6 projects and overflow it today)
+
+#### The grid *(decided 2026-08-12)*
+
+**Weekly columns, one tab, 2026-03-02 → 2027-12-27 — about 96 columns.**
+
+No yearly tabs. Eyal chose weeks over months for resolution, and end-2027 over
+end-2028 to keep the width workable — 145 weekly columns to end-2028 would be
+mostly horizontal scrolling.
+
+That span is **exactly what the current board already covers**, which is a
+useful accident: the legacy bars extracted in Phase 0 land on the *same grid*,
+so "what we planned in March" can be overlaid against "what we think now"
+column-for-column, with no date arithmetic. Worth building the extract with
+that overlay in mind even if it ships later.
+
+#### Bar ends *(decided 2026-08-12)*
+
+A project with no `target_date` renders **open-ended to the right** — the bar
+runs to the edge with no terminator. Eyal closes it by entering a date when he
+knows one.
+
+Deliberately *not* falling back to the latest open task deadline: that end
+would move every time a task was added or re-dated, so a bar would appear to
+change plan when nothing was decided. An open end is honest about not knowing;
+a derived end is a guess wearing a date. 11 of 23 projects have no target
+today.
 
 ### `CEO` tab — milestones and management
 
@@ -263,6 +287,50 @@ database corresponds to OKRs, escalations or availability, and inventing a
 source would be worse than a hand-maintained block that is honest about being
 hand-maintained. The milestone block above it *is* DB-backed and editable both
 ways.
+
+### Bidirectional editing *(decided 2026-08-12)*
+
+Eyal: *"if I change in the new gantt something like responsible or due dates, I
+will want to see it in the sheet of the project status (and the DB of
+course)."* Yes — **at project level. Task rows stay read-only on the Timeline.**
+
+The reason is recent and specific. On 2026-08-08 this system deliberately
+collapsed to **one editable surface for tasks** (`TASKS_TAB_READ_ONLY=true`),
+because *"two writers on the same rows produced every cross-surface defect of
+2026-08: the rename-revert loop, the per-task manual_set_at recency bug, and
+three labels left permanently divergent because the Tasks tab pulled a stale
+cell over a value Project Status had just written."*
+
+A Timeline whose waterfall rows are editable puts a second writer on
+`tasks.deadline` and `tasks.assignee` — the exact fields Nechama edits daily on
+the area tabs. Project rows carry no such collision:
+
+| Field | Editable today | On the Timeline |
+|---|---|---|
+| `start_date` | nowhere — the column does not exist yet | **its only home** |
+| `canonical_projects.target_date` | Projects tab (rarely visited) | **editable** |
+| `canonical_projects.owner` | Projects tab | **editable** |
+| `tasks.deadline` / `tasks.assignee` | area tabs, daily | **read-only** |
+
+So Eyal gets what he asked for — change the responsible or the due date on the
+Gantt, see it in Project Status and the database — without a second writer on
+the rows that produced every cross-surface defect this month.
+
+**Mechanism already exists.** `sheet_snapshots` supports one merge base per
+SURFACE: `uq_sheet_snapshots_task` and `uq_sheet_snapshots_ps_action` are
+partial indexes on the same `task_id` and coexist precisely so an edit on one
+surface does not read as divergence on the other. The Timeline takes
+`entity_type='gantt_project'`.
+
+**Conflict rule: report, never guess.** If the same field changed on both the
+Timeline and the Projects tab within one cycle, the reconcile writes neither
+and surfaces it — the same instinct as an `AMBIGUOUS` row, where `Project` and
+`Action` both filled is reported rather than resolved. Two humans disagreeing
+is not a merge problem, it is a question.
+
+If task-level editing on the Timeline is wanted later, the honest path is to
+make the Timeline the *only* task-date surface — which means taking it off the
+area tabs. That is a different decision, not an increment of this one.
 
 ### Registration — non-negotiable
 
@@ -350,17 +418,26 @@ chosen so nothing writes a live surface until the data underneath is trusted.
 
 ---
 
-## 9. Open decisions for Eyal
+## 9. Decisions
 
-1. **Bar end when no `target_date`** — 11 of 23 projects have none. Use the
-   latest open task deadline (moves as tasks change), or leave the bar
-   open-ended to the right?
-2. **Retired projects** — show greyed with their historical span, or drop them?
-3. **Horizon** — the old board runs to 2027-12. Does the Timeline show 18
-   months, or the current + next quarter with the rest collapsed?
-4. **Milestone ownership** — the ★ rows carry `[E]`/`[E/P]` prefixes. Does a
+### Settled 2026-08-12
+
+1. **Bar end when no `target_date`** — open-ended to the right; Eyal closes it
+   by hand. Not derived from task deadlines. (§5)
+2. **Horizon and resolution** — weekly columns, one tab, 2026-03 → 2027-12
+   (~96 columns). No yearly tabs. (§5)
+3. **Bidirectional** — yes at project level (start, target, owner); task rows
+   read-only on the Timeline. Conflicts reported, never guessed. (§5)
+
+### Still open
+
+4. **Retired projects** — show greyed with their historical span, or drop them?
+5. **Milestone ownership** — the ★ rows carry `[E]`/`[E/P]` prefixes. Does a
    milestone get an owner, or is every milestone the CEO's?
-5. **Does the old board keep running in parallel**, and for how long?
+6. **Does the old board keep running in parallel**, and for how long?
+7. **Legacy overlay** — worth rendering the Phase 0 bars as a "what we planned
+   in March" ghost layer on the same grid? It is nearly free given the spans
+   now match, but it doubles what is on screen.
 
 ---
 
