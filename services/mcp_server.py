@@ -705,7 +705,8 @@ class MCPServer:
                 if type == "knowledge":
                     types = ("topic_merge", "topic_assign")
                 elif type == "project":
-                    types = ("project_new", "topic_project_link")
+                    types = ("project_new", "topic_project_link",
+                             "project_start_proposal")
                 elif type == "meeting":
                     types = ("task_is_a_meeting",)
                 elif type == "question":
@@ -810,9 +811,16 @@ class MCPServer:
 
                 # --- new canonical project (auto-learn) / question closure ---
                 if content_type in ("project_new", "topic_project_link",
-                                    "question_resolved", "task_is_a_meeting"):
+                                    "question_resolved", "task_is_a_meeting",
+                                    "project_start_proposal"):
                     if content_type == "project_new":
                         from processors.project_learning import apply_project_proposal as _apply
+                    elif content_type == "project_start_proposal":
+                        # Freezes a start date onto the project so a Gantt bar
+                        # has a left edge. See docs/GANTT_V2_PLAN.md Phase 1.
+                        from processors.project_start_dates import (
+                            apply_project_start as _apply,
+                        )
                     elif content_type == "task_is_a_meeting":
                         # A task that is really a meeting needing booking. It
                         # moves to the meetings pool and the task is CANCELLED,

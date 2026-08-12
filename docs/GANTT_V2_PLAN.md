@@ -195,8 +195,28 @@ ALTER TABLE milestones ENABLE ROW LEVEL SECURITY;   -- MANDATORY, see CLAUDE.md
 ```
 
 `original_date` is what makes *"Signing #1 MVP client — postponed here"*
-expressible: the row keeps its first commitment and shows the slip, instead of
-quietly moving.
+expressible: the row keeps its first commitment and shows the move, instead of
+quietly changing.
+
+**No reason field. Decided 2026-08-12.** A first draft of this plan proposed
+recording *why* a milestone moved — delay vs deliberate postponement vs added
+scope. Eyal rejected it: *"I don't see a reason to have a 'reason per move'
+that will force me to add explanations or even worse, will try to guess it
+automatically."*
+
+He is right on both halves. A required reason is friction on every move, and an
+optional one is an empty slot that something will eventually be tempted to fill
+by inference — which would be the system asserting intent it cannot observe.
+
+So the model records **the fact and nothing else**: the dates, and when they
+changed. `original_date` never moves; `target_date` does; a `milestone_moves`
+child row records each `(from, to, moved_at)`. Any explanation lives in the
+free-text label, exactly as the old board already does it — written by a human
+who felt like writing it, never prompted for and never inferred.
+
+The CEO tab therefore shows *"moved 1 Jun → 6 Jul"*, not *"SLIPPED"*.
+Whether that was a slip or a re-plan is Eyal's read, and the board should not
+put a word in his mouth.
 
 ### Migration C — the extraction archive
 

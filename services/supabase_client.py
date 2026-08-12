@@ -6474,7 +6474,11 @@ class SupabaseClient:
     # [2026-08-07]
     # =========================================================================
 
-    _PROJECT_MANUAL_FIELDS = ("objective", "target_date", "owner", "notes")
+    # `start_date` joins the rail so a start Eyal approved or typed is defended
+    # from inference. Without it, Rule 2 cannot see the field and the derive-
+    # then-freeze step would be free to overwrite a human's date. [2026-08-12]
+    _PROJECT_MANUAL_FIELDS = ("objective", "target_date", "owner", "notes",
+                              "start_date")
 
     def get_ps_project_snapshots(self) -> dict:
         """Last-synced Project Status snapshot per project, keyed by project id."""

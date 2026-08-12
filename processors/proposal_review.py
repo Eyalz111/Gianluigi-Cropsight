@@ -68,6 +68,22 @@ def _label(content_type: str, c: dict) -> str:
             f"Add <b>\"{c.get('name', '?')}\"</b> as a project?\n"
             f"<i>Used as a label in {seen} meetings — {samples}</i>"
         )
+    if content_type == "project_start_proposal":
+        rec, gantt = c.get("recommended"), c.get("gantt_date")
+        lines = [
+            f"Set the start date for <b>\"{c.get('project_name', '?')}\"</b>?",
+            f"<b>{rec or '—'}</b>  <i>(its earliest task)</i>",
+        ]
+        if gantt:
+            # Shown as evidence, never as the recommendation: matching board
+            # labels to projects by name is confidently wrong often enough that
+            # Eyal has to be the one who reads it.
+            lines.append(
+                f"<i>The old Gantt says <b>{gantt}</b> for "
+                f"\"{(c.get('gantt_label') or '')[:60]}\" — if that is the same "
+                f"work, reject this and set the date by hand.</i>"
+            )
+        return "\n".join(lines)
     if content_type == "question_resolved":
         return (
             f"Close this open question?\n"
@@ -130,11 +146,13 @@ def apply_proposal_decision(proposal_id: str, decision: str) -> dict:
         )
         return {"status": "ok", "decision": "approved" if approve else "rejected", "result": result}
 
-    if content_type in ("project_new", "question_resolved"):
+    if content_type in ("project_new", "question_resolved", "project_start_proposal"):
         result = None
         if approve:
             if content_type == "project_new":
                 from processors.project_learning import apply_project_proposal as _apply
+            elif content_type == "project_start_proposal":
+                from processors.project_start_dates import apply_project_start as _apply
             else:
                 from processors.question_lifecycle import apply_question_resolution as _apply
             result = _apply(content)
