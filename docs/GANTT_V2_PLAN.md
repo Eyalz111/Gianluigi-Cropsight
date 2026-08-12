@@ -366,8 +366,11 @@ formatting pass strips them — precisely what happened to the meetings pool
 Each phase is independently shippable, flag-gated, and reversible. Order is
 chosen so nothing writes a live surface until the data underneath is trusted.
 
-**Status, 2026-08-12.** Phases 0 and 2 are built and merged; Phase 1's 22
-proposals are emitted and waiting on Eyal. Phases 1b and 3–5 are not started.
+**Status, 2026-08-12.** Phases 0 and 2 are built and merged — Phase 2 now
+including the legacy archive block (decision 7). Phase 1's 22 proposals are
+emitted and waiting on Eyal, and they gate everything visible: until a start
+date is approved the live half of the Timeline draws **zero bars**. Phases 1b
+and 3–5 are not started.
 
 ### Phase 0 — Extract and archive *(no user-visible change)* — **DONE**
 - Promote `gantt_extract.py` to `scripts/extract_legacy_gantt.py`
@@ -385,30 +388,36 @@ proposals are emitted and waiting on Eyal. Phases 1b and 3–5 are not started.
 - **Exit criterion:** every active project has a start date, or is explicitly
   marked as having none
 
-### Phase 1b — start dates for the retired projects — **NOT STARTED**
+### Phase 1b — the five projects with no signal at all — **NOT STARTED**
 
 Decision 4 (keep retired projects, greyed) does not render on its own. A grey
 row is still a row that needs a left edge: `span_columns()` returns `(-1, -1)`
-when `start_date` is `None`, so those projects appear as a name and an empty
+when `start_date` is `None`, so those projects appear as a name against an empty
 96-week grid — present but blank, which reads as a bug rather than as history.
 
-The pass ran on 27 projects and emitted **22** proposals. The 5 with no
-derivable start are exactly the ones that need this: the four retired projects
-plus `Others — Fundraising`. They have no start because they have no open
-tasks — which is what being retired means.
+The pass ran on 27 projects and emitted **22** proposals. Measured 2026-08-12,
+the five it skipped are:
 
-Asking Eyal to remember when a retired project began is the wrong request; the
-answer is already archived. `gantt_legacy_bars` (392 rows) is the only surviving
-record of when that work actually ran, and for finished work the old board is
-*more* reliable than task timestamps, because the project completed before the
-board was abandoned.
+```
+Moldova Pilot                 retired   no tasks
+Operational Tooling           retired   no tasks
+Others - Cleints improvment   retired   no tasks
+Team & HR                     retired   no tasks
+Others — Fundraising          active    no tasks
+```
 
-- Extend the Phase 1 pass to cover retired projects, seeded from
-  `gantt_legacy_bars` with the same area gate
-- Same proposal path, same approve gate — a retired project's start is history,
-  and history should still be confirmed rather than assumed
-- **Exit criterion:** every retired project either draws a grey bar over its
-  real historical span, or is explicitly marked as having no recoverable start
+`propose_project_starts` **already includes retired projects** and already
+consults the archive — an earlier draft of this section wrongly said it needed
+extending. These five fall out for a different reason: no tasks to derive from,
+*and* no archived bar whose name match survives the area gate. There is no
+signal, and inventing one is the failure mode the whole phase exists to avoid.
+
+So this is a hand-typed date, not an algorithm — but not an unaided one. The
+archive block shipped with the ghost layer puts the old board's own lanes on the
+same grid, which is the evidence Eyal would need to type them from.
+
+- **Exit criterion:** each of the five either draws a grey bar over a real
+  historical span, or is explicitly marked as having no recoverable start
 
 ### Phase 2 — Timeline tab, read-only — **BUILT, FLAG OFF**
 - Render the tab from the DB; **no readback**
@@ -428,6 +437,16 @@ Two things learned building it, both worth carrying into Phase 3:
 removes text and never formatting, so a bar that moved or shortened leaves its
 old cells coloured — the ghost of a previous plan sitting on the board looking
 like current truth. Pinned by a test that asserts the wipe precedes the fills.
+
+The **legacy archive block** (decision 7) ships in the same tab: `legacy_archive`
+in the processor, rendered below the live rows and collapsed, behind
+`TIMELINE_LEGACY_OVERLAY_ENABLED`. Meeting lanes and the `OPERATIONAL RULES`
+section are dropped as not-plan — 99 of the 244 surviving bars — leaving 28 lane
+rows and 144 bars. Two mechanical traps are pinned by tests: a bar with a blank
+end is **one week**, never open-ended (these are runs of filled cells, so a blank
+end means the run was one cell — treating it as open would paint 90-odd weeks of
+lilac), and `addDimensionGroup` *creates* a group without closing it, so the
+block arrives collapsed only because a second `updateDimensionGroup` says so.
 
 *A bar needs a left edge, which means Phase 1 gates Phase 2 completely.* The tab
 renders correctly with zero bars today because no start date is approved yet.
@@ -532,11 +551,36 @@ nobody maintains.
    parallel, just dont delete it."* At cutover it becomes a frozen archive, not
    a second live surface. What that means concretely is in Phase 5. (§6)
 
+7. **Legacy overlay — yes, and it makes no per-project claim.** Eyal approved
+   the ghost layer. Built as a **collapsed archive block** below the live rows:
+   the old board's own sections and lanes, redrawn on the new columns.
+
+   The obvious shape — each project's matched legacy bar drawn directly beneath
+   it — was built first and dropped, because it cannot be made honest. Measured
+   on live data it drew **2 ghosts across 27 projects**, and the matches it
+   suppressed included obviously-correct ones scoring *identically* to obvious
+   junk:
+
+   ```
+   Legal      -> "Legal entity Establishment"            1 shared word   RIGHT
+   Italy      -> "Aquiring MVP Clients: Italy"           1 shared word   RIGHT
+   Corporate  -> "Monthly close — send docs to Shimony"  1 shared word   WRONG
+   Others—CD  -> "Signing #1 MVP client"                 1 shared word   WRONG
+   ```
+
+   No threshold admits the first two without the second two. Raising the bar to
+   two shared words silences the feature; lowering it ships confident nonsense
+   under a project's own name, which is worse than shipping nothing.
+
+   The archive asserts nothing instead: **28 lane rows, 144 bars**, the old
+   board's structure on the new grid, and Eyal reads the correspondence himself.
+   Same instinct as the rest of this plan — show the evidence, never infer the
+   link. Collapsed by default, so "it doubles what is on screen" is answered:
+   it does not, until asked. `TIMELINE_LEGACY_OVERLAY_ENABLED`, default on.
+
 ### Still open
 
-7. **Legacy overlay** — worth rendering the Phase 0 bars as a "what we planned
-   in March" ghost layer on the same grid? It is nearly free given the spans
-   now match, but it doubles what is on screen.
+*(nothing — 1 through 7 are settled)*
 
 ---
 

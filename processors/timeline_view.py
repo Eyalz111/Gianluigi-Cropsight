@@ -19,12 +19,22 @@ COLOUR CARRIES STATUS, NOT PRIORITY. The two are different questions and one
 cell cannot answer both without becoming unreadable, so the bar takes the old
 board's own status palette and priority keeps its own column with the
 Urgent/H/M/L colours already used on the Project Status tabs.
+
+THE GHOST LAYER answers "what did we plan in March?" on the same columns, as a
+collapsed block below the live rows: the old board's own sections and lanes,
+redrawn on the new grid. It is nearly free because the grid already spans
+exactly what the old board spans, so no dates are recomputed. It attaches no
+bar to any project — see `legacy_archive` for why that was tried and dropped.
+Approved by Eyal 2026-08-12; gated on TIMELINE_LEGACY_OVERLAY_ENABLED because
+the cost is screen density, and that is a judgement only he can make once he
+sees it.
 """
 
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
+from config.settings import settings
 from services.supabase_client import supabase_client
 
 logger = logging.getLogger(__name__)
@@ -46,6 +56,18 @@ STATUS_BG = {
 # An open-ended run past today is drawn in a paler active tint: it says "still
 # going, end unknown" rather than claiming a finish at the edge of the grid.
 OPEN_END_BG = "#E4F0E1"
+
+# The legacy ghost. Deliberately OUTSIDE the status palette — a lilac that
+# matches none of the four status colours, so the archive can never be misread
+# as current truth at a glance.
+GHOST_BG = "#D9CFE8"
+
+# Lanes and sections that carry no plan. The Meetings lanes are attendance
+# cadence, and OPERATIONAL RULES is the old board's own legend — neither is
+# something anyone planned, and together they are 99 of the 244 bars.
+_ARCHIVE_SKIP_LANES = ("Meeting Count", "All Meetings", "Availability",
+                       "Meetings", "Management Meetings")
+_ARCHIVE_SKIP_SECTIONS = ("OPERATIONAL RULES",)
 
 HEADERS = ["Area / Project", "Owner", "Start", "Target", "Priority"]
 N_LABEL_COLS = len(HEADERS)
@@ -111,6 +133,53 @@ def _status_of(project: dict, open_tasks: int, is_retired: bool) -> str:
     return "planned"
 
 
+def legacy_archive(bars: list[dict], weeks: list[date]) -> list[dict]:
+    """The old board's own rows, on the new grid. Sections -> lanes -> spans.
+
+    NO PROJECT MATCHING. An earlier build of this drew each project's matched
+    legacy bar directly beneath it, which is the more useful shape and is not
+    supportable: measured on live data it drew 2 ghosts across 27 projects, and
+    the matches it suppressed included obviously-correct ones ("Legal" ->
+    "Legal entity Establishment") scoring identically to obvious junk
+    ("Corporate" -> "Monthly close — send docs to Shimony"). Name overlap does
+    not separate the two, and no threshold exists that admits one without the
+    other.
+
+    So the archive asserts nothing about which project a bar belongs to. It
+    reproduces the old board's own structure — its sections, its lanes — on the
+    new columns, and lets Eyal read the correspondence himself. That is the same
+    instinct as the rest of this plan: show the evidence, never infer the link.
+    """
+    lanes: dict[tuple, list] = defaultdict(list)
+    for b in bars:
+        section = (b.get("section") or "").strip() or "(unsectioned)"
+        lane = (b.get("lane") or "").strip() or "(unnamed)"
+        if section in _ARCHIVE_SKIP_SECTIONS:
+            continue
+        if any(skip in lane for skip in _ARCHIVE_SKIP_LANES):
+            continue
+        start = _parse(b.get("start_date"))
+        if start is None:
+            continue
+        # A bar with no recorded end is ONE week, never open-ended: these are
+        # contiguous runs of filled cells, so a blank end means the run was one
+        # cell long. Treating it as open would paint 90-odd weeks of lilac.
+        end = _parse(b.get("end_date")) or start
+        first, last, _ = span_columns(start, end, weeks)
+        if first < 0:
+            continue
+        lanes[(section, lane)].append({
+            "first_col": first, "last_col": last,
+            "label": (b.get("label") or "").strip(), "start": start, "end": end})
+
+    out: dict[str, list] = defaultdict(list)
+    for (section, lane), spans in lanes.items():
+        out[section].append({"lane": lane,
+                             "bars": sorted(spans, key=lambda s: s["first_col"])})
+    return [{"section": s, "lanes": sorted(out[s], key=lambda l: l["lane"])}
+            for s in sorted(out)]
+
+
 def build_timeline() -> dict:
     """Areas -> ordered project rows, each with its span and colour.
 
@@ -128,6 +197,15 @@ def build_timeline() -> dict:
     tasks = (c.table("tasks").select(
         "id,project_id,title,assignee,deadline,status,priority,approval_status")
         .limit(5000).execute()).data or []
+
+    bars = []
+    if settings.TIMELINE_LEGACY_OVERLAY_ENABLED:
+        try:
+            bars = (c.table("gantt_legacy_bars").select("*")
+                    .limit(1000).execute()).data or []
+        except Exception as e:                               # noqa: BLE001
+            # The archive missing is not a reason to drop the whole timeline.
+            logger.warning(f"[timeline] legacy bars unavailable: {e}")
 
     open_by_project = defaultdict(list)
     for t in tasks:
@@ -176,4 +254,9 @@ def build_timeline() -> dict:
                 key=lambda t: (t["deadline"] is None, t["deadline"] or date.max)),
         })
 
-    return {"weeks": weeks, "areas": dict(by_area), "stats": stats}
+    archive = legacy_archive(bars, weeks)
+    stats["archive_rows"] = sum(len(s["lanes"]) for s in archive)
+    stats["archive_bars"] = sum(len(l["bars"]) for s in archive for l in s["lanes"])
+
+    return {"weeks": weeks, "areas": dict(by_area), "archive": archive,
+            "stats": stats}

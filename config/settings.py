@@ -183,6 +183,14 @@ class Settings(BaseSettings):
     # refresh. Reading edits back is phase 4 and ships in shadow mode first.
     # [2026-08-12]
     TIMELINE_VIEW_ENABLED: bool = Field(default=False, description="Build the Timeline tab (projects on a weekly grid)")
+    # The legacy ghost layer: the OLD board's sections and lanes redrawn on the
+    # new columns, as a collapsed block below the live rows. It attaches no bar
+    # to any project — that was tried and does not work; see legacy_archive.
+    # Defaults ON because Eyal asked for it and it lives inside the already-off
+    # Timeline tab, so a second dark flag would just mean he turns the tab on
+    # and does not see what he approved. Turn this off if the block reads as
+    # clutter; nothing else depends on it. [2026-08-12]
+    TIMELINE_LEGACY_OVERLAY_ENABLED: bool = Field(default=True, description="Draw the old board's archived plan as a collapsed block on the Timeline")
     # Weekly re-triage of the open-questions backlog. Rides the Sunday knowledge
     # run. PROPOSES closures only — never closes a question itself. [2026-08-06]
     QUESTION_TRIAGE_ENABLED: bool = Field(default=False, description="Weekly open-question re-triage (proposes closures for approval)")

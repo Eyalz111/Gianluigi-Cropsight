@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from config.settings import settings
 from processors.timeline_view import (
-    HEADERS, N_LABEL_COLS, OPEN_END_BG, STATUS_BG, TIMELINE_TAB,
+    GHOST_BG, HEADERS, N_LABEL_COLS, OPEN_END_BG, STATUS_BG, TIMELINE_TAB,
     build_timeline,
 )
 from services.google_sheets import sheets_service
@@ -36,8 +36,15 @@ _TODAY = {"red": 0.85, "green": 0.33, "blue": 0.31}
 _PROTECT_DESC = "Gianluigi: Timeline is generated — edit projects on the area tabs"
 
 # Order matters: the swatch under column i is coloured from _LEGEND_KEYS[i].
+# These four are the STATUS legend and must stay exactly the status palette —
+# a test asserts it, because a legend that drifts from the bars is worse than
+# no legend at all.
 _LEGEND = ("Blocked", "Active", "Planned", "Completed / retired")
 _LEGEND_KEYS = ("blocked", "active", "planned", "completed")
+# The ghost swatch is NOT a status, so it is kept out of the pair above and
+# painted into the one spare label column. The LABEL appears only when the
+# archive was drawn; the cell's fill is asserted on every run either way.
+_GHOST_LEGEND = "Old board"
 
 
 def _rgb(hex_colour: str) -> dict:
@@ -93,6 +100,9 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
     grid[TITLE_ROW][0] = "TIMELINE — projects on a weekly grid"
     for i, label in enumerate(_LEGEND):
         grid[LEGEND_ROW][i] = label
+    show_ghost = bool(data.get("archive"))
+    if show_ghost and len(_LEGEND) < N_LABEL_COLS:
+        grid[LEGEND_ROW][len(_LEGEND)] = _GHOST_LEGEND
     grid[MONTH_ROW][N_LABEL_COLS:] = _month_band(weeks)
     grid[WEEK_ROW][:N_LABEL_COLS] = HEADERS
     grid[WEEK_ROW][N_LABEL_COLS:] = [w.strftime("%d/%m") for w in weeks]
@@ -143,6 +153,40 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
             if len(grid) > first_task_row:
                 group_spans.append((first_task_row, len(grid) - 1))
 
+    # ---- the old board, redrawn on the same columns -------------------------
+    # One collapsed block at the bottom rather than a ghost row per project:
+    # the archive makes no claim about which project a bar belongs to, because
+    # the matching that would support such a claim does not work (see
+    # processors.timeline_view.legacy_archive). Collapsed by default, so the
+    # answer to "it doubles what is on screen" is that it does not until asked.
+    archive = data.get("archive") or []
+    archive_span = archive_title_row = None
+    if archive:
+        grid.append(["OLD BOARD — what we planned (archived, read-only)"]
+                    + [""] * (n_cols - 1))
+        archive_title_row = len(grid) - 1
+        first_archive_row = len(grid)
+        for block in archive:
+            area_rows.append(len(grid))
+            grid.append([block["section"]] + [""] * (n_cols - 1))
+            for lane in block["lanes"]:
+                line = [""] * n_cols
+                line[0] = f"    {lane['lane']}"
+                for bar in lane["bars"]:
+                    a = N_LABEL_COLS + bar["first_col"]
+                    b = N_LABEL_COLS + bar["last_col"]
+                    # The label goes in the bar's FIRST cell only. Sheets
+                    # overflows text rightwards into empty cells, so it reads
+                    # across its own bar and stops at the next one — which is
+                    # how the old board labelled its bars in the first place.
+                    line[a] = bar["label"][:80]
+                    fills.append({"row": len(grid), "a": a, "b": b,
+                                  "colour": GHOST_BG})
+                grid.append(line)
+        if len(grid) > first_archive_row:
+            archive_span = (first_archive_row, len(grid) - 1)
+            group_spans.append(archive_span)
+
     # ---- write ------------------------------------------------------------
     sid = await sheets_service._ensure_tab(TIMELINE_TAB, HEADERS,
                                            spreadsheet_id=ssid)
@@ -160,7 +204,8 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
             valueInputOption="RAW", body={"values": grid}))
 
     reqs = _format_requests(sid, n_cols, len(grid), weeks, today_col,
-                            fills, area_rows, group_spans, ssid)
+                            fills, area_rows, group_spans, ssid, show_ghost,
+                            archive_title_row, archive_span)
     if reqs:
         sheets_service._execute_with_retry(
             lambda: sheets_service.service.spreadsheets().batchUpdate(
@@ -172,7 +217,10 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
 
 
 def _format_requests(sid, n_cols, n_rows, weeks, today_col,
-                     fills, area_rows, group_spans, ssid) -> list[dict]:
+                     fills, area_rows, group_spans, ssid,
+                     show_ghost: bool = False,
+                     archive_title_row: int | None = None,
+                     archive_span: tuple | None = None) -> list[dict]:
     reqs: list[dict] = [
         {"updateSheetProperties": {
             "properties": {"sheetId": sid, "gridProperties": {
@@ -207,6 +255,21 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                       "startColumnIndex": i, "endColumnIndex": i + 1},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": _rgb(STATUS_BG[key]),
+                "textFormat": {"fontSize": 9, "foregroundColor": _INK}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+
+    # ASSERT, don't add: this cell is painted on EVERY run, white when there is
+    # no ghost layer. Writing it only when show_ghost would leave a lilac swatch
+    # with no text behind forever the first time the overlay is turned off —
+    # values().clear() takes the label away and never the fill.
+    if len(_LEGEND) < N_LABEL_COLS:
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": LEGEND_ROW,
+                      "endRowIndex": LEGEND_ROW + 1,
+                      "startColumnIndex": len(_LEGEND),
+                      "endColumnIndex": len(_LEGEND) + 1},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": _rgb(GHOST_BG) if show_ghost else _WHITE,
                 "textFormat": {"fontSize": 9, "foregroundColor": _INK}}},
             "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
 
@@ -260,12 +323,45 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                   "startIndex": N_LABEL_COLS, "endIndex": n_cols},
         "properties": {"pixelSize": 21}, "fields": "pixelSize"}})
 
+    if archive_title_row is not None:
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": archive_title_row,
+                      "endRowIndex": archive_title_row + 1,
+                      "startColumnIndex": 0, "endColumnIndex": n_cols},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": _rgb(GHOST_BG),
+                "textFormat": {"bold": True, "foregroundColor": _INK}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+        # The archive's bar labels are printed into the week columns, where the
+        # cells are 21px wide. Anything but a small font is unreadable soup.
+        if archive_span:
+            reqs.append({"repeatCell": {
+                "range": {"sheetId": sid, "startRowIndex": archive_span[0],
+                          "endRowIndex": archive_span[1] + 1,
+                          "startColumnIndex": N_LABEL_COLS,
+                          "endColumnIndex": n_cols},
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"fontSize": 8, "foregroundColor": _INK}}},
+                "fields": "userEnteredFormat.textFormat"}})
+
     # The task waterfall, collapsed by default: a project row is the unit, and
     # its tasks are there when Eyal wants them.
     for a, b in group_spans:
         reqs.append({"addDimensionGroup": {
             "range": {"sheetId": sid, "dimension": "ROWS",
                       "startIndex": a, "endIndex": b + 1}}})
+
+    # The archive collapses to a single line by default. addDimensionGroup only
+    # CREATES the group — it does not close it — so the answer to "it doubles
+    # what is on screen" depends on this second request actually being sent.
+    if archive_span:
+        reqs.append({"updateDimensionGroup": {
+            "dimensionGroup": {
+                "range": {"sheetId": sid, "dimension": "ROWS",
+                          "startIndex": archive_span[0],
+                          "endIndex": archive_span[1] + 1},
+                "depth": 1, "collapsed": True},
+            "fields": "collapsed"}})
 
     # ASSERT, DON'T ADD. Conditional formats, groups and protected ranges all
     # survive a values clear, so re-running without deleting stacks a duplicate
