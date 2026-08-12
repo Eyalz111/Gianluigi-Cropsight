@@ -1423,9 +1423,27 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         # --- proposed date (unparseable cells are never pulled) ---
         raw_date = sm.get("proposed_date_raw")
         s_date = sm.get("proposed_date")
+
+        # KEEP THE WORDS EVEN WHEN THEY ARE NOT A DATE. Eyal writes "Once a
+        # week" or "end of August" here — telling Nechama roughly when he wants
+        # it, not booking a slot. Ignoring the cell (below) stops it corrupting
+        # a timestamptz, but it also meant his phrasing never left the sheet, so
+        # nothing else in the system could see it. The text now lands in
+        # timing_text and the parsed reading beside it. [2026-08-12]
+        if raw_date and str(raw_date).strip():
+            from processors.meeting_timing import parse_timing
+
+            timing = parse_timing(raw_date)
+            if str(dm.get("timing_text") or "") != timing["text"]:
+                upd["timing_text"] = timing["text"]
+                upd["recurrence"] = timing["recurrence"]
+                upd["window_start"] = timing["window_start"]
+                upd["window_end"] = timing["window_end"]
+
         if raw_date and parse_human_date(raw_date) is None:
             logger.warning(
-                f"[meeting-reconcile] unparseable date {raw_date!r} (row {row}) — ignored"
+                f"[meeting-reconcile] unparseable date {raw_date!r} (row {row}) — "
+                "kept as timing_text, not pulled as a date"
             )
             summary["bad_dates"] += 1
             final["proposed_date"] = dm.get("proposed_date")

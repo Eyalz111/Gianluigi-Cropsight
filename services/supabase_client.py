@@ -5856,10 +5856,32 @@ class SupabaseClient:
         if "led_by" in updates:
             updates["led_by"] = self.resolve_assignee(updates["led_by"])
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        result = (
-            self.client.table("follow_up_meetings")
-            .update(updates).eq("id", meeting_id).execute()
-        )
+        try:
+            result = (
+                self.client.table("follow_up_meetings")
+                .update(updates).eq("id", meeting_id).execute()
+            )
+        except Exception as first:                           # noqa: BLE001
+            # The timing columns arrive with migrate_meeting_timing.sql. Until
+            # it is applied, insisting on them would make this raise and take
+            # the whole meetings reconcile down with it — a far worse failure
+            # than the one it is carrying. Drop them and apply the rest.
+            # [2026-08-12]
+            timing_keys = ("timing_text", "recurrence", "window_start", "window_end")
+            if not (any(k in updates for k in timing_keys)
+                    and any(k in str(first) for k in timing_keys + ("PGRST204", "42703"))):
+                raise
+            logger.warning(
+                "[meetings] timing columns absent — updating "
+                f"{meeting_id} without them; run migrate_meeting_timing.sql")
+            for key in timing_keys:
+                updates.pop(key, None)
+            if not any(k for k in updates if k != "updated_at"):
+                return {"id": meeting_id}
+            result = (
+                self.client.table("follow_up_meetings")
+                .update(updates).eq("id", meeting_id).execute()
+            )
         if not result.data:
             raise ValueError(f"Follow-up meeting {meeting_id} not found or not updated")
         return result.data[0]
@@ -5893,19 +5915,59 @@ class SupabaseClient:
         meetings in the morning of 2026-08-09.
         """
         try:
+            # AN UNREADABLE CELL COSTS THE CELL, NEVER THE ROW. `proposed_date`
+            # is a timestamptz and Eyal writes "Once a week" into that column —
+            # he is telling Nechama roughly when he wants it, not booking a
+            # slot. That raised 22007, the except below returned None, and the
+            # caller's `if not created: continue` discarded the whole meeting,
+            # every cycle, for hours. Six of his rows lived only in the sheet.
+            #
+            # The words are kept verbatim in timing_text; the parsed reading
+            # goes alongside it and is allowed to be empty. [2026-08-12]
+            from processors.meeting_timing import parse_timing
+
+            timing = parse_timing(proposed_date)
             data = {
                 "title": title,
                 "led_by": self.resolve_assignee(led_by),
-                "proposed_date": proposed_date,
+                "proposed_date": timing["date"],
                 "participants": participants or [],
                 "label": self.resolve_label(label),
                 "status": status or "not_scheduled",
                 "approval_status": "approved",
             }
+            if timing["text"]:
+                data["timing_text"] = timing["text"]
+            if timing["recurrence"]:
+                data["recurrence"] = timing["recurrence"]
+            if timing["window_start"]:
+                data["window_start"] = timing["window_start"]
+                data["window_end"] = timing["window_end"]
             if str(priority or "").strip():
                 data["priority"] = str(priority).strip()
                 data["manual_priority"] = True
-            result = self.client.table("follow_up_meetings").insert(data).execute()
+            try:
+                result = self.client.table("follow_up_meetings").insert(data).execute()
+            except Exception as first:                       # noqa: BLE001
+                # The timing columns arrive with migrate_meeting_timing.sql.
+                # Until it has been run they do not exist, and insisting on them
+                # would drop the row for a NEW reason — the same failure this
+                # change exists to fix. Fall back to the row without them: a
+                # meeting that lands without its timing phrase is still a
+                # meeting, and the phrase returns on the next cycle once the
+                # migration is applied. [2026-08-12]
+                if not any(k in str(first) for k in
+                           ("timing_text", "recurrence", "window_start",
+                            "window_end", "PGRST204", "42703")):
+                    raise
+                logger.warning(
+                    "[meetings] timing columns absent — creating "
+                    f"{title!r} without them; run migrate_meeting_timing.sql")
+                for key in ("timing_text", "recurrence", "window_start",
+                            "window_end"):
+                    data.pop(key, None)
+                result = self.client.table("follow_up_meetings").insert(data).execute()
+
             if result.data:
                 logger.info(f"Created manual follow-up meeting: {title}")
                 return result.data[0]
