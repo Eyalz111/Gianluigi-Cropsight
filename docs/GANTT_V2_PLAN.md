@@ -366,8 +366,8 @@ formatting pass strips them — precisely what happened to the meetings pool
 Each phase is independently shippable, flag-gated, and reversible. Order is
 chosen so nothing writes a live surface until the data underneath is trusted.
 
-**Status, 2026-08-12.** Phases 0 and 2 are built and merged; Phase 1's proposals
-are emitted and waiting on Eyal. Phases 3–5 are not started.
+**Status, 2026-08-12.** Phases 0 and 2 are built and merged; Phase 1's 22
+proposals are emitted and waiting on Eyal. Phases 1b and 3–5 are not started.
 
 ### Phase 0 — Extract and archive *(no user-visible change)* — **DONE**
 - Promote `gantt_extract.py` to `scripts/extract_legacy_gantt.py`
@@ -384,6 +384,31 @@ are emitted and waiting on Eyal. Phases 3–5 are not started.
 - Approve → `start_date` + `manual_start_date = TRUE`
 - **Exit criterion:** every active project has a start date, or is explicitly
   marked as having none
+
+### Phase 1b — start dates for the retired projects — **NOT STARTED**
+
+Decision 4 (keep retired projects, greyed) does not render on its own. A grey
+row is still a row that needs a left edge: `span_columns()` returns `(-1, -1)`
+when `start_date` is `None`, so those projects appear as a name and an empty
+96-week grid — present but blank, which reads as a bug rather than as history.
+
+The pass ran on 27 projects and emitted **22** proposals. The 5 with no
+derivable start are exactly the ones that need this: the four retired projects
+plus `Others — Fundraising`. They have no start because they have no open
+tasks — which is what being retired means.
+
+Asking Eyal to remember when a retired project began is the wrong request; the
+answer is already archived. `gantt_legacy_bars` (392 rows) is the only surviving
+record of when that work actually ran, and for finished work the old board is
+*more* reliable than task timestamps, because the project completed before the
+board was abandoned.
+
+- Extend the Phase 1 pass to cover retired projects, seeded from
+  `gantt_legacy_bars` with the same area gate
+- Same proposal path, same approve gate — a retired project's start is history,
+  and history should still be confirmed rather than assumed
+- **Exit criterion:** every retired project either draws a grey bar over its
+  real historical span, or is explicitly marked as having no recoverable start
 
 ### Phase 2 — Timeline tab, read-only — **BUILT, FLAG OFF**
 - Render the tab from the DB; **no readback**
@@ -425,9 +450,34 @@ section.
 - Ships in **shadow mode first**, exactly as Project Status v2 did
 - **Exit criterion:** a clean shadow week
 
-### Phase 5 — Retire or repoint the old board
-- Only after Phases 0–4 are settled
-- Fix the `#REF!` errors regardless — that board is still what Eyal reads today
+### Phase 5 — Freeze the old board *(decided 2026-08-12)*
+
+Eyal: *"dont make it run in parallel, just dont delete it."* Freeze, keep,
+never write. Only after Phases 0–4 are settled.
+
+The board is **already never painted** — `GANTT_SHADOW_MODE` defaults `True`
+and is not overridden in prod, and `reconcile_scheduler._run_gantt` is
+documented "Never paints the board". So there is no write to stop. What is
+still live is the weekly **read**: `reconcile_gantt_lanes()` pulls board →
+knowledge, and `compute_gantt_nudges()` derives nudges from it.
+
+That read is what "running in parallel" actually means here, and it is the
+thing that must stop. A frozen board keeps feeding March lane text into
+knowledge forever, and the nudges would compare the brief against a board
+nobody maintains.
+
+- **Cutover action: `GANTT_RECONCILE_ENABLED=false`.** One flag; that is the
+  whole parallel-running surface.
+- **Leave the workbook in Drive, untouched.** It is the record of 174 dated
+  bars, and `gantt_legacy_bars` is a copy, not a replacement — the copy holds
+  no formatting, no ★ styling, no section structure.
+- **Convert the live formulas to static values at freeze time**, and fix the
+  `#REF!` cells in the same pass. The original plan said fix them "regardless —
+  that board is still what Eyal reads today"; under decision 6 it stops being
+  what he reads, which makes the case *stronger*, not weaker. An archive with
+  live formulas keeps re-evaluating against tabs nobody is maintaining, so it
+  can rot further after we stop looking at it. Values freeze; formulas decay.
+- **No deletion, ever.** Already in §10.
 
 ---
 
@@ -470,13 +520,20 @@ section.
    (~96 columns). No yearly tabs. (§5)
 3. **Bidirectional** — yes at project level (start, target, owner); task rows
    read-only on the Timeline. Conflicts reported, never guessed. (§5)
+4. **Retired projects** — stay on the board, greyed, with their historical span.
+   Already built this way in Phase 2 (`_status_of` → `completed` → `#D0D0CC`).
+   Consequence: a grey row still needs a start date to draw a bar, and the four
+   retired projects have none — see Phase 1b. (§6)
+5. **Milestones have no owner.** Eyal: *"milestone has no owner because it is a
+   company thing."* So Migration B carries no `owner` column, and the `[E]` /
+   `[E/P]` prefixes on the old ★ rows stay as legacy text inside the label —
+   they are never promoted to a field. A milestone belongs to the company. (§4)
+6. **The old board does not run in parallel.** Eyal: *"dont make it run in
+   parallel, just dont delete it."* At cutover it becomes a frozen archive, not
+   a second live surface. What that means concretely is in Phase 5. (§6)
 
 ### Still open
 
-4. **Retired projects** — show greyed with their historical span, or drop them?
-5. **Milestone ownership** — the ★ rows carry `[E]`/`[E/P]` prefixes. Does a
-   milestone get an owner, or is every milestone the CEO's?
-6. **Does the old board keep running in parallel**, and for how long?
 7. **Legacy overlay** — worth rendering the Phase 0 bars as a "what we planned
    in March" ghost layer on the same grid? It is nearly free given the spans
    now match, but it doubles what is on screen.
