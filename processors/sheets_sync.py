@@ -1322,7 +1322,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
 
     summary = {"matched": 0, "pulled": 0, "pushed": 0, "created": 0, "readded": 0,
                "manual_held": 0, "status_guarded": 0, "bad_dates": 0,
-               "shadow": shadow, "dry_run": dry_run}
+               "canonicalized": 0, "shadow": shadow, "dry_run": dry_run}
     manual_held: list[tuple] = []
     cell_writes: list[dict] = []
     snapshot_writes: list[tuple] = []
@@ -1493,6 +1493,7 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
         if raw_s_status and not s_status:
             logger.warning(
                 f"[meeting-reconcile] unknown status {raw_s_status!r} (row {row})")
+        status_written = False
         if s_status and s_status != snap_status and s_status != d_status:
             if d_status not in MEETING_TERMINAL_STATUSES:
                 upd["status"] = s_status
@@ -1502,13 +1503,40 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             else:
                 summary["status_guarded"] += 1
                 _cell("status", row, d_status)
+                status_written = True
                 final["status"] = d_status
         elif d_status != s_status:
             _cell("status", row, d_status)
+            status_written = True
             summary["pushed"] += 1
             final["status"] = d_status
         else:
             final["status"] = s_status
+
+        # THE CELL'S OWN SPELLING IS NORMALISED TOO — and this is the only step
+        # that can do it. Canonicalising on the way in makes the three surfaces
+        # AGREE: with `not_scheduled` in the cell, in the database and in the
+        # snapshot, all three read as `to_schedule`, every comparison above is
+        # equal, so no divergence is found and no branch ever writes the cell.
+        # The rename was invisible on the tab for exactly that reason — the
+        # value the system stopped using stayed on screen, outside the dropdown
+        # (red triangle) and matching no colour rule, until somebody retyped it.
+        #
+        # Compare the LITERAL cell text, not `raw_s_status`: that one is already
+        # lower-cased, so a hand-typed `To_Schedule` would compare equal to the
+        # canonical form and keep its invalid-entry triangle forever.
+        #
+        # This is the same in-cycle canonicalisation the other columns already
+        # get on their push paths — `_fmt_ddmmyyyy` for dates, the Urgent/H/M/L
+        # map for priority. Cosmetic only: `final` is unchanged, so nothing is
+        # pulled, nothing is marked manual, and the snapshot still records the
+        # canonical value it already recorded. [2026-08-13]
+        literal_status = str(sm.get("status") or "").strip()
+        if (not status_written and literal_status
+                and final.get("status")
+                and literal_status != final["status"]):
+            _cell("status", row, final["status"])
+            summary["canonicalized"] += 1
 
         if upd:
             db_updates[mid] = upd

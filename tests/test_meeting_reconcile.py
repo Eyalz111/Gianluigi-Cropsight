@@ -289,6 +289,128 @@ class TestReviewFindings:
         assert calls["snapshot"][0][4] == "Roye Tadmor"
 
 
+class TestStatusCellCanonicalisation:
+    """The rename was invisible on the tab, and canonicalising is why. [2026-08-13]
+
+    `not_scheduled` became `to_schedule` on 2026-08-12, and three live rows kept
+    showing the old word for a day. Not a write failure: the cell, the DB row and
+    the snapshot ALL held `not_scheduled`, `canonical_meeting_status()` maps all
+    three to `to_schedule`, so every comparison in the merge was equal, no
+    divergence was found, and no branch wrote the cell. The old spelling was also
+    outside the dropdown (red triangle) and matched no colour rule.
+
+    A tolerant reader needs a writer that settles on the canonical spelling, or
+    the value it tolerates lives on screen forever.
+    """
+
+    @staticmethod
+    def _status_writes(fake):
+        from services.google_sheets import MEETING_COLUMNS
+        call = fake.service.spreadsheets.return_value.values.return_value.batchUpdate.call_args
+        if call is None:
+            return []
+        col = MEETING_COLUMNS["status"]
+        return [w["values"][0][0] for w in call.kwargs["body"]["data"]
+                if f"!{col}" in w["range"]]
+
+    async def test_agreed_old_spelling_is_rewritten(self, monkeypatch):
+        """The live bug. Three surfaces agree on the retired word — and agreeing
+        is exactly why nothing used to fix it."""
+        sheet = [_srow(id="m1", title="T", status="not_scheduled")]
+        db = [_dbrow(id="m1", title="T", status="not_scheduled")]
+        snap = {"m1": {"title": "T", "status": "not_scheduled"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res["canonicalized"] == 1
+        assert self._status_writes(fake) == ["to_schedule"]
+        # Cosmetic only: no pull, no DB write, no sticky mark.
+        assert res["pulled"] == 0
+        assert calls["update"] == []
+        assert calls["manual"] == []
+
+    async def test_snapshot_keeps_the_canonical_value(self, monkeypatch):
+        """The snapshot must record what is NOW in the cell, or the next cycle
+        reads a fresh divergence against the value we just wrote."""
+        sheet = [_srow(id="m1", title="T", status="not_scheduled")]
+        db = [_dbrow(id="m1", title="T", status="not_scheduled")]
+        snap = {"m1": {"title": "T", "status": "not_scheduled"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        assert calls["snapshot"][0][7] == "to_schedule"
+
+    async def test_case_only_difference_is_normalised(self, monkeypatch):
+        """Compare the LITERAL cell, not the lower-cased read. `To_Schedule`
+        canonicalises to itself once lowered, so a lower-cased comparison would
+        leave a hand-typed capital sitting outside the dropdown forever."""
+        sheet = [_srow(id="m1", title="T", status="To_Schedule")]
+        db = [_dbrow(id="m1", title="T", status="to_schedule")]
+        snap = {"m1": {"title": "T", "status": "to_schedule"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res["canonicalized"] == 1
+        assert self._status_writes(fake) == ["to_schedule"]
+        assert calls["update"] == []
+
+    async def test_already_canonical_cell_is_left_alone(self, monkeypatch):
+        """No write means no write. A cosmetic pass that touches every row every
+        cycle is a quota bill and a revision-history flood."""
+        sheet = [_srow(id="m1", title="T", status="to_schedule")]
+        db = [_dbrow(id="m1", title="T", status="to_schedule")]
+        snap = {"m1": {"title": "T", "status": "to_schedule"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res["canonicalized"] == 0
+        assert self._status_writes(fake) == []
+
+    async def test_a_pulled_status_leaves_the_cell_canonical(self, monkeypatch):
+        """Pulling `not_scheduled` writes `to_schedule` to the DB; the cell has
+        to end up saying the same thing."""
+        sheet = [_srow(id="m1", title="T", status="not_scheduled")]
+        db = [_dbrow(id="m1", title="T", status="parked")]
+        snap = {"m1": {"title": "T", "status": "parked"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert calls["update"] == [("m1", {"status": "to_schedule"})]
+        assert res["canonicalized"] == 1
+        assert self._status_writes(fake) == ["to_schedule"]
+
+    async def test_guarded_row_is_written_once(self, monkeypatch):
+        """The terminal guard already pushes the DB value into the cell. A second
+        cosmetic write of the same range would be the pass fighting the branch."""
+        sheet = [_srow(id="m1", title="T", status="not_scheduled")]
+        db = [_dbrow(id="m1", title="T", status="held")]
+        snap = {"m1": {"title": "T", "status": "not_scheduled"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res["canonicalized"] == 0
+        assert self._status_writes(fake) == ["held"]
+
+    async def test_unknown_status_is_not_canonicalised_into_a_guess(self, monkeypatch):
+        """`canonical_meeting_status` returns "" for anything it does not know,
+        and "" must never reach the cell as an erase."""
+        sheet = [_srow(id="m1", title="T", status="banana")]
+        db = [_dbrow(id="m1", title="T", status="parked")]
+        snap = {"m1": {"title": "T", "status": "parked"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        assert self._status_writes(fake) == ["parked"]
+        assert calls["update"] == []
+
+
 class TestTerminalArchive:
     """Held meetings STAY on the tab as visible history; dropped meetings stay
     too until they've been untouched for the archival window (TASK_ARCHIVAL_DAYS),
