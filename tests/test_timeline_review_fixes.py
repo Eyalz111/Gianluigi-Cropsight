@@ -155,10 +155,16 @@ class TestTheClearIsNotSizedFromTheNewGrid:
         shrank the tab by more than 40 rows left the previous tail behind as
         text — and the fill wipe reaches 200 rows, so those leftovers showed up
         as rows with no bar under them, reading as real work."""
+        from processors.timeline_view import N_HIDDEN
+        from services.timeline_sheet import _a1_col
         cap = await _render()
         assert len(cap["clear_ranges"]) == 1
         rng = cap["clear_ranges"][0]
-        assert rng == "'Timeline'!A:CW", rng
+        # Derived, not hardcoded: the grid gained two hidden identity columns in
+        # Phase 4a and a literal "CW" here would have to be re-guessed every
+        # time the shape changes.
+        last = _a1_col(N_LABEL_COLS + 96 + N_HIDDEN - 1)
+        assert rng == f"'Timeline'!A:{last}", rng
         assert not any(ch.isdigit() for ch in rng.split("!")[1]), \
             "a row bound reintroduces the shrink bug"
 
@@ -179,9 +185,12 @@ class TestTheGridWidthIsAsserted:
         widen = [b for b in cap["batches"]
                  if len(b) == 1 and "updateSheetProperties" in b[0]
                  and "columnCount" in b[0]["updateSheetProperties"]["fields"]]
+        from processors.timeline_view import N_HIDDEN
         assert widen, "the grid width is never asserted"
         props = widen[0][0]["updateSheetProperties"]["properties"]
-        assert props["gridProperties"]["columnCount"] == N_LABEL_COLS + 96
+        # 5 label + 96 weeks + the 2 hidden identity columns added in Phase 4a.
+        assert (props["gridProperties"]["columnCount"]
+                == N_LABEL_COLS + 96 + N_HIDDEN)
 
     async def test_it_only_touches_the_column_count(self):
         """A wider fields mask would reset rowCount, frozen panes, or the tab's
@@ -311,3 +320,130 @@ class TestAProposalAlwaysCarriesADate:
         assert content["recommended_source"] == "earliest_task"
         assert content["recommended"] == "2026-07-22"
         assert content["gantt_date"] == "2026-03-09", "evidence must survive"
+
+
+class TestRowIdentity:
+    """Phase 4a. The readback must find a project row without depending on WHERE
+    it sits or WHAT it is called: rows move whenever a project is added to an
+    area, and matching by name is the untrusted step this whole plan avoids."""
+
+    async def _render_full(self):
+        """Render with a task and an archive block, so every row kind appears."""
+        import services.timeline_sheet as ts
+
+        cap = {}
+        svc = MagicMock()
+        svc._execute_with_retry.side_effect = lambda f: f()
+
+        async def _ensure(*a, **kw):
+            return 7
+        svc._ensure_tab = _ensure
+        sheets = svc.service.spreadsheets.return_value
+        sheets.get.side_effect = lambda **kw: {"sheets": []}
+
+        def _batch(**kw):
+            if len(kw["body"]["requests"]) > 1:
+                cap["reqs"] = kw["body"]["requests"]
+            return MagicMock()
+        sheets.batchUpdate.side_effect = _batch
+        sheets.values.return_value.update.side_effect = \
+            lambda **kw: cap.setdefault("values", kw["body"]["values"])
+        sheets.values.return_value.clear.side_effect = lambda **kw: MagicMock()
+
+        data = {
+            "weeks": week_starts(),
+            "areas": {"AREA": [{
+                "project_id": "proj-uuid-1", "name": "Legal", "owner": "E",
+                "start": date(2026, 3, 2), "target": date(2026, 4, 6),
+                "first_col": 0, "last_col": 5, "open_ended": False,
+                "status": "active", "retired": False,
+                "tasks": [{"title": "t", "assignee": "E", "deadline": None,
+                           "priority": "M"}]}]},
+            "archive": [{"section": "P&T", "lanes": [
+                {"lane": "Execution #1", "bars": [
+                    {"first_col": 2, "last_col": 8, "label": "old",
+                     "start": date(2026, 3, 16), "end": date(2026, 4, 27)}]}]}],
+            "stats": {},
+        }
+        with patch.object(ts, "build_timeline", return_value=data), \
+             patch.object(ts, "sheets_service", svc), \
+             patch.object(ts.settings, "PROJECT_STATUS_SHEET_ID", "ssid"):
+            await ts.refresh_timeline()
+        return cap
+
+    async def test_a_project_row_carries_its_uuid_and_kind(self):
+        from processors.timeline_view import N_HIDDEN, ROW_PROJECT
+        cap = await self._render_full()
+        rows = cap["values"]
+        uid_col = len(rows[0]) - N_HIDDEN
+        proj = next(r for r in rows if r[0].strip() == "Legal")
+        assert proj[uid_col] == "proj-uuid-1"
+        assert proj[uid_col + 1] == ROW_PROJECT
+
+    async def test_every_row_declares_a_kind(self):
+        """A row with no kind would be ambiguous to the readback, and the safe
+        reading of ambiguity is 'do not touch it' — which silently drops edits."""
+        from processors.timeline_view import N_HIDDEN
+        cap = await self._render_full()
+        rows = cap["values"]
+        kind_col = len(rows[0]) - N_HIDDEN + 1
+        assert all(str(r[kind_col]).strip() for r in rows), \
+            "some row carries no kind"
+
+    async def test_task_rows_are_marked_task_not_project(self):
+        """Task rows stay read-only on the Timeline: tasks.deadline and
+        tasks.assignee are edited daily on the area tabs, and a second writer on
+        those rows is the collision every 2026-08 cross-surface defect came from."""
+        from processors.timeline_view import N_HIDDEN, ROW_TASK
+        cap = await self._render_full()
+        rows = cap["values"]
+        kind_col = len(rows[0]) - N_HIDDEN + 1
+        task = next(r for r in rows if "└" in r[0])
+        assert task[kind_col] == ROW_TASK
+
+    async def test_archive_rows_are_never_mistaken_for_projects(self):
+        from processors.timeline_view import N_HIDDEN, ROW_ARCHIVE, ROW_PROJECT
+        cap = await self._render_full()
+        rows = cap["values"]
+        kind_col = len(rows[0]) - N_HIDDEN + 1
+        arch = [r for r in rows if str(r[kind_col]) == ROW_ARCHIVE]
+        assert arch, "the archive block declared no rows"
+        assert all(str(r[kind_col]) != ROW_PROJECT for r in arch)
+
+    async def test_the_identity_columns_are_hidden_and_invisible(self):
+        """White-on-white as well as hidden: unhiding them should still show
+        nothing useful, the same treatment project_status_sheet gives its own."""
+        from processors.timeline_view import N_HIDDEN
+        cap = await self._render_full()
+        n_cols = len(cap["values"][0])
+        start = n_cols - N_HIDDEN
+        hidden = [r for r in cap["reqs"]
+                  if (r.get("updateDimensionProperties") or {})
+                  .get("range", {}).get("startIndex") == start]
+        assert hidden, "the identity columns are never hidden"
+        assert hidden[0]["updateDimensionProperties"]["properties"]["hiddenByUser"] is True
+
+        white = {"red": 1.0, "green": 1.0, "blue": 1.0}
+        masked = [r for r in cap["reqs"]
+                  if (r.get("repeatCell") or {}).get("range", {})
+                  .get("startColumnIndex") == start
+                  and r["repeatCell"]["cell"]["userEnteredFormat"]
+                  .get("textFormat", {}).get("foregroundColor") == white]
+        assert masked, "the identity columns are not masked white-on-white"
+
+    async def test_no_paint_reaches_the_identity_columns(self):
+        """A fill running to n_cols would colour the hidden cells and reveal
+        them the moment anyone unhid the columns."""
+        from processors.timeline_view import N_HIDDEN
+        cap = await self._render_full()
+        n_cols = len(cap["values"][0])
+        start = n_cols - N_HIDDEN
+        white = {"red": 1.0, "green": 1.0, "blue": 1.0}
+        for r in cap["reqs"]:
+            rng = (r.get("repeatCell") or {}).get("range")
+            if not rng or rng.get("startColumnIndex") == start:
+                continue
+            bg = r["repeatCell"]["cell"]["userEnteredFormat"].get("backgroundColor")
+            if bg and bg != white:
+                assert rng["endColumnIndex"] <= start, (
+                    f"a {bg} fill reaches the identity columns: {rng}")

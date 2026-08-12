@@ -72,6 +72,21 @@ _ARCHIVE_SKIP_SECTIONS = ("OPERATIONAL RULES",)
 HEADERS = ["Area / Project", "Owner", "Start", "Target", "Priority"]
 N_LABEL_COLS = len(HEADERS)
 
+# Hidden identity columns, written to the right of the week grid and hidden the
+# same way the Project Status tabs hide theirs. Phase 4 reads this tab back, and
+# a row must be identifiable without depending on WHERE it sits or WHAT it is
+# called: rows move whenever a project is added to an area, and matching by name
+# is the untrusted step this whole plan works around.
+#
+# `_kind` is stored rather than inferred from indentation, so the readback never
+# has to guess whether "    Legal" is a project or a task whose title happens to
+# be indented.
+HIDDEN_HEADERS = ["_uid", "_kind"]
+N_HIDDEN = len(HIDDEN_HEADERS)
+
+ROW_PROJECT, ROW_TASK, ROW_AREA = "project", "task", "area"
+ROW_ARCHIVE, ROW_CHROME = "archive", "chrome"
+
 _OPEN_TASK = ("pending", "in_progress", "overdue")
 _CLOSED_TASK = ("done", "archived", "cancelled", "superseded")
 

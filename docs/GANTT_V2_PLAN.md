@@ -586,9 +586,48 @@ Eyal's read.
 flip `CEO_TAB_ENABLED`.
 
 ### Phase 4 — Bidirectional edit
-- Dragging a bar is *not* supported; editing dates in cells is
-- Reuse the Project Status reconcile machinery wholesale — snapshot as merge
-  base, `manual_*` rails, `unresolved_columns` layout gate, cell-write batch
+
+Dragging a bar is *not* supported; editing dates in cells is. Reuses the Project
+Status reconcile machinery wholesale — snapshot as merge base, `manual_*` rails,
+`unresolved_columns` layout gate, cell-write batch. Split in two because
+identity is independently useful and independently safe.
+
+#### 4a — row identity — **BUILT**
+
+`scripts/migrate_timeline_readback.sql` adds `sheet_snapshots.start_date` and
+`uq_sheet_snapshots_gantt_project`. The Timeline gains two hidden columns to the
+right of the week grid, `_uid` and `_kind`, hidden and masked white-on-white the
+way the Project Status tabs mask theirs.
+
+**Why identity cannot wait for the merge.** A readback has to find a project row
+without depending on where it sits or what it is called. Rows move every time a
+project is added to an area, and matching by name is precisely the untrusted
+step this plan works around everywhere else — the same name matching that drew
+2 correct ghosts out of 27 attempts.
+
+`_kind` is **stored, not inferred**. Reading it off indentation would mean
+deciding whether `    Legal` is a project or a task whose title happens to start
+with spaces, and the safe reading of an ambiguous row is "do not touch it" —
+which silently drops the edit rather than failing loudly.
+
+Three surfaces now hold an independent merge base for one project — Projects
+tab, Project Status workbook, Timeline — as three partial unique indexes on the
+same `canonical_project_id`. Sharing one would make an edit on any surface read
+as divergence on the others, which is the whole cross-surface defect family of
+2026-08.
+
+Note the grid is now **103 columns**: 5 label + 96 weeks + 2 hidden. Everything
+that paints stops at the visible edge; a fill running to the full width would
+colour the hidden cells and reveal them the moment anyone unhid the columns.
+
+#### 4b — readback and merge — **NOT STARTED**
+- Sheet cell vs snapshot: differs ⇒ human edited it ⇒ write to DB and set the
+  `manual_*` rail; matches ⇒ DB wins and the sheet is refreshed
+- **Project rows only.** `start_date`, `target_date`, `owner`. Task rows stay
+  read-only — `tasks.deadline` and `tasks.assignee` are edited daily on the area
+  tabs, and a second writer there is the collision this design exists to avoid
+- Conflict rule: same field changed on two surfaces in one cycle ⇒ write
+  neither, surface it. Two humans disagreeing is a question, not a merge
 - Ships in **shadow mode first**, exactly as Project Status v2 did
 - **Exit criterion:** a clean shadow week
 

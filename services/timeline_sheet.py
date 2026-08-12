@@ -14,8 +14,9 @@ from datetime import date, datetime, timedelta, timezone
 
 from config.settings import settings
 from processors.timeline_view import (
-    GHOST_BG, HEADERS, N_LABEL_COLS, OPEN_END_BG, STATUS_BG, TIMELINE_TAB,
-    build_timeline,
+    GHOST_BG, HEADERS, HIDDEN_HEADERS, N_HIDDEN, N_LABEL_COLS, OPEN_END_BG,
+    ROW_ARCHIVE, ROW_AREA, ROW_CHROME, ROW_PROJECT, ROW_TASK, STATUS_BG,
+    TIMELINE_TAB, build_timeline,
 )
 from services.google_sheets import sheets_service
 
@@ -90,22 +91,35 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
         logger.warning("[timeline] no areas returned — leaving the tab alone")
         return {"skipped": "no rows"}
 
-    n_cols = N_LABEL_COLS + len(weeks)
+    # `n_week_end` bounds the VISIBLE board; `n_cols` includes the two hidden
+    # identity columns beyond it. Everything that paints or wipes the board uses
+    # n_week_end — a fill that ran to n_cols would colour the hidden cells and
+    # make them visible the moment anyone unhid them.
+    n_week_end = N_LABEL_COLS + len(weeks)
+    n_cols = n_week_end + N_HIDDEN
     today = datetime.now(ISRAEL_TZ).date()
     today_col = next((N_LABEL_COLS + i for i, w in enumerate(weeks)
                       if w <= today < w + timedelta(days=7)), None)
 
+    def _row(kind: str, uid: str = "") -> list:
+        """A blank row already carrying its identity."""
+        line = [""] * n_cols
+        line[n_week_end] = uid
+        line[n_week_end + 1] = kind
+        return line
+
     # ---- values -----------------------------------------------------------
-    grid: list[list] = [[""] * n_cols for _ in range(FIRST_BODY_ROW)]
+    grid: list[list] = [_row(ROW_CHROME) for _ in range(FIRST_BODY_ROW)]
     grid[TITLE_ROW][0] = "TIMELINE — projects on a weekly grid"
     for i, label in enumerate(_LEGEND):
         grid[LEGEND_ROW][i] = label
     show_ghost = bool(data.get("archive"))
     if show_ghost and len(_LEGEND) < N_LABEL_COLS:
         grid[LEGEND_ROW][len(_LEGEND)] = _GHOST_LEGEND
-    grid[MONTH_ROW][N_LABEL_COLS:] = _month_band(weeks)
+    grid[MONTH_ROW][N_LABEL_COLS:n_week_end] = _month_band(weeks)
     grid[WEEK_ROW][:N_LABEL_COLS] = HEADERS
-    grid[WEEK_ROW][N_LABEL_COLS:] = [w.strftime("%d/%m") for w in weeks]
+    grid[WEEK_ROW][N_LABEL_COLS:n_week_end] = [w.strftime("%d/%m") for w in weeks]
+    grid[WEEK_ROW][n_week_end:] = HIDDEN_HEADERS
 
     fills: list[dict] = []          # (row, col_from, col_to, colour)
     area_rows: list[int] = []
@@ -113,12 +127,14 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
 
     for area in sorted(areas):
         area_rows.append(len(grid))
-        grid.append([area] + [""] * (n_cols - 1))
+        line = _row(ROW_AREA)
+        line[0] = area
+        grid.append(line)
 
         for proj in sorted(areas[area],
                            key=lambda p: (p["first_col"] < 0, p["first_col"])):
             row = len(grid)
-            line = [""] * n_cols
+            line = _row(ROW_PROJECT, proj["project_id"])
             line[0] = f"    {proj['name']}"
             line[1] = proj["owner"]
             line[2] = str(proj["start"] or "")
@@ -144,7 +160,12 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
 
             first_task_row = len(grid)
             for t in proj["tasks"]:
-                trow = [""] * n_cols
+                # Task rows carry the PROJECT's uid so a stray edit can be
+                # attributed, but their kind marks them read-only: Phase 4 opens
+                # project rows only. tasks.deadline and tasks.assignee are edited
+                # daily on the area tabs, and a second writer on those is the
+                # collision this design exists to avoid.
+                trow = _row(ROW_TASK, proj["project_id"])
                 trow[0] = f"        └ {t['title'][:70]}"
                 trow[1] = t["assignee"]
                 trow[3] = str(t["deadline"] or "")
@@ -162,15 +183,18 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
     archive = data.get("archive") or []
     archive_span = archive_title_row = None
     if archive:
-        grid.append(["OLD BOARD — what we planned (archived, read-only)"]
-                    + [""] * (n_cols - 1))
+        line = _row(ROW_ARCHIVE)
+        line[0] = "OLD BOARD — what we planned (archived, read-only)"
+        grid.append(line)
         archive_title_row = len(grid) - 1
         first_archive_row = len(grid)
         for block in archive:
             area_rows.append(len(grid))
-            grid.append([block["section"]] + [""] * (n_cols - 1))
+            line = _row(ROW_ARCHIVE)
+            line[0] = block["section"]
+            grid.append(line)
             for lane in block["lanes"]:
-                line = [""] * n_cols
+                line = _row(ROW_ARCHIVE)
                 line[0] = f"    {lane['lane']}"
                 for bar in lane["bars"]:
                     a = N_LABEL_COLS + bar["first_col"]
@@ -227,7 +251,7 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
 
     reqs = _format_requests(sid, n_cols, len(grid), weeks, today_col,
                             fills, area_rows, group_spans, ssid, show_ghost,
-                            archive_title_row, archive_span)
+                            archive_title_row, archive_span, n_week_end)
     if reqs:
         sheets_service._execute_with_retry(
             lambda: sheets_service.service.spreadsheets().batchUpdate(
@@ -242,7 +266,11 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                      fills, area_rows, group_spans, ssid,
                      show_ghost: bool = False,
                      archive_title_row: int | None = None,
-                     archive_span: tuple | None = None) -> list[dict]:
+                     archive_span: tuple | None = None,
+                     n_week_end: int | None = None) -> list[dict]:
+    # Everything that PAINTS stops at the visible edge; only the grid-width
+    # assertion and the hidden-column treatment go past it.
+    n_week_end = n_cols - N_HIDDEN if n_week_end is None else n_week_end
     reqs: list[dict] = [
         {"updateSheetProperties": {
             "properties": {"sheetId": sid, "gridProperties": {
@@ -261,7 +289,7 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
         {"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": WEEK_ROW,
                       "endRowIndex": WEEK_ROW + 1,
-                      "startColumnIndex": 0, "endColumnIndex": n_cols},
+                      "startColumnIndex": 0, "endColumnIndex": n_week_end},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": _HEADER_BG,
                 "textFormat": {"bold": True, "foregroundColor": _WHITE},
@@ -310,7 +338,7 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
     reqs.append({"repeatCell": {
         "range": {"sheetId": sid, "startRowIndex": FIRST_BODY_ROW,
                   "endRowIndex": max(n_rows, FIRST_BODY_ROW) + 200,
-                  "startColumnIndex": 0, "endColumnIndex": n_cols},
+                  "startColumnIndex": 0, "endColumnIndex": n_week_end},
         "cell": {"userEnteredFormat": {
             "backgroundColor": _WHITE,
             "textFormat": {"bold": False, "fontSize": 10,
@@ -327,7 +355,7 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
     reqs.append({"updateBorders": {
         "range": {"sheetId": sid, "startRowIndex": MONTH_ROW,
                   "endRowIndex": max(n_rows, MONTH_ROW + 1),
-                  "startColumnIndex": N_LABEL_COLS, "endColumnIndex": n_cols},
+                  "startColumnIndex": N_LABEL_COLS, "endColumnIndex": n_week_end},
         "top": {"style": "NONE"}, "bottom": {"style": "NONE"},
         "left": {"style": "NONE"}, "right": {"style": "NONE"},
         "innerHorizontal": {"style": "NONE"},
@@ -336,7 +364,7 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
     for row in area_rows:
         reqs.append({"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": row, "endRowIndex": row + 1,
-                      "startColumnIndex": 0, "endColumnIndex": n_cols},
+                      "startColumnIndex": 0, "endColumnIndex": n_week_end},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": _AREA_BG,
                 "textFormat": {"bold": True, "foregroundColor": _INK}}},
@@ -369,14 +397,35 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
             "properties": {"pixelSize": px}, "fields": "pixelSize"}})
     reqs.append({"updateDimensionProperties": {
         "range": {"sheetId": sid, "dimension": "COLUMNS",
-                  "startIndex": N_LABEL_COLS, "endIndex": n_cols},
+                  "startIndex": N_LABEL_COLS, "endIndex": n_week_end},
         "properties": {"pixelSize": 21}, "fields": "pixelSize"}})
+
+    # The identity columns: narrow, hidden, and white-on-white so that unhiding
+    # them still shows nothing useful — the same treatment project_status_sheet
+    # gives its own. Asserted every run rather than set once, because a person
+    # who unhides a column expects it to stay unhidden and this tab does not
+    # negotiate: the readback depends on those cells being exactly what the
+    # renderer wrote.
+    reqs.append({"updateDimensionProperties": {
+        "range": {"sheetId": sid, "dimension": "COLUMNS",
+                  "startIndex": n_week_end, "endIndex": n_week_end + N_HIDDEN},
+        "properties": {"pixelSize": 120, "hiddenByUser": True},
+        "fields": "pixelSize,hiddenByUser"}})
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": 0,
+                  "endRowIndex": max(n_rows, 1) + 200,
+                  "startColumnIndex": n_week_end,
+                  "endColumnIndex": n_week_end + N_HIDDEN},
+        "cell": {"userEnteredFormat": {
+            "backgroundColor": _WHITE,
+            "textFormat": {"fontSize": 8, "foregroundColor": _WHITE}}},
+        "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
 
     if archive_title_row is not None:
         reqs.append({"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": archive_title_row,
                       "endRowIndex": archive_title_row + 1,
-                      "startColumnIndex": 0, "endColumnIndex": n_cols},
+                      "startColumnIndex": 0, "endColumnIndex": n_week_end},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": _rgb(GHOST_BG),
                 "textFormat": {"bold": True, "foregroundColor": _INK}}},
@@ -388,7 +437,7 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                 "range": {"sheetId": sid, "startRowIndex": archive_span[0],
                           "endRowIndex": archive_span[1] + 1,
                           "startColumnIndex": N_LABEL_COLS,
-                          "endColumnIndex": n_cols},
+                          "endColumnIndex": n_week_end},
                 "cell": {"userEnteredFormat": {
                     "textFormat": {"fontSize": 8, "foregroundColor": _INK}}},
                 "fields": "userEnteredFormat.textFormat"}})
