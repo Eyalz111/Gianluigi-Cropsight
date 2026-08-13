@@ -138,12 +138,56 @@ function callSync_(tab) {
   return body.message || 'synced';
 }
 
+/**
+ * NEVER THROWS. The status write is a courtesy; the sync is the job.
+ *
+ * The first version could throw, and did — and because the error handler in
+ * onSheetEdit reports failures by calling THIS function, the second throw
+ * escaped and killed the run. So one bad timezone took out the sync itself,
+ * and did it silently: the server never saw a request, which looks exactly like
+ * a trigger that is not attached. An indicator that can break the thing it
+ * reports on is worse than no indicator. [2026-08-13]
+ */
 function setStatus_(sheet, message) {
   if (!message) return;
-  var stamp = Utilities.formatDate(new Date(),
-      SpreadsheetApp.getActive().getSpreadsheetTimeZone(), 'HH:mm');
-  // Written as a NOTE, never as a cell value. Every one of these tabs is
-  // regenerated from the database, and a value in A1 would either be wiped on
-  // the next refresh or — worse on the area tabs — be read back as data.
-  sheet.getRange(STATUS_CELL).setNote('Gianluigi ' + stamp + ' — ' + message);
+  try {
+    // Written as a NOTE, never as a cell value. Every one of these tabs is
+    // regenerated from the database, and a value in A1 would either be wiped on
+    // the next refresh or — worse on the area tabs — be read back as data.
+    sheet.getRange(STATUS_CELL)
+         .setNote('Gianluigi ' + stamp_(sheet) + ' — ' + message);
+  } catch (ignored) {
+    // A protected cell, a deleted range, anything: the edit still syncs.
+  }
+}
+
+/**
+ * HH:mm, and never a reason to fail.
+ *
+ * This threw `Invalid argument: timeZone. Should be of type: String` on every
+ * trigger run: `SpreadsheetApp.getActive()` does not reliably resolve inside an
+ * installable trigger, so its timezone came back as null. Because setStatus_ is
+ * the FIRST thing onSheetEdit does — writing "syncing…" — the whole handler died
+ * before it ever reached the network, which is why the server saw nothing at
+ * all rather than an error.
+ *
+ * Now read from the sheet's own parent, which the event handed us and cannot be
+ * null, with two fallbacks. A CLOCK must never be the reason a sync does not
+ * happen: the worst case here is a wrong-looking hour in a note, and that is far
+ * cheaper than the edit not syncing. [2026-08-13]
+ */
+function stamp_(sheet) {
+  var tz = null;
+  try {
+    if (sheet) tz = sheet.getParent().getSpreadsheetTimeZone();
+  } catch (ignored) {}
+  if (typeof tz !== 'string' || !tz) {
+    try { tz = Session.getScriptTimeZone(); } catch (ignored2) { tz = null; }
+  }
+  if (typeof tz !== 'string' || !tz) tz = 'UTC';
+  try {
+    return Utilities.formatDate(new Date(), tz, 'HH:mm');
+  } catch (ignored3) {
+    return '';
+  }
 }
