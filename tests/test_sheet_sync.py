@@ -153,6 +153,94 @@ class TestTheCycleAndTheWebhookShareOneLock:
             assert run.await_count == 1, "it never ran after the lock was freed"
 
 
+class TestTheViewsFollowARealChange:
+    """Eyal: *"cross system and cross tabs liveliness."* Reconciling one surface
+    updates the DATABASE in seconds, but Focus and the Timeline are projections
+    of it — without this they showed the old value until the next 30-minute
+    cycle, so a change was live in the system and stale on screen."""
+
+    @pytest.fixture(autouse=True)
+    def _views_on(self, monkeypatch):
+        from config.settings import settings
+        monkeypatch.setattr(settings, "FOCUS_VIEW_ENABLED", True, raising=False)
+        monkeypatch.setattr(settings, "TIMELINE_VIEW_ENABLED", True, raising=False)
+
+    async def test_a_real_change_rebuilds_the_other_views(self, _on):
+        with patch.object(ss, "_run_surface",
+                          AsyncMock(return_value={"a": {"pulled": 2}})), \
+             patch.object(ss, "_refresh_views",
+                          AsyncMock(return_value={"focus": {}})) as views:
+            out = await ss.sync_surface("FUNDRAISING & INVESTOR RELATIONS")
+        views.assert_awaited_once()
+        assert out["views"] == ["focus"]
+
+    async def test_a_no_op_sync_rebuilds_nothing(self, _on):
+        """Re-rendering on every keystroke would churn the revision history and
+        flicker the tab under whoever is reading it."""
+        with patch.object(ss, "_run_surface",
+                          AsyncMock(return_value={"a": {"pulled": 0, "pushed": 3}})), \
+             patch.object(ss, "_refresh_views", AsyncMock()) as views:
+            await ss.sync_surface("FUNDRAISING & INVESTOR RELATIONS")
+        views.assert_not_awaited()
+
+    @pytest.mark.parametrize("key", [
+        "pulled", "created", "task_updates", "project_updates", "ticked",
+        "unticked", "archived", "deleted_to_dropped"])
+    def test_every_kind_of_change_counts(self, key):
+        assert ss._changed({"a": {key: 1}}) is True
+
+    def test_a_push_alone_is_not_a_change(self):
+        """A push writes the DB value back INTO the sheet — the database did not
+        move, so nothing downstream of it can have."""
+        assert ss._changed({"a": {"pushed": 5}}) is False
+
+    def test_a_non_dict_part_does_not_crash_it(self):
+        assert ss._changed({"a": "skipped"}) is False
+
+    async def test_a_surface_does_not_rebuild_itself(self, _on):
+        """Editing the Timeline already re-rendered it; doing it twice in one
+        pass would overwrite the merge that just ran."""
+        with patch("services.focus_sheet.refresh_focus",
+                   AsyncMock(return_value={})) as focus, \
+             patch("services.timeline_sheet.refresh_timeline",
+                   AsyncMock(return_value={})) as timeline:
+            out = await ss._refresh_views(ss.SURFACE_TIMELINE)
+        timeline.assert_not_awaited()
+        focus.assert_awaited_once()
+        assert "timeline" not in out
+
+    async def test_a_failing_view_never_takes_down_the_sync(self, _on):
+        """The data is already written. A view failing costs a stale tab."""
+        with patch("services.focus_sheet.refresh_focus",
+                   AsyncMock(side_effect=RuntimeError("sheets 500"))), \
+             patch("services.timeline_sheet.refresh_timeline",
+                   AsyncMock(return_value={})):
+            out = await ss._refresh_views(ss.SURFACE_MEETINGS)
+        assert "focus" not in out
+        assert "timeline" in out
+
+    async def test_views_run_inside_the_lock(self, _on):
+        """They read the state the reconcile just settled, and a cycle starting
+        mid-render would have them rendering a half-applied database."""
+        held = {}
+
+        async def _check(_exclude):
+            held["locked"] = ss.SHEET_LOCK.locked()
+            return {}
+        with patch.object(ss, "_run_surface",
+                          AsyncMock(return_value={"a": {"pulled": 1}})), \
+             patch.object(ss, "_refresh_views", AsyncMock(side_effect=_check)):
+            await ss.sync_surface("Meetings")
+        assert held.get("locked") is True
+
+    async def test_a_disabled_view_is_skipped(self, monkeypatch):
+        from config.settings import settings
+        monkeypatch.setattr(settings, "FOCUS_VIEW_ENABLED", False, raising=False)
+        monkeypatch.setattr(settings, "TIMELINE_VIEW_ENABLED", False, raising=False)
+        out = await ss._refresh_views(ss.SURFACE_MEETINGS)
+        assert out == {}
+
+
 class TestTheStatusLine:
     """Written for someone who will not read a JSON blob."""
 

@@ -126,6 +126,59 @@ async def _run_surface(surface: str) -> dict:
     return {"skipped": f"unknown surface {surface!r}"}
 
 
+def _changed(result: dict) -> bool:
+    """Did this reconcile actually change the database?
+
+    Only a real change earns a view refresh. Re-rendering on every no-op sync
+    would rewrite Focus and the Timeline on every keystroke — a stream of API
+    calls, a churned revision history, and a tab that flickers under whoever is
+    reading it.
+    """
+    for part in (result or {}).values():
+        if not isinstance(part, dict):
+            continue
+        for key in ("pulled", "created", "task_updates", "project_updates",
+                    "ticked", "unticked", "archived", "deleted_to_dropped"):
+            if int(part.get(key) or 0):
+                return True
+    return False
+
+
+async def _refresh_views(exclude: str) -> dict:
+    """Re-render the read-only views so a change is visible ACROSS the workbook.
+
+    Eyal: *"cross system and cross tabs liveliness … if we change dates on the
+    timeline or in the project tabs i will want to see it happening live."*
+    Reconciling one surface updates the DATABASE in seconds, but Focus and the
+    Timeline are projections of it — they showed the old value until the next
+    30-minute cycle re-rendered them, so a change was live in the system and
+    stale on screen.
+
+    Only VIEWS, never other reconciles. A view is a one-way render out of the
+    database: it cannot pull, cannot conflict, and cannot disagree with another
+    surface. Fanning out to the other RECONCILES on every edit is the thing this
+    must not do — that is a read-modify-write of rows somebody is typing into.
+
+    Non-fatal, one by one: a view failing costs a stale tab, and must never take
+    down the sync that already wrote the data. [2026-08-13]
+    """
+    out = {}
+    if exclude != SURFACE_FOCUS and getattr(settings, "FOCUS_VIEW_ENABLED", False):
+        try:
+            from services.focus_sheet import refresh_focus
+            out["focus"] = await refresh_focus()
+        except Exception as e:                               # noqa: BLE001
+            logger.warning(f"[sheet-sync] focus refresh failed: {e}")
+    if exclude != SURFACE_TIMELINE and getattr(
+            settings, "TIMELINE_VIEW_ENABLED", False):
+        try:
+            from services.timeline_sheet import refresh_timeline
+            out["timeline"] = await refresh_timeline()
+        except Exception as e:                               # noqa: BLE001
+            logger.warning(f"[sheet-sync] timeline refresh failed: {e}")
+    return out
+
+
 async def sync_surface(tab: str) -> dict:
     """Entry point for the webhook. Returns what happened, for the status cell."""
     if not getattr(settings, "SHEET_SYNC_ENABLED", False):
@@ -158,8 +211,17 @@ async def sync_surface(tab: str) -> dict:
             logger.error(f"[sheet-sync] {surface} failed: {e}")
             return {"ok": False, "surface": surface, "error": str(e)[:200]}
 
-    logger.info(f"[sheet-sync] {surface} <- {tab!r}: {result}")
-    return {"ok": True, "surface": surface, "result": result}
+        # Views LAST, still under the lock, and only when something actually
+        # changed. They read the state this reconcile just settled, so running
+        # them first would render what was true a moment ago.
+        views = {}
+        if _changed(result):
+            views = await _refresh_views(surface)
+
+    logger.info(f"[sheet-sync] {surface} <- {tab!r}: {result}"
+                + (f" views={list(views)}" if views else ""))
+    return {"ok": True, "surface": surface, "result": result,
+            "views": sorted(views)}
 
 
 def summarise(result: dict) -> str:
@@ -179,10 +241,13 @@ def summarise(result: dict) -> str:
         if isinstance(part, dict):
             pulled += int(part.get("pulled") or 0)
             pushed += int(part.get("pushed") or 0)
+    # Say when the other tabs were rebuilt too, so "why hasn't Focus changed"
+    # never has to be asked.
+    also = f" · {' + '.join(result['views'])} updated" if result.get("views") else ""
     if pulled and pushed:
-        return f"synced — {pulled} saved, {pushed} refreshed"
+        return f"synced — {pulled} saved, {pushed} refreshed{also}"
     if pulled:
-        return f"synced — {pulled} change{'s' if pulled != 1 else ''} saved"
+        return f"synced — {pulled} change{'s' if pulled != 1 else ''} saved{also}"
     if pushed:
-        return f"synced — {pushed} cell{'s' if pushed != 1 else ''} refreshed"
+        return f"synced — {pushed} cell{'s' if pushed != 1 else ''} refreshed{also}"
     return "synced — nothing to change"
