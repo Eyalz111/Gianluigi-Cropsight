@@ -1698,3 +1698,94 @@ class TestBatchThreeReviewFindings:
         # Before the READ that trusts the column, not merely before the word.
         assert (src.index("meetings_layout_ok()")
                 < src.index("existing: set[str]"))
+
+
+class TestALabelIsComparedByTheProjectItNames:
+    """Third instance of one shape in a single day. [2026-08-13]
+
+    After `not_scheduled` (the cell) and `timing_text` (the guard), this is the
+    same defect again: a value with a canonical form, compared raw.
+
+    Renaming a project keeps the old name as an ALIAS and backfills every
+    reference, so the sheet said `Business Plan` while the database said
+    `Business Plan updates/refinements Q3 2026` — one project, two spellings.
+    The raw comparison saw a difference, `manual_label` held the sheet value
+    under Rule 2, and the cell would have stayed divergent forever.
+    """
+
+    @staticmethod
+    def _alias(monkeypatch, old, new):
+        """resolve_label maps the retired name onto the current one."""
+        monkeypatch.setattr(
+            ss.supabase_client, "resolve_label",
+            lambda v: new if str(v).strip() in (old, new) else v)
+
+    async def test_an_aliased_label_is_not_a_divergence(self, monkeypatch):
+        self._alias(monkeypatch, "Business Plan", "BP Q3 2026")
+        sheet = [_srow(id="m1", title="T", label="Business Plan")]
+        db = [_dbrow(id="m1", title="T", label="BP Q3 2026", manual_label=True)]
+        snap = {"m1": {"title": "T", "label": "Business Plan",
+                       "status": "to_schedule"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert calls["update"] == [], "an alias must not be pulled as an edit"
+        assert res["manual_held"] == 0, "Rule 2 should not fire — they agree"
+
+    async def test_the_cell_settles_on_the_current_name(self, monkeypatch):
+        """Agreeing is exactly what stops anything rewriting the cell, so the
+        retired name would sit there forever unless the spelling is settled."""
+        self._alias(monkeypatch, "Business Plan", "BP Q3 2026")
+        sheet = [_srow(id="m1", title="T", label="Business Plan")]
+        db = [_dbrow(id="m1", title="T", label="BP Q3 2026", manual_label=True)]
+        snap = {"m1": {"title": "T", "label": "Business Plan",
+                       "status": "to_schedule"}}
+        calls, fake = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res["canonicalized"] >= 1
+        call = fake.service.spreadsheets.return_value.values.return_value \
+            .batchUpdate.call_args
+        written = [w["values"][0][0] for w in call.kwargs["body"]["data"]]
+        assert "BP Q3 2026" in written
+
+    async def test_an_already_current_label_is_not_rewritten(self, monkeypatch):
+        """No churn: the common case must be silent."""
+        self._alias(monkeypatch, "Business Plan", "BP Q3 2026")
+        sheet = [_srow(id="m1", title="T", label="BP Q3 2026")]
+        db = [_dbrow(id="m1", title="T", label="BP Q3 2026")]
+        snap = {"m1": {"title": "T", "label": "BP Q3 2026",
+                       "status": "to_schedule"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        res = await ss.reconcile_meetings()
+
+        assert res["canonicalized"] == 0
+        assert calls["update"] == []
+
+    async def test_a_genuinely_different_label_still_pulls(self, monkeypatch):
+        """The fix must not swallow a real relabel — someone moving a meeting to
+        another project is an edit, not an alias."""
+        self._alias(monkeypatch, "Business Plan", "BP Q3 2026")
+        sheet = [_srow(id="m1", title="T", label="Legal")]
+        db = [_dbrow(id="m1", title="T", label="BP Q3 2026")]
+        snap = {"m1": {"title": "T", "label": "BP Q3 2026",
+                       "status": "to_schedule"}}
+        calls, _ = _setup(monkeypatch, sheet, db, snap)
+
+        await ss.reconcile_meetings()
+
+        assert calls["update"] == [("m1", {"label": "Legal"})]
+
+    def test_an_unresolvable_label_falls_back_to_plain_text(self, monkeypatch):
+        """The vocabulary cannot resolve everything, and an unknown label is
+        still worth comparing as text rather than collapsing to blank."""
+        monkeypatch.setattr(ss.supabase_client, "resolve_label",
+                            lambda v: (_ for _ in ()).throw(RuntimeError("x")))
+        assert ss._same_label("Whatever") == "whatever"
+
+    def test_a_blank_label_stays_blank(self, monkeypatch):
+        assert ss._same_label("") == ""
+        assert ss._same_label(None) == ""

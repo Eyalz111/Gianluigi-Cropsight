@@ -298,3 +298,39 @@ class TestStructuralWorkNeverRunsFromAWebhook:
                    AsyncMock(side_effect=_fake)):
             await ss._run_surface(ss.SURFACE_PROJECT_STATUS)
         assert seen.get("slot") is None
+
+
+class TestEveryPushHasAKillSwitch:
+    """Twice now a scheduler has sent to Eyal with no way to silence it short of
+    a code change: `meeting_prep` (found 2026-08-11) and `weekly_digest` (found
+    2026-08-13, whose own comment read "Digest always starts").
+
+    A push nobody can turn off is not a feature, and "the plan named a flag" is
+    not evidence the flag exists — PROJECT_LEARNING_ENABLED was referenced for
+    weeks and was never in settings at all.
+    """
+
+    def test_the_weekly_digest_flag_actually_exists(self):
+        from config.settings import Settings
+        assert "WEEKLY_DIGEST_ENABLED" in Settings.model_fields
+
+    def test_it_defaults_true_so_adding_it_changed_nothing(self):
+        """A kill switch that silently turns something off on deploy is its own
+        kind of surprise."""
+        from config.settings import Settings
+        assert Settings.model_fields["WEEKLY_DIGEST_ENABLED"].default is True
+
+    def test_main_gates_the_digest_on_it(self):
+        import pathlib
+        src = pathlib.Path("main.py").read_text(encoding="utf-8")
+        assert "settings.WEEKLY_DIGEST_ENABLED" in src
+
+    def test_the_qa_flag_map_names_only_flags_that_exist(self):
+        """The map decides whether a silent scheduler is a fault or a choice. An
+        entry naming a missing flag falls through `getattr(..., True)` and
+        reports a deliberately-disabled scheduler as stale, forever."""
+        from config.settings import Settings
+        from schedulers.qa_scheduler import _SCHEDULER_ENABLE_FLAG
+        missing = sorted({f for f in _SCHEDULER_ENABLE_FLAG.values()
+                          if f and f not in Settings.model_fields})
+        assert not missing, f"flag map names settings that do not exist: {missing}"

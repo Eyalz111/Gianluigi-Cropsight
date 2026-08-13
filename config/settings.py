@@ -1202,6 +1202,18 @@ class Settings(BaseSettings):
     # match a canonical assignee name. The /prep command still works ON
     # DEMAND; this gates only the automatic push and its restart-time timer
     # reconstruction.
+    WEEKLY_DIGEST_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "The Friday digest — Drive doc, email, and a Telegram send. It had "
+            "NO flag at all: the scheduler started whenever Calendar was "
+            "available, so it was un-silenceable without a code change. The "
+            "same trap MEETING_PREP_ENABLED closed on 2026-08-11, and the same "
+            "one PROJECT_LEARNING_ENABLED is remembered for — a plan naming a "
+            "flag does not mean the flag exists. Defaults TRUE so adding it "
+            "changes nothing until somebody decides to turn it off."
+        ),
+    )
     MEETING_PREP_ENABLED: bool = Field(
         default=False,
         description="Push a prep outline before each calendar meeting. OFF = /prep on demand only."

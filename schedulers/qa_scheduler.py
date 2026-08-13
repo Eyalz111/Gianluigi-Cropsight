@@ -45,11 +45,11 @@ _SCHEDULER_ENABLE_FLAG = {
     "meeting_prep": "MEETING_PREP_ENABLED",
     "prep_ping": "PREP_PING_ENABLED",
     "weekly_review": "WEEKLY_REVIEW_ENABLED",
-    # weekly_digest has NO gate — main.py starts it whenever Calendar is
-    # available, and it self-skips when a review session exists. The entry here
-    # named WEEKLY_DIGEST_ENABLED, which does not exist in settings, so
-    # `getattr(settings, flag, True)` fell through to True. Same behaviour,
-    # but the map no longer claims a switch nobody can throw. [2026-08-11]
+    # The switch this comment used to say did not exist now does — added
+    # 2026-08-13, so a digest that is turned off is not reported stale forever.
+    # That false alarm is the one I created for myself when meeting_prep was
+    # disabled while its flag was still missing from this map. [2026-08-13]
+    "weekly_digest": "WEEKLY_DIGEST_ENABLED",
     "weekly_pulse": "WEEKLY_PULSE_ENABLED",
     "cost_report": "COST_REPORT_ENABLED",
     "rollout": "ROLLOUT_SCHEDULER_ENABLED",

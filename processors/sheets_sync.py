@@ -30,6 +30,24 @@ TASK_COMPARE_FIELDS = ("status", "assignee", "deadline", "priority", "label", "c
 DECISION_COMPARE_FIELDS = ("decision_status",)
 
 
+def _same_label(value) -> str:
+    """Two labels compare equal when they name the same PROJECT.
+
+    A rename keeps the old name as an alias and backfills every reference, so
+    the sheet and the database can legitimately hold different spellings of one
+    thing. Falls back to the plain normalisation when the vocabulary cannot
+    resolve it — an unknown label is still worth comparing as text.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        from services.supabase_client import supabase_client
+        return _normalize(supabase_client.resolve_label(raw) or raw)
+    except Exception:                                        # noqa: BLE001
+        return _normalize(raw)
+
+
 def _normalize(value: str | None) -> str:
     """Normalize a value for comparison (lowercase, strip whitespace)."""
     if value is None:
@@ -1421,15 +1439,38 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
             if field == "participants":
                 # Stored as TEXT[] in the DB, rendered comma-separated in the cell.
                 d_val = ", ".join(d_val) if isinstance(d_val, list) else (d_val or "")
+            # COMPARE A LABEL BY THE PROJECT IT NAMES, NOT BY ITS TEXT.
+            #
+            # Renaming a project keeps the old name as an ALIAS and backfills
+            # every reference, so after the 2026-08-13 rename the sheet said
+            # "Business Plan" and the database said "Business Plan
+            # updates/refinements Q3 2026" — the same project, spelled two ways.
+            # The raw comparison saw a difference, `manual_label` held the sheet
+            # value under Rule 2, and the cell would have stayed divergent
+            # forever.
+            #
+            # Third instance of this shape today, after `not_scheduled` and
+            # `timing_text`: a value with a canonical form, compared raw. The
+            # canonicalisation is the same one `resolve_label` applies on the
+            # way in, so this only teaches the merge what the writer already
+            # knew. [2026-08-13]
+            if field == "label":
+                s_cmp, d_cmp, snap_cmp = (_same_label(s_val),
+                                          _same_label(d_val),
+                                          _same_label(snap_val))
+            else:
+                s_cmp, d_cmp, snap_cmp = (_normalize(s_val), _normalize(d_val),
+                                          _normalize(snap_val))
+
             if (str(s_val or "").strip()
-                    and _normalize(s_val) != _normalize(snap_val)
-                    and _normalize(s_val) != _normalize(d_val)):
+                    and s_cmp != snap_cmp
+                    and s_cmp != d_cmp):
                 upd[field] = (_meeting_participants_to_list(s_val)
                               if field == "participants" else s_val)
                 manual_marks.append((mid, field))
                 summary["pulled"] += 1
                 final[field] = s_val
-            elif _normalize(d_val) != _normalize(s_val):
+            elif d_cmp != s_cmp:
                 if dm.get(f"manual_{field}"):
                     summary["manual_held"] += 1
                     manual_held.append((mid, field, d_val, s_val))
@@ -1451,6 +1492,16 @@ async def reconcile_meetings(dry_run: bool = False, shadow: bool | None = None) 
                     final[field] = d_val
             else:
                 final[field] = s_val
+                # AND SETTLE THE SPELLING. The two sides now AGREE that
+                # "Business Plan" and the renamed project are one thing — which
+                # is exactly what stops anything from rewriting the cell, so the
+                # old name would sit there forever. Same in-cycle
+                # canonicalisation the status column gets, and the same reason:
+                # a tolerant reader needs a writer that settles on one spelling.
+                if field == "label" and str(d_val or "").strip():
+                    if str(s_val or "").strip() != str(d_val).strip():
+                        _cell(sheet_key, row, d_val)
+                        summary["canonicalized"] += 1
 
         # --- proposed date (unparseable cells are never pulled) ---
         raw_date = sm.get("proposed_date_raw")

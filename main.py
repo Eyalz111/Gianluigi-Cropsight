@@ -293,8 +293,11 @@ async def start_services() -> None:
         )
         tasks.append(review_task)
 
-    # Digest always starts — it self-skips when a review session exists
-    if init_status.get("google_calendar"):
+    # The digest needs BOTH: Calendar to read the week, and a flag to be
+    # allowed to send. It used to start on Calendar alone — the comment here
+    # said "always starts" and meant it — which made it the second push with no
+    # kill switch, after meeting prep. [2026-08-13]
+    if init_status.get("google_calendar") and settings.WEEKLY_DIGEST_ENABLED:
         from schedulers.weekly_digest_scheduler import weekly_digest_scheduler
         logger.info("  Starting weekly digest scheduler...")
         digest_task = asyncio.create_task(
@@ -302,6 +305,8 @@ async def start_services() -> None:
             name="weekly_digest_scheduler"
         )
         tasks.append(digest_task)
+    elif not settings.WEEKLY_DIGEST_ENABLED:
+        logger.info("  Weekly digest scheduler disabled (WEEKLY_DIGEST_ENABLED=false)")
     else:
         logger.warning("  Weekly digest/review schedulers disabled (Google Calendar not available)")
 
