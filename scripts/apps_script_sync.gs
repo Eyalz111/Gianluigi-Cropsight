@@ -81,10 +81,16 @@ function onSheetEdit(e) {
   // need to reason about trigger semantics every time this file is read.
   if (e.range.getA1Notation() === STATUS_CELL) return;
 
-  // Hidden identity columns are system-owned; an edit there is a paste
-  // accident, and syncing on it would ask the engine to adopt whatever landed.
-  var header = String(sheet.getRange(1, e.range.getColumn()).getValue() || '');
-  if (header.charAt(0) === '_') return;
+  // NO COLUMN GUARD. An earlier version skipped edits to the hidden `_uid`
+  // columns by reading the header — from ROW 1, which is the banner on the area
+  // tabs and the title on the Timeline, so it inspected the wrong row entirely.
+  //
+  // It is gone rather than fixed, because it protected nothing. This call does
+  // not send the edited cell; it asks the server to reconcile the whole
+  // SURFACE, and the engine re-reads every row and applies its own rules
+  // regardless of which cell was touched. Skipping the request would only mean
+  // a slower sync for that edit, never a safer one — and one less thing to be
+  // wrong about the row a header lives on. [2026-08-13]
 
   // DROP, don't queue. Pasting a column fires this once per cell; each would
   // otherwise wait its turn and hammer the endpoint long after the first call
