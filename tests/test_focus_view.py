@@ -240,56 +240,149 @@ class TestTheEngineIgnoresTheView:
         assert unresolved_columns(fv.HEADERS)
 
 
-class TestTheQueryFormula:
-    def test_it_reads_the_data_tab_and_selects_every_display_column(self):
-        f = fv._query_formula()
-        assert f.startswith("=IFERROR(QUERY(")
-        assert f"'{fv.FOCUS_DATA_TAB}'!A2:K" in f
-        assert "select J, B, C, D, F, G, H, A" in f
+class TestTheFilterMovedToTheServer:
+    """The QUERY is gone; `display_rows` does the filtering now. [2026-08-13]
+
+    Not a refactor — a QUERY owns its whole spill range, so its rows cannot be
+    typed into, and an edit placed BESIDE one is anchored to a row POSITION and
+    re-points at a different task the moment a dropdown changes. Materialising
+    is what makes Focus editable at all.
+
+    Every filter SEMANTIC below is carried over from the formula unchanged;
+    these are the same behaviours, re-pinned against the new mechanism.
+    """
+
+    def _raw(self, *rows):
+        """Rows in `build_rows` shape: Kind, Due, What, Who, PriSort, Priority,
+        Project, Area, Status, Bucket, BucketSort, Uid."""
+        return list(rows)
+
+    def _task(self, what="a task", who="Eyal Zror", area="P&T", bsort=3,
+              due="2026-08-20", uid="t1", pri="M", prisort=3):
+        return ["Task", due, what, who, prisort, pri, "Proj", area, "pending",
+                "THIS WEEK", bsort, uid]
+
+    def _meeting(self, what="a meeting", who="Eyal Zror", uid="m1"):
+        return ["Meeting", "", what, who, 3, "M", "", "", "scheduled",
+                "NO DATE", 6, uid]
 
     def test_every_grouping_choice_has_a_sort(self):
         """A dropdown choice with no matching sort would silently fall through
         to the default and look like the control was ignored."""
         for choice in fv.GROUP_CHOICES:
-            assert choice in fv._GROUP_SORT
-            assert choice in fv._query_formula()
+            assert choice in fv._GROUP_KEY
 
-    def test_every_show_choice_appears(self):
-        f = fv._query_formula()
+    def test_every_show_choice_filters_or_is_the_default(self):
         for choice in fv.SHOW_CHOICES:
-            if choice != "Everything open":     # the empty-clause default
-                assert choice in f
-
-    def test_it_degrades_to_a_sentence_not_an_error_cell(self):
-        assert "Nothing matches" in fv._query_formula()
+            assert choice == "Everything open" or choice in fv._SHOW_BUCKETS
 
     def test_filtering_by_area_still_shows_meetings(self):
-        """Meetings carry no area. A strict `H = area` would hide all of them
-        the moment an area was chosen — and most already have no date, so they
-        would vanish from the one view meant to catch them."""
-        f = fv._query_formula()
-        assert "or A = 'Meeting'" in f
+        """Meetings carry no area. A strict match would hide all of them the
+        moment an area was chosen — and most already have no date, so they would
+        vanish from the one view meant to catch them."""
+        raw = self._raw(self._task(area="P&T"), self._meeting())
+        out = fv.display_rows(raw, area="SALES")
+        assert [r[3] for r in out] == ["a meeting"]
 
     def test_filtering_by_owner_is_strict(self):
-        """Owner is different: a meeting HAS a lead, so 'show me Paolo's work'
-        should not quietly include meetings led by someone else."""
-        f = fv._query_formula()
-        assert " and D = '" in f
-        assert "D = '\"&D2&\"' or" not in f
+        """Owner is different: a meeting HAS a lead, so "show me Paolo's work"
+        must not quietly include meetings led by someone else."""
+        raw = self._raw(self._task(who="Paolo Vailetti"),
+                        self._meeting(who="Eyal Zror"))
+        out = fv.display_rows(raw, owner="Paolo Vailetti")
+        assert [r[3] for r in out] == ["a task"]
 
-    def test_the_layout_puts_controls_and_query_where_the_formula_expects(self):
+    def test_overdue_only_keeps_just_the_late_ones(self):
+        raw = self._raw(self._task(what="late", bsort=1),
+                        self._task(what="soon", bsort=3, uid="t2"))
+        assert [r[3] for r in fv.display_rows(raw, show="Overdue only")] == ["late"]
+
+    def test_due_this_week_includes_overdue_and_today(self):
+        """Something already late is not excluded from "this week" — it is the
+        most this-week thing there is."""
+        raw = self._raw(self._task(what="late", bsort=1),
+                        self._task(what="today", bsort=2, uid="t2"),
+                        self._task(what="week", bsort=3, uid="t3"),
+                        self._task(what="month", bsort=4, uid="t4"))
+        got = [r[3] for r in fv.display_rows(raw, show="Due this week")]
+        assert got == ["late", "today", "week"]
+
+    def test_a_row_with_no_text_is_dropped(self):
+        assert fv.display_rows(self._raw(self._task(what=""))) == []
+
+    def test_undated_work_sorts_last_but_is_never_filtered_out(self):
+        """Undated work is the backlog that ages silently, and a view that hides
+        it is how a to-do list quietly stops being true."""
+        raw = self._raw(self._task(what="dated", bsort=3, due="2026-08-20"),
+                        self._task(what="undated", bsort=6, due="", uid="t2"))
+        got = [r[3] for r in fv.display_rows(raw)]
+        assert got == ["dated", "undated"]
+
+    def test_the_controls_are_preserved_not_reset(self):
+        """The server reads these to filter now, so writing the defaults back
+        every refresh would drop Nechama to "Everything open" every thirty
+        minutes — mid-meeting, while she was looking at it."""
+        layout = fv.focus_layout({"group": "Owner", "owner": "Paolo Vailetti",
+                                  "area": "SALES", "show": "Overdue only"})
+        assert layout[1][1] == "Owner"
+        assert layout[1][3] == "Paolo Vailetti"
+        assert layout[1][5] == "SALES"
+        assert layout[1][7] == "Overdue only"
+
+    def test_the_layout_defaults_when_it_is_given_nothing(self):
         layout = fv.focus_layout()
-        assert layout[1][1] == fv.GROUP_CHOICES[0]      # B2 group
-        assert layout[1][3] == "All"                     # D2 owner
-        assert layout[1][5] == "All"                     # F2 area
-        assert layout[1][7] == fv.SHOW_CHOICES[0]        # H2 show
-        assert layout[3] == fv.HEADERS                   # row 4
-        assert layout[4][0].startswith("=IFERROR(QUERY(")
+        assert layout[1][1] == fv.GROUP_CHOICES[0]
+        assert layout[1][7] == fv.SHOW_CHOICES[0]
 
-    def test_data_headers_and_query_letters_stay_in_step(self):
-        """The QUERY addresses columns by letter, so a column inserted in the
-        middle of DATA_HEADERS silently re-points every selector."""
-        assert fv.DATA_HEADERS.index("Bucket") == 9        # J
-        assert fv.DATA_HEADERS.index("BucketSort") == 10   # K
-        assert fv.DATA_HEADERS.index("Due") == 1           # B
-        assert fv.DATA_HEADERS.index("What") == 2          # C
+    def test_the_header_row_carries_the_hidden_identity_columns(self):
+        layout = fv.focus_layout()
+        assert layout[3] == fv.HEADERS + fv.FOCUS_HIDDEN_HEADERS
+
+    def test_a_stale_control_value_falls_back_rather_than_returning_nothing(self):
+        """An owner with no open work left would filter to zero rows and read as
+        "nothing is open" — the one wrong answer this tab must never give."""
+        assert fv.valid_control("owner", "Somebody Gone", ["Eyal Zror"]) == "All"
+        assert fv.valid_control("area", "OLD AREA", areas=["P&T"]) == "All"
+        assert fv.valid_control("group", "nonsense") == fv.GROUP_CHOICES[0]
+        assert fv.valid_control("show", "nonsense") == fv.SHOW_CHOICES[0]
+
+    def test_a_valid_control_value_is_kept(self):
+        assert fv.valid_control("owner", "Eyal Zror", ["Eyal Zror"]) == "Eyal Zror"
+        assert fv.valid_control("group", "Owner") == "Owner"
+
+    def test_data_headers_and_the_column_indexes_stay_in_step(self):
+        """Everything downstream indexes these by position."""
+        assert fv.DATA_HEADERS.index("Bucket") == fv.DCOL_BUCKET
+        assert fv.DATA_HEADERS.index("BucketSort") == fv.DCOL_BUCKETSORT
+        assert fv.DATA_HEADERS.index("Due") == fv.DCOL_DUE
+        assert fv.DATA_HEADERS.index("What") == fv.DCOL_WHAT
+        assert fv.DATA_HEADERS.index("Uid") == fv.DCOL_UID
+
+
+class TestTheHeaderAndTheDataAgreeOnWidth:
+    """This misalignment has now been introduced TWICE by the same hand, and the
+    full suite passed both times because nothing compared the two. [2026-08-13]
+
+    The header row and the rows beneath it are produced by different code — the
+    header from HEADERS, the body from either the QUERY's select list or the
+    materialised renderer. When Phase C added the Done column to HEADERS without
+    the body following, the header sat one column out of step with its own data
+    on a live tab, and no test noticed.
+
+    A tab whose columns are labelled wrong is worse than one that fails to
+    render: it looks correct and every value is attributed to the wrong field.
+    """
+
+    def test_the_visible_body_has_exactly_as_many_columns_as_HEADERS(self):
+        from processors.focus_view import (
+            HEADERS, FOCUS_HIDDEN_HEADERS, DATA_HEADERS, display_rows)
+
+        raw = [["Task", "2026-08-20", "a thing", "Eyal", 3, "M", "P", "A",
+                "pending", "THIS WEEK", 3, "uid-1"]]
+        assert len(raw[0]) == len(DATA_HEADERS), "the fixture drifted"
+        body = display_rows(raw)
+        assert body, "display_rows produced nothing"
+        assert len(body[0]) == len(HEADERS) + len(FOCUS_HIDDEN_HEADERS), (
+            f"HEADERS declares {len(HEADERS)} visible columns plus "
+            f"{len(FOCUS_HIDDEN_HEADERS)} hidden, but the body produces "
+            f"{len(body[0])}. The header row would label the wrong data.")

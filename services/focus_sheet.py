@@ -8,8 +8,10 @@ import logging
 
 from config.settings import settings
 from processors.focus_view import (
-    CTL_AREA, CTL_GROUP, CTL_OWNER, CTL_SHOW, DATA_HEADERS, FOCUS_DATA_TAB,
-    FOCUS_TAB, GROUP_CHOICES, HEADERS, SHOW_CHOICES, build_rows, focus_layout,
+    DATA_HEADERS, DCOL_AREA, DCOL_WHO, FCOL_DONE, FCOL_DUE, FCOL_PRIORITY,
+    FCOL_WHEN, FOCUS_DATA_TAB, FOCUS_HIDDEN_HEADERS, FOCUS_TAB, GROUP_CHOICES,
+    HEADERS, N_FOCUS_HIDDEN, SHOW_CHOICES, build_rows, display_rows,
+    focus_layout, valid_control,
 )
 from services.google_sheets import sheets_service
 
@@ -31,7 +33,8 @@ _NODATE_BG = {"red": 0.937, "green": 0.937, "blue": 0.937}
 _WEEK_BG = {"red": 0.996, "green": 0.965, "blue": 0.878}
 
 _PROTECT_DESC = "Gianluigi: Focus is generated — change the dropdowns, not the rows"
-_COL_PX = [110, 90, 420, 150, 80, 190, 210, 80]
+# ✓, When, Due, What, Who, Priority, Project, Area, Kind
+_COL_PX = [34, 100, 90, 400, 140, 80, 180, 200, 70]
 
 
 def _cell(value: str) -> dict:
@@ -52,6 +55,17 @@ def _dropdown(sheet_id: int, a1_row: int, a1_col: int, choices: list[str]) -> di
             "showCustomUi": True,
             "strict": True,
         }}}
+
+
+def _when_col() -> str:
+    """The A1 letter of the When column, which the row-colour rules key on.
+
+    Derived, never spelled. It moved from A to B when the Done tick took the
+    first column, and a hardcoded `$A` would have coloured every row by its
+    checkbox — silently, because a formula that matches nothing simply paints
+    nothing. [2026-08-13]
+    """
+    return chr(65 + FCOL_WHEN)
 
 
 def _bucket_colour_rules(sheet_id: int) -> list[dict]:
@@ -78,10 +92,39 @@ def _bucket_colour_rules(sheet_id: int) -> list[dict]:
                         "startColumnIndex": 0, "endColumnIndex": len(HEADERS)}],
             "booleanRule": {
                 "condition": {"type": "CUSTOM_FORMULA", "values": [
-                    {"userEnteredValue": f'=$A5="{text}"'}]},
+                    {"userEnteredValue": f'=${_when_col()}5="{text}"'}]},
                 "format": {"backgroundColor": bg},
             }}}})
     return rules
+
+
+def _a1(idx: int) -> str:
+    out = ""
+    idx += 1
+    while idx:
+        idx, rem = divmod(idx - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def _read_controls(ssid: str, owners, areas) -> dict:
+    """The four dropdowns, as the server will filter on them.
+
+    An unreadable tab yields the DEFAULTS rather than an error: the controls are
+    a preference, and losing a filter setting is a far smaller harm than
+    skipping the refresh and leaving a stale list on screen.
+    """
+    got = {}
+    try:
+        resp = sheets_service._execute_with_retry(
+            lambda: sheets_service.service.spreadsheets().values().get(
+                spreadsheetId=ssid, range=f"'{FOCUS_TAB}'!A2:H2"))
+        row = list((resp.get("values") or [[]])[0]) + [""] * 8
+        got = {"group": row[1], "owner": row[3], "area": row[5], "show": row[7]}
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"[focus] could not read the controls ({e}) — defaulting")
+    return {k: valid_control(k, got.get(k), owners, areas)
+            for k in ("group", "owner", "area", "show")}
 
 
 async def refresh_focus(spreadsheet_id: str | None = None) -> dict:
@@ -103,8 +146,8 @@ async def refresh_focus(spreadsheet_id: str | None = None) -> dict:
     if not ok:
         return {"error": "data tab write failed"}
 
-    owners = sorted({r[3] for r in rows if r[3]})
-    areas = sorted({r[7] for r in rows if r[7]})
+    owners = sorted({r[DCOL_WHO] for r in rows if r[DCOL_WHO]})
+    areas = sorted({r[DCOL_AREA] for r in rows if r[DCOL_AREA]})
 
     sid = await sheets_service._ensure_tab(FOCUS_TAB, HEADERS, spreadsheet_id=ssid)
     data_sid = await sheets_service._ensure_tab(
@@ -112,13 +155,33 @@ async def refresh_focus(spreadsheet_id: str | None = None) -> dict:
     if sid is None:
         return {"error": "could not create the Focus tab"}
 
-    # USER_ENTERED, not RAW: every cell written here is a formula, and RAW would
+    # READ THE CONTROLS BEFORE OVERWRITING THEM. The server does the filtering
+    # now, so these four cells are INPUTS — and rewriting the defaults every
+    # refresh would drop Nechama back to "Everything open" every thirty minutes,
+    # mid-meeting, while she was looking at it.
+    controls = _read_controls(ssid, owners, areas)
+    display = display_rows(rows, **controls)
+
+    n_vis = len(HEADERS)
+    n_cols = n_vis + N_FOCUS_HIDDEN
+    grid = [(r + [""] * n_cols)[:n_cols] for r in focus_layout(controls)]
+    grid.extend((list(r) + [""] * n_cols)[:n_cols] for r in display)
+
+    # Wipe the body first. The row count changes with every filter change, and
+    # values().update only overwrites what it covers — a shorter result would
+    # leave the tail of the previous, longer one behind, reading as live work
+    # that no longer matches the filter.
+    sheets_service._execute_with_retry(
+        lambda: sheets_service.service.spreadsheets().values().clear(
+            spreadsheetId=ssid,
+            range=f"'{FOCUS_TAB}'!A5:{_a1(n_cols - 1)}", body={}))
+    # USER_ENTERED, not RAW: the header block holds formulas, and RAW would
     # store them as text that looks right and computes nothing.
     sheets_service._execute_with_retry(
         lambda: sheets_service.service.spreadsheets().values().update(
-            spreadsheetId=ssid, range=f"'{FOCUS_TAB}'!A1:H5",
-            valueInputOption="USER_ENTERED",
-            body={"values": focus_layout()}))
+            spreadsheetId=ssid,
+            range=f"'{FOCUS_TAB}'!A1:{_a1(n_cols - 1)}{len(grid)}",
+            valueInputOption="USER_ENTERED", body={"values": grid}))
 
     reqs: list[dict] = [
         {"updateSheetProperties": {
@@ -183,13 +246,55 @@ async def refresh_focus(spreadsheet_id: str | None = None) -> dict:
                              {"protectedRangeId": pr["protectedRangeId"]}})
 
     reqs.extend(_bucket_colour_rules(sid))
-    # Row 5 down only. Row 2 holds the dropdowns and MUST stay editable — the
-    # tab is useless if the controls are locked with everything else.
-    reqs.append({"addProtectedRange": {"protectedRange": {
-        "range": {"sheetId": sid, "startRowIndex": 4},
-        "description": _PROTECT_DESC,
-        "warningOnly": True,
-    }}})
+
+    # ---- the Done tick ---------------------------------------------------
+    # A real checkbox, not the word TRUE: it is the gesture of the whole tab, and
+    # a cell you have to type into is not one you use in a meeting. Wiped first
+    # for the same reason every other validation is — it survives values().clear()
+    # and would otherwise stay on rows that are now shorter than the last render.
+    n_body = max(len(grid), 5) + 200
+    reqs.append({"setDataValidation": {
+        "range": {"sheetId": sid, "startRowIndex": 4, "endRowIndex": n_body,
+                  "startColumnIndex": 0, "endColumnIndex": n_vis}}})
+    reqs.append({"setDataValidation": {
+        "range": {"sheetId": sid, "startRowIndex": 4, "endRowIndex": len(grid),
+                  "startColumnIndex": FCOL_DONE, "endColumnIndex": FCOL_DONE + 1},
+        "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}}})
+
+    # ---- the identity columns --------------------------------------------
+    # Hidden and masked white-on-white, the way every other editable tab masks
+    # its own: unhiding them still shows nothing useful, because the readback
+    # depends on those cells being exactly what the renderer wrote.
+    reqs.append({"updateDimensionProperties": {
+        "range": {"sheetId": sid, "dimension": "COLUMNS",
+                  "startIndex": n_vis, "endIndex": n_vis + N_FOCUS_HIDDEN},
+        "properties": {"pixelSize": 120, "hiddenByUser": True},
+        "fields": "pixelSize,hiddenByUser"}})
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": n_body,
+                  "startColumnIndex": n_vis, "endColumnIndex": n_vis + N_FOCUS_HIDDEN},
+        "cell": {"userEnteredFormat": {
+            "backgroundColor": _WHITE,
+            "textFormat": {"fontSize": 8, "foregroundColor": _WHITE}}},
+        "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+
+    # ---- protection: the GENERATED columns only --------------------------
+    # Done, Due and Priority are the point of Phase C and must stay open. The
+    # rest is rendered from the database and would be silently overwritten on
+    # the next refresh, so it is protected — warningOnly, because this is a tab
+    # people work in and a hard block on a stray click is its own kind of
+    # unusable. The identity columns are inside the protected block too: an edit
+    # there would ask the readback to adopt whatever landed. [2026-08-13]
+    _READ_ONLY = ((FCOL_WHEN, FCOL_DUE),                       # When
+                  (FCOL_DUE + 1, FCOL_PRIORITY),               # What, Who
+                  (FCOL_PRIORITY + 1, n_vis + N_FOCUS_HIDDEN))  # Project..hidden
+    for a, b in _READ_ONLY:
+        reqs.append({"addProtectedRange": {"protectedRange": {
+            "range": {"sheetId": sid, "startRowIndex": 4,
+                      "startColumnIndex": a, "endColumnIndex": b},
+            "description": _PROTECT_DESC,
+            "warningOnly": True,
+        }}})
 
     sheets_service._execute_with_retry(
         lambda: sheets_service.service.spreadsheets().batchUpdate(

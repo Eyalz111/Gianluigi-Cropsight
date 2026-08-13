@@ -116,8 +116,42 @@ _ARCHIVE_SKIP_SECTIONS = ("OPERATIONAL RULES",)
 # workspace sets a project's status today, so making the Timeline its writer adds
 # no second writer to anything. Eyal declares it where he can see the fold
 # happen, which is the same place the consequence shows up.
-HEADERS = ["Area / Project", "Owner", "Start", "Target", "Status"]
+HEADERS = ["Area / Project", "Owner", "Start", "Target", "Status", "Priority"]
 N_LABEL_COLS = len(HEADERS)
+
+# Priority is APPENDED, never inserted before Status. The readback maps sheet
+# columns to fields by index, so slotting a column in ahead of an editable one
+# would silently re-point every edit onto the wrong field — the exact failure
+# the layout gate exists to catch, introduced by our own hand.
+#
+# It is DERIVED — the most urgent open task on the project — not declared.
+# Decision 9 insisted status be declared because the FOLD keys on it, and
+# inferring "finished" from an empty task list would hide live work. Priority
+# carries no structural consequence: nothing folds, moves or changes colour
+# because of it, so a value that tracks the tasks is honest and is always
+# current. Eyal changed a task's priority on an area tab and expected to see it
+# here, which is exactly what a derived column gives him. [2026-08-13]
+_PRIORITY_RANK = {"U": 0, "URGENT": 0, "H": 1, "M": 2, "L": 3}
+_PRIORITY_LABEL = {"U": "Urgent", "H": "H", "M": "M", "L": "L"}
+
+
+def project_priority(tasks: list[dict]) -> str:
+    """The most urgent open task's priority, or "" when there are none.
+
+    A blank means "no open work to rank", which is a different statement from
+    "low priority" and must not render as one. `M` is NOT assumed: an untouched
+    default is not a decision, and stamping it across the board is what told
+    Eyal his whole meeting pool had been triaged when none of it had.
+    """
+    best, label = None, ""
+    for t in tasks:
+        raw = str(t.get("priority") or "").strip().upper()
+        rank = _PRIORITY_RANK.get(raw)
+        if rank is None:
+            continue
+        if best is None or rank < best:
+            best, label = rank, _PRIORITY_LABEL.get(raw[0], raw)
+    return label
 
 # Hidden identity columns, written to the right of the week grid and hidden the
 # same way the Project Status tabs hide theirs. Phase 4 reads this tab back, and
@@ -502,6 +536,7 @@ def build_timeline() -> dict:
             "status": _status_of(p, start, today),
             "folded": folded,
             "action": nearest_action(sorted_tasks),
+            "priority": project_priority(sorted_tasks),
             "tasks": sorted_tasks,
         }
         (folded_by_area if folded else by_area)[area].append(row)

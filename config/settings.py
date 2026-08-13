@@ -176,6 +176,26 @@ class Settings(BaseSettings):
     # visible one is protected because an edit there would be silently
     # discarded on the next refresh. [2026-08-11]
     FOCUS_VIEW_ENABLED: bool = Field(default=False, description="Build the Focus tab (one re-sliceable view of everything open)")
+    FOCUS_READBACK_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Read the Focus tab back — tick to close, edit Due and Priority. "
+            "Focus is a FILTERED view, so absence from it is NEVER a delete; "
+            "see processors/focus_readback.py. Needs "
+            "scripts/migrate_focus_readback.sql, which gives Focus its own "
+            "snapshot entity_type so an edit here does not read as divergence "
+            "on the area tabs."
+        ),
+    )
+    FOCUS_SHADOW_MODE: bool = Field(
+        default=True,
+        description=(
+            "Focus readback computes and logs but writes NOTHING. Keep True "
+            "until a clean cycle has been read: this is a FOURTH writer on "
+            "tasks.deadline, and the three existing ones produced every "
+            "cross-surface defect of 2026-08."
+        ),
+    )
     FOCUS_STALE_DAYS: int = Field(default=90, description="Age at which an open item is flagged stale on the Focus tab")
     # The Timeline tab — the Gantt rebuilt on project rows over a 96-week grid
     # (docs/GANTT_V2_PLAN.md). Phase 2 is RENDER ONLY: nothing is read back, and

@@ -401,7 +401,7 @@ class TestTheMergeBaseIsBootstrapped:
                 "start": date(2026, 3, 2), "target": date(2026, 4, 6),
                 "first_col": 0, "last_col": 5, "open_ended": False,
                 "declared": "active", "status": "active", "folded": False,
-                "action": "", "tasks": []}]},
+                "action": "", "priority": "", "tasks": []}]},
             "folded": {}, "lanes": {}, "milestones": [],
             "archive": [], "stats": {},
         }

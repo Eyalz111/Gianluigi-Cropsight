@@ -6623,6 +6623,89 @@ class SupabaseClient:
             logger.error(f"Error upserting ps_project snapshot for '{project_id}': {e}")
             return False
 
+    def get_focus_snapshots(self) -> dict:
+        """Last-synced FOCUS snapshot, keyed by (kind, uid).
+
+        Its OWN entity_type, not the Tasks tab's or the area tabs'. A task can
+        appear on three surfaces at once and each holds an independent merge
+        base — sharing one would make an edit on any of them read as divergence
+        on the others, which is the whole cross-surface defect family of
+        2026-08. See scripts/migrate_focus_readback.sql. [2026-08-13]
+        """
+        out = {}
+        try:
+            rows = (
+                self.client.table("sheet_snapshots")
+                .select("*")
+                .in_("entity_type", ["focus_task", "focus_meeting"])
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:                               # noqa: BLE001
+            logger.error(f"Error reading focus snapshots: {e}")
+            return {}
+        for r in rows:
+            # NORMALISE THE DATE COLUMN ON READ. `sheet_snapshots` has no `due`
+            # column — a task's date lives in `deadline` and a meeting's in
+            # `proposed_date`, because those are the fields they mirror. The
+            # merge compares one logical field, so it is presented as `due` here
+            # rather than teaching the comparison about two column names.
+            if r.get("entity_type") == "focus_task" and r.get("task_id"):
+                out[("task", r["task_id"])] = {**r, "due": r.get("deadline")}
+            elif r.get("follow_up_meeting_id"):
+                out[("meeting", r["follow_up_meeting_id"])] = {
+                    **r, "due": r.get("proposed_date")}
+        return out
+
+    def upsert_focus_snapshot(self, kind: str, uid: str,
+                              sheet_row: int | None = None,
+                              due: str | None = None,
+                              priority: str | None = None) -> bool:
+        """Write/refresh the Focus merge base for one row.
+
+        `due` lands in the column its KIND uses — a task's deadline and a
+        meeting's proposed_date are different fields in different tables, and a
+        base recorded against the wrong one would compare every cycle against a
+        value that never moves.
+        """
+        try:
+            from datetime import datetime, timezone
+            is_task = kind == "task"
+            entity = "focus_task" if is_task else "focus_meeting"
+            key = "task_id" if is_task else "follow_up_meeting_id"
+            # THE DATE GOES IN THE COLUMN ITS KIND USES. There is no `due`
+            # column on sheet_snapshots: a task mirrors `deadline`, a meeting
+            # mirrors `proposed_date`. Writing `due` raised PGRST204 and the
+            # broad except swallowed it — so no base was ever written, and
+            # "no merge base means no edit" would have refused every edit on
+            # this tab, silently, forever. [2026-08-13]
+            date_col = "deadline" if is_task else "proposed_date"
+            data = {
+                key: uid,
+                "entity_type": entity,
+                "sheet_row": sheet_row,
+                "sheet_tab": "Focus",
+                # Empty cells come back as "" and a DATE column rejects it
+                # (22007), which is why this is coerced to None.
+                date_col: (due or None),
+                "priority": (priority or None),
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            }
+            existing = (
+                self.client.table("sheet_snapshots").select("id")
+                .eq(key, uid).eq("entity_type", entity).execute()
+            )
+            if existing.data:
+                (self.client.table("sheet_snapshots").update(data)
+                 .eq(key, uid).eq("entity_type", entity).execute())
+            else:
+                self.client.table("sheet_snapshots").insert(data).execute()
+            return True
+        except Exception as e:                               # noqa: BLE001
+            logger.error(f"Error upserting focus snapshot for {kind} {uid}: {e}")
+            return False
+
     def get_timeline_snapshots(self) -> dict:
         """Last-synced TIMELINE snapshot per project, keyed by project id.
 

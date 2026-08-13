@@ -146,7 +146,7 @@ class TestArchiveRendering:
                 "start": date(2026, 3, 2), "target": date(2026, 4, 6),
                 "first_col": 0, "last_col": 5, "open_ended": False,
                 "declared": "active", "status": "active", "folded": False,
-                "action": "", "tasks": []}]},
+                "action": "", "priority": "", "tasks": []}]},
             "folded": {}, "lanes": {}, "milestones": [],
             "archive": archive,
             "stats": {},
@@ -229,24 +229,25 @@ class TestArchiveRendering:
         leaves a lilac cell with no label behind forever the first time the
         overlay is switched off — values().clear() takes the text, never the
         fill. Five of the fifteen defects in the 2026-08-09 review were this."""
-        from services.timeline_sheet import LEGEND_ROW, _LEGEND
+        from services.timeline_sheet import LEGEND_ROW, _GHOST_LEGEND_COL
         cap = await self._render([])
         cells = [r for r in cap["reqs"]
                  if (r.get("repeatCell") or {}).get("range", {}).get("startRowIndex")
                  == LEGEND_ROW
-                 and r["repeatCell"]["range"]["startColumnIndex"] == len(_LEGEND)]
+                 and r["repeatCell"]["range"]["startColumnIndex"] == _GHOST_LEGEND_COL]
         assert len(cells) == 1, "the spare legend column is never asserted"
         assert (cells[0]["repeatCell"]["cell"]["userEnteredFormat"]
                 ["backgroundColor"] == {"red": 1.0, "green": 1.0, "blue": 1.0})
 
     async def test_the_legend_gains_its_swatch_when_the_archive_is_drawn(self):
-        from services.timeline_sheet import LEGEND_ROW, _GHOST_LEGEND, _LEGEND
+        from services.timeline_sheet import (
+            LEGEND_ROW, _GHOST_LEGEND, _GHOST_LEGEND_COL)
         cap = await self._render(self._archive())
-        assert cap["values"][LEGEND_ROW][len(_LEGEND)] == _GHOST_LEGEND
+        assert cap["values"][LEGEND_ROW][_GHOST_LEGEND_COL] == _GHOST_LEGEND
         cells = [r for r in cap["reqs"]
                  if (r.get("repeatCell") or {}).get("range", {}).get("startRowIndex")
                  == LEGEND_ROW
-                 and r["repeatCell"]["range"]["startColumnIndex"] == len(_LEGEND)]
+                 and r["repeatCell"]["range"]["startColumnIndex"] == _GHOST_LEGEND_COL]
         assert (cells[0]["repeatCell"]["cell"]["userEnteredFormat"]
                 ["backgroundColor"] == _rgb_of(GHOST_BG))
 

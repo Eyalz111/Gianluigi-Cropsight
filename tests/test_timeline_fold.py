@@ -39,7 +39,7 @@ def _proj(**kw) -> dict:
             "start": date(2026, 3, 2), "target": date(2026, 4, 6),
             "first_col": 0, "last_col": 5, "open_ended": False,
             "declared": "active", "status": "active", "folded": False,
-            "action": "", "tasks": []}
+            "action": "", "priority": "", "tasks": []}
     base.update(kw)
     return base
 
@@ -435,3 +435,88 @@ class TestAssertDontAddForTheNewState:
         sets = [i for i, r in enumerate(reqs) if "updateCells" in r]
         assert wipes and sets
         assert min(wipes) < min(sets), "the wipe must precede the notes"
+
+
+class TestTheTimelineShowsPriority:
+    """Eyal, after the Option A rename took the column: *"timeline need it too."*
+
+    Column 4 became Status when the fold was built, and with it the board lost
+    any view of priority — he changed a task's priority on an area tab and saw
+    nothing move here. Priority is now its own column, APPENDED after Status so
+    the readback's column->field map is untouched: inserting ahead of an
+    editable column would silently re-point every edit onto the wrong field.
+
+    DERIVED, not declared. Decision 9 insisted status be declared because the
+    FOLD keys on it; priority changes nothing structural, so a value that tracks
+    the tasks is honest and is always current — which is exactly what he was
+    testing for.
+    """
+
+    def test_the_most_urgent_open_task_wins(self):
+        from processors.timeline_view import project_priority
+        assert project_priority([{"priority": "H"}, {"priority": "U"},
+                                 {"priority": "L"}]) == "Urgent"
+
+    def test_no_open_tasks_is_blank_not_low(self):
+        """"Nothing to rank" and "low priority" are different statements, and a
+        board that renders them alike is lying about one of them."""
+        from processors.timeline_view import project_priority
+        assert project_priority([]) == ""
+
+    def test_an_unrecognised_priority_is_ignored_not_ranked(self):
+        from processors.timeline_view import project_priority
+        assert project_priority([{"priority": "banana"}]) == ""
+        assert project_priority([{"priority": "banana"}, {"priority": "M"}]) == "M"
+
+    def test_it_never_assumes_M(self):
+        """An untouched default is not a decision. Stamping `M` across the board
+        is what told Eyal his whole meeting pool had been triaged when none of
+        it had."""
+        from processors.timeline_view import project_priority
+        assert project_priority([{"priority": None}, {"priority": ""}]) == ""
+
+    def test_priority_is_appended_so_the_editable_map_is_untouched(self):
+        """THE ORDERING INVARIANT. The readback maps sheet columns to database
+        fields by INDEX, so a column inserted before an editable one re-points
+        every edit onto the wrong field."""
+        from processors.timeline_view import HEADERS
+        from processors.timeline_readback import EDITABLE
+        assert HEADERS[-1] == "Priority"
+        assert HEADERS[4] == "Status"
+        assert EDITABLE[4] == "status"
+        assert max(EDITABLE) < len(HEADERS) - 1, "Priority must not be editable"
+
+    async def test_a_project_row_renders_its_priority(self):
+        grid, _ = await _render(_data(areas={"AREA": [
+            _proj(priority="Urgent",
+                  tasks=[{"title": "t", "assignee": "R", "deadline": None,
+                          "priority": "U"}])]}))
+        row = next(r for r, k in zip(grid, _kinds(grid)) if k == ROW_PROJECT)
+        assert row[4] == "active"
+        assert row[5] == "Urgent"
+
+    async def test_a_task_row_carries_its_own_priority_and_no_status(self):
+        """Status is a PROJECT field. A task borrowing its project's would read
+        as a claim about the task."""
+        grid, _ = await _render(_data(areas={"AREA": [
+            _proj(tasks=[{"title": "t", "assignee": "R", "deadline": None,
+                          "priority": "L"}])]}))
+        trow = next(r for r, k in zip(grid, _kinds(grid)) if k == "task")
+        assert trow[4] == ""
+        assert trow[5] == "L"
+
+    async def test_the_priority_cell_is_coloured_from_the_shared_palette(self):
+        """Two boards colouring the same word differently is how a legend stops
+        being trusted."""
+        from processors.timeline_view import N_LABEL_COLS
+        from services.timeline_sheet import _PRI_BG, _rgb
+        _, reqs = await _render(_data(areas={"AREA": [
+            _proj(priority="Urgent",
+                  tasks=[{"title": "t", "assignee": "R", "deadline": None,
+                          "priority": "U"}])]}))
+        painted = [r for r in reqs
+                   if (r.get("repeatCell") or {}).get("range", {})
+                   .get("startColumnIndex") == N_LABEL_COLS - 1
+                   and (r["repeatCell"]["cell"].get("userEnteredFormat") or {})
+                   .get("backgroundColor") == _rgb(_PRI_BG["Urgent"])]
+        assert painted, "the Urgent cell was never coloured"

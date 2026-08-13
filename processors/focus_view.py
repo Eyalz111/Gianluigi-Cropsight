@@ -48,7 +48,14 @@ ISRAEL_TZ = timezone(timedelta(hours=3))
 # selector on the other tab. Add at the END.
 #        A       B      C       D      E          F           G          H       I         J         K
 DATA_HEADERS = ["Kind", "Due", "What", "Who", "PriSort", "Priority", "Project", "Area",
-                "Status", "Bucket", "BucketSort"]
+                "Status", "Bucket", "BucketSort", "Uid"]
+
+# Index of each field in a `build_rows` row. The renderer, the filter and the
+# readback all index these, and three sets of literals would drift the first
+# time a column moved.
+DCOL_KIND, DCOL_DUE, DCOL_WHAT, DCOL_WHO = 0, 1, 2, 3
+DCOL_PRISORT, DCOL_PRIORITY, DCOL_PROJECT, DCOL_AREA = 4, 5, 6, 7
+DCOL_STATUS, DCOL_BUCKET, DCOL_BUCKETSORT, DCOL_UID = 8, 9, 10, 11
 
 _PRI_SORT = {"U": 1, "Urgent": 1, "H": 2, "M": 3, "L": 4}
 _PRI_LABEL = {"U": "Urgent", "H": "H", "M": "M", "L": "L"}
@@ -209,6 +216,7 @@ def build_rows(today=None) -> list[list]:
             t.get("status") or "",
             bucket,
             bsort,
+                t.get("id") or "",
         ])
 
     meetings = (supabase_client.client.table("follow_up_meetings").select("*")
@@ -244,6 +252,7 @@ def build_rows(today=None) -> list[list]:
             m.get("status") or "",
             bucket,
             bsort,
+                m.get("id") or "",
         ])
 
     rows.sort(key=lambda r: (r[10], r[1] or "9999-99-99", r[4]))
@@ -261,72 +270,168 @@ SHOW_CHOICES = ["Everything open", "Overdue only", "Due this week", "No date onl
 
 # Which QUERY column each grouping sorts on FIRST. Always followed by K (bucket)
 # and B (date) so that within any grouping the order is still "soonest first".
-_GROUP_SORT = {
-    "Due date": "K, B, E",
-    "Owner": "D, K, B",
-    "Project": "G, K, B",
-    "Area": "H, K, B",
-    "Priority": "E, K, B",
-}
 
 CTL_GROUP = "B2"
 CTL_OWNER = "D2"
 CTL_AREA = "F2"
 CTL_SHOW = "H2"
 
-HEADERS = ["When", "Due", "What", "Who", "Priority", "Project", "Area", "Kind"]
+HEADERS = ["✓", "When", "Due", "What", "Who", "Priority", "Project", "Area", "Kind"]
+
+# Hidden identity, written to the right of the visible block and masked
+# white-on-white the way every other editable tab masks its own. A readback has
+# to find a row without depending on WHERE it sits, and Focus re-sorts and
+# re-filters on every dropdown change, so row position means even less here than
+# on the Timeline — where at least the order is stable between renders.
+#
+# `_kind` is STORED, not inferred. A task and a meeting write to different
+# tables, and reading that off the visible Kind column would mean trusting a
+# cell a person can retype.
+FOCUS_HIDDEN_HEADERS = ["_uid", "_kind"]
+N_FOCUS_HIDDEN = len(FOCUS_HIDDEN_HEADERS)
+
+# Column indexes into a rendered Focus row. Named because the readback, the
+# renderer and the conditional formats all have to agree.
+FCOL_DONE, FCOL_WHEN, FCOL_DUE = 0, 1, 2
+FCOL_WHAT, FCOL_WHO, FCOL_PRIORITY = 3, 4, 5
+FCOL_PROJECT, FCOL_AREA, FCOL_KIND = 6, 7, 8
+
+ROW_TASK, ROW_MEETING = "task", "meeting"
+
+# EDITABLE ON FOCUS: Done, Due, Priority. Deliberately NOT Who.
+#
+# `tasks.deadline` and `tasks.assignee` are edited daily by Nechama on the area
+# tabs and are read-only on the Timeline for exactly that reason; Focus makes a
+# FOURTH writer on those rows, and every cross-surface defect of 2026-08 came
+# from two writers on one field. Done is a status transition nothing else
+# contends for, and Due and Priority are what actually move in a weekly review.
+# Reassignment is rarer and the likeliest of the three to happen in two places
+# in one week, so it stays with its existing owner. Eyal's call, 2026-08-13,
+# after being shown the trade.
+FOCUS_EDITABLE = {FCOL_DONE: "done", FCOL_DUE: "due", FCOL_PRIORITY: "priority"}
 
 
-def _query_formula() -> str:
-    """One QUERY, assembled from the four dropdowns.
+_SHOW_BUCKETS = {
+    "Overdue only": {1},
+    "Due this week": {1, 2, 3},
+    "No date only": {6},
+}
 
-    Built as a formula rather than resolved here on purpose: the whole point of
-    the tab is that Nechama changes a dropdown and the answer changes at once.
+# Which raw column each grouping sorts on FIRST, then always bucket and date, so
+# that within any grouping the order is still "soonest first". Mirrors the old
+# QUERY's letters exactly — the behaviour Nechama already knows.
+_GROUP_KEY = {
+    "Due date": (DCOL_BUCKETSORT, DCOL_DUE, DCOL_PRISORT),
+    "Owner": (DCOL_WHO, DCOL_BUCKETSORT, DCOL_DUE),
+    "Project": (DCOL_PROJECT, DCOL_BUCKETSORT, DCOL_DUE),
+    "Area": (DCOL_AREA, DCOL_BUCKETSORT, DCOL_DUE),
+    "Priority": (DCOL_PRISORT, DCOL_BUCKETSORT, DCOL_DUE),
+}
+
+
+def display_rows(raw: list[list], group="Due date", owner="All", area="All",
+                 show="Everything open") -> list[list]:
+    """The filtered, sorted, display-shaped rows for the visible tab.
+
+    THIS REPLACES THE QUERY FORMULA. The tab used to be a single QUERY over the
+    data tab, which made the dropdowns instant — and made the rows unwritable,
+    because Sheets owns a formula's whole spill range. Worse, an edit placed
+    BESIDE a query is anchored to a row POSITION, so changing any dropdown
+    re-points it at a different task and a Done tick lands on whatever now sits
+    on that line. Materialising is what makes Focus editable at all, and it is
+    why the filter had to move to the server.
+
+    The filter semantics are carried over unchanged, including the one that
+    looks like a bug and is not: MEETINGS SURVIVE THE AREA FILTER. They carry no
+    area of their own, so a strict match would hide every one of them the moment
+    an area was chosen — and a meeting disappearing because you narrowed to your
+    own area is the failure this tab exists to prevent. [2026-08-11, Eyal's call]
     """
-    src = f"'{FOCUS_DATA_TAB}'!A2:K"
+    out = []
+    for r in raw:
+        if not str(r[DCOL_WHAT] or "").strip():
+            continue
+        if owner and owner != "All" and str(r[DCOL_WHO]) != owner:
+            continue
+        if (area and area != "All" and str(r[DCOL_AREA]) != area
+                and str(r[DCOL_KIND]) != "Meeting"):
+            continue
+        wanted = _SHOW_BUCKETS.get(show)
+        if wanted is not None and int(r[DCOL_BUCKETSORT]) not in wanted:
+            continue
+        out.append(r)
 
-    where = "where C is not null"
-    owner = f"&IF({CTL_OWNER}=\"All\",\"\",\" and D = '\"&{CTL_OWNER}&\"'\")"
-    # Meetings survive the Area filter. They carry no area — only tasks hang off
-    # a project — so a strict `H = area` would hide all 22 of them the moment an
-    # area was chosen, and 21 of those already have no date. A meeting that
-    # disappears because you narrowed to your own area is the failure this whole
-    # tab exists to prevent. [2026-08-11, Eyal's call]
-    area = (f"&IF({CTL_AREA}=\"All\",\"\","
-            f"\" and (H = '\"&{CTL_AREA}&\"' or A = 'Meeting')\")")
-    show = (
-        f"&SWITCH({CTL_SHOW},"
-        f"\"Overdue only\",\" and K = 1\","
-        f"\"Due this week\",\" and K <= 3\","
-        f"\"No date only\",\" and K = 6\","
-        f"\"\")"
-    )
-    order = (
-        "&\" order by \"&SWITCH(" + CTL_GROUP
-        + "," + ",".join(f'"{k}","{v}"' for k, v in _GROUP_SORT.items())
-        + f",\"{_GROUP_SORT['Due date']}\")"
-    )
-    return (
-        f'=IFERROR(QUERY({src},"select J, B, C, D, F, G, H, A "&"{where}"'
-        f'{owner}{area}{show}{order},0),'
-        f'"Nothing matches — widen a filter above.")'
-    )
+    keys = _GROUP_KEY.get(group, _GROUP_KEY["Due date"])
+
+    def _sort_key(r):
+        vals = []
+        for k in keys:
+            v = r[k]
+            # Dates and blanks share a column; an empty due date must sort LAST
+            # rather than first, or the undated backlog would head the list.
+            if k == DCOL_DUE:
+                vals.append(str(v) or "9999-99-99")
+            elif isinstance(v, int):
+                vals.append(f"{v:04d}")
+            else:
+                vals.append(str(v).lower())
+        return tuple(vals)
+
+    out.sort(key=_sort_key)
+
+    return [[
+        False,                                   # the Done tick, always unticked
+        r[DCOL_BUCKET], r[DCOL_DUE], r[DCOL_WHAT], r[DCOL_WHO],
+        r[DCOL_PRIORITY], r[DCOL_PROJECT], r[DCOL_AREA], r[DCOL_KIND],
+        r[DCOL_UID],
+        ROW_MEETING if str(r[DCOL_KIND]) == "Meeting" else ROW_TASK,
+    ] for r in out]
+
+
+def valid_control(kind: str, value, owners=(), areas=()) -> str:
+    """A control cell's value, or its default if the cell says something unknown.
+
+    A dropdown can hold a stale option — an owner with no open work left, an
+    area renamed since the last refresh. Filtering on it would return zero rows
+    and read as "nothing is open", which is the one wrong answer this tab must
+    never give.
+    """
+    v = str(value or "").strip()
+    if kind == "group":
+        return v if v in GROUP_CHOICES else GROUP_CHOICES[0]
+    if kind == "show":
+        return v if v in SHOW_CHOICES else SHOW_CHOICES[0]
+    if kind == "owner":
+        return v if (v == "All" or v in owners) else "All"
+    if kind == "area":
+        return v if (v == "All" or v in areas) else "All"
+    return v
 
 
 def _counts_formula(bucket_sort: int, label: str) -> str:
     return (f'="{label}: "&COUNTIF(\'{FOCUS_DATA_TAB}\'!K2:K,{bucket_sort})')
 
 
-def focus_layout() -> list[list]:
-    """Rows 1-5 of the visible tab. Row 5 is the single QUERY."""
+def focus_layout(controls: dict | None = None) -> list[list]:
+    """Rows 1-4 of the visible tab. The rows themselves are written separately.
+
+    THE CONTROLS ARE PRESERVED, NOT RESET. They used to be written as constants
+    because a QUERY read them and nothing else did; now the SERVER reads them to
+    filter, and re-writing the defaults every refresh would silently drop
+    Nechama back to "Everything open" every thirty minutes — mid-meeting, while
+    she was looking at it. The caller reads the live values and passes them back.
+    """
+    c = controls or {}
     return [
-        ["FOCUS — everything still open", "", "", "",
+        ["", "FOCUS — everything still open", "", "",
          _counts_formula(1, "Overdue"), _counts_formula(2, "Today"),
          _counts_formula(3, "This week"), _counts_formula(6, "No date")],
-        ["Group by:", GROUP_CHOICES[0], "Owner:", "All",
-         "Area:", "All", "Show:", SHOW_CHOICES[0]],
+        ["Group by:", c.get("group") or GROUP_CHOICES[0],
+         "Owner:", c.get("owner") or "All",
+         "Area:", c.get("area") or "All",
+         "Show:", c.get("show") or SHOW_CHOICES[0]],
         [f'=" refreshed "&TEXT(NOW(),"ddd d mmm HH:MM")&"  ·  '
-         f'this tab is generated — edit tasks on the area tabs, not here"'],
-        HEADERS,
-        [_query_formula()],
+         f'tick ✓ to close · Due and Priority are editable · '
+         f'everything else is generated"'],
+        HEADERS + FOCUS_HIDDEN_HEADERS,
     ]

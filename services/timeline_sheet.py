@@ -63,6 +63,12 @@ _MILESTONE_MARKER = "★"
 _MILESTONE_BG = "#FFF2CC"
 _FOLD_BG = "#EDEDEA"
 
+# The Urgent/H/M/L palette already in use on the Project Status tabs. Reused
+# rather than reinvented: two boards colouring the same word differently is how
+# a legend stops being trusted.
+_PRI_BG = {"Urgent": "#E85050", "H": "#F4B183", "M": "#FFE699", "L": "#D9E2F3"}
+_PRI_LABEL = {"U": "Urgent", "URGENT": "Urgent", "H": "H", "M": "M", "L": "L"}
+
 
 def _rgb(hex_colour: str) -> dict:
     h = hex_colour.lstrip("#")
@@ -147,6 +153,7 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
     # undo the height the fold exists to reclaim. [2026-08-13]
     group_spans: list[tuple[int, int]] = []
     status_rows: list[int] = []               # project rows -> Status dropdown
+    pri_cells: list[tuple] = []               # (row, label) -> priority colour
     fold_rows: list[int] = []                 # the "Completed (n)" header lines
     lane_rows: list[int] = []
     notes: list[tuple[int, int, str]] = []    # (row, col, note)
@@ -164,7 +171,10 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
         line[2] = display_date(proj["start"])
         line[3] = display_date(proj["target"])
         line[4] = proj["declared"]
+        line[5] = proj["priority"]
         grid.append(line)
+        if proj["priority"]:
+            pri_cells.append((row, proj["priority"]))
         status_rows.append(row)
         # The merge base is written HERE, by the render, because this is the
         # one moment the sheet and the database agree by construction.
@@ -216,7 +226,10 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
             trow[0] = f"        └ {t['title'][:70]}"
             trow[1] = t["assignee"]
             trow[3] = display_date(t["deadline"])
-            trow[4] = t["priority"]
+            # Column 4 is Status, which is a PROJECT field — a task has none, so
+            # it stays blank rather than borrowing the project's.
+            trow[5] = _PRI_LABEL.get(str(t["priority"]).strip().upper(),
+                                     t["priority"])
             grid.append(trow)
         if len(grid) > first_task_row:
             group_spans.append((first_task_row, len(grid) - 1))
@@ -377,7 +390,7 @@ async def refresh_timeline(spreadsheet_id: str | None = None) -> dict:
                             fills, area_rows, group_spans, ssid, show_ghost,
                             archive_title_row, archive_span, n_week_end,
                             status_rows, fold_rows, lane_rows, milestone_row,
-                            notes)
+                            notes, pri_cells)
     if reqs:
         sheets_service._execute_with_retry(
             lambda: sheets_service.service.spreadsheets().batchUpdate(
@@ -413,7 +426,8 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                      fold_rows: list | None = None,
                      lane_rows: list | None = None,
                      milestone_row: int | None = None,
-                     notes: list | None = None) -> list[dict]:
+                     notes: list | None = None,
+                     pri_cells: list | None = None) -> list[dict]:
     # Everything that PAINTS stops at the visible edge; only the grid-width
     # assertion and the hidden-column treatment go past it.
     n_week_end = n_cols - N_HIDDEN if n_week_end is None else n_week_end
@@ -552,7 +566,7 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
 
     # Column widths: the label block readable, the 96 week columns narrow
     # enough that a quarter fits on screen.
-    for i, px in enumerate([300, 120, 84, 84, 70][:N_LABEL_COLS]):
+    for i, px in enumerate([300, 120, 84, 84, 78, 70][:N_LABEL_COLS]):
         reqs.append({"updateDimensionProperties": {
             "range": {"sheetId": sid, "dimension": "COLUMNS",
                       "startIndex": i, "endIndex": i + 1},
@@ -663,6 +677,18 @@ def _format_requests(sid, n_cols, n_rows, weeks, today_col,
                 "type": "ONE_OF_LIST",
                 "values": [{"userEnteredValue": s} for s in PROJECT_STATUSES]},
                 "strict": False, "showCustomUi": True}}})
+
+    # ---- priority, in the palette the area tabs already use ----------------
+    for row, label in (pri_cells or []):
+        bg = _PRI_BG.get(label)
+        if not bg:
+            continue
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": row, "endRowIndex": row + 1,
+                      "startColumnIndex": N_LABEL_COLS - 1,
+                      "endColumnIndex": N_LABEL_COLS},
+            "cell": {"userEnteredFormat": {"backgroundColor": _rgb(bg)}},
+            "fields": "userEnteredFormat.backgroundColor"}})
 
     # ---- notes: the text a 21px cell cannot hold ----------------------------
     # A milestone title or a meeting count printed into the grid would overflow

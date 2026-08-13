@@ -34,7 +34,7 @@ def _proj(**kw) -> dict:
             "start": date(2026, 3, 2), "target": date(2026, 4, 6),
             "first_col": 0, "last_col": 5, "open_ended": False,
             "declared": "active", "status": "active", "folded": False,
-            "action": "", "tasks": []}
+            "action": "", "priority": "", "tasks": []}
     base.update(kw)
     return base
 
@@ -191,7 +191,7 @@ class TestA1Columns:
     def test_the_real_right_edge_of_the_grid(self):
         from processors.timeline_view import N_LABEL_COLS, week_starts
         from services.timeline_sheet import _a1_col
-        assert _a1_col(N_LABEL_COLS + len(week_starts()) - 1) == "CW"
+        assert _a1_col(N_LABEL_COLS + len(week_starts()) - 1) == "CX"
 
 
 class TestMonthBand:

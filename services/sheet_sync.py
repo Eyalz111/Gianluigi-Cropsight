@@ -121,7 +121,16 @@ async def _run_surface(surface: str) -> dict:
 
     if surface == SURFACE_FOCUS:
         from services.focus_sheet import refresh_focus
-        return {"focus": await refresh_focus()}
+
+        # READ BEFORE RENDER, exactly as the Timeline does — and it matters more
+        # here, because the webhook fires the instant a box is ticked and the
+        # render would otherwise overwrite that tick within the same call.
+        out = {}
+        if getattr(settings, "FOCUS_READBACK_ENABLED", False):
+            from processors.focus_readback import reconcile_focus
+            out["readback"] = await reconcile_focus()
+        out["focus"] = await refresh_focus()
+        return out
 
     return {"skipped": f"unknown surface {surface!r}"}
 

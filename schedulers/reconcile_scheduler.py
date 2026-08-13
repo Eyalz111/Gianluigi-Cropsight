@@ -305,6 +305,15 @@ class ReconcileScheduler:
                 focus = None
                 if getattr(settings, "FOCUS_VIEW_ENABLED", False):
                     try:
+                        # READ BEFORE RENDER. refresh_focus rewrites every cell
+                        # from the database, so a refresh that ran first would
+                        # erase the tick before anything had looked at it — the
+                        # close would vanish and never reach the DB. Same
+                        # ordering the Timeline follows, and for the same
+                        # reason. [2026-08-13]
+                        if getattr(settings, "FOCUS_READBACK_ENABLED", False):
+                            from processors.focus_readback import reconcile_focus
+                            await reconcile_focus()
                         from services.focus_sheet import refresh_focus
                         focus = await refresh_focus()
                     except Exception as fe:

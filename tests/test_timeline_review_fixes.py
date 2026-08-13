@@ -50,7 +50,7 @@ async def _render():
             "start": date(2026, 3, 2), "target": date(2026, 4, 6),
             "first_col": 0, "last_col": 5, "open_ended": False,
             "declared": "active", "status": "active", "folded": False,
-            "action": "", "tasks": []}]},
+            "action": "", "priority": "", "tasks": []}]},
         "folded": {}, "lanes": {}, "milestones": [],
         "archive": [{"section": "PRODUCT & TECHNOLOGY", "lanes": [
             {"lane": "Execution #1", "bars": [
@@ -359,7 +359,7 @@ class TestRowIdentity:
                 "start": date(2026, 3, 2), "target": date(2026, 4, 6),
                 "first_col": 0, "last_col": 5, "open_ended": False,
                 "declared": "active", "status": "active", "folded": False,
-                "action": "",
+                "action": "", "priority": "M",
                 "tasks": [{"title": "t", "assignee": "E", "deadline": None,
                            "priority": "M"}]}]},
             "folded": {}, "lanes": {}, "milestones": [],
