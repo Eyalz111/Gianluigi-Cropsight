@@ -30,13 +30,46 @@ var STATUS_CELL = 'A1';           // written on the edited tab itself
 var LOCK_WAIT_MS = 100;           // don't queue behind another edit; drop instead
 var TIMEOUT_MS = 25000;
 
+/**
+ * Run this ONCE from the editor. It reports through the execution log, never
+ * through a dialog.
+ *
+ * The first version ended with `SpreadsheetApp.getUi().alert(...)`, which is
+ * wrong for a function you run from the editor: the dialog renders in the
+ * SPREADSHEET tab, so the execution blocks waiting for a click nobody can see
+ * and the editor shows it "running" until the six-minute limit kills it. The
+ * trigger itself was already created by then — the alert was the only thing
+ * still pending. [2026-08-13]
+ */
 function installTrigger() {
   var ss = SpreadsheetApp.getActive();
+  var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'onSheetEdit') ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === 'onSheetEdit') {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
   });
   ScriptApp.newTrigger('onSheetEdit').forSpreadsheet(ss).onEdit().create();
-  SpreadsheetApp.getUi().alert('Gianluigi sync installed.');
+
+  // Prove the configuration too, while a human is watching the log — a missing
+  // property otherwise shows up only as a silent no-op on the first real edit.
+  var props = PropertiesService.getScriptProperties();
+  var url = props.getProperty('GIANLUIGI_URL');
+  var token = props.getProperty('GIANLUIGI_TOKEN');
+  Logger.log('Gianluigi sync installed (replaced ' + removed + ' old trigger(s)).');
+  Logger.log('GIANLUIGI_URL   : ' + (url || 'MISSING — set it in Script Properties'));
+  Logger.log('GIANLUIGI_TOKEN : ' + (token ? 'set (' + token.length + ' chars)'
+                                           : 'MISSING — set it in Script Properties'));
+  return 'installed';
+}
+
+/**
+ * Optional: run this to test the endpoint without editing a cell.
+ * Writes nothing to the sheet; just returns what the server said.
+ */
+function testSync() {
+  Logger.log(callSync_('Meetings'));
 }
 
 function onSheetEdit(e) {
