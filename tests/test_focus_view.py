@@ -124,6 +124,109 @@ class TestRowsComeFromTheDateNotTheStatus:
         assert [r[2] for r in rows] == ["late", "later", "undated"]
 
 
+class TestTheActionCarriesItsTopic:
+    """The action alone is often meaningless. [2026-08-13]
+
+    Eyal, reading the live tab: *"some are 'context missing' such as 'Yoram to
+    reach out - Eyal to articulate a message for him' … cannot understand
+    exactly what is the task without moving to the right tab."* On the area tab
+    that row reads `Eitan Zemel` in Topic beside the action, and the Topic is
+    what names the person, the grant or the counterparty. Focus was showing
+    Project and dropping Topic entirely.
+
+    `tasks.label` IS the topic — the 226 label values are topics, not projects.
+    """
+
+    def test_the_topic_prefixes_the_action(self):
+        assert fv._what("Eitan Zemel", "Coordinate a meeting for Yoram",
+                        "Investor Outreach") == \
+            "Eitan Zemel — Coordinate a meeting for Yoram"
+
+    def test_a_topic_that_only_repeats_the_project_is_suppressed(self):
+        """A word with no information is worse than nothing in a narrow column."""
+        assert fv._what("Business Plan", "Update the P&L", "Business Plan") == \
+            "Update the P&L"
+
+    def test_a_topic_already_inside_the_title_does_not_stutter(self):
+        assert fv._what("Investor Materials", "Send Investor Materials NDA",
+                        "Investors Materials") == "Send Investor Materials NDA"
+
+    def test_no_topic_leaves_the_title_alone(self):
+        assert fv._what("", "Bare title", "P") == "Bare title"
+        assert fv._what(None, "Bare title", None) == "Bare title"
+
+    def test_a_topic_with_no_title_is_better_than_an_empty_cell(self):
+        assert fv._what("Eitan Zemel", "", "P") == "Eitan Zemel"
+
+    def test_it_reaches_the_built_row(self):
+        rows = TestRowsComeFromTheDateNotTheStatus()._rows(
+            [{"id": "t1", "title": "Coordinate a meeting", "status": "pending",
+              "approval_status": "approved", "deadline": "2026-08-12",
+              "label": "Eitan Zemel", "project_id": "p1"}])
+        assert rows[0][2] == "Eitan Zemel — Coordinate a meeting"
+
+
+class TestMeetingsCarryTheirProject:
+    """Every meeting row rendered a blank Project, so they all sat under
+    "(no project)" and the Project filter could never find one.
+    `follow_up_meetings.label` is already the canonical project name."""
+
+    def test_a_meeting_shows_its_project_and_area(self):
+        rows = TestRowsComeFromTheDateNotTheStatus()._rows(
+            [], [{"id": "m", "title": "Sync", "status": "scheduled",
+                  "approval_status": "approved", "proposed_date": "2026-08-12",
+                  "label": "Pilot"}])
+        assert rows[0][6] == "Pilot"
+        assert rows[0][7] == "PRODUCT & TECHNOLOGY"
+
+    def test_an_unmatched_label_yields_no_area_rather_than_a_guess(self):
+        """A meeting filed under the wrong area is worse than one filed under
+        none — the same rule the Timeline's meetings lanes follow."""
+        rows = TestRowsComeFromTheDateNotTheStatus()._rows(
+            [], [{"id": "m", "title": "Sync", "status": "scheduled",
+                  "approval_status": "approved", "proposed_date": "2026-08-12",
+                  "label": "Something nobody has heard of"}])
+        assert rows[0][7] == ""
+
+
+class TestTheWeekIsColoured:
+    """Eyal: *"lets think if we should color also this week as the meetings with
+    nechama will probably be weekly ones."* The weekly review is the operative
+    rhythm, so THIS WEEK is the actionable set and TODAY is a subset of it."""
+
+    def _rules(self):
+        from services.focus_sheet import _bucket_colour_rules
+        return _bucket_colour_rules(7)
+
+    def _formulas(self):
+        return [r["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]
+                ["values"][0]["userEnteredValue"] for r in self._rules()]
+
+    def test_this_week_now_has_a_rule(self):
+        assert any('"THIS WEEK"' in f for f in self._formulas())
+
+    def test_it_is_a_lighter_shade_of_today_not_a_new_colour(self):
+        """A different hue would read as a different KIND of urgency and compete
+        with TODAY instead of nesting under it."""
+        from services.focus_sheet import _TODAY_BG, _WEEK_BG
+        assert _WEEK_BG != _TODAY_BG
+        for ch in ("red", "green", "blue"):
+            assert _WEEK_BG[ch] >= _TODAY_BG[ch], f"{ch} must be lighter"
+        # Same hue family: the red-to-blue fall-off keeps its direction.
+        assert _WEEK_BG["red"] > _WEEK_BG["blue"]
+
+    def test_this_month_and_later_stay_white(self):
+        """Those two would flatten the contrast, and neither is something you
+        act on in a weekly meeting."""
+        joined = " ".join(self._formulas())
+        assert "THIS MONTH" not in joined
+        assert "LATER" not in joined
+
+    def test_the_rule_indexes_are_distinct(self):
+        idx = [r["addConditionalFormatRule"]["index"] for r in self._rules()]
+        assert len(set(idx)) == len(idx)
+
+
 class TestTheEngineIgnoresTheView:
     def test_both_tabs_are_registered_as_non_area(self):
         from processors.project_status_reconcile import NON_AREA_TABS

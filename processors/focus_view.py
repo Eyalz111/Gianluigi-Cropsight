@@ -125,6 +125,53 @@ def _area_and_project_maps() -> tuple[dict, dict]:
     return projects, areas
 
 
+def _what(label, title, project_name) -> str:
+    """The action, prefixed by the thread it belongs to.
+
+    THE ACTION ALONE IS OFTEN MEANINGLESS. Eyal, reading the live tab: *"some
+    are 'context missing' such as 'Yoram to reach out - Eyal to articulate a
+    message for him' … cannot understand exactly what is the task without moving
+    to the right tab."* On the area tab that row reads `Eitan Zemel` in Topic and
+    the action beside it, and the Topic is what names the person, the grant or
+    the counterparty. Focus was showing Project and dropping Topic, so a whole
+    class of rows arrived without the noun they are about.
+
+    `tasks.label` IS the topic — the 226 label values are topics, not projects;
+    the project is `project_id`. Suppressed when it merely repeats the project
+    name, which would add a word and no information.
+    """
+    t = (title or "").strip()
+    lab = (label or "").strip()
+    if not lab or _norm_name(lab) == _norm_name(project_name):
+        return t
+    if not t:
+        return lab
+    # Already self-describing — don't stutter "Eitan Zemel — Eitan Zemel call".
+    if _norm_name(lab) in _norm_name(t):
+        return t
+    return f"{lab} — {t}"
+
+
+def _norm_name(v) -> str:
+    return " ".join(str(v or "").lower().split())
+
+
+def _meeting_area(label, projects: dict) -> str:
+    """The area a meeting rolls up to, via its project name.
+
+    Looked up by NAME because `follow_up_meetings` carries a label, not a
+    project_id. An unmatched label yields "" rather than a guess — a meeting
+    filed under the wrong area is worse than one filed under none.
+    """
+    want = _norm_name(label)
+    if not want:
+        return ""
+    for _pid, (pname, parea) in projects.items():
+        if _norm_name(pname) == want:
+            return parea or ""
+    return ""
+
+
 def build_rows(today=None) -> list[list]:
     """Every open task and every open meeting, one row each.
 
@@ -153,7 +200,7 @@ def build_rows(today=None) -> list[list]:
         rows.append([
             "Task",
             due.isoformat() if due else "",
-            t.get("title") or "",
+            _what(t.get("label"), t.get("title"), pname),
             t.get("assignee") or "(unassigned)",
             _PRI_SORT.get(pri, 3),
             _PRI_LABEL.get(pri, pri),
@@ -188,8 +235,12 @@ def build_rows(today=None) -> list[list]:
             m.get("led_by") or "(no lead)",
             _PRI_SORT.get(pri, 3),
             _PRI_LABEL.get(pri, pri),
-            "",
-            "",
+            # A meeting's project was rendered blank, so every meeting row sat
+            # under "(no project)" and the Project filter could never find one.
+            # `follow_up_meetings.label` is already the canonical project name.
+            # [2026-08-13]
+            (m.get("label") or "").strip(),
+            _meeting_area(m.get("label"), projects),
             m.get("status") or "",
             bucket,
             bsort,

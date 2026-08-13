@@ -559,6 +559,34 @@ class Settings(BaseSettings):
     # v1.0 — MCP Server
     # ==========================================================================
     MCP_AUTH_TOKEN: str = Field(default="", description="Auth token for MCP server")
+    SHEET_SYNC_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Enable POST /sync — an authenticated on-demand reconcile for ONE "
+            "sheet surface, called by the workbook's Apps Script onEdit trigger "
+            "so an edit lands in seconds instead of on the 30-minute cycle. "
+            "Never replaces the scheduled cycle: a webhook that quietly stops "
+            "firing must not mean a workbook that quietly stops syncing."
+        ),
+    )
+    SHEET_SYNC_TOKEN: str = Field(
+        default="",
+        description=(
+            "Bearer token for POST /sync. DELIBERATELY NOT MCP_AUTH_TOKEN: this "
+            "one lives in a spreadsheet's Apps Script properties, which anyone "
+            "with edit access to the workbook can read, so it must not also open "
+            "the MCP surface. Blank = the endpoint refuses everything."
+        ),
+    )
+    SHEET_SYNC_MIN_INTERVAL_SECONDS: int = Field(
+        default=10,
+        description=(
+            "Floor between on-demand syncs of the same surface. onEdit fires "
+            "once per cell commit, so pasting a column emits a burst; runs "
+            "inside the floor are COALESCED rather than rejected, because the "
+            "reconcile reads the sheet whole and therefore already covers them."
+        ),
+    )
     MCP_PORT: int = Field(default=8080, description="MCP server port (shared with health server)")
     MCP_RATE_LIMIT_PER_HOUR: int = Field(
         default=100, description="Max MCP tool calls per hour per token"

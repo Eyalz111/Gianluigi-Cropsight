@@ -230,7 +230,28 @@ class ReconcileScheduler:
         return f"{trig.strftime(stamp)}:{name}"
 
     async def _run(self, slot: str) -> bool:
-        """Run the reconcile slot. Returns True on success, False on failure (audit SC-05)."""
+        """Run the reconcile slot, holding the shared sheet lock.
+
+        THE SAME LOCK `POST /sync` TAKES. The webhook can fire at any moment —
+        that is the whole point of it — and a scheduled cycle interleaving with
+        an on-demand run would read-modify-write the same rows from two places.
+        The merge would then compare the sheet against a half-applied state and
+        could pull the system's own in-flight write back in as a human edit,
+        which is precisely the cross-surface defect family this codebase spent
+        August eliminating.
+
+        Held across the WHOLE slot rather than per reconcile, because the passes
+        depend on each other: the Project Status merge reads projects the
+        Projects reconcile has just settled, and the views read the state all of
+        them leave behind. [2026-08-13]
+        """
+        from services.sheet_sync import SHEET_LOCK
+
+        async with SHEET_LOCK:
+            return await self._run_locked(slot)
+
+    async def _run_locked(self, slot: str) -> bool:
+        """Returns True on success, False on failure (audit SC-05)."""
         name = slot.split(":", 1)[1]
         logger.info(f"Reconcile triggering ({slot})")
         from services.supabase_client import supabase_client

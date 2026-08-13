@@ -22,6 +22,13 @@ _WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 _OVERDUE_BG = {"red": 0.957, "green": 0.78, "blue": 0.765}
 _TODAY_BG = {"red": 0.988, "green": 0.91, "blue": 0.698}
 _NODATE_BG = {"red": 0.937, "green": 0.937, "blue": 0.937}
+# A PALER TINT OF TODAY, not a fourth colour. Eyal: *"i like it that today is
+# colored in yellow… lets think if we should color also this week as the
+# meetings with nechama will probably be weekly ones."* The weekly review is the
+# operative rhythm, so THIS WEEK is the actionable set and TODAY is a subset of
+# it — which is exactly what a lighter shade of the same hue says. A different
+# colour would read as a different KIND of urgency and compete with it.
+_WEEK_BG = {"red": 0.996, "green": 0.965, "blue": 0.878}
 
 _PROTECT_DESC = "Gianluigi: Focus is generated — change the dropdowns, not the rows"
 _COL_PX = [110, 90, 420, 150, 80, 190, 210, 80]
@@ -48,12 +55,23 @@ def _dropdown(sheet_id: int, a1_row: int, a1_col: int, choices: list[str]) -> di
 
 
 def _bucket_colour_rules(sheet_id: int) -> list[dict]:
-    """Colour the whole row by its When cell. Three states only — the eye needs
-    late, today, and forgotten; colouring all six buckets makes none of them
-    stand out."""
+    """Colour the whole row by its When cell.
+
+    FOUR of the six buckets, not all six. The original rule was three — late,
+    today, forgotten — on the reasoning that colouring everything makes nothing
+    stand out. That still holds, and THIS WEEK earns the fourth slot because the
+    working rhythm is weekly: the Nechama review covers the week, so the week is
+    the actionable set and TODAY is a subset of it. It is drawn as a lighter
+    shade of the TODAY yellow rather than a new colour, so it reads as "the same
+    thing, less imminent" instead of a competing kind of urgency.
+
+    THIS MONTH and LATER stay white. Those are the two that would flatten the
+    contrast, and neither is something you act on in a weekly meeting.
+    """
     rules = []
     for idx, (text, bg) in enumerate((
-        ("OVERDUE", _OVERDUE_BG), ("TODAY", _TODAY_BG), ("NO DATE", _NODATE_BG),
+        ("OVERDUE", _OVERDUE_BG), ("TODAY", _TODAY_BG), ("THIS WEEK", _WEEK_BG),
+        ("NO DATE", _NODATE_BG),
     )):
         rules.append({"addConditionalFormatRule": {"index": idx, "rule": {
             "ranges": [{"sheetId": sheet_id, "startRowIndex": 4,

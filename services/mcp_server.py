@@ -242,6 +242,44 @@ class MCPServer:
                 return JSONResponse({"status": "ready"})
             return JSONResponse({"status": "not_ready"}, status_code=503)
 
+        @mcp.custom_route("/sync", methods=["POST"])
+        async def handle_sync(request: Request) -> JSONResponse:
+            """On-demand reconcile of ONE sheet surface. [2026-08-13]
+
+            Called by the workbook's Apps Script onEdit trigger so a typed value
+            lands in seconds rather than on the 30-minute cycle — the difference
+            between a system that looks alive and one Nechama reasonably
+            concludes is broken.
+
+            Its own token, not MCP_AUTH_TOKEN: this one sits in Apps Script
+            properties, readable by anyone with edit access to the spreadsheet,
+            and must not also open the MCP surface. A blank token refuses
+            everything rather than defaulting open.
+            """
+            from services.sheet_sync import summarise, sync_surface
+
+            expected = getattr(settings, "SHEET_SYNC_TOKEN", "") or ""
+            if not expected:
+                return JSONResponse({"error": "sync not configured"},
+                                    status_code=503)
+            header = request.headers.get("authorization", "")
+            token = header[7:] if header.lower().startswith("bearer ") else ""
+            # compare_digest: a plain == leaks the token a character at a time
+            # to anyone who can time the response.
+            import hmac
+            if not hmac.compare_digest(token, expected):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+            try:
+                body = await request.json()
+            except Exception:                                # noqa: BLE001
+                body = {}
+            tab = str((body or {}).get("tab") or "").strip()
+
+            result = await sync_surface(tab)
+            return JSONResponse({**result, "message": summarise(result)},
+                                status_code=200 if result.get("ok") else 500)
+
         @mcp.custom_route("/reports/weekly/{access_token}", methods=["GET"])
         async def handle_weekly_report(request: Request) -> Response:
             access_token = request.path_params.get("access_token", "")
